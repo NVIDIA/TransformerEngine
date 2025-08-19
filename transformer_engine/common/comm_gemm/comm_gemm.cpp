@@ -12,6 +12,7 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -134,28 +135,28 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a1 == k);
+    NVTE_CHECK(a1 == k, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, k, block_size(ctx, m), 0, 0, k,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a0 == k);
+    NVTE_CHECK(a0 == k, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, block_size(ctx, m), k, 0, 0,
                                                      block_size(ctx, m), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
-    NVTE_CHECK(b0 == k);
+    NVTE_CHECK(b0 == k, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), k, 0, 0,
                                                      block_size(ctx, n), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b1 == k);
+    NVTE_CHECK(b1 == k, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, k, block_size(ctx, n), 0, 0, k,
                                                      get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d0 == n);
+  NVTE_CHECK(d0 == n, "Unsupported tensor dimensions");
   *ldd = block_size(ctx, m);
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, block_size(ctx, m), block_size(ctx, n), 0,
                                                    0, *ldd, get_cuda_dtype(d->dtype()),
@@ -173,28 +174,28 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a0 == m);
+    NVTE_CHECK(a0 == m, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a1 == m);
+    NVTE_CHECK(a1 == m, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, m, block_size(ctx, k), 0, 0, m,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
-    NVTE_CHECK(b1 == n);
+    NVTE_CHECK(b1 == n, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
         n, k, block_size(ctx, n), block_size(ctx, k), 0, 0, block_size(ctx, n),
         get_cuda_dtype(b->dtype()), ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b0 == n);
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
         k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
         get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m);
+  NVTE_CHECK(d1 == m, "Unsupported tensor dimensions");
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
@@ -212,22 +213,22 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a0 == m);
+    NVTE_CHECK(a0 == m, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(false);
+    NVTE_ERROR("N transpose flag is not supported for input A");
   }
   if (transb) {
-    NVTE_CHECK(false);
+    NVTE_ERROR("T transpose flag is not supported for input B");
   } else {
-    NVTE_CHECK(b0 == n);
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimensions");
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m);
+  NVTE_CHECK(d1 == m, "Unsupported tensor dimensions");
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
@@ -248,7 +249,8 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, cublas
                    bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
   for (auto t : {a, b, d}) {
-    NVTE_CHECK(is_tensor_scaling(t->scaling_mode), "Unsupported scaling mode");
+    NVTE_CHECK(is_tensor_scaling(t->scaling_mode),
+               "Unsupported scaling mode: " + std::to_string(t->scaling_mode));
   }
 
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
