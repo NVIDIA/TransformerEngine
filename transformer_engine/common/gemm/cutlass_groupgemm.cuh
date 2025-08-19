@@ -158,19 +158,19 @@ typename GemmT::Arguments MakeArguments(int num_experts, void* problem_sizes_hos
   fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
   fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
 
-  arguments = typename GemmT::Arguments{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {num_experts, reinterpret_cast<ProblemShapeType*>(problem_sizes),
-       reinterpret_cast<ProblemShapeType const*>(problem_sizes_host)},
-      {ptr_A, stride_A, ptr_B, stride_B},
-      {
-          fusion_args,
-          (beta > 0.0) ? (const ElementC**)ptr_C : nullptr,  // NOLINT(*)
-          stride_C,
-          ptr_C,
-          stride_C,
-      },
-      kernel_hw_info};
+  arguments =
+      typename GemmT::Arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
+                                {num_experts, reinterpret_cast<ProblemShapeType*>(problem_sizes),
+                                 reinterpret_cast<ProblemShapeType const*>(problem_sizes_host)},
+                                {ptr_A, stride_A, ptr_B, stride_B},
+                                {
+                                    fusion_args,
+                                    (beta > 0.0) ? (const ElementC**)ptr_C : nullptr,  // NOLINT(*)
+                                    stride_C,
+                                    ptr_C,
+                                    stride_C,
+                                },
+                                kernel_hw_info};
 
   return arguments;
 }
