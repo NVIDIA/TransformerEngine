@@ -469,6 +469,9 @@ class QuantizedTensor(torch.Tensor):
         if kwargs is not None:
             kwargs = tree_map(maybe_unwrap, kwargs)
         out = super().__torch_dispatch__(func, types, args, kwargs)
+
+        # Retain requires_grad, which __torch_dispatch__ always seems to set to False.
+        out.requires_grad = args[0].requires_grad
         return out
 
     @classmethod

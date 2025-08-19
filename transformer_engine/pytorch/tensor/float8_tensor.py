@@ -549,7 +549,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             return Float8Tensor(
                 shape=out_shape,
                 dtype=tensor.dtype,
-                requires_grad=False,
+                requires_grad=tensor.requires_grad,
                 data=out_data,
                 fp8_scale_inv=tensor._scale_inv,
                 fp8_dtype=tensor._fp8_dtype,

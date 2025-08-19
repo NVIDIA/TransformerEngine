@@ -79,6 +79,7 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
     nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
   });
 
+  out.attr("requires_grad_")(input.attr("requires_grad"));
   return out;
 }
 

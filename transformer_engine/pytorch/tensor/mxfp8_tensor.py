@@ -339,7 +339,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 columnwise_data=tensor._columnwise_data,
                 columnwise_scale_inv=tensor._columnwise_scale_inv,
                 quantizer=tensor._quantizer,
-                requires_grad=False,
+                requires_grad=tensor.requires_grad,
                 fp8_dtype=tensor._fp8_dtype,
             )
 
