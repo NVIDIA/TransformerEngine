@@ -16,6 +16,8 @@ import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 from .quantize import (
+    ScaledTensorFactory,
+    QuantizeLayout,
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
@@ -253,10 +255,12 @@ def grouped_dense(
     group_sizes: jnp.ndarray,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (1,)),
     bias: jnp.ndarray = None,
+    kernel_amax: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    kernel_fsdp_info: Tuple[str, int] = (None, -1),
 ):
     """
     Perform grouped dense (linear) layer transformation with optional quantization.
@@ -282,25 +286,29 @@ def grouped_dense(
         group_sizes,
         contracting_dims,
         bias,
+        kernel_amax,
         precision,
         preferred_element_type,
         group_offset,
         quantizer_set,
+        kernel_fsdp_info,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 6, 7, 8, 10))
 def _grouped_dense(
     x,
     kernel,
     group_sizes,
     contracting_dims,
     bias,
+    kernel_amax,
     precision,
     preferred_element_type,
     group_offset,
     quantizer_set,
+    kernel_fsdp_info,
 ):
     output, _ = _grouped_dense_fwd_rule(
         x,
@@ -308,10 +316,12 @@ def _grouped_dense(
         group_sizes,
         contracting_dims,
         bias,
+        kernel_amax,
         precision,
         preferred_element_type,
         group_offset,
         quantizer_set,
+        kernel_fsdp_info,
     )
     return output
 
@@ -322,13 +332,17 @@ def _grouped_dense_fwd_rule(
     group_sizes,
     contracting_dims,
     bias,
+    kernel_amax,
     precision,
     preferred_element_type,
     group_offset,
     quantizer_set,
+    kernel_fsdp_info,
 ):
     use_bias = bias is not None
     is_noop_quantizer_set = quantizer_set == noop_quantizer_set
+
+    origianl_quantizer_set_kernel_q_layout = quantizer_set.kernel.q_layout
 
     if is_noop_quantizer_set:
         grouped_gemm_x = x
@@ -351,11 +365,23 @@ def _grouped_dense_fwd_rule(
             f"got {x_contracting_dims=} and {k_contracting_dims=}"
         )
 
+        kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
+        kernel_fsdp_enable = kernel_fsdp_axis_name is not None
+
         casted_x = tex.grouped_quantize(
-            x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
+            x,
+            quantizer_set.x,
+            group_sizes,
+            flatten_axis=flatten_axis_x,
         )
+
+        ctx_kernel_usage = TensorUsage.RHS_TRANS
+        if kernel_fsdp_enable:
+            # Perform `cast` only
+            ctx_kernel_usage = TensorUsage.LHS
+            quantizer_set.kernel.q_layout = QuantizeLayout.ROWWISE
         casted_kernel = tex.grouped_quantize(
-            kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k
+            kernel, quantizer_set.kernel, amax=kernel_amax, flatten_axis=flatten_axis_k
         )
         contracting_dims = (x_contracting_dims, k_contracting_dims)
 
@@ -363,9 +389,58 @@ def _grouped_dense_fwd_rule(
         # rowwise_casted_x.original_shape == (M, K)
         # colwise_casted_kernel.original_shape == (G, N, K)
         grouped_gemm_x = casted_x.get_tensor(usage=TensorUsage.LHS)
-        grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
         ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
-        ctx_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS)
+        ctx_kernel = casted_kernel.get_tensor(usage=ctx_kernel_usage)
+
+        kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
+        if kernel_fsdp_enable:
+            assert kernel_fsdp_axis_idx >= 0
+            kernel_shape = kernel.shape
+            kernel_whole_shape = (
+                *kernel_shape[:kernel_fsdp_axis_idx],
+                -1,
+                *kernel_shape[kernel_fsdp_axis_idx + 1 :],
+            )
+            ctx_kernel_in_original_shape = ctx_kernel.data.reshape(ctx_kernel.original_shape)
+            ctx_kernel_data_global = jax.lax.all_gather(
+                ctx_kernel_in_original_shape, kernel_fsdp_axis_name, axis=kernel_fsdp_axis_idx
+            )
+            ctx_kernel_data_global = ctx_kernel_data_global.reshape(*kernel_whole_shape)
+
+            kernel_shape = ctx_kernel_data_global.shape
+
+            ctx_kernel = ScaledTensorFactory.create_1x(
+                ctx_kernel_data_global.reshape(-1),
+                ctx_kernel.scale_inv,
+                ctx_kernel.scaling_mode,
+                dq_dtype=ctx_kernel.dq_dtype,
+                is_colwise=False,
+                data_layout="N",
+                flatten_axis=ctx_kernel.flatten_axis,
+                group_sizes=ctx_kernel.group_sizes,
+                original_shape=kernel_shape,
+                group_axis=ctx_kernel.group_axis,
+            )
+
+            grouped_gemm_kernel_data = ctx_kernel_data_global.transpose(0, 2, 1)
+            grouped_gemm_kernel = ScaledTensorFactory.create_1x(
+                grouped_gemm_kernel_data.reshape(-1),
+                ctx_kernel.scale_inv,
+                ctx_kernel.scaling_mode,
+                dq_dtype=ctx_kernel.dq_dtype,
+                is_colwise=True,
+                data_layout="T",
+                flatten_axis=ctx_kernel.flatten_axis,
+                group_sizes=ctx_kernel.group_sizes,
+                original_shape=kernel_shape,
+                group_axis=ctx_kernel.group_axis,
+            )
+        else:
+            grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
+
+    # Reset quantizer_set.kernel.q_layout to align the PyTree as the given one.
+    # This is needed especially when kernel_fsdp_enable == True AND FP8 enabled.
+    quantizer_set.kernel.q_layout = origianl_quantizer_set_kernel_q_layout
 
     output = tex.grouped_gemm(
         grouped_gemm_x,
@@ -393,7 +468,7 @@ def _grouped_dense_fwd_rule(
 
 
 def _grouped_dense_bwd_rule(
-    contracting_dims, precision, preferred_element_type, group_offset, ctx, grad
+    contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
 ):
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
@@ -474,11 +549,24 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
+    kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
+    if kernel_fsdp_axis_name is not None:
+        wgrad = wgrad.reshape(
+            *kernel_shape[:kernel_fsdp_axis_idx],
+            -1,
+            kernel_shape[kernel_fsdp_axis_idx],
+            *kernel_shape[kernel_fsdp_axis_idx + 1 :],
+        )
+        wgrad = jax.lax.psum_scatter(
+            wgrad, kernel_fsdp_axis_name, scatter_dimension=kernel_fsdp_axis_idx
+        )
+        wgrad = wgrad.reshape(kernel_shape)
 
     group_sizes_grad = None
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
+    dkernel_amax = None
 
-    return dgrad, wgrad, group_sizes_grad, dbias, quantizer_set
+    return dgrad, wgrad, group_sizes_grad, dbias, dkernel_amax, quantizer_set
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
