@@ -491,7 +491,7 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             rhs_non_cspecs = tuple(
-                None if spec is not None and global_mesh_resource().fsdp_resource in spec else spec
+                None if spec is not None and spec == global_mesh_resource().fsdp_resource else spec
                 for spec in rhs_non_cspecs
             )
 
