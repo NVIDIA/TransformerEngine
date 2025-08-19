@@ -92,7 +92,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
-                             bool bulk_overlap) {
+                             bool bulk_overlap, float alpha, std::optional<float> beta) {
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
@@ -109,6 +109,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
+
+  // Check scaling factors
+  if (accumulate) {
+    if (!beta) {
+      beta = 1.0f;
+    }
+  } else {
+    if (!beta) {
+      beta = 0.0f;
+    }
+    NVTE_CHECK(beta == 0.0, "Trying to use non-zero beta while not accumulating ",
+               "into D tensor. Beta has nothing to be applied to.");
+  }
 
   // Output tensor
   TensorWrapper D_tensor;
@@ -238,9 +251,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), bias_tensor.data(),
-                         te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                         accumulate, use_split_accumulator, num_math_sms, main_stream);
+        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), D_tensor.data(),
+                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
+                                te_workspace.data(), alpha, *beta, use_split_accumulator,
+                                num_math_sms, main_stream);
       });
     }
   } else {
@@ -326,10 +340,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
   std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
       te_pre_gelu_out_vector, te_workspace_vector;
-  std::vector<TensorWrapper> wrappers;
+  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, wrappers;
   std::vector<at::Tensor> D_vectors;
-  // Keep the swizzled scaling factor tensors alive during the GEMMs.
-  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
   auto none = py::none();
 
@@ -396,10 +408,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       continue;
     }
 
-    // Optionally swizzle the scaling factors
-    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
-    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
-
     auto te_D = makeTransformerEngineTensor(out_tensor);
     auto te_bias = makeTransformerEngineTensor(bias[i]);
     auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
@@ -419,18 +427,25 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_bias_vector.emplace_back(te_bias.data());
     te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out.data());
 
-    wrappers.emplace_back(std::move(te_A));
-    wrappers.emplace_back(std::move(te_B));
+    te_A_wrappers.emplace_back(std::move(te_A));
+    te_B_wrappers.emplace_back(std::move(te_B));
     wrappers.emplace_back(std::move(te_D));
     wrappers.emplace_back(std::move(te_bias));
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
+
+  // Optionally swizzle the scaling factors
+  // Keep the swizzled scaling factor tensors alive during the GEMMs.
+  auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
+  auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
+
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
                                            std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }
+
   // For now, we only have multi-stream cublas backend.
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),

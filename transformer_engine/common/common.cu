@@ -95,6 +95,9 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {

@@ -410,8 +410,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("q_layout")
-                                  .Attr<int64_t>("flatten_axis"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<int64_t>("flatten_axis"));
 
 }  // namespace jax
 }  // namespace transformer_engine

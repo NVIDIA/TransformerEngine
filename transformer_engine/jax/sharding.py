@@ -15,10 +15,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 import warnings
-from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec
+from jax.interpreters import pxla
+from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
@@ -86,68 +86,29 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def get_sequence_parallel_dim(logical_axes, contracting_dims, batch_dims):
+def _generate_pspec(logical_axis_names):
     """
-    Get the index for the sequence-parallel dimension based on the given logical axes.
+    Convert TransformerEngine logical axes (e.g. BATCH_AXES) to a JAX PartitionSpec.
+    Note, this method does not support Flax logical axes.
 
-    The sequence-parallel dimension is assumed to be the only sharded non-batched non-contracting
-    dimension.
+    Args:
+        logical_axis_names: TransformerEngine logical axes to convert to a JAX PartitionSpec.
+    Returns:
+        A JAX PartitionSpec with the mesh axes corresponding to the given TransformerEngine logical axis names
     """
-    if not logical_axes:
-        return None
+    rules = get_sharding_map_logic_axis_to_mesh_axis()
 
-    pspec = generate_pspec(logical_axes, with_flax_rules=True, padded=True)
-    ldims = [i for i in range(len(logical_axes)) if i not in set(contracting_dims + batch_dims)]
-    lspecs = [pspec[i] for i in ldims if pspec[i] is not None]
-    if len(lspecs) == 0:
-        return None
-
-    assert len(lspecs) == 1, (
-        "Expected only 1 non-batched non-contracting dimension to be sharded for "
-        f"sequence-parallelism, but found {len(lspecs)}: {pspec} @ idx {ldims}"
-    )
-
-    return pspec.index(lspecs[0])
-
-
-def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
-    """
-    Convert logical axes to PartitionSpec
-    """
-    rules = None
-    if with_flax_rules:
-        try:
-            import flax
-
-            rules = dict(flax.linen.get_logical_axis_rules())
-        except ImportError:
-            pass
-
-    if rules is None:
-        warnings.warn(
-            "Transformer Engine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated"
-            " and removed in a future version. Please use Flax logical axes with the"
-            " `flax.linen.logical_axis_rules()` context and optionally use"
-            " `transformer_engine.jax.flax.extend_logical_axis_rules()` to extend Flax axis rules"
-            " with Transformer Engine logical axes.",
-            DeprecationWarning,
-        )
-        rules = get_sharding_map_logic_axis_to_mesh_axis()
-    # mesh_axis_names = [rules[name] for name in logical_axis_names]
-    mesh_axis_names = []
-    for name in logical_axis_names:
-        axis_name = rules[name] if name in rules else None
-        mesh_axis_names.append(axis_name)
+    mesh_axis_names = [rules.get(name) for name in logical_axis_names]
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
-    if padded:
-        pspec = get_padded_spec(pspec, len(mesh_axis_names))
     return pspec
 
 
 def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
-    A wrapper function to jax.lax.with_sharding_constraint to
-    support the case that Mesh is empty.
+    A wrapper function to jax.lax.with_sharding_constraint
+        1. Does nothing if mesh is empty.
+        2. If all mesh axes are manual axes, replaces pspec with all Nones.
+        3. Otherwise, strips only the manual axes.
     """
     if pspec is None:
         return x
@@ -155,7 +116,14 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
     if mesh.empty:
         return x
-    return jax.lax.with_sharding_constraint(x, pspec)
+
+    # We want to exclude the axes that already used by shard_map and shard_map
+    # only sets those in the abstract_mesh, not the physical one
+    manual_axis_names = get_abstract_mesh().manual_axes
+    cleaned_axis_names = tuple(name if name not in manual_axis_names else None for name in pspec)
+
+    cleaned_pspec = PartitionSpec(*cleaned_axis_names)
+    return jax.lax.with_sharding_constraint(x, cleaned_pspec)
 
 
 def with_sharding_constraint_by_logical_axes(
@@ -203,7 +171,7 @@ def with_sharding_constraint_by_logical_axes(
 
     # If no logical axis rules are available from Flax, fallback to TE's hardcoded logical axis rule table
     assert len(x.shape) == len(logical_axis_names)
-    pspec = generate_pspec(logical_axis_names)
+    pspec = _generate_pspec(logical_axis_names)
     return with_sharding_constraint(x, pspec)
 
 
@@ -427,24 +395,3 @@ class ShardingType(Enum):
     TP_ROW = (MajorShardingType.TP, "tp_row")
     DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
-
-
-def get_non_contracting_logical_axes(
-    ndim, logical_axes: tuple[Optional[str]], contracting_dims
-) -> tuple[Optional[str]]:
-    """Get logical axes for non-contracting dimensions.
-
-    Args:
-        ndim: Number of dimensions in the tensor.
-        logical_axes: Tuple of logical axes for each dimension.
-        contracting_dims: Set of dimensions that are being contracted.
-
-    Returns:
-        Tuple of logical axes for non-contracting dimensions.
-    """
-    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
-    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
-
-    non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
-    non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
-    return non_contracting_logical_axes

@@ -398,11 +398,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -441,11 +438,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -591,67 +585,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
 
   return output_py_list;
-}
-
-template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                       cudaStream_t)>
-std::vector<py::object> dbias_dact(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                   py::handle quantizer) {
-  init_extension();
-  auto my_quantizer = convert_quantizer(quantizer);
-
-  auto grad_tensor = makeTransformerEngineTensor(grad_output);
-
-  auto grad_bias = allocateTorchTensor(grad_output.size(-1), grad_tensor.dtype());
-  auto act_input_tensor = makeTransformerEngineTensor(act_input);
-
-  const auto &shape = convertShape(grad_tensor.shape());
-  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype());
-
-  auto dbias_tensor = makeTransformerEngineTensor(grad_bias);
-
-  // Query workspace size and allocate workspace
-  transformer_engine::TensorWrapper workspace;
-  NVTE_SCOPED_GIL_RELEASE({
-    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-         workspace.data(), at::cuda::getCurrentCUDAStream());
-  });
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-
-  // Launch kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-         workspace.data(), at::cuda::getCurrentCUDAStream());
-  });
-
-  return {py::cast(grad_bias), dact};
-}
-
-std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dgelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dsilu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dsilu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_drelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dqgelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dsrelu>(grad_output, act_input, quantizer);
 }
 
 }  // namespace pytorch
