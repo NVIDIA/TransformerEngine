@@ -793,8 +793,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   bool supported_data_type_flag = (A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F);
 
   // Currently only supports the case when bias is null, in this case the grad flag can be ignored.
-  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator &&
-      supported_data_type_flag) {
+  // Ignore use_split_accumulator, since it's not used in BF16/FP16 GEMMs.
+  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && supported_data_type_flag) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
   } else {

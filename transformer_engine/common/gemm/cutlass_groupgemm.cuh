@@ -160,11 +160,12 @@ typename GemmT::Arguments MakeArguments(int num_experts, void* problem_sizes_hos
 
   arguments = typename GemmT::Arguments{
       cutlass::gemm::GemmUniversalMode::kGrouped,
-      {num_experts, (ProblemShapeType*)problem_sizes, (ProblemShapeType const*)problem_sizes_host},
+      {num_experts, reinterpret_cast<ProblemShapeType*>(problem_sizes),
+       reinterpret_cast<ProblemShapeType const*>(problem_sizes_host)},
       {ptr_A, stride_A, ptr_B, stride_B},
       {
           fusion_args,
-          (beta > 0.0) ? (const ElementC**)ptr_C : nullptr,
+          (beta > 0.0) ? (const ElementC**)ptr_C : nullptr,  // NOLINT(*)
           stride_C,
           ptr_C,
           stride_C,
@@ -236,11 +237,11 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
              static_cast<int64_t>(total_workspace_size),
              ", available=", static_cast<int64_t>(wspace->numel()), " for CUTLASS grouped GEMM.");
 
-  char* all_workspace = (char*)(wspace->data.dptr);
+  char* all_workspace = reinterpret_cast<char*>(wspace->data.dptr);
 
   char* workspace_ptr = nullptr;
 
-  char* host_workspace = (char*)std::malloc(param_workspace_size);
+  char* host_workspace = reinterpret_cast<char*>(std::malloc(param_workspace_size));
 
   ProblemShapeType* problem_sizes_host = reinterpret_cast<ProblemShapeType*>(host_workspace);
 
@@ -267,9 +268,9 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
     auto problem = ProblemShapeType(m, n, k);
     problem_sizes_host[i] = problem;
 
-    ptr_A_host[i] = (ElementA*)inputA->data.dptr;
-    ptr_B_host[i] = (ElementB*)inputB->data.dptr;
-    ptr_C_host[i] = (ElementC*)outputD->data.dptr;
+    ptr_A_host[i] = reinterpret_cast<ElementA*>(inputA->data.dptr);
+    ptr_B_host[i] = reinterpret_cast<ElementB*>(inputB->data.dptr);
+    ptr_C_host[i] = reinterpret_cast<ElementC*>(outputD->data.dptr);
 
     lda_host[i] =
         infer_stride<StrideA>(m, k, std::is_same_v<LayoutA, cutlass::layout::ColumnMajor>);
@@ -284,19 +285,19 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
 
   char* param_workspace = all_workspace;
   ProblemShapeType* problem_sizes_device = reinterpret_cast<ProblemShapeType*>(param_workspace);
-  const ElementA** ptr_A =
-      reinterpret_cast<const ElementA**>((char*)param_workspace + gemm_coord_size);
-  const ElementB** ptr_B =
-      reinterpret_cast<const ElementB**>((char*)param_workspace + gemm_coord_size + 1 * ptr_size);
-  ElementC** ptr_C =
-      reinterpret_cast<ElementC**>((char*)param_workspace + gemm_coord_size + 2 * ptr_size);
+  const ElementA** ptr_A = reinterpret_cast<const ElementA**>(
+      reinterpret_cast<char*>(param_workspace) + gemm_coord_size);
+  const ElementB** ptr_B = reinterpret_cast<const ElementB**>(
+      reinterpret_cast<char*>(param_workspace) + gemm_coord_size + 1 * ptr_size);
+  ElementC** ptr_C = reinterpret_cast<ElementC**>(reinterpret_cast<char*>(param_workspace) +
+                                                  gemm_coord_size + 2 * ptr_size);
 
-  StrideA* lda = reinterpret_cast<StrideA*>((char*)param_workspace + gemm_coord_size +
-                                            3 * ptr_size + 0 * ldd_size);
-  StrideB* ldb = reinterpret_cast<StrideB*>((char*)param_workspace + gemm_coord_size +
-                                            3 * ptr_size + 1 * ldd_size);
-  StrideC* ldc = reinterpret_cast<StrideC*>((char*)param_workspace + gemm_coord_size +
-                                            3 * ptr_size + 2 * ldd_size);
+  StrideA* lda = reinterpret_cast<StrideA*>(reinterpret_cast<char*>(param_workspace) +
+                                            gemm_coord_size + 3 * ptr_size + 0 * ldd_size);
+  StrideB* ldb = reinterpret_cast<StrideB*>(reinterpret_cast<char*>(param_workspace) +
+                                            gemm_coord_size + 3 * ptr_size + 1 * ldd_size);
+  StrideC* ldc = reinterpret_cast<StrideC*>(reinterpret_cast<char*>(param_workspace) +
+                                            gemm_coord_size + 3 * ptr_size + 2 * ldd_size);
 
   workspace_ptr = all_workspace + param_workspace_size;
 
