@@ -47,10 +47,11 @@ void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  * m, n, k - Global GEMM dimensions.
  * Tensors and boolean flags have the same meaning as in nvte_cublas_gemm.
  */
-void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
-                              const NVTETensor b, const NVTETensor d, const NVTETensor bias,
-                              const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                              bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
+                              const NVTETensor a, const NVTETensor b, const NVTETensor d,
+                              const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
+                              bool transb, bool grad, bool accumulate, int comm_sm_count,
+                              cudaStream_t main_stream,
                               cublasMpMatmulAlgoType_t algo = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT);
 
 /*! \brief GEMM-AllReduce.
