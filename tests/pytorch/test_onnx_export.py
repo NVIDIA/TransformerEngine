@@ -1201,7 +1201,7 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
         torch.testing.assert_close(out, out_ref, atol=atol, rtol=rtol)
     finally:
         pass
-        #try:
+        # try:
         #    os.remove(onnx_path)
-        #except FileNotFoundError:
+        # except FileNotFoundError:
         #    pass
