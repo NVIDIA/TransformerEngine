@@ -13,7 +13,18 @@ from transformer_engine.jax.quantize import (
     noop_quantizer_set,
 )
 
-def run_grouped_quantize(in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes, num_iters: int, num_steps: int):
+
+def run_grouped_quantize(
+    in_dtype,
+    input_shape,
+    q_dtype,
+    scaling_mode,
+    q_layout,
+    flatten_axis,
+    with_group_sizes,
+    num_iters: int,
+    num_steps: int,
+):
     n_groups, m, n = input_shape
     key = jax.random.PRNGKey(0)
     subkeys = jax.random.split(key, 2)
@@ -62,6 +73,7 @@ def run_grouped_quantize(in_dtype, input_shape, q_dtype, scaling_mode, q_layout,
 
     # assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
+
 def main():
     in_dtype = jnp.bfloat16
     # Note, kMaxTensorsPerKernel=64 so group size needs to be big enough to dispatch multiple kernels to take advantage of PDL
@@ -74,7 +86,18 @@ def main():
 
     num_iters = 10
     num_steps = 10
-    run_grouped_quantize(in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes, num_iters=num_iters, num_steps=num_steps)
+    run_grouped_quantize(
+        in_dtype,
+        input_shape,
+        q_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        with_group_sizes,
+        num_iters=num_iters,
+        num_steps=num_steps,
+    )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

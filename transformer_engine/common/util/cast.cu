@@ -18,8 +18,8 @@
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
 #include "../util/multi_stream.h"
-#include "../util/vectorized_pointwise.h"
 #include "../util/system.h"
+#include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 #include "cast_kernels.cuh"
 #include "dequantize_kernels.cuh"
@@ -172,7 +172,8 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 
   if (!g_set) {
     g_set = true;
-    g_use_single_stream = transformer_engine::getenv<bool>("NVTE_GROUPED_QUANTIZE_USE_SINGLE_STREAM");
+    g_use_single_stream =
+        transformer_engine::getenv<bool>("NVTE_GROUPED_QUANTIZE_USE_SINGLE_STREAM");
     if (g_use_single_stream) {
       printf("Using single stream for quantization.\n");
     } else {
@@ -213,8 +214,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
     for (int s = 0; s < num_stream_used; s++) {
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
     }
-  }
-  else {
+  } else {
     nvte_multi_cast_transpose(num_tensors, inputs, outputs, stream);
   }
 }
