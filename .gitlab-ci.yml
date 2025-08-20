@@ -914,6 +914,8 @@ send_result_to_slack:
         if [[ "${github_username}" == "mk-61" ]]; then nv_username="vcherepanov@nvidia.com" ; fi
         if [[ "${github_username}" == "negvet" ]]; then nv_username="etsykunov@nvidia.com" ; fi
         if [[ "${github_username}" == "janekb04" ]]; then nv_username="jbielak@nvidia.com" ; fi
+        if [[ "${github_username}" == "tdophung" ]]; then nv_username="tdophung@nvidia.com" ; fi
+        if [[ "${github_username}" == "vthumbe1503" ]]; then nv_username="vthumbe@nvidia.com" ; fi
         echo "${nv_username}"
     }
 
@@ -935,6 +937,8 @@ send_result_to_slack:
         if [[ "${nv_username}" == "vcherepanov@nvidia.com" ]]; then slack_user_id="<@USE6S7V4Z>" ; fi
         if [[ "${nv_username}" == "etsykunov@nvidia.com" ]]; then slack_user_id="<@U08F3RZUZA5>" ; fi
         if [[ "${nv_username}" == "jbielak@nvidia.com" ]]; then slack_user_id="<@U05AGG0044R>" ; fi
+        if [[ "${nv_username}" == "tdophung@nvidia.com" ]]; then slack_user_id="<@U01RWAH5971>" ; fi
+        if [[ "${nv_username}" == "vthumbe@nvidia.com" ]]; then slack_user_id="<@U09AW1ZP8JZ>" ; fi
         echo "${slack_user_id}"
     }
 
