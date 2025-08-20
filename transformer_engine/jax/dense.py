@@ -301,10 +301,15 @@ def grouped_dense(
         contracting_dims: Tuple of sequences specifying which dimensions to contract
                           (currently only supports ((1,), (1,)))
         bias: Bias tensor of shape (G, N)
+        kernel_amax: The amax values of weight matrix of shape (G,)
         precision: JAX precision for the GEMM operation
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
         quantizer_set: Set of quantizers for FP8 quantization of the input and output
+        kernel_fsdp_info: A tuple containing FSDP-related information for a weight matrix
+                          represented in the format (str, int). The first element is the
+                          FSDP mesh axis, and the second element is the dimension along
+                          which the weight is sharded.
 
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
