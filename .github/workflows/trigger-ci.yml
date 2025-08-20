@@ -55,6 +55,7 @@ jobs:
            || github.actor == 'pstjohn'
            || github.actor == 'vcherepanov-nv'
            || github.actor == 'tdophung'
+           || github.actor == 'vthumbe1503'
            || github.actor == 'janekb04'
          )
     steps:

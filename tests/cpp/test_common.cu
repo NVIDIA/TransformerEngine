@@ -844,9 +844,18 @@ void fillCase(Tensor *t, const InputsFillCase fill_case) {
   }
 }
 
+template void fillCase<byte>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int32>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int64>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<fp16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<bf16>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e4m3>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
-template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
+#if FP4_TYPE_SUPPORTED
+template void fillCase<fp4e2m1>(Tensor *t, const InputsFillCase fill_case);
+#endif
 
 void setRandomScale(Tensor *t) {
   std::uniform_real_distribution<> dis(-2.0, 1.0);
