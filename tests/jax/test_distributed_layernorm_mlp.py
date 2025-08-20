@@ -173,7 +173,7 @@ class TestDistributedLayernormMLP:
             )
 
             # Single GPU
-            with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+            with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
                 single_jitter = jax.jit(
                     value_and_grad_func,
                     static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
@@ -330,7 +330,7 @@ class TestDistributedLayernormMLP:
 
         with use_jax_gemm(enabled=with_jax_gemm):
             # Single GPUs
-            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
                 ln_mlp_single = LayerNormMLP(
                     layernorm_type=layernorm_type,
                     intermediate_dim=INTERMEDIATE,

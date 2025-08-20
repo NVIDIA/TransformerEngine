@@ -404,9 +404,6 @@ def fp8_autocast(
     if fp8_recipe is None:
         fp8_recipe = recipe.DelayedScaling()
 
-    if mesh_resource is None:
-        mesh_resource = MeshResource()
-
     Config = DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         Config = BlockScalingQuantizeConfig
