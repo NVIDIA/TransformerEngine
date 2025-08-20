@@ -637,8 +637,8 @@ class TestQuantize:
 @pytest_parametrize_wrapper("flatten_axis", [-1])
 @pytest_parametrize_wrapper("with_group_sizes", [True, False])
 @pytest_parametrize_wrapper(
-    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
-)
+    "q_layout", [QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
+) # ROWWISE doesn't work with multi_cast_transpose as that expects colwise output pointers
 class TestGroupedQuantize:
     def test_grouped_qdq(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes

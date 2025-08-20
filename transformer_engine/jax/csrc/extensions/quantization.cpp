@@ -390,7 +390,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     nvte_memset(colwise_scale_invs->untyped_data(), 0, total_colwise_sinv_size, stream);
   }
 
-  QuantizationConfigWrapper quant_config;
+  QuantizationConfigWrapper quant_config{};
   nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config,
                              num_non_empty_groups, stream);
 

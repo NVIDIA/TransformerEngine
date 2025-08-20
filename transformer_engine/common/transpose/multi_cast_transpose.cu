@@ -13,6 +13,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -149,6 +150,11 @@ __global__ void __launch_bounds__(threads_per_block)
     }
   }
 
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // Trigger the next kernel, so its TMA load can be overlapped with the current kernel
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
   // Copy transposed output from registers to global memory
   __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
 #pragma unroll
@@ -191,6 +197,26 @@ __global__ void __launch_bounds__(threads_per_block)
   if (tile_id == 0 && tid == 0 && scale_inv_ptr != nullptr) {
     reciprocal<CType>(scale_inv_ptr, scale);
   }
+}
+
+// HACK so this memory doesn't go out of scope from local stack
+cudaLaunchAttribute g_attribute[1];
+
+
+cudaLaunchConfig_t create_cuda_launch_config(size_t n_blocks, size_t threads_per_block, cudaStream_t stream) {
+  cudaLaunchConfig_t cfg = {dim3(n_blocks), dim3(threads_per_block), 0, stream, NULL, 0};
+
+  cfg.numAttrs = 0;
+
+  int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
+  if (deviceComputeCapability >= 90) {
+    g_attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    g_attribute[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = g_attribute;
+    cfg.numAttrs = 1;
+  }
+  
+  return cfg;
 }
 
 }  // namespace
@@ -255,8 +281,12 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
               otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
               constexpr int nvec_out = desired_store_size / sizeof(OutputType);
               const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-              multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+              cudaLaunchConfig_t cfg = create_cuda_launch_config(n_blocks, threads_per_block, stream);
+              NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                &cfg,
+                multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>,
+                kernel_args_aligned));
+          );  // NOLINT(*)
       );                                                                            // NOLINT(*)
       kernel_args_aligned.num_tensors = 0;
     }
@@ -268,8 +298,12 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
               constexpr int nvec_out = desired_store_size / sizeof(OutputType);
               const int n_blocks =
                   kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-              multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+              cudaLaunchConfig_t cfg = create_cuda_launch_config(n_blocks, threads_per_block, stream);
+              NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                &cfg,
+                multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>,
+                kernel_args_unaligned));
+            );  // NOLINT(*)
       );                                                                              // NOLINT(*)
       kernel_args_unaligned.num_tensors = 0;
     }
@@ -308,8 +342,12 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
             otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
             constexpr int nvec_out = desired_store_size / sizeof(OutputType);
             const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-            multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+            cudaLaunchConfig_t cfg = create_cuda_launch_config(n_blocks, threads_per_block, stream);
+            NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+              &cfg,
+              multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>,
+              kernel_args_aligned));
+        ); // NOLINT(*)
     );                                                                            // NOLINT(*)
   }
   if (kernel_args_unaligned.num_tensors > 0) {
@@ -320,8 +358,12 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
             constexpr int nvec_out = desired_store_size / sizeof(OutputType);
             const int n_blocks =
                 kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-            multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+            cudaLaunchConfig_t cfg = create_cuda_launch_config(n_blocks, threads_per_block, stream);
+            NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+              &cfg,
+              multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>,
+              kernel_args_unaligned));
+        );  // NOLINT(*)
     );                                                                              // NOLINT(*)
   }
 }
