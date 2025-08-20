@@ -825,20 +825,28 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           const TensorWrapper &B, bool transb, TensorWrapper &D,
                                           TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
-                                          bool use_split_accumulator, TensorWrapper &B_copy,
-                                          cudaStream_t stream_main) {
+                                          bool use_split_accumulator, bool ag_on_B,
+                                          TensorWrapper &B_copy, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
   _ub_comm->cga_size = _cga_size;
-  // Get GEMM dimensions between TN and NN input layouts
+  // Get GEMM dimensions between TN, NN and NT input layouts
   const size_t m = (transa) ? A.size(0) : A.size(1);
   const size_t k = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = _ubufs[0].size(0);
+  const size_t n = (transb) ? B.size(1) : B.size(0);
+
+  // For TN or NN layout, we chunk on the n dimension.
+  const size_t n_chunk = (transb) ? n : (n / _tp_size);
+  // For NT layer, we chunk on the k dimension.
+  const size_t k_chunk = (transb) ? (k / _tp_size) : k;
 
   // Get communication and GEMM output chunk sizes
   const int comm_bytes = _ubufs[0].bytes();
   const bool do_gelu = pre_gelu_out.numel() > 0;
+  size_t input_a_chunk_size = m * k_chunk;
+  size_t input_b_chunk_size = n_chunk * k_chunk;
+  size_t output_chunk_size = n_chunk * m;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
   NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
@@ -852,10 +860,11 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 
     // Chunk dims
     std::vector<size_t> input_b_chunk_shape =
-        (transb ? std::vector<size_t>{k, 2 * n_chunk} : std::vector<size_t>{2 * n_chunk, k});
-    std::vector<size_t> output_chunk_shape = {2 * n_chunk, m};
-    size_t input_b_chunk_size = 2 * n_chunk * k;
-    size_t output_chunk_size = 2 * n_chunk * m;
+        (transb ? std::vector<size_t>{2 * k_chunk, n} : std::vector<size_t>{2 * n_chunk, k});
+    std::vector<size_t> output_chunk_shape = {(transb ? 1 : 2) * n_chunk, m};
+    input_a_chunk_size *= transb ? 2 : 1;
+    input_b_chunk_size *= 2;
+    output_chunk_size *= transb ? 1 : 2;
 
     // Initial 1X input chunk exchange between neighboring peers
     int send_chunk_id = _tp_id;
@@ -883,18 +892,37 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      auto input_b_chunk =
-          get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id / 2, input_b_chunk_shape);
-      auto output_chunk =
-          get_tensor_chunk(D, output_chunk_size * send_chunk_id / 2, output_chunk_shape);
+      TensorWrapper input_a_chunk, input_b_chunk;
+      if (ag_on_B) {  // AllGather is performed on input B tensor (default case).
+                      // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
+        input_a_chunk = get_tensor_chunk(
+            A, transb ? input_a_chunk_size * send_chunk_id / 2 : 0,
+            transb ? std::vector<size_t>{k_chunk * 2, m} : shape_to_vector(A.shape()));
+        input_b_chunk =
+            get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id / 2, input_b_chunk_shape);
+      } else {  // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
+        assert(transa == false && transb == true);
+        input_a_chunk = get_buffer_chunk_like(A, input_a_chunk_size * send_chunk_id / 2,
+                                              std::vector<size_t>{k_chunk * 2, m});
+        input_b_chunk =
+            get_tensor_chunk(B, input_b_chunk_size * send_chunk_id / 2, input_b_chunk_shape);
+      }
+      auto output_chunk = get_tensor_chunk(D, transb ? 0 : output_chunk_size * send_chunk_id / 2,
+                                           output_chunk_shape);
       auto aux_chunk = (do_gelu)
                            ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id / 2,
-                                              {n_chunk * 2, k})
+                                              {2 * n_chunk, k})
                            : TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
-      nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
+      // For NT input layer, overwrite the output buffer which perhpaps not been zeroed yet with the
+      // first chunk's partail output, and then accmulate the partial sum's result for all
+      // the following chunked gemms.
+      if (transa == false && transb == true && accumulate == false) {
+        accumulate = (i == 0) ? false : true;
+      }
+      nvte_cublas_gemm(input_a_chunk.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                        aux_chunk.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                        use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
@@ -920,10 +948,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   } else {
     // Chunk dims
     std::vector<size_t> input_b_chunk_shape =
-        (transb ? std::vector<size_t>{k, n_chunk} : std::vector<size_t>{n_chunk, k});
+        (transb ? std::vector<size_t>{k_chunk, n} : std::vector<size_t>{n_chunk, k});
     std::vector<size_t> output_chunk_shape = {n_chunk, m};
-    size_t input_b_chunk_size = n_chunk * k;
-    size_t output_chunk_size = n_chunk * m;
 
     for (int i = 0; i < _tp_size; i++) {
       // Set the userbuffer id. Buffer under send is the input for the current
@@ -936,10 +962,24 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       int recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      auto input_b_chunk =
-          get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
+      TensorWrapper input_a_chunk, input_b_chunk;
+      if (ag_on_B) {  // AllGather is performed on input B tensor (default case).
+                      // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
+        input_a_chunk =
+            get_tensor_chunk(A, transb ? input_a_chunk_size * send_chunk_id : 0,
+                             transb ? std::vector<size_t>{k_chunk, m} : shape_to_vector(A.shape()));
+        input_b_chunk =
+            get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
+      } else {  // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
+        assert(transa == false && transb == true);
+        input_a_chunk = get_buffer_chunk_like(
+            A, input_a_chunk_size * send_chunk_id,
+            transb ? std::vector<size_t>{k_chunk, m} : std::vector<size_t>{m, k});
+        input_b_chunk =
+            get_tensor_chunk(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
+      }
       auto output_chunk =
-          get_tensor_chunk(D, output_chunk_size * send_chunk_id, output_chunk_shape);
+          get_tensor_chunk(D, transb ? 0 : output_chunk_size * send_chunk_id, output_chunk_shape);
       auto aux_chunk =
           (do_gelu)
               ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id, {n_chunk, k})
@@ -947,7 +987,14 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
-      nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
+      // For NT input layer, overwrite the output buffer which perhpaps not been zeroed yet with the
+      // first chunk's partail output, and then accmulate the partial sum's result for all
+      // the following chunked gemms.
+      if (transa == false && transb == true && accumulate == false) {
+        accumulate = (i == 0) ? false : true;
+      }
+
+      nvte_cublas_gemm(input_a_chunk.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                        aux_chunk.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                        use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
