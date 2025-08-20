@@ -57,11 +57,12 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if (
         get_device_compute_capability() >= (9, 0)
-        and get_device_compute_capability() < (10, 0)
         and float(torch.version.cuda) >= 12.9
     ):
         return True, ""
-    return False, "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
+    return (
+        False, "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9."
+    )
 
 
 def check_recipe_support(recipe: Recipe) -> None:
