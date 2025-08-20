@@ -535,7 +535,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
-    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT
+    context_parallel_strategy: str = "DEFAULT"
     context_checkpoint_name: str = "context"
 
     @nn.compact
