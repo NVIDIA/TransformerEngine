@@ -17,12 +17,41 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 from .quantize import (
     ScaledTensorFactory,
+    ScalingMode,
     QuantizeLayout,
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
+
+
+def _all_gather_kernel(kernel, mesh_axis, axis_idx):
+    assert mesh_axis is not None
+    assert 0 < axis_idx < len(kernel.shape)
+
+    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
+    kernel_shape = kernel.shape
+    kernel_whole_shape = (*kernel_shape[:axis_idx], -1, *kernel_shape[axis_idx + 1 :])
+    global_kernel = jax.lax.all_gather(kernel, mesh_axis, axis=axis_idx)
+    global_kernel = global_kernel.reshape(*kernel_whole_shape)
+    return global_kernel
+
+
+def _psum_scatter_kernel(kernel, scattered_kernel_shape, mesh_axis, axis_idx):
+    assert mesh_axis is not None
+    assert 0 < axis_idx < len(scattered_kernel_shape)
+
+    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
+    kernel = kernel.reshape(
+        *scattered_kernel_shape[:axis_idx],
+        -1,
+        scattered_kernel_shape[axis_idx],
+        *scattered_kernel_shape[axis_idx + 1 :],
+    )
+    kernel = jax.lax.psum_scatter(kernel, mesh_axis, scatter_dimension=axis_idx)
+    kernel = kernel.reshape(scattered_kernel_shape)
+    return kernel
 
 
 def dense(
@@ -342,7 +371,9 @@ def _grouped_dense_fwd_rule(
     use_bias = bias is not None
     is_noop_quantizer_set = quantizer_set == noop_quantizer_set
 
-    origianl_quantizer_set_kernel_q_layout = quantizer_set.kernel.q_layout
+    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
+    kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
+    original_quantizer_set_kernel_q_layout = quantizer_set.kernel.q_layout
 
     if is_noop_quantizer_set:
         grouped_gemm_x = x
@@ -350,6 +381,9 @@ def _grouped_dense_fwd_rule(
         ctx_x = x
         ctx_kernel = kernel
         flatten_axis_k = None
+
+        if kernel_fsdp_enabled:
+            kernel = _all_gather_kernel(kernel, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx)
     else:
         x_contracting_dims, k_contracting_dims = contracting_dims
         flatten_axis_x = -len(x_contracting_dims)
@@ -365,9 +399,6 @@ def _grouped_dense_fwd_rule(
             f"got {x_contracting_dims=} and {k_contracting_dims=}"
         )
 
-        kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
-        kernel_fsdp_enable = kernel_fsdp_axis_name is not None
-
         casted_x = tex.grouped_quantize(
             x,
             quantizer_set.x,
@@ -376,10 +407,15 @@ def _grouped_dense_fwd_rule(
         )
 
         ctx_kernel_usage = TensorUsage.RHS_TRANS
-        if kernel_fsdp_enable:
+        if kernel_fsdp_enabled:
+            assert quantizer_set.kernel.scaling_mode in [
+                ScalingMode.CURRENT_TENSOR_SCALING,
+                ScalingMode.DELAYED_TENSOR_SCALING,
+            ]
             # Perform `cast` only
             ctx_kernel_usage = TensorUsage.LHS
             quantizer_set.kernel.q_layout = QuantizeLayout.ROWWISE
+
         casted_kernel = tex.grouped_quantize(
             kernel, quantizer_set.kernel, amax=kernel_amax, flatten_axis=flatten_axis_k
         )
@@ -392,25 +428,15 @@ def _grouped_dense_fwd_rule(
         ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
         ctx_kernel = casted_kernel.get_tensor(usage=ctx_kernel_usage)
 
-        kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
-        if kernel_fsdp_enable:
-            assert kernel_fsdp_axis_idx >= 0
-            kernel_shape = kernel.shape
-            kernel_whole_shape = (
-                *kernel_shape[:kernel_fsdp_axis_idx],
-                -1,
-                *kernel_shape[kernel_fsdp_axis_idx + 1 :],
-            )
+        if kernel_fsdp_enabled:
             ctx_kernel_in_original_shape = ctx_kernel.data.reshape(ctx_kernel.original_shape)
-            ctx_kernel_data_global = jax.lax.all_gather(
-                ctx_kernel_in_original_shape, kernel_fsdp_axis_name, axis=kernel_fsdp_axis_idx
+            global_ctx_kernel_data = _all_gather_kernel(
+                ctx_kernel_in_original_shape, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx
             )
-            ctx_kernel_data_global = ctx_kernel_data_global.reshape(*kernel_whole_shape)
-
-            kernel_shape = ctx_kernel_data_global.shape
+            kernel_shape = global_ctx_kernel_data.shape
 
             ctx_kernel = ScaledTensorFactory.create_1x(
-                ctx_kernel_data_global.reshape(-1),
+                global_ctx_kernel_data.reshape(-1),
                 ctx_kernel.scale_inv,
                 ctx_kernel.scaling_mode,
                 dq_dtype=ctx_kernel.dq_dtype,
@@ -422,7 +448,7 @@ def _grouped_dense_fwd_rule(
                 group_axis=ctx_kernel.group_axis,
             )
 
-            grouped_gemm_kernel_data = ctx_kernel_data_global.transpose(0, 2, 1)
+            grouped_gemm_kernel_data = global_ctx_kernel_data.transpose(0, 2, 1)
             grouped_gemm_kernel = ScaledTensorFactory.create_1x(
                 grouped_gemm_kernel_data.reshape(-1),
                 ctx_kernel.scale_inv,
@@ -439,8 +465,8 @@ def _grouped_dense_fwd_rule(
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
 
     # Reset quantizer_set.kernel.q_layout to align the PyTree as the given one.
-    # This is needed especially when kernel_fsdp_enable == True AND FP8 enabled.
-    quantizer_set.kernel.q_layout = origianl_quantizer_set_kernel_q_layout
+    # This is needed especially when kernel_fsdp_enabled == True AND FP8 enabled.
+    quantizer_set.kernel.q_layout = original_quantizer_set_kernel_q_layout
 
     output = tex.grouped_gemm(
         grouped_gemm_x,
@@ -549,18 +575,11 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
-    kernel_fsdp_axis_name, kernel_fsdp_axis_idx = kernel_fsdp_info
-    if kernel_fsdp_axis_name is not None:
-        wgrad = wgrad.reshape(
-            *kernel_shape[:kernel_fsdp_axis_idx],
-            -1,
-            kernel_shape[kernel_fsdp_axis_idx],
-            *kernel_shape[kernel_fsdp_axis_idx + 1 :],
+    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
+    if kernel_fsdp_mesh_axis is not None:
+        wgrad = _psum_scatter_kernel(
+            wgrad, kernel_shape, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx
         )
-        wgrad = jax.lax.psum_scatter(
-            wgrad, kernel_fsdp_axis_name, scatter_dimension=kernel_fsdp_axis_idx
-        )
-        wgrad = wgrad.reshape(kernel_shape)
 
     group_sizes_grad = None
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
