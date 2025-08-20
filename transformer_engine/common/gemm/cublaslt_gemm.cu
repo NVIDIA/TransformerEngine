@@ -663,12 +663,14 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
              CUDA_VERSION);
 #endif
 #if !(CUBLAS_VERSION >= 120205 && CUBLAS_VERSION < 130000)
-  NVTE_ERROR("Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION);
+  NVTE_ERROR(
+      "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS version is ",
+      CUBLAS_VERSION);
 #endif
-  NVTE_CHECK(cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
-             "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
-             cuda::cudart_version());
+  NVTE_CHECK(
+      cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
+      "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
+      cuda::cudart_version());
   NVTE_CHECK(
       cublas_version() >= 120205 && cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
