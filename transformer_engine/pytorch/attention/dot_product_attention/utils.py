@@ -1868,31 +1868,6 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
             dP_quantizer,
         )
 
-<<<<<<< HEAD
-    names = [
-        "QKV_quantizer",
-        "O_quantizer",
-        "S_quantizer",
-        "dQKV_quantizer",
-        "dO_quantizer",
-        "dP_quantizer",
-    ]
-    quantizers = [
-        QKV_quantizer,
-        O_quantizer,
-        S_quantizer,
-        dQKV_quantizer,
-        dO_quantizer,
-        dP_quantizer,
-    ]
-    if torch.cuda.current_device() == 0:
-        for i, x in enumerate(quantizers):
-            if x is None:
-                print(f">>>> {names[i]}: None")
-            else:
-                print(f">>>> {names[i]}: {x}, {x.scale=}, {x.amax=}")
-=======
->>>>>>> 6102f750 (fix NVTE_DPA_FORCE_DS and add NVTE_PRINT)
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
 
