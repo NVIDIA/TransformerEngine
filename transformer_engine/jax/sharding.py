@@ -286,7 +286,7 @@ class MeshResource:
     cp_resource: str = None
 
 
-_GLOBAL_MESH_RESOURCE = MeshResource()
+_GLOBAL_MESH_RESOURCE = None
 
 
 @contextmanager
@@ -314,6 +314,11 @@ def global_mesh_resource() -> MeshResource:
     Returns:
         The current MeshResource instance
     """
+    assert _GLOBAL_MESH_RESOURCE is not None, (
+        "Global mesh resource is not set. Please set the MeshResource via a global_shard_guard"
+        " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
+        " wrapping your program in 'with global_shard_guard(MeshResource()):'"
+    )
     return _GLOBAL_MESH_RESOURCE
 
 
