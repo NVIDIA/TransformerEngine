@@ -12,11 +12,13 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
+import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     fp8_autocast,
     fp8_model_init,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -1720,13 +1722,16 @@ def _test_grouped_linear_accuracy(
     fp8,
     fuse_wgrad_accumulation,
     delay_wgrad_compute=False,
+    activation_func=None,  # assume gated activation function
 ):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
 
+    # assume gated activation function
+    hidden_size = config.hidden_size if activation_func is None else 2 * config.hidden_size
     inp_hidden_states = torch.randn(
-        (config.max_seqlen_q, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -1751,11 +1756,11 @@ def _test_grouped_linear_accuracy(
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
-            out = block(inp_hidden_states, m_splits.tolist())
+            out = block(activation_func(inp_hidden_states), m_splits.tolist())
         else:
             out = torch.cat(
                 [
-                    block[i](inp)
+                    block[i](activation_func(inp))
                     for i, inp in enumerate(torch.split(inp_hidden_states, m_splits.tolist()))
                 ]
             )
@@ -1988,6 +1993,92 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         bias=True,
         delay_wgrad_compute=False,
     )
+
+
+@pytest.mark.skipif(not mxfp8_available, reason="MXFP8 is not available")
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", [recipe.MXFP8BlockScaling()])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_grouped_linear_fp8_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+):
+    config = model_configs[model]
+    if config.max_seqlen_q % 32 != 0:
+        pytest.skip("MXFP8 requires sequence length to be divisible by 32.")
+
+    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
+        grouped_linear_bf16_input = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=True,
+        ).eval()
+
+        grouped_linear_fp8_input = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=True,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            setattr(
+                grouped_linear_fp8_input,
+                f"weight{i}",
+                Parameter(getattr(grouped_linear_bf16_input, f"weight{i}").clone()),
+            )
+            weight_i = getattr(grouped_linear_bf16_input, f"weight{i}")
+            weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+            weight_i_copy = getattr(grouped_linear_fp8_input, f"weight{i}")
+            weight_i_copy.main_grad = weight_i.main_grad.clone()
+
+    bf16_activation = te.ops.SwiGLU()
+    fp8_activation = te.ops.Sequential(
+        te.ops.SwiGLU(),
+        te.ops.Quantize(forward=True, backward=False),  # Output QuantizedTensor in forward
+    )
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        grouped_linear_bf16_input,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8=True,
+        fuse_wgrad_accumulation=True,
+        activation_func=bf16_activation,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear_fp8_input,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8=True,
+        fuse_wgrad_accumulation=True,
+        activation_func=fp8_activation,
+    )
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
@@ -2729,3 +2820,49 @@ def test_noncontiguous():
     out = _run_module(g2, b)
 
     assert_allclose(out, outT, 1e-7)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason="MXFP8 is not available")
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("m", [64, 128, 256])
+@pytest.mark.parametrize("k", [64, 128, 256])
+def test_split_quantized_tensor(dtype, num_experts, m, k):
+
+    tensor = torch.randn((m * num_experts, k), dtype=dtype, device="cuda")
+    m_splits = [m] * num_experts
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+
+    # Split and quantize one by one
+    ref_mxfp8 = tex.split_quantize(tensor, m_splits, [quantizer] * num_experts)
+
+    # Quantize as a whole and then split
+    out_mxfp8 = tex.split_quantized_tensor(quantizer.quantize(tensor), m_splits)
+
+    for ref, out in zip(ref_mxfp8, out_mxfp8):
+        assert ref._quantizer.rowwise_usage == out._quantizer.rowwise_usage
+        assert ref._quantizer.columnwise_usage == out._quantizer.columnwise_usage
+        assert ref._quantizer.dtype == out._quantizer.dtype
+        assert ref._quantizer.internal == out._quantizer.internal
+
+        torch.testing.assert_close(ref._rowwise_data, out._rowwise_data, rtol=0, atol=0)
+        # Padded area are random filled.
+        torch.testing.assert_close(
+            ref._rowwise_scale_inv[:m, : k // 32],
+            out._rowwise_scale_inv[:m, : k // 32],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(ref._columnwise_data, out._columnwise_data, rtol=0, atol=0)
+        # Padded area are random filled.
+        torch.testing.assert_close(
+            ref._columnwise_scale_inv[: m // 32, :k],
+            out._columnwise_scale_inv[: m // 32, :k],
+            rtol=0,
+            atol=0,
+        )
