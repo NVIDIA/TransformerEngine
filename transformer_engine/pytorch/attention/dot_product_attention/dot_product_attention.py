@@ -447,10 +447,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         _original_recipe = self.fp8_meta.get("recipe", None)
         primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
         fake_secondary_recipe = DelayedScaling(
-            margin=0,
             fp8_format=primary_recipe.fp8_format,
-            amax_history_len=1014,
-            amax_compute_algo="most_recent",
             fp8_dpa=primary_recipe.fp8_dpa,
             fp8_mha=primary_recipe.fp8_mha,
         )
