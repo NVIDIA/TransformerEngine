@@ -145,9 +145,9 @@ __device__ void swizzle_col_scaling_kernel_impl(const void* input, void* output,
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void swizzle_col_scaling_kernel(const void* input, void* output, const int M,
-                                           const int K, const int original_M,
-                                           const int original_K) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    swizzle_col_scaling_kernel(const void* input, void* output, const int M, const int K,
+                               const int original_M, const int original_K) {
   swizzle_col_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
       input, output, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
 }
@@ -238,9 +238,9 @@ __device__ void swizzle_row_scaling_kernel_impl(const void* input, void* output,
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void swizzle_row_scaling_kernel(const void* input, void* output, const int M,
-                                           const int K, const int original_M,
-                                           const int original_K) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    swizzle_row_scaling_kernel(const void* input, void* output, const int M, const int K,
+                               const int original_M, const int original_K) {
   swizzle_row_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
       input, output, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
 }

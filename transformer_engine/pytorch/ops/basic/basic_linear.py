@@ -350,10 +350,12 @@ class BasicLinear(BasicOperation):
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         weight: torch.Tensor,
         *,
+        alpha: float = 1.0,
         bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         out: Optional[torch.Tensor] = None,
+        beta: Optional[float] = None,
         accumulate_into_out: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -373,6 +375,8 @@ class BasicLinear(BasicOperation):
             Input tensor
         weight: torch.Tensor
             Weight tensor
+        alpha: float, default = 1.0
+            Scaling factor applied to the result of the GEMM
         bias: torch.Tensor, optional
             Bias tensor
         device: torch.device, default = default CUDA device
@@ -381,6 +385,8 @@ class BasicLinear(BasicOperation):
             Tensor datatype
         out: torch.Tensor, optional
             Output tensor
+        beta: float, optional
+            Scaling factor applied to original value of out when accumulating into it
         accumulate_into_out: bool, default = `False`
             Add result to output tensor instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -530,6 +536,8 @@ class BasicLinear(BasicOperation):
             get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
+            alpha=alpha,
+            beta=beta,
             accumulate=accumulate_into_out,
             out=y,
             bias=bias,
@@ -567,13 +575,17 @@ class BasicLinear(BasicOperation):
         input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
         weight: Optional[torch.Tensor],
         *,
+        grad_input_alpha: Optional[float] = None,
         input_requires_grad: bool = True,
+        grad_weight_alpha: Optional[float] = None,
         weight_requires_grad: bool = True,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         grad_weight: Optional[torch.Tensor] = None,
+        grad_weight_beta: Optional[float] = None,
         accumulate_into_grad_weight: bool = False,
         grad_input: Optional[torch.Tensor] = None,
+        grad_input_beta: Optional[float] = None,
         accumulate_into_grad_input: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -596,8 +608,12 @@ class BasicLinear(BasicOperation):
         weight: torch.Tensor, optional
             Weight tensor. Required to compute loss gradient w.r.t.
             input.
+        grad_input_alpha: float, optional
+            Scaling factor applied to the result of the dgrad GEMM
         input_requires_grad: bool
             Whether to compute loss gradient w.r.t. input tensor
+        grad_weight_alpha: float, optional
+            Scaling factor applied to the result of the wgrad GEMM
         weight_requires_grad: bool
             Whether to compute loss gradient w.r.t. weight tensor
         device: torch.device, default = default CUDA device
@@ -606,10 +622,14 @@ class BasicLinear(BasicOperation):
             Tensor datatype
         grad_weight: torch.Tensor, optional
             Loss gradient w.r.t. weight tensor
+        grad_weight_beta: float, optional
+            Scaling factor applied to original value of grad_weight when accumulating into it
         accumulate_into_grad_weight: bool, default = `False`
             Add result to weight grad instead of overwriting
         grad_input: torch.Tensor, optional
             Loss gradient w.r.t. input tensor
+        grad_input_beta: float, optional
+            Scaling factor applied to original value of grad_input when accumulating into it
         accumulate_into_grad_input: bool, default = `False`
             Add result to input grad instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -806,6 +826,8 @@ class BasicLinear(BasicOperation):
                 get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
+                alpha=grad_input_alpha,
+                beta=grad_input_beta,
                 accumulate=accumulate_into_grad_input,
                 layout="NN",
                 out=dx,
@@ -856,6 +878,8 @@ class BasicLinear(BasicOperation):
                 dy,
                 get_workspace(),
                 out_dtype=dw_dtype,
+                alpha=grad_weight_alpha,
+                beta=grad_weight_beta,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
                 out=dw,
