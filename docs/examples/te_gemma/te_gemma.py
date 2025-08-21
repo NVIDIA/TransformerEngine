@@ -77,7 +77,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
 
 class StaticGemmaModel(torch.nn.Module):
     """
-    StaticGemma is based of HF GemmaModel class.
+    StaticGemma is based off of HF GemmaModel class.
     It is adjusted to work properly with CUDA Graphs.
     """
 
@@ -122,7 +122,9 @@ class StaticGemmaModel(torch.nn.Module):
 
         # This is not needed for generation but is needed for training
         # or finetuning.
-        # logits = logits.float()
+        if self.training:
+            logits = logits.float()
+
         return logits
 
 
@@ -133,12 +135,11 @@ class GemmaGenerator(torch.nn.Module):
     """
 
     def __init__(
-        self, model: GemmaModel, lm_head: torch.nn.Module, dtype: torch.dtype, qkv_format: str
+        self, model: GemmaModel, lm_head: torch.nn.Module, dtype: torch.dtype,
     ):
         super().__init__()
         self.model = model
         self.gemma_layers = StaticGemmaModel(model, dtype, lm_head)
-        self.qkv_format = qkv_format
 
     def set_inference_params(self, inference_params):
         self.inference_params = inference_params
@@ -204,7 +205,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             lm_head=self.lm_head,
             model=self.model,
             dtype=dtype,
-            qkv_format=config.qkv_format,
         )
         self._model_context_phase = StaticGemmaModel(self.model, dtype, self.lm_head)
 
@@ -358,7 +358,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 max_batch_size=batch_size,
                 max_sequence_length=max_input_sequence_len,
                 num_heads_kv=self.config.num_key_value_heads,
-                # num_heads_q=self.config.num_attention_heads,
                 head_dim_v=self.config.head_dim,
                 head_dim_k=self.config.head_dim,
                 dtype=torch.bfloat16,

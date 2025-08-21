@@ -22,13 +22,16 @@ from transformers.utils.hub import get_checkpoint_shard_files
 
 
 def _load_weights_for_fp8_model(vanilla_model, hyperparams):
-    # The weights are loaded from the file with state_dict
-    # of model with weights which contains also fp8 parameters.
-    # The weights are in BF16 precision, but they contain fp8 metadata
-    # computed by the calibration procedure.
+    """
+    Loads weights and FP8 metadata from a calibrated weights file.
+
+    The weights are in BF16 precision, but the state dict also contains
+    fp8 metadata computed by the calibration procedure.
+    """
+
     fp8_metadata_sd = torch.load(hyperparams.fp8_model_weights_filename)
 
-    # @sudhakars: This is a hack to remove the extra state from the fp8_metadata_sd
+    # A hack to remove the extra state from the fp8_metadata_sd
     # that contains the extra state from the core_attention module.
     fp8_metadata_sd = {
         k: v for k, v in fp8_metadata_sd.items() if "core_attention._extra_state" not in k
@@ -36,15 +39,18 @@ def _load_weights_for_fp8_model(vanilla_model, hyperparams):
     vanilla_model.load_state_dict(
         fp8_metadata_sd,
         strict=False,
-        # strict = false, because some parameters have
-        # multiple pointers to the same weight
-        # vanilla_model._model_context_phase.model
-        # and vanilla_model._model_generation_phase.model
+        # Because some parameters have multiple pointers to the same weight
+        # vanilla_model._model_context_phase.model and
+        # vanilla_model._model_generation_phase.model we need to load the
+        # weights in a non-strict manner.
     )
 
 
 def _load_weights_for_standard_model(vanilla_model, config):
-    # The weights are loaded from the file with original weights.
+    """
+    Loads weights from the HuggingFace checkpoint.
+    """
+
     archive_file = os.path.join(config.weights_cache_dir, "model.safetensors.index.json")
     resolved_archive_file, _ = get_checkpoint_shard_files(config.weights_cache_dir, archive_file)
     total_dict = {}
@@ -58,8 +64,7 @@ def _load_weights_for_standard_model(vanilla_model, config):
         config,
         qkv_fused_and_interleaved=config.fuse_qkv_params,
     )
-    # Copy parameters like embedding:
-    # _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="")
+    # Copy remaining parameters like embedding.
     vanilla_model.load_state_dict(total_dict, strict=False)
 
     # Force mem release. Taken from huggingface code.
@@ -68,6 +73,10 @@ def _load_weights_for_standard_model(vanilla_model, config):
 
 
 def load_te_model(cls, config):
+    """
+    Loads the TE model with proper weights.
+    """
+
     # Force the dtype to bfloat16 while loading the model.
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
@@ -78,11 +87,13 @@ def load_te_model(cls, config):
     """
     config.use_cache = False  # To make TransformerLayer compatible with GemmaModel
     with fp8_model_init(config.fp8_model_init):
-        # there we need only to create model
+        # Just create a model with random weights.
         vanilla_model = cls(config).cuda()
 
-    # return vanilla_model
-    # and now we copy the weights into it
+    # Copy proper weights into the model. If loading weights with FP8 metadata,
+    # then the source weights are basically the same as the weights in the model.
+    # If not, then we need to load the weights from the HuggingFace checkpoint
+    # and do mapping of the weight names from HF to the TE model.
     if config.fp8_model_weights_filename is not None:
         _load_weights_for_fp8_model(vanilla_model, config)
     else:

@@ -283,7 +283,7 @@ class InferenceParams:
 
         # Copy the pre-step seqlens to the device in CUDA Graphs safe manner.
         self.pre_step_seqlens[: len(pre_step_seqlens_temp)].copy_(
-            pre_step_seqlens_temp, non_blocking=True
+            pre_step_seqlens_temp, non_blocking=False
         )
 
         seqlens_q = list(step_dict.values())
