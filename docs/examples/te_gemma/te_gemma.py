@@ -135,7 +135,10 @@ class GemmaGenerator(torch.nn.Module):
     """
 
     def __init__(
-        self, model: GemmaModel, lm_head: torch.nn.Module, dtype: torch.dtype,
+        self,
+        model: GemmaModel,
+        lm_head: torch.nn.Module,
+        dtype: torch.dtype,
     ):
         super().__init__()
         self.model = model
