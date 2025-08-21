@@ -22,7 +22,7 @@ from ...module.base import (
 )
 from ...tensor.quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.base.float8_tensor_base import Float8TensorBase
 from .._common import maybe_dequantize, is_quantized_tensor
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (

@@ -16,7 +16,7 @@ from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
+from .base.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,

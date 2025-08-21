@@ -13,7 +13,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
-from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
+from .base.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,

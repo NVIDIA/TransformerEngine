@@ -13,7 +13,7 @@ from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
-from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,

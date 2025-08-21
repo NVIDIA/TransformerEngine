@@ -43,7 +43,7 @@ void init_float8_extension() {
   Float8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor._internal.float8_tensor_base");
+      py::module_::import("transformer_engine.pytorch.tensor.base.float8_tensor_base");
   Float8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorBase"));
   NVTE_CHECK(Float8TensorPythonClass != nullptr,
@@ -58,7 +58,7 @@ void init_mxfp8_extension() {
   MXFP8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base");
+      py::module_::import("transformer_engine.pytorch.tensor.base.mxfp8_tensor_base");
   MXFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorBase"));
   NVTE_CHECK(MXFP8TensorPythonClass != nullptr,
@@ -70,7 +70,7 @@ void init_float8blockwise_extension() {
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
   auto fp8_base_module = py::module_::import(
-      "transformer_engine.pytorch.tensor._internal.float8_blockwise_tensor_base");
+      "transformer_engine.pytorch.tensor.base.float8_blockwise_tensor_base");
   Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
   Float8BlockwiseQTensorBasePythonClass = reinterpret_cast<PyTypeObject *>(

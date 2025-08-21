@@ -41,9 +41,9 @@ from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentSc
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from .tensor.quantized_tensor import QuantizedTensor, Quantizer
-from .tensor._internal.float8_tensor_base import Float8TensorBase
-from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .tensor.base.float8_tensor_base import Float8TensorBase
+from .tensor.base.mxfp8_tensor_base import MXFP8TensorBase
+from .tensor.base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 
