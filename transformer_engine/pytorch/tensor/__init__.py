@@ -6,7 +6,13 @@
 
 import torch
 
-from .quantized_tensor import QuantizedTensorBase, QuantizedTensor, Quantizer, prepare_for_saving, restore_from_saved
+from .quantized_tensor import (
+    QuantizedTensorBase,
+    QuantizedTensor,
+    Quantizer,
+    prepare_for_saving,
+    restore_from_saved,
+)
 from .base.float8_tensor_base import Float8TensorBase
 from .base.mxfp8_tensor_base import MXFP8TensorBase
 from .base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
