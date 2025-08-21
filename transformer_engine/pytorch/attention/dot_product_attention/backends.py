@@ -1267,17 +1267,35 @@ class FusedAttnFunc(torch.autograd.Function):
                             primary_recipe, ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
 
-                    names = ["QKV_quantizer ", "O_quantizer   ", "S_quantizer   ", "dQKV_quantizer", "dO_quantizer  ", "dP_quantizer  "]
-                    quantizers = [q_fp8._quantizer, out_fp8._quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, d_out_fp8._quantizer, ctx.dP_quantizer]
+                    names = [
+                        "QKV_quantizer ",
+                        "O_quantizer   ",
+                        "S_quantizer   ",
+                        "dQKV_quantizer",
+                        "dO_quantizer  ",
+                        "dP_quantizer  ",
+                    ]
+                    quantizers = [
+                        q_fp8._quantizer,
+                        out_fp8._quantizer,
+                        ctx.S_quantizer,
+                        ctx.dQKV_quantizer,
+                        d_out_fp8._quantizer,
+                        ctx.dP_quantizer,
+                    ]
                     if torch.cuda.current_device() == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
                         print(f">>>> autocast recipe: {ctx.orig_primary_recipe}")
                         print(f">>>> Module recipe  : {ctx.fp8_meta["recipe"]}")
                         print(f">>>> Func recipe    : {primary_recipe}")
-                        for i,x in enumerate(quantizers):
+                        for i, x in enumerate(quantizers):
                             if x is None:
                                 print(f">>>> {names[i]}: None")
                             else:
-                                print(f">>>> {names[i]}: {"CS" if x.__class__ == Float8CurrentScalingQuantizer else "DS"}, {x.scale=}, {x.amax=}")
+                                print(
+                                    f">>>> {names[i]}:"
+                                    f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
+                                    f" {x.scale=}, {x.amax=}"
+                                )
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
