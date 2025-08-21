@@ -1811,7 +1811,9 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     S_quantizer = None
     dP_quantizer = None
     force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
-    primary_recipe = fp8_meta["recipe"] if force_dpa_recipe_DS else FP8GlobalStateManager.get_fp8_recipe()
+    primary_recipe = (
+        fp8_meta["recipe"] if force_dpa_recipe_DS else FP8GlobalStateManager.get_fp8_recipe()
+    )
     if primary_recipe.delayed():
         S_quantizer = quantizers["scaling_fwd"][META_S]
         S_quantizer.internal = True
@@ -1861,10 +1863,24 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
             dP_quantizer,
         )
 
-    names = ["QKV_quantizer", "O_quantizer", "S_quantizer", "dQKV_quantizer", "dO_quantizer", "dP_quantizer"]
-    quantizers = [QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer]
+    names = [
+        "QKV_quantizer",
+        "O_quantizer",
+        "S_quantizer",
+        "dQKV_quantizer",
+        "dO_quantizer",
+        "dP_quantizer",
+    ]
+    quantizers = [
+        QKV_quantizer,
+        O_quantizer,
+        S_quantizer,
+        dQKV_quantizer,
+        dO_quantizer,
+        dP_quantizer,
+    ]
     if torch.cuda.current_device() == 0:
-        for i,x in enumerate(quantizers):
+        for i, x in enumerate(quantizers):
             if x is None:
                 print(f">>>> {names[i]}: None")
             else:

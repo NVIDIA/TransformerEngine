@@ -528,7 +528,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            if orig_primary_recipe.delayed() or (orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS):
+            if orig_primary_recipe.delayed() or (
+                orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS
+            ):
                 self.init_fp8_meta_tensors(primary_recipe)
             if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
                 self.init_fp8_meta_tensors([primary_recipe, fake_secondary_recipe])
