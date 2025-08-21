@@ -67,6 +67,7 @@ class RunConfiguration:
         # model weights are downloaded.
         self.weights_cache_dir = ""
 
+
 # Global variable for the run configuration so that it can be easily accessed
 # throughout the jupyter notebook with an `import * from utils` statement
 run_config = RunConfiguration()
@@ -181,11 +182,7 @@ def init_te_gemma_model(run_config):
     # Download and cache the weights if not already downloaded
     ensure_model_is_downloaded(run_config)
 
-    cls = (
-        TEGemmaForCausalLMCudaGraphs
-        if run_config.generation_cuda_graphs
-        else TEGemmaForCausalLM
-    )
+    cls = TEGemmaForCausalLMCudaGraphs if run_config.generation_cuda_graphs else TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(run_config.model_name)
 
     # Inject all fields from the `run_config` to the model `config` to make the
@@ -258,6 +255,7 @@ def run_forward_pass(model, run_config, num_iters):
 ###############################################################################
 # Benchmarking and example generation functions.
 ###############################################################################
+
 
 def print_sample_of_generated_texts(model, run_config):
     """
