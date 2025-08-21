@@ -420,6 +420,14 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 size_t roundup(const size_t value, const size_t multiple);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
+
+/*! @brief Helper function to construct tensor view
+ *
+ * Note: Deleter holds a shared_ptr for the buffer, so the buffer
+ * will survive until all views are deleted.
+ */
+at::Tensor make_torch_view(std::shared_ptr<at::Tensor>& buffer, const std::vector<size_t>& shape,
+                           size_t offset, at::ScalarType dtype);
 }  // namespace transformer_engine::pytorch
 
 namespace std {

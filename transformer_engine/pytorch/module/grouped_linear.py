@@ -49,6 +49,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor.mxfp8_tensor import MXFP8Tensor
 
 __all__ = ["GroupedLinear"]
 
@@ -121,11 +122,15 @@ class _GroupedLinear(torch.autograd.Function):
                 f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
-        inp_view = inp.reshape(-1, in_features)
+        fp8_input = isinstance(inp, QuantizedTensorBase)
         inputmats: list
-        if fp8:
+        if fp8 and fp8_input:
+            inputmats = tex.split_quantized_tensor(inp, m_splits)
+        elif fp8:
+            inp_view = inp.reshape(-1, in_features)
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
         else:
+            inp_view = inp.reshape(-1, in_features)
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
 
         # Initialize weights
@@ -193,7 +198,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
-            # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
                 if save_original_input:
                     inputmats = [None] * num_gemms
@@ -733,9 +737,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        assert not isinstance(
-            inp, QuantizedTensorBase
-        ), "GroupedLinear doesn't support input tensor in FP8."
+        fp8_input = isinstance(inp, QuantizedTensorBase)
+        if fp8_input:
+            # GroupedLinear accepts one single tensor as input, so the input tensor has to support
+            # the `split` method and only MXFP8 quantized tensor does. Because when we ensure that
+            # `m_splits` is padded to 32, quantizing the whole tensor will produce exactly the same
+            # data as splitting and then quantizing, only the scaling factors are different due to
+            # padding. While for other recipes, this doesn't hold.
+            assert isinstance(inp, MXFP8Tensor), f"Input type {type(inp)} is not supported."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
         if FP8GlobalStateManager.fp8_graph_capturing():
@@ -758,15 +767,15 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
             grad_output_quantizers, _ = [None] * self.num_gemms, [None] * self.num_gemms
             if self.fp8:
-                input_quantizers = [
-                    self.quantizers["scaling_fwd"][
-                        self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                if not fp8_input:
+                    input_quantizers = [
+                        self.quantizers["scaling_fwd"][
+                            self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                        ]
+                        for i in range(self.num_gemms)
                     ]
-                    for i in range(self.num_gemms)
-                ]
-                # TODO: use internal after #1638 is merged. # pylint: disable=fixme
-                for i in range(self.num_gemms):
-                    input_quantizers[i].internal = False
+                    for i in range(self.num_gemms):
+                        input_quantizers[i].internal = True
                 if torch.is_grad_enabled():
                     grad_output_quantizers = [
                         self.quantizers["scaling_bwd"][

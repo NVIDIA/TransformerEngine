@@ -7,11 +7,12 @@
 #include "util.h"
 
 #include "common.h"
+#include "extensions.h"
+#include "pybind.h"
+namespace transformer_engine::pytorch {
 
 std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
                                                   bool rowwise) {
-  using namespace transformer_engine::pytorch;
-
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
   } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
@@ -78,8 +79,6 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 
 std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper>& tensors, bool rowwise) {
-  using namespace transformer_engine::pytorch;
-
   if (tensors.empty()) {
     return std::nullopt;
   }
@@ -170,3 +169,115 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
 
   return buffer;
 }
+
+namespace {
+
+constexpr size_t fp8_elem_size = 1;
+constexpr size_t scale_elem_size = 1;
+
+void split_quantized_tensor_impl(at::Tensor& data, at::Tensor& scale_inv,
+                                 std::vector<size_t>& m_splits, std::vector<at::Tensor>& data_list,
+                                 std::vector<at::Tensor>& scale_inv_list, bool rowwise) {
+  auto hidden_dim = data.size(-1);
+  data = data.reshape({-1, hidden_dim}).contiguous();
+  NVTE_CHECK(std::accumulate(m_splits.begin(), m_splits.end(), 0) == data.size(0),
+             "Rowwise data size does not match m_splits.");
+  NVTE_CHECK(scale_inv.dim() == 2, "Rowwise scale_inv must be 2D.");
+  scale_inv = scale_inv.contiguous();
+
+  std::vector<std::vector<size_t>> data_shapes, scale_shapes;
+  std::vector<size_t> no_pad_m_splits, padded_m_splits, data_offsets, scale_inv_offsets;
+  size_t padded_total_m = 0, data_offset = 0, scale_inv_offset = 0;
+  for (size_t i = 0; i < m_splits.size(); ++i) {
+    if (rowwise) {
+      // Rowwise scaling factors are required to be 128 multiple in the m dimension
+      padded_m_splits.push_back(roundup(m_splits[i], 128));
+      padded_total_m += padded_m_splits.back();
+      no_pad_m_splits.push_back(m_splits[i]);
+    } else {
+      // Columnwise scaling factors are required to be 4 multiple in the m dimension
+      padded_m_splits.push_back(roundup(m_splits[i] / 32, 4));
+      padded_total_m += padded_m_splits.back();
+      no_pad_m_splits.push_back(m_splits[i] / 32);
+    }
+
+    data_shapes.push_back({m_splits[i], static_cast<size_t>(hidden_dim)});
+    data_offsets.push_back(data_offset);
+    data_offset += m_splits[i] * hidden_dim * fp8_elem_size;
+
+    scale_shapes.push_back({padded_m_splits[i], static_cast<size_t>(scale_inv.size(1))});
+    scale_inv_offsets.push_back(scale_inv_offset);
+    scale_inv_offset += padded_m_splits[i] * scale_inv.size(1) * scale_elem_size;
+  }
+
+  // Optionally pad scale_inv
+  at::Tensor scale_inv_padded = scale_inv;
+  if (padded_total_m != scale_inv.size(0)) {
+    scale_inv_padded =
+        at::empty({static_cast<int64_t>(padded_total_m), scale_inv.size(1)}, scale_inv.options());
+    fused_multi_row_padding(scale_inv, scale_inv_padded, no_pad_m_splits, padded_m_splits);
+  }
+
+  // Split data and scale_inv
+  auto data_buffer = std::make_shared<at::Tensor>(data);
+  auto scale_inv_buffer = std::make_shared<at::Tensor>(scale_inv_padded);
+  for (size_t i = 0; i < m_splits.size(); ++i) {
+    data_list.emplace_back(
+        make_torch_view(data_buffer, data_shapes[i], data_offsets[i], torch::kUInt8));
+    scale_inv_list.emplace_back(
+        make_torch_view(scale_inv_buffer, scale_shapes[i], scale_inv_offsets[i], torch::kUInt8));
+  }
+}
+
+}  // namespace
+
+std::vector<py::object> split_quantized_tensor(py::handle tensor, std::vector<size_t>& m_splits) {
+  init_extension();
+
+  NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "Input must be MXFP8Tensor.");
+
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
+
+  const transformer_engine::DType fp8_dtype =
+      tensor.attr("_fp8_dtype").cast<transformer_engine::DType>();
+
+  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_inv_list;
+  if (rowwise_usage) {
+    auto rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    auto rowwise_scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+
+    split_quantized_tensor_impl(rowwise_data, rowwise_scale_inv, m_splits, rowwise_data_list,
+                                rowwise_scale_inv_list, true);
+  }
+
+  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_inv_list;
+  if (columnwise_usage) {
+    auto columnwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    auto columnwise_scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+
+    split_quantized_tensor_impl(columnwise_data, columnwise_scale_inv, m_splits,
+                                columnwise_data_list, columnwise_scale_inv_list, false);
+  }
+
+  // Construct mxfp8 tensors
+  auto quantizer = tensor.attr("_quantizer");
+  std::vector<py::object> tensor_py_list;
+  py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorBasePythonClass));
+  for (size_t i = 0; i < m_splits.size(); ++i) {
+    // Create tensor objects with proper reference counting
+    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_inv_list[i]) : py::none();
+    py::object columnwise_data =
+        (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
+    py::object columnwise_scale =
+        (columnwise_usage ? py::cast(columnwise_scale_inv_list[i]) : py::none());
+    // Construct Python tensor
+    tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, fp8_dtype, quantizer));
+  }
+
+  return tensor_py_list;
+}
+}  // namespace transformer_engine::pytorch

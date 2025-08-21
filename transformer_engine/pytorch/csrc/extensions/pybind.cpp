@@ -18,6 +18,7 @@
 
 #include "../common.h"
 #include "../extensions.h"
+#include "../util.h"
 #include "common.h"
 
 namespace transformer_engine::pytorch {
@@ -255,6 +256,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
+  m.def("split_quantized_tensor", &transformer_engine::pytorch::split_quantized_tensor,
+        "Split quantized tensor");
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
