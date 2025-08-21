@@ -56,6 +56,20 @@ from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 from transformer_engine.pytorch.tensor import Quantizer
+from transformer_engine.pytorch.tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor import QuantizedTensorBase
+from transformer_engine.pytorch.tensor import Float8TensorBase
+from transformer_engine.pytorch.tensor import MXFP8TensorBase
+from transformer_engine.pytorch.tensor import Float8BlockwiseQTensorBase
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor import Float8Tensor
+from transformer_engine.pytorch.tensor import MXFP8Tensor
+from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
+from transformer_engine.pytorch.tensor import prepare_for_saving
+from transformer_engine.pytorch.tensor import restore_from_saved
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
