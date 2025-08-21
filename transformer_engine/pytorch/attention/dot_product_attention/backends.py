@@ -930,9 +930,14 @@ class FusedAttnFunc(torch.autograd.Function):
     ):
         # pylint: disable=missing-function-docstring
         force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
-        primary_recipe = (
-            fp8_meta["recipe"] if force_dpa_recipe_DS else FP8GlobalStateManager.get_fp8_recipe()
-        )
+        orig_primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        primary_recipe = fp8_meta["recipe"]
+        if orig_primary_recipe.delayed():
+            pass
+        if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
+            primary_recipe = orig_primary_recipe
+        if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
+            pass
 
         # add NVTX range
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
@@ -1102,6 +1107,8 @@ class FusedAttnFunc(torch.autograd.Function):
         if ctx.fp8 and primary_recipe.delayed():
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
+        ctx.primary_recipe = primary_recipe
+        ctx.orig_primary_recipe = orig_primary_recipe
 
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -1123,12 +1130,7 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
-        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
-        primary_recipe = (
-            ctx.fp8_meta["recipe"]
-            if force_dpa_recipe_DS
-            else FP8GlobalStateManager.get_fp8_recipe()
-        )
+        primary_recipe = ctx.primary_recipe
         if ctx.is_output_fp8:
             assert isinstance(d_out, Float8Tensor), (
                 "Gradient of the DPA output is expected to be in Float8Tensor type but found"
@@ -1264,6 +1266,18 @@ class FusedAttnFunc(torch.autograd.Function):
                         dq, dk, dv = combine_and_quantize(
                             primary_recipe, ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
+
+                    names = ["QKV_quantizer ", "O_quantizer   ", "S_quantizer   ", "dQKV_quantizer", "dO_quantizer  ", "dP_quantizer  "]
+                    quantizers = [q_fp8._quantizer, out_fp8._quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, d_out_fp8._quantizer, ctx.dP_quantizer]
+                    if torch.cuda.current_device() == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+                        print(f">>>> autocast recipe: {ctx.orig_primary_recipe}")
+                        print(f">>>> Module recipe  : {ctx.fp8_meta["recipe"]}")
+                        print(f">>>> Func recipe    : {primary_recipe}")
+                        for i,x in enumerate(quantizers):
+                            if x is None:
+                                print(f">>>> {names[i]}: None")
+                            else:
+                                print(f">>>> {names[i]}: {"CS" if x.__class__ == Float8CurrentScalingQuantizer else "DS"}, {x.scale=}, {x.amax=}")
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()

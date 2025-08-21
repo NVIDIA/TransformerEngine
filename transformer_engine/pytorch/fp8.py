@@ -396,6 +396,8 @@ class FP8GlobalStateManager:
             if len(amax_buffer) == 0:
                 continue
 
+            if torch.cuda.current_device() == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+                print(f">>>> reduce_and_update_fp8_tensors: {forward=}, {amax_buffer=}")
             # Retrieve autocast specific args and concat amaxes.
             recipe, group = cls.autocast_arguments[autocast_key]
             contiguous_amax = torch.cat(amax_buffer)
