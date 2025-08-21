@@ -929,7 +929,8 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_output,
     ):
         # pylint: disable=missing-function-docstring
-        primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
+        primary_recipe = fp8_meta["recipe"] if force_dpa_recipe_DS else FP8GlobalStateManager.get_fp8_recipe()
 
         # add NVTX range
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
@@ -1120,7 +1121,8 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
-        primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
+        primary_recipe = ctx.fp8_meta["recipe"] if force_dpa_recipe_DS else FP8GlobalStateManager.get_fp8_recipe()
         if ctx.is_output_fp8:
             assert isinstance(d_out, Float8Tensor), (
                 "Gradient of the DPA output is expected to be in Float8Tensor type but found"

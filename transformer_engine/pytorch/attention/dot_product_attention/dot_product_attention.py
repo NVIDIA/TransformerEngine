@@ -445,12 +445,33 @@ class DotProductAttention(TransformerEngineBaseModule):
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
         _original_recipe = self.fp8_meta.get("recipe", None)
-        primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        fake_secondary_recipe = DelayedScaling(
-            fp8_format=primary_recipe.fp8_format,
-            fp8_dpa=primary_recipe.fp8_dpa,
-            fp8_mha=primary_recipe.fp8_mha,
-        )
+
+        # Force DPA recipe to be DS, regardless of fp8_autocast recipe
+        # This will be DS for all tensors, not just dP
+        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
+
+        # fp8 recipe passed in through fp8_autocast
+        orig_primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        primary_recipe = orig_primary_recipe
+        fake_secondary_recipe = None
+
+        if orig_primary_recipe.delayed():
+            # fp8_autocast(fp8_recipe=DS):                                   use DS for all tensors
+            pass
+        if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
+            # fp8_autocast(fp8_recipe=CS) and NVTE_DPA_FORCE_DS=0 (default): use CS for QKV, O, dO, dQKV; None for S; and DS for dP
+            fake_secondary_recipe = DelayedScaling(
+                fp8_format=orig_primary_recipe.fp8_format,
+                fp8_dpa=orig_primary_recipe.fp8_dpa,
+                fp8_mha=orig_primary_recipe.fp8_mha,
+            )
+        if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
+            # fp8_autocast(fp8_recipe=CS) and NVTE_DPA_FORCE_DS=1:           use DS for all tensors
+            primary_recipe = DelayedScaling(
+                fp8_format=orig_primary_recipe.fp8_format,
+                fp8_dpa=orig_primary_recipe.fp8_dpa,
+                fp8_mha=orig_primary_recipe.fp8_mha,
+            )
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
@@ -467,10 +488,19 @@ class DotProductAttention(TransformerEngineBaseModule):
             ):
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            if primary_recipe.delayed():
+            if orig_primary_recipe.delayed():
                 self.fp8_meta["recipe"] = primary_recipe
-            if primary_recipe.float8_current_scaling():
-                # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
+            if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
+                self.fp8_meta["recipe"] = primary_recipe
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    primary_recipe, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    primary_recipe,
+                    fp8_group,
+                )
+            if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
+                # Manipulate DPA.fp8_meta["recipe"] so dP gets reduced in DS style
                 self.fp8_meta["recipe"] = fake_secondary_recipe
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fake_secondary_recipe, fp8_group
@@ -498,16 +528,25 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            if primary_recipe.delayed():
+            if orig_primary_recipe.delayed() or (orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS):
                 self.init_fp8_meta_tensors(primary_recipe)
-            if primary_recipe.float8_current_scaling():
+            if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
                 self.init_fp8_meta_tensors([primary_recipe, fake_secondary_recipe])
             self.fp8_initialized = True
 
-            if primary_recipe.delayed():
+            if orig_primary_recipe.delayed():
                 self.fp8_meta["recipe"] = primary_recipe
-            if primary_recipe.float8_current_scaling():
-                # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
+            if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
+                self.fp8_meta["recipe"] = primary_recipe
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    primary_recipe, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    primary_recipe,
+                    fp8_group,
+                )
+            if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
+                # Manipulate DPA.fp8_meta["recipe"] so dP gets reduced in DS style
                 self.fp8_meta["recipe"] = fake_secondary_recipe
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fake_secondary_recipe, fp8_group
