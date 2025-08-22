@@ -36,6 +36,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
+import tensorrt as trt
 
 # Global test configuration knobs.
 
@@ -113,7 +114,7 @@ def trt_fp8_dequantize(t, scale):
 
 
 @onnx_op(
-    op_type="trt::TRT_MXFP8QuantizeLinear",
+    op_type="trt::TRT_MXFP8DynamicQuantize",
     domain="trt",
     inputs=[
         PyCustomOpDef.dt_float,
@@ -1139,3 +1140,59 @@ def test_export_ctx_manager(enabled):
     with te.onnx_export(enabled):
         assert is_in_onnx_export_mode() == enabled
     assert is_in_onnx_export_mode() == False
+
+
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+def test_trt_integration(fp8_recipe: recipe.Recipe):
+
+    model = te.TransformerLayer(
+        hidden_size=128,
+        ffn_hidden_size=128,
+        num_attention_heads=4,
+    ).eval()
+    inps = (torch.randn([16, 16, 128], device="cuda", requires_grad=False),)
+
+    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        out_ref = model(*inps)
+
+    onnx_fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
+    os.close(onnx_fd)
+    try:
+        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+            with te.onnx_export(enabled=True):
+                torch.onnx.export(
+                    model,
+                    inps,
+                    onnx_path,
+                    output_names=["output"],
+                    dynamo=True,
+                    custom_translation_table=te_translation_table,
+                )
+
+        os.system(f"trtexec --onnx={onnx_path} --saveEngine={onnx_path}.engine")
+
+        # Run TRT engine
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        with open(onnx_path + ".engine", "rb") as f:
+            engine_data = f.read()
+        engine = runtime.deserialize_cuda_engine(engine_data)
+        context = engine.create_execution_context()
+        context.set_tensor_address(engine.get_tensor_name(0), inps[0].data_ptr())
+        stream = torch.cuda.Stream()
+
+        out = torch.zeros_like(out_ref)
+        context.set_tensor_address("output", out.data_ptr())
+
+        context.execute_async_v3(stream_handle=stream.cuda_stream)
+        stream.synchronize()
+
+        # Compare TRT and TE outputs
+        atol = 5e-2 if fp8_recipe is not None else 1e-4
+        rtol = 5e-2 if fp8_recipe is not None else 1e-4
+        torch.testing.assert_close(out, out_ref, atol=atol, rtol=rtol)
+    finally:
+        try:
+            os.remove(onnx_path)
+        except FileNotFoundError:
+            pass
