@@ -65,7 +65,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -219,7 +219,8 @@ class _Linear(torch.autograd.Function):
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
 
-        start_offload_if_offload_enabled(inputmat)
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
         # ------------------------------------------------------
         # Input tensor is ready for GEMM...
@@ -388,7 +389,7 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            mark_is_weight(weight, weightmat, bias)
+            mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -771,14 +772,12 @@ class _Linear(torch.autograd.Function):
                     reduce_scatter_out = torch.empty(
                         dgrad_shape, dtype=ctx.activation_dtype, device=grad_output_arg.device
                     )
-                
+
                 # Arguments to include in wgrad GEMM closure
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        main_grad.dtype
-                        if ctx.fuse_wgrad_accumulation
-                        else ctx.activation_dtype
+                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,

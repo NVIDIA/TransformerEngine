@@ -49,7 +49,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.softmax import F
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
-    start_offload_if_offload_enabled,
+    start_offload,
 )
 
 # Import attention utils
@@ -515,9 +515,8 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        start_offload_if_offload_enabled(
-            query_layer, key_layer, value_layer, offload_base_tensor=True
-        )
+        if is_cpu_offload_enabled():
+            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
 
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
@@ -935,7 +934,8 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attn, is_output_fp8 = True:  fake_dtype = torch.float8_e4m3fn
         fake_dtype = q.dtype
 
-        start_offload_if_offload_enabled(q, k, v, offload_base_tensor=True)
+        if is_cpu_offload_enabled():
+            start_offload(q, k, v, offload_base_tensor=True)
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)

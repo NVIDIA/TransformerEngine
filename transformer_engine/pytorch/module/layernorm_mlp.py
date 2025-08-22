@@ -66,7 +66,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorBase,
@@ -217,7 +217,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
-        start_offload_if_offload_enabled(inputmat)
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
@@ -533,7 +534,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 act_out = None
 
             if cpu_offloading:
-                mark_is_weight(
+                mark_not_offload(
                     ln_weight,
                     ln_bias,
                     fc1_weight_final,

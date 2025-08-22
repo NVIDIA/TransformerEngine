@@ -145,8 +145,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
                 self._rowwise_scale_inv,
                 self._columnwise_scale_inv,
             )
-        else:
-            return self._rowwise_data, self._columnwise_data
+        return self._rowwise_data, self._columnwise_data
 
     def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
         """Set this Tensor's data."""

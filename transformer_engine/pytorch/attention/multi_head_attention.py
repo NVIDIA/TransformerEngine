@@ -940,11 +940,10 @@ class MultiheadAttention(torch.nn.Module):
         # Core attention computation
         # ===========================
 
-        from transformer_engine.pytorch.cpu_offload import start_offload_if_offload_enabled
+        from transformer_engine.pytorch.cpu_offload import start_offload, is_cpu_offload_enabled
 
-        """start_offload_if_offload_enabled(
-            query_layer, key_layer, value_layer, offload_base_tensor=True
-        )"""
+        if is_cpu_offload_enabled():
+            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
         context_layer = self.core_attention(
             query_layer,
             key_layer,

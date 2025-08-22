@@ -132,8 +132,7 @@ class Float8TensorBase(QuantizedTensorBase):
         """Get this Tensor's data."""
         if scales:
             return self._data, self._transpose, self._scale_inv
-        else:
-            return self._data, self._transpose
+        return self._data, self._transpose
 
     def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
         """Set this Tensor's data."""

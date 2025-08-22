@@ -40,7 +40,7 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..cpu_offload import is_cpu_offload_enabled, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.quantized_tensor import (
@@ -190,7 +190,7 @@ class _GroupedLinear(torch.autograd.Function):
                     weight_quantizers[i].calibrate(weights[i])
 
         if cpu_offloading:
-            mark_is_weight(*weights_fp8, *weights)
+            mark_not_offload(*weights_fp8, *weights)
 
         if is_grad_enabled:
             ctx.weight_quantizers = weight_quantizers

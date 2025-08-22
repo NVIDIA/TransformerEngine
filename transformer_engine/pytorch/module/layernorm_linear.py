@@ -68,7 +68,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 from ..cpp_extensions import (
@@ -155,7 +155,8 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
-        start_offload_if_offload_enabled(inputmat)
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
 
@@ -421,7 +422,7 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
-                mark_is_weight(
+                mark_not_offload(
                     weightmat,
                     weight,
                     bias,
@@ -814,9 +815,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        main_grad.dtype
-                        if ctx.fuse_wgrad_accumulation
-                        else ctx.activation_dtype
+                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,
