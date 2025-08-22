@@ -58,7 +58,7 @@ class BackwardLinearScale(FusedOperation):
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = linear_op.weight
-            if hasattr(linear_op.weight, "__fsdp_param__"):
+            if hasattr(weight_param, "__fsdp_param__"):
                 weight_param.main_grad = weight_param.get_main_grad()
             if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
