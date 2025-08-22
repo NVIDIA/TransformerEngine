@@ -5,21 +5,18 @@
 """Mixin class holding data specific for Float8BlockwiseQTensor"""
 
 from __future__ import annotations
-import math
-from typing import Optional, Dict, Any, Tuple
-import torch
 
+import math
+from typing import Any, Dict, Optional, Tuple
+
+import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
-from ..quantized_tensor import QuantizedTensorBase
-
 from ...constants import TE_DType_To_Torch
-
-from ..quantized_tensor import Quantizer
-
 from ...utils import _empty_tensor
+from ..quantized_tensor import QuantizedTensorBase, Quantizer
 
 
 class Float8BlockwiseQTensorBase(QuantizedTensorBase):

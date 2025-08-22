@@ -2,41 +2,34 @@
 #
 # See LICENSE for license information.
 
-from collections import OrderedDict
-from typing import List
-import os
-import sys
-import pathlib
 import logging
 import math
+import os
+import pathlib
+import sys
+from collections import OrderedDict
+from typing import List
 
 import pytest
 import torch
-
 from torch.distributions import Exponential
-from transformer_engine.pytorch import make_graphed_callables
+
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.transformer import (
-    TransformerLayer,
-)
+from transformer_engine.pytorch import fp8_autocast, fp8_model_init, make_graphed_callables
 from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
+from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.utils import (
     init_method_normal,
-    scaled_init_method_normal,
     is_bf16_compatible,
+    scaled_init_method_normal,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import (
-    ModelConfig,
-    reset_rng_states,
-    get_available_attention_backends,
-)
+from utils import ModelConfig, get_available_attention_backends, reset_rng_states
 
 # Reset RNG states
 reset_rng_states()

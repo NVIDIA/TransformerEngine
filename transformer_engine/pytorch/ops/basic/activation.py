@@ -5,16 +5,17 @@
 """Fusible operations for activation functions."""
 
 from __future__ import annotations
+
 import abc
 from typing import Optional
 
 import torch
-
 import transformer_engine_torch as tex
+
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
-from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
+from ..op import BasicOperation, OperationContext
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):

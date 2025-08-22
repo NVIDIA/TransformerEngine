@@ -4,16 +4,16 @@
 
 """Internal function used by multiple modules."""
 
-from typing import Any, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
-
 import queue
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional, Tuple, Union
+
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
-from ..utils import get_default_init_method
 from ..export import is_in_onnx_export_mode
+from ..utils import get_default_init_method
 
 
 def _get_normalization_func(normalization: str, forward: bool):

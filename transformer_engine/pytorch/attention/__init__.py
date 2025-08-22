@@ -5,8 +5,8 @@
 """Python interface for attention"""
 
 from .dot_product_attention import DotProductAttention
-from .multi_head_attention import MultiheadAttention
 from .inference import InferenceParams
+from .multi_head_attention import MultiheadAttention
 from .rope import RotaryPositionEmbedding
 
 __all__ = [

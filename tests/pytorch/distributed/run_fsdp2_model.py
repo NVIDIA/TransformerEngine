@@ -4,12 +4,10 @@
 #
 # See LICENSE for license information.
 
+import argparse
 import os
 import sys
-import argparse
-
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -18,7 +16,9 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from contextlib import nullcontext
+
+import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 
 class SimpleNet(nn.Module):

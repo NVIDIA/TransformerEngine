@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 if torch.cuda.device_count() < 2:
     pytest.skip("cast_master_weights_to_fp8 test needs at least 2 GPUs.")

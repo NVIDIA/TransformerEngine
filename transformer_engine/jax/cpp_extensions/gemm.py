@@ -6,37 +6,35 @@
 import math
 import operator
 from collections.abc import Iterable
-from typing import Tuple, Sequence, Union
 from functools import partial, reduce
+from typing import Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
-from jax.sharding import NamedSharding, PartitionSpec
-from jax.experimental.custom_partitioning import SdyShardingRule
-
 import transformer_engine_jax as tex
+from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.sharding import NamedSharding, PartitionSpec
 from transformer_engine_jax import get_num_compute_streams
 
-from .base import BasePrimitive, register_primitive
-from .quantization import grouped_quantize
 from ..quantize import (
+    GroupedQuantizer,
+    GroupedScaledTensor1x,
+    QuantizeConfig,
+    QuantizeLayout,
+    Quantizer,
+    QuantizerSet,
     ScaledTensor,
     ScaledTensor2x,
-    GroupedScaledTensor1x,
     ScalingMode,
-    Quantizer,
-    GroupedQuantizer,
-    QuantizeConfig,
-    QuantizerSet,
-    QuantizeLayout,
-    noop_quantizer_set,
-    is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
+    is_fp8_gemm_with_all_layouts_supported,
+    noop_quantizer_set,
 )
 from ..sharding import global_mesh_resource
+from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec
-
+from .quantization import grouped_quantize
 
 __all__ = [
     "gemm",

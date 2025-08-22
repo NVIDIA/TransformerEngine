@@ -3,9 +3,13 @@
 # See LICENSE for license information.
 
 from typing import Iterable, List, Union
-import pytest
 
+import pytest
 import torch
+from utils import ModelConfig, reset_rng_states
+
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     DotProductAttention,
     LayerNormLinear,
@@ -19,9 +23,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()

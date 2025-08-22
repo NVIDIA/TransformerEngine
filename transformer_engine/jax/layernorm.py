@@ -15,11 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-
-from .quantize import (
-    ScaledTensor,
-    Quantizer,
-)
+from .quantize import Quantizer, ScaledTensor
 
 
 def canonicalize_norm_type(x):

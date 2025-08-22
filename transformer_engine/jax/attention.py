@@ -3,21 +3,23 @@
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
 from __future__ import annotations
+
+import warnings
 from enum import Enum
 from functools import partial
 from typing import Optional, Tuple, Union
-import warnings
 
-from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
 from flax.linen import make_attention_mask
-
-from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine_jax import nvte_get_qkv_format
+from jax.ad_checkpoint import checkpoint_name
+from transformer_engine_jax import (
+    NVTE_Bias_Type,
+    NVTE_Mask_Type,
+    NVTE_QKV_Format,
+    NVTE_QKV_Layout,
+    nvte_get_qkv_format,
+)
 
 from . import cpp_extensions as tex
 

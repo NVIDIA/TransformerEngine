@@ -5,11 +5,12 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
-
 from transformer_engine_torch import FP8TensorMeta
+
 from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor

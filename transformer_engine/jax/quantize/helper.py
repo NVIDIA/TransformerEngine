@@ -7,23 +7,23 @@ Config module for quantization metadata management
 This module provides configuration and helper functions for managing quantization metadata
 in JAX, including support for different scaling modes and datatypes.
 """
+import operator
 from contextlib import contextmanager
 from enum import Enum
-from typing import Optional, Tuple, Dict, Union, Sequence
 from functools import reduce
-import operator
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
-
 from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
-from transformer_engine.common import recipe
-from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
-from .scaling_modes import ScalingMode
+from transformer_engine.common import recipe
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
 from .. import cpp_extensions as tex
 from .device_utils import get_device_compute_capability
+from .scaling_modes import ScalingMode
 
 __all__ = [
     "QuantizeConfig",

@@ -2,13 +2,14 @@
 #
 # See LICENSE for license information.
 
-from collections.abc import Iterable
 import io
 import math
+from collections.abc import Iterable
 from typing import Any, Dict, List, Tuple, Union
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
@@ -17,7 +18,6 @@ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockwiseQTensor,
 )
 from transformer_engine.pytorch.utils import get_device_compute_capability
-import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
