@@ -462,6 +462,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # fp8_autocast(fp8_recipe=CS) and NVTE_DPA_FORCE_DS=0 (default): use CS for QKV, O, dO, dQKV; None for S; and DS for dP
             fake_secondary_recipe = DelayedScaling(
                 fp8_format=orig_primary_recipe.fp8_format,
+                margin=0,
+                amax_history_len=1,
+                amax_compute_algo="most_recent",
                 fp8_dpa=orig_primary_recipe.fp8_dpa,
                 fp8_mha=orig_primary_recipe.fp8_mha,
             )
@@ -469,6 +472,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # fp8_autocast(fp8_recipe=CS) and NVTE_DPA_FORCE_DS=1:           use DS for all tensors
             primary_recipe = DelayedScaling(
                 fp8_format=orig_primary_recipe.fp8_format,
+                margin=0,
+                amax_history_len=1,
+                amax_compute_algo="most_recent",
                 fp8_dpa=orig_primary_recipe.fp8_dpa,
                 fp8_mha=orig_primary_recipe.fp8_mha,
             )
