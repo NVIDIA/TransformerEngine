@@ -42,9 +42,8 @@ typedef struct NVTECommGemmCtx NVTECommGemmCtx;
  *  \param[in]  comm          NCCL communicator.
  *  \param[in]  nranks        Number of ranks.
  *  \param[in]  rank          Local rank.
- *  \param[in]  local_device  CUDA device, used by this rank.
  */
-NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, int local_device);
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank);
 
 /*! \brief Destroy a comm-gemm context.
  *

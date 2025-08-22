@@ -424,8 +424,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx,
 
 }  // namespace
 
-NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank,
-                                           int local_device) {
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_create);
   auto stream = CudaStreamCreate();
   auto event = CudaEventCreate(cudaEventDisableTiming);

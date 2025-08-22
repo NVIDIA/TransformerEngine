@@ -119,13 +119,12 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
   CommGemmFixure() {
     CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks_));
     CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
-    int local_device = rank_;
     NVTE_CHECK_CUDA(cudaSetDevice(rank_));
     ncclUniqueId id{};
     if (rank_ == 0) CHECK_NCCL(ncclGetUniqueId(&id));
     CHECK_MPI(MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
     CHECK_NCCL(ncclCommInitRank(&comm_, nranks_, id, rank_));
-    ctx_ = nvte_comm_gemm_ctx_create(comm_, nranks_, rank_, local_device);
+    ctx_ = nvte_comm_gemm_ctx_create(comm_, nranks_, rank_);
   }
   ~CommGemmFixure() {
     nvte_comm_gemm_ctx_destroy(ctx_);
