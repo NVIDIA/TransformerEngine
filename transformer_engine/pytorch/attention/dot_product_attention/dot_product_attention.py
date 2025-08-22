@@ -478,7 +478,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_dpa=orig_primary_recipe.fp8_dpa,
                 fp8_mha=orig_primary_recipe.fp8_mha,
             )
-        fp8_group = FP8GlobalStateManager.get_fp8_group()
+        # only reduce over TP group for now; need to consider CP group later
+        fp8_group = self.tp_group #FP8GlobalStateManager.get_fp8_group()
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
@@ -527,7 +528,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if fp8_enabled:
             # Set FP8 and other FP8 metadata
             self.fp8_meta["num_gemms"] = num_gemms
-            self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+            self.fp8_meta["fp8_group"] = fp8_group
 
             # Set FP8_MAX per tensor according to recipe
             self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
