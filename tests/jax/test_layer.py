@@ -28,6 +28,7 @@ from transformer_engine.jax.quantize import (
     is_fp8_available,
     update_collections,
 )
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -490,19 +491,28 @@ class BaseTester:
     def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""
         QuantizeConfig.finalize()  # Ensure FP8 disabled.
-        self.runner(attrs).test_forward(data_shape, dtype)
+        with global_shard_guard(
+            MeshResource()
+        ):  # Empty MeshResource is used as we are running on a single device
+            self.runner(attrs).test_forward(data_shape, dtype)
 
     def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
         QuantizeConfig.finalize()  # Ensure FP8 disabled.
-        self.runner(attrs).test_backward(data_shape, dtype)
+        with global_shard_guard(
+            MeshResource()
+        ):  # Empty MeshResource is used as we are running on a single device
+            self.runner(attrs).test_backward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
         QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
-        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+        with global_shard_guard(
+            MeshResource()
+        ):  # Empty MeshResource is used as we are running on a single device
+            self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         QuantizeConfig.finalize()
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -510,7 +520,10 @@ class BaseTester:
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
         QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
-        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+        with global_shard_guard(
+            MeshResource()
+        ):  # Empty MeshResource is used as we are running on a single device
+            self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         QuantizeConfig.finalize()
 
 
