@@ -4,16 +4,17 @@
 
 """Python interface for GEMM extensions"""
 
-from typing import Iterable, Optional, Tuple, Union, List
 import os
+from typing import Iterable, List, Optional, Tuple, Union
+
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType
-from ..utils import get_sm_count, _empty_tensor
 
-from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ..constants import TE_DType
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.quantized_tensor import Quantizer
+from ..utils import _empty_tensor, get_sm_count
 
 __all__ = [
     "general_gemm",

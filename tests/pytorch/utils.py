@@ -10,16 +10,16 @@ from contextlib import contextmanager
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-    get_attention_backend,
-    AttentionParams,
     AttentionLogging,
+    AttentionParams,
+    get_attention_backend,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 

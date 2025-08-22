@@ -4,21 +4,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import io
 import math
 import pathlib
 import sys
+from collections.abc import Iterable
 from typing import Optional
 
 import pytest
 import torch
+import transformer_engine_torch as tex
+
+# Import utility functions
+from utils import dtype_tols, make_recipe, reset_rng_states
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
     BackwardAddRMSNorm,
@@ -30,16 +34,12 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
+    Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_torch as tex
-
-# Import utility functions
-from utils import dtype_tols, make_recipe, reset_rng_states
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

@@ -5,17 +5,14 @@
 """Fused backward dgrad GEMM + scale."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
-from ..basic import BasicLinear, ConstantScale
-from ..op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
 from ...utils import clear_tensor_data
+from ..basic import BasicLinear, ConstantScale
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class BackwardLinearScale(FusedOperation):

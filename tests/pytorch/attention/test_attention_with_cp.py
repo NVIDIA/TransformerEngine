@@ -3,17 +3,15 @@
 # See LICENSE for license information.
 
 import os
+import pathlib
 import subprocess
 import sys
-import pathlib
 
 import pytest
 import torch
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    get_cudnn_version,
-)
+
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))

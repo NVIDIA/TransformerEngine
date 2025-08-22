@@ -5,20 +5,18 @@
 """Base classes for fusible operations."""
 
 from __future__ import annotations
+
 import abc
-from collections.abc import Iterable
 import dataclasses
 import pickle
+from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from ..fp8 import (
-    FP8GlobalStateManager,
-    RecipeState,
-    fp8_autocast,
-)
+
+from ..fp8 import FP8GlobalStateManager, RecipeState, fp8_autocast
 from ..tensor import Quantizer
 
 

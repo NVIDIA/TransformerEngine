@@ -4,14 +4,15 @@
 
 import os
 from contextlib import nullcontext
+
 import pytest
 import torch
+from utils import ModelConfig, get_available_attention_backends
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
-from utils import ModelConfig, get_available_attention_backends
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 # Check if FP8 is supported
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()

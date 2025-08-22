@@ -3,15 +3,16 @@
 # See LICENSE for license information.
 
 import argparse
+import pathlib
+from contextlib import nullcontext
+
+import pandas as pd
 import torch
 import torch.utils.benchmark as benchmark
-import pandas as pd
-import pathlib
 
-from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
-from contextlib import nullcontext
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+from transformer_engine.pytorch.module import GroupedLinear
 
 """
 # Profile BF16 recipe with Nsight Systems

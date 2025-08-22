@@ -10,32 +10,27 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch.constants import AttnMaskTypes, LayerTypes, dist_group_type
+from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import (
+    bias_dropout_add_fused_inference,
+    bias_dropout_add_fused_train,
+    get_bias_dropout_add,
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
-    get_bias_dropout_add,
-    bias_dropout_add_fused_train,
-    bias_dropout_add_fused_inference,
 )
+from transformer_engine.pytorch.module import LayerNorm, LayerNormMLP, RMSNorm
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
     torch_get_autocast_gpu_dtype,
 )
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    LayerTypes,
-    dist_group_type,
-)
-from transformer_engine.pytorch.distributed import get_distributed_world_size
-from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 

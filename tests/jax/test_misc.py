@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
-import pytest
-from functools import partial
 import os
+from functools import partial
+
+import pytest
 
 from transformer_engine.jax.cpp_extensions.misc import get_xla_flag
 

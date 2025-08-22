@@ -3,27 +3,25 @@
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
 
-import os
 import functools
 import math
 import operator
-from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional, NewType
+import os
 from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, NewType, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from flax import linen as nn
 from flax.linen.attention import combine_masks
-from jax import lax, vmap
+from jax import lax
 from jax import nn as jax_nn
 from jax import random as jax_random
-import pytest
+from jax import vmap
 
-from transformer_engine.jax.attention import (
-    canonicalize_attn_mask_type,
-    make_swa_mask,
-)
+from transformer_engine.jax.attention import canonicalize_attn_mask_type, make_swa_mask
 from transformer_engine.jax.quantize.helper import DType as TEDType
 
 PRNGKey = Any

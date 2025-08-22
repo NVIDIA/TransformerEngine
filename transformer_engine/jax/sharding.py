@@ -10,16 +10,17 @@ parallelism (FSDP). It includes functions for sharding constraints, mesh managem
 and collective operations.
 """
 import os
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
-import warnings
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
-import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 

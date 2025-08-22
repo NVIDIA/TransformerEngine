@@ -4,21 +4,15 @@
 """Test transformer_engine.jax.flax.TransformerLayer"""
 import os
 from functools import partial
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
 import flax
 import jax
 import jax.numpy as jnp
 import pytest
-
-from utils import (
-    assert_allclose,
-    assert_tree_like_allclose,
-    dtype_tols,
-    sync_params_values,
-)
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
+from utils import assert_allclose, assert_tree_like_allclose, dtype_tols, sync_params_values
 
 from transformer_engine.common import recipe
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType

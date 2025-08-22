@@ -9,13 +9,13 @@ import pytest
 import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
+
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
-from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import gpu_autocast_ctx
+from transformer_engine.pytorch.utils import gpu_autocast_ctx, is_bf16_compatible
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

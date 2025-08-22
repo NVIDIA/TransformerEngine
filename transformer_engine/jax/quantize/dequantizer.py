@@ -8,8 +8,8 @@ This module provides utilities for dequantizing tensors that have been quantized
 using various scaling modes, including delayed scaling and block scaling.
 """
 import math
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp

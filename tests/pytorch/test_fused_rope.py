@@ -1,14 +1,13 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from typing import Callable, Tuple, Union
 import math
-import torch
+from typing import Callable, Tuple, Union
+
 import pytest
-from transformer_engine.pytorch.attention.rope import (
-    RotaryPositionEmbedding,
-    apply_rotary_pos_emb,
-)
+import torch
+
+from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding, apply_rotary_pos_emb
 
 
 # Gradient is a broadcasted scalar

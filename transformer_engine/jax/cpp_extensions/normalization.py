@@ -2,41 +2,41 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
+import operator
 import os
 import warnings
-import operator
-from functools import partial, cache, reduce
+from functools import cache, partial, reduce
 from typing import Optional, Union
-from packaging import version
 
 import jax
 import jax.numpy as jnp
+import transformer_engine_jax
 from jax import dtypes
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
-
-import transformer_engine_jax
+from packaging import version
 from transformer_engine_jax import NVTE_Norm_Type
 
-from .base import BasePrimitive, register_primitive
-from .misc import (
-    get_padded_spec,
-    check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
-    NamedSharding,
-    get_cudnn_version,
-)
-from .quantization import _quantize_dbias_impl
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
-    Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
+    QuantizeLayout,
+    Quantizer,
+    ScaledTensor,
+    ScaledTensorFactory,
     ScalingMode,
 )
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from .base import BasePrimitive, register_primitive
+from .misc import (
+    NamedSharding,
+    check_valid_batch_dims,
+    get_cudnn_version,
+    get_padded_spec,
+    jax_dtype_to_te_dtype,
+    te_dtype_to_jax_dtype,
+)
+from .quantization import _quantize_dbias_impl
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports

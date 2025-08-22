@@ -6,16 +6,15 @@
 This module provides optimized activation functions with quantization support.
 """
 
-from typing import Sequence, Union, Callable, Optional
 from functools import partial
+from typing import Callable, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-
-from .quantize.tensor import ScaledTensor
 from .quantize.quantizer import Quantizer
+from .quantize.tensor import ScaledTensor
 
 
 def activation(

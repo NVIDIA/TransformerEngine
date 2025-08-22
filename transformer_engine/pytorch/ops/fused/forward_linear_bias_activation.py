@@ -5,6 +5,7 @@
 """Fused operation for forward GEMM + bias + activation."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 
@@ -12,11 +13,8 @@ import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
-from transformer_engine.pytorch.ops.op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from transformer_engine.pytorch.ops.op import FusedOperation, FusibleOperation, OperationContext
+
 from ...tensor import Quantizer
 
 

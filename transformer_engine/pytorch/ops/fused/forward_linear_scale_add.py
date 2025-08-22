@@ -5,19 +5,16 @@
 """Fused operation for forward GEMM + scale + add."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
 
 from ...fp8 import FP8GlobalStateManager
-from ..basic import AddExtraInput, BasicLinear, ConstantScale
-from ..op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
 from ...tensor import Quantizer
+from ..basic import AddExtraInput, BasicLinear, ConstantScale
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class ForwardLinearScaleAdd(FusedOperation):

@@ -5,15 +5,16 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+
 import abc
 import copy
 import warnings
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import torch
+import transformer_engine_torch as tex
 from torch.utils._pytree import tree_map
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 

@@ -5,37 +5,36 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 import functools
 import itertools
 import os
 import pathlib
 import subprocess
 import sys
+from collections.abc import Iterable
 from typing import Optional
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import dtype_tols, make_recipe
-
 
 # Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

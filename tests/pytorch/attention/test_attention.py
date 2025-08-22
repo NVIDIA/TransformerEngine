@@ -4,56 +4,51 @@
 import logging
 import math
 import os
-import sys
 import pathlib
+import sys
 from typing import Any, Dict, Tuple, Union
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
+import transformer_engine.pytorch.cpp_extensions as ext
+import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
     _attention_backends,
 )
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
 )
-from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-import transformer_engine.pytorch.cpp_extensions as ext
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
     fused_attn_bwd,
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    init_method_normal,
-    scaled_init_method_normal,
-    is_bf16_compatible,
-)
-from transformer_engine.pytorch.utils import get_cudnn_version
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    get_device_compute_capability,
+    init_method_normal,
+    is_bf16_compatible,
+    scaled_init_method_normal,
+)
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import (
-    reset_rng_states,
-    ModelConfig,
-    dtype_tols,
-    get_available_attention_backends,
-)
+from utils import ModelConfig, dtype_tols, get_available_attention_backends, reset_rng_states
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
