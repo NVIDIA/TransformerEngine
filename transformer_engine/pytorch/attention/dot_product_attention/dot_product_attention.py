@@ -479,7 +479,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_mha=orig_primary_recipe.fp8_mha,
             )
         # only reduce over TP group for now; need to consider CP group later
-        fp8_group = self.tp_group #FP8GlobalStateManager.get_fp8_group()
+        fp8_group = self.tp_group  # FP8GlobalStateManager.get_fp8_group()
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
