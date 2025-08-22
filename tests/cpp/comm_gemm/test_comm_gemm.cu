@@ -263,7 +263,7 @@ struct AgGemm : public CommGemmFixure {
                 bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                 cudaStream_t stream) override {
     nvte_all_gather_gemm(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                         accumulate, comm_sm_count, stream);
+                         accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 };
 
@@ -298,7 +298,7 @@ struct GemmRs : public CommGemmFixure {
                 bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                 cudaStream_t stream) override {
     nvte_gemm_reduce_scatter(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                             accumulate, comm_sm_count, stream);
+                             accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 };
 
@@ -330,7 +330,7 @@ struct GemmAr : public CommGemmFixure {
                 bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                 cudaStream_t stream) override {
     nvte_gemm_all_reduce(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                         accumulate, comm_sm_count, stream);
+                         accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 
   void SetUp() override {

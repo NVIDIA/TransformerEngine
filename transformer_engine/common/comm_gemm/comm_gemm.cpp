@@ -6,8 +6,8 @@
 
 #include "transformer_engine/comm_gemm.h"
 
+#include <cublasmp.h>
 #include <cuda_runtime.h>
-#include <nccl.h>
 #include <nvshmem.h>
 
 #include <map>
@@ -15,6 +15,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -243,8 +244,20 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 using InitMatricesFn = void (*)(NVTECommGemmCtx*, int64_t*, int64_t, int64_t, int64_t,
                                 const Tensor*, const Tensor*, const Tensor*, bool, bool);
 
+cublasMpMatmulAlgoType_t cublasmp_algo(NVTECommGemmAlgoType algo) {
+  static const std::unordered_map<NVTECommGemmAlgoType, cublasMpMatmulAlgoType_t> s_map {
+      {kNVTECommGemmAlgoDefault, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT},
+      {kNVTECommGemmAlgoSplitP2P, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P},
+      {kNVTECommGemmAlgoSplitMulticast, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_MULTICAST},
+      {kNVTECommGemmAlgoAtomicP2P, CUBLASMP_MATMUL_ALGO_TYPE_ATOMIC_P2P},
+      {kNVTECommGemmAlgoAtomicMulticast, CUBLASMP_MATMUL_ALGO_TYPE_ATOMIC_MULTICAST},
+  };
+  auto it = s_map.find(algo);
+  return it != s_map.end() ? it->second : static_cast<cublasMpMatmulAlgoType_t>(algo);
+}
+
 void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx,
-                   cublasMpMatmulAlgoType_t algo, int64_t m, int64_t n, int64_t k, const Tensor* a,
+                   NVTECommGemmAlgoType algo, int64_t m, int64_t n, int64_t k, const Tensor* a,
                    const Tensor* b, const Tensor* d, const Tensor* bias, const Tensor* pre_act_out,
                    bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
@@ -266,8 +279,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx,
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
       ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSB, &trans_b,
       sizeof trans_b));
+  cublasMpMatmulAlgoType_t algo_attr = cublasmp_algo(algo);
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
-      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo, sizeof algo));
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo_attr,
+      sizeof algo_attr));
 
   const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
   if (is_fp8_dtype(a->dtype())) {
@@ -466,7 +481,7 @@ void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          cublasMpMatmulAlgoType_t algo) {
+                          NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_all_gather_gemm);
   cublasmp_gemm(AgGemmInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
@@ -478,7 +493,7 @@ void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_
                               const NVTETensor a, const NVTETensor b, const NVTETensor d,
                               const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
                               bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream, cublasMpMatmulAlgoType_t algo) {
+                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_gemm_reduce_scatter);
   cublasmp_gemm(GemmRsInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
@@ -490,7 +505,7 @@ void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          cublasMpMatmulAlgoType_t algo) {
+                          NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_gemm_all_reduce);
   cublasmp_gemm(GemmArInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),

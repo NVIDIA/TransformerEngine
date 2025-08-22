@@ -17,13 +17,12 @@
  *  - `D = AB + bias` if `pre_gelu_out` is empty and `bias` is not empty
  *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
  *
- *  Functions differ in matrix distribution patterns.
+ *  Functions differ in matrix distribution patterns
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_H_
 
-#include <cublasmp.h>
 #include <nccl.h>
 #include <stdint.h>
 
@@ -36,6 +35,14 @@ extern "C" {
 #endif
 
 typedef struct NVTECommGemmCtx NVTECommGemmCtx;
+
+enum NVTECommGemmAlgoType {
+  kNVTECommGemmAlgoDefault = 0,
+  kNVTECommGemmAlgoSplitP2P = 1,
+  kNVTECommGemmAlgoSplitMulticast = 2,
+  kNVTECommGemmAlgoAtomicP2P = 3,
+  kNVTECommGemmAlgoAtomicMulticast = 4
+};
 
 /*! \brief Create a comm-gemm context.
  *
@@ -70,13 +77,13 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx);
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
- *  \param[in]     algo          cuBLASMp algorithm to use.
+ *  \param[in]     algo          Algorithm to use.
  */
 void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          cublasMpMatmulAlgoType_t algo = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT);
+                          NVTECommGemmAlgoType algo);
 
 /*! \brief Perform GEMM followed by ReduceScatter communication
  *
@@ -97,14 +104,13 @@ void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
- *  \param[in]     algo          cuBLASMp algorithm to use.
+ *  \param[in]     algo          Algorithm to use.
  */
 void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               const NVTETensor a, const NVTETensor b, const NVTETensor d,
                               const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
                               bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream,
-                              cublasMpMatmulAlgoType_t algo = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT);
+                              cudaStream_t main_stream, NVTECommGemmAlgoType algo);
 
 /*! \brief Perform GEMM followed by AllReduce communication
  *
@@ -125,13 +131,13 @@ void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
- *  \param[in]     algo          cuBLASMp algorithm to use.
+ *  \param[in]     algo          Algorithm to use.
  */
 void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          cublasMpMatmulAlgoType_t algo = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT);
+                          NVTECommGemmAlgoType algo);
 
 /*! \brief Get local number of rows or columns.
  *
