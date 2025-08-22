@@ -245,7 +245,7 @@ using InitMatricesFn = void (*)(NVTECommGemmCtx*, int64_t*, int64_t, int64_t, in
                                 const Tensor*, const Tensor*, const Tensor*, bool, bool);
 
 cublasMpMatmulAlgoType_t cublasmp_algo(NVTECommGemmAlgoType algo) {
-  static const std::unordered_map<NVTECommGemmAlgoType, cublasMpMatmulAlgoType_t> s_map {
+  static const std::unordered_map<NVTECommGemmAlgoType, cublasMpMatmulAlgoType_t> s_map{
       {kNVTECommGemmAlgoDefault, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT},
       {kNVTECommGemmAlgoSplitP2P, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P},
       {kNVTECommGemmAlgoSplitMulticast, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_MULTICAST},
@@ -256,10 +256,10 @@ cublasMpMatmulAlgoType_t cublasmp_algo(NVTECommGemmAlgoType algo) {
   return it != s_map.end() ? it->second : static_cast<cublasMpMatmulAlgoType_t>(algo);
 }
 
-void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx,
-                   NVTECommGemmAlgoType algo, int64_t m, int64_t n, int64_t k, const Tensor* a,
-                   const Tensor* b, const Tensor* d, const Tensor* bias, const Tensor* pre_act_out,
-                   bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
+void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECommGemmAlgoType algo,
+                   int64_t m, int64_t n, int64_t k, const Tensor* a, const Tensor* b,
+                   const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
+                   bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
   for (auto t : {a, b, d}) {
     NVTE_CHECK(is_tensor_scaling(t->scaling_mode),
