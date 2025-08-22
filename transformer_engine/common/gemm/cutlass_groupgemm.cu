@@ -29,28 +29,26 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
 }
 
 // Explicit template instantiation to match the template declarations in the .cuh
-template void CutlassGroupedGemm<false, false, cutlass::half_t>(bool, bool, const NVTETensor*,
+template void CutlassGroupedGemm<false, false, cutlass::half_t>(const NVTETensor*,
                                                                 const NVTETensor*, NVTETensor*,
                                                                 NVTETensor*, float, float, int,
                                                                 cudaStream_t, int, int);
-template void CutlassGroupedGemm<true, false, cutlass::half_t>(bool, bool, const NVTETensor*,
-                                                               const NVTETensor*, NVTETensor*,
-                                                               NVTETensor*, float, float, int,
-                                                               cudaStream_t, int, int);
-template void CutlassGroupedGemm<false, true, cutlass::half_t>(bool, bool, const NVTETensor*,
-                                                               const NVTETensor*, NVTETensor*,
-                                                               NVTETensor*, float, float, int,
-                                                               cudaStream_t, int, int);
+template void CutlassGroupedGemm<true, false, cutlass::half_t>(const NVTETensor*, const NVTETensor*,
+                                                               NVTETensor*, NVTETensor*, float,
+                                                               float, int, cudaStream_t, int, int);
+template void CutlassGroupedGemm<false, true, cutlass::half_t>(const NVTETensor*, const NVTETensor*,
+                                                               NVTETensor*, NVTETensor*, float,
+                                                               float, int, cudaStream_t, int, int);
 
-template void CutlassGroupedGemm<false, false, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+template void CutlassGroupedGemm<false, false, cutlass::bfloat16_t>(const NVTETensor*,
                                                                     const NVTETensor*, NVTETensor*,
                                                                     NVTETensor*, float, float, int,
                                                                     cudaStream_t, int, int);
-template void CutlassGroupedGemm<true, false, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+template void CutlassGroupedGemm<true, false, cutlass::bfloat16_t>(const NVTETensor*,
                                                                    const NVTETensor*, NVTETensor*,
                                                                    NVTETensor*, float, float, int,
                                                                    cudaStream_t, int, int);
-template void CutlassGroupedGemm<false, true, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+template void CutlassGroupedGemm<false, true, cutlass::bfloat16_t>(const NVTETensor*,
                                                                    const NVTETensor*, NVTETensor*,
                                                                    NVTETensor*, float, float, int,
                                                                    cudaStream_t, int, int);
@@ -74,17 +72,14 @@ void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* 
   auto dispatch = [&](auto tag) {
     using T = decltype(tag);
     if (!transa && !transb) {
-      grouped_gemm::CutlassGroupedGemm<false, false, T>(transb, transa, B, A, D, workspace, alpha,
-                                                        beta, num_gemms, stream, device,
-                                                        math_sm_count);
+      grouped_gemm::CutlassGroupedGemm<false, false, T>(B, A, D, workspace, alpha, beta, num_gemms,
+                                                        stream, device, math_sm_count);
     } else if (!transb && transa) {
-      grouped_gemm::CutlassGroupedGemm<false, true, T>(transb, transa, B, A, D, workspace, alpha,
-                                                       beta, num_gemms, stream, device,
-                                                       math_sm_count);
+      grouped_gemm::CutlassGroupedGemm<false, true, T>(B, A, D, workspace, alpha, beta, num_gemms,
+                                                       stream, device, math_sm_count);
     } else if (transb && !transa) {
-      grouped_gemm::CutlassGroupedGemm<true, false, T>(transb, transa, B, A, D, workspace, alpha,
-                                                       beta, num_gemms, stream, device,
-                                                       math_sm_count);
+      grouped_gemm::CutlassGroupedGemm<true, false, T>(B, A, D, workspace, alpha, beta, num_gemms,
+                                                       stream, device, math_sm_count);
     } else {
       NVTE_ERROR("Layout 'TT' is not supported by cutlass_grouped_gemm.");
     }

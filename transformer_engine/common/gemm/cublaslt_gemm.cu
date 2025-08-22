@@ -784,23 +784,50 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     return true;
   };
 
-  auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
-  auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
-  auto A_type = get_cuda_dtype(inputA->data.dtype);
-  auto B_type = get_cuda_dtype(inputB->data.dtype);
+  auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
+    int64_t ref_k = -1;
+    for (size_t i = 0; i < num_gemms; i++) {
+      const auto tensor = transformer_engine::convertNVTETensorCheck(p[i]);
+      const int k = trans ? tensor->data.shape[0] : tensor->data.shape[1];
 
-  NVTE_CHECK(A_type == B_type, "A/B dtype mismatch in cutlass_grouped_gemm.");
-  bool supported_data_type_flag = (A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F);
+      if ((k & 127) != 0) return false;
 
-  // Currently only supports the case when bias is null, in this case the grad flag can be ignored.
-  // Ignore use_split_accumulator, since it's not used in BF16/FP16 GEMMs.
-  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && supported_data_type_flag) {
+      if (ref_k < 0)
+        ref_k = k;
+      else if (k != ref_k)
+        return false;
+    }
+
+    return true;
+  };
+
+  auto is_supported_dtype = [&]() -> bool {
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+    auto *OutputB = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto A_type = get_cuda_dtype(inputA->data.dtype);
+    auto B_type = get_cuda_dtype(inputB->data.dtype);
+    auto D_type = get_cuda_dtype(OutputB->data.dtype);
+
+    return (A_type == B_type) && (A_type == D_type) &&
+           ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
+  };
+
+  // CUTLASS Grouped GEMM fast path (SM90/TMA)
+  // Conditions:
+  //  - No fused epilogue: both bias and pre_gelu_out are empty.
+  //  - Supported dtypes only: FP16/BF16 (FP32 accumulate).
+  //  - Uniform K across groups and K % 128 == 0.
+  //  - use_split_accumulator is ignored for FP16/BF16.
+  //  - grad is irrelevant when bias/pre_gelu_out are empty.
+  //
+  // Otherwise, fall back to cuBLAS.
+  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
+      all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
   } else {
-    NVTE_WARN(
-        "Falling back to cuBLAS: CUTLASS Grouped GEMM not supported "
-        "with current params.");
+    NVTE_WARN("cuBLAS fallback.");
     cublas_path();
   }
 }

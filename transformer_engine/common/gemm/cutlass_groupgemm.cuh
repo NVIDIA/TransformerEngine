@@ -40,13 +40,13 @@
 
 namespace grouped_gemm {
 
-template <bool transa>
+template <bool trans_a>
 using GroupedGemmInputALayout =
-    std::conditional_t<transa, ::cutlass::layout::ColumnMajor, ::cutlass::layout::RowMajor>;
+    std::conditional_t<trans_a, ::cutlass::layout::ColumnMajor, ::cutlass::layout::RowMajor>;
 
-template <bool transb>
+template <bool trans_b>
 using GroupedGemmInputBLayout =
-    std::conditional_t<transb, ::cutlass::layout::ColumnMajor, ::cutlass::layout::RowMajor>;
+    std::conditional_t<trans_b, ::cutlass::layout::ColumnMajor, ::cutlass::layout::RowMajor>;
 
 using ProblemShapeType = cute::Shape<int, int, int>;
 using ProblemShape = cutlass::gemm::GroupProblemShape<ProblemShapeType>;  // <M,N,K> per group
@@ -175,18 +175,9 @@ typename GemmT::Arguments MakeArguments(int num_experts, void* problem_sizes_hos
   return arguments;
 }
 
-template <typename StrideT>
-StrideT infer_stride(int rows, int cols, bool is_col_major) {
-  if (is_col_major) {
-    return cutlass::make_cute_packed_stride(StrideT{}, {rows, cols, 0});  // ColumnMajor
-  } else {
-    return cutlass::make_cute_packed_stride(StrideT{}, {rows, cols, 0});  // RowMajor
-  }
-}
-
 template <typename T>
-inline __device__ __host__ T DIV_UP(T m, T n) {
-  return (m + n - 1) / n;
+inline __device__ __host__ T ROUND_UP(T m, T n) {
+  return (m + n - 1) / n * n;
 }
 
 template <typename T>
@@ -195,21 +186,21 @@ void debug_type() {
 }
 
 int64_t inline getGemmCoordSize(int64_t num_gemms) {
-  return (int64_t)(DIV_UP(num_gemms * sizeof(ProblemShapeType), 128UL) * 128UL);
+  return (int64_t)(ROUND_UP(num_gemms * sizeof(ProblemShapeType), 128UL));
 }
 
 int64_t inline getPtrSize(int64_t num_gemms) {
-  return (int64_t)(DIV_UP(num_gemms * sizeof(half*), 128UL) * 128UL);
+  return (int64_t)(ROUND_UP(num_gemms * sizeof(half*), 128UL));
 }
 
 int64_t inline getLddSize(int64_t num_gemms) {
-  return (int64_t)(DIV_UP(num_gemms * sizeof(int64_t), 128UL) * 128UL);
+  return (int64_t)(ROUND_UP(num_gemms * sizeof(int64_t), 128UL));
 }
 
 template <bool trans_a, bool trans_b, typename Element>
-void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVTETensor* B,
-                        NVTETensor* D, NVTETensor* workspace, float alpha, float beta,
-                        int num_gemms, cudaStream_t stream, int device, int math_sm_count) {
+void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                        NVTETensor* workspace, float alpha, float beta, int num_gemms,
+                        cudaStream_t stream, int device, int math_sm_count) {
   using Gemm = GemmGrouped<Element, trans_a, trans_b>;
   using LayoutA = typename Gemm::LayoutA;
   using LayoutB = typename Gemm::LayoutB;
@@ -224,22 +215,22 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;
 
   typename Gemm::Arguments arguments;
-  size_t workspace_size = Gemm::get_workspace_size(arguments);
+  size_t kernel_workspace_size = Gemm::get_workspace_size(arguments);
   auto gemm_coord_size = getGemmCoordSize(num_gemms);
   auto ptr_size = getPtrSize(num_gemms);
   auto ldd_size = getLddSize(num_gemms);
   auto param_workspace_size = 3 * ptr_size + 3 * ldd_size + gemm_coord_size;
 
-  auto total_workspace_size = param_workspace_size + workspace_size;
+  auto total_workspace_size = param_workspace_size + kernel_workspace_size;
   transformer_engine::Tensor* wspace = transformer_engine::convertNVTETensor(workspace[0]);
 
   NVTE_CHECK(total_workspace_size < wspace->numel(), "Insufficient workspace[0] size: required=",
              static_cast<int64_t>(total_workspace_size),
              ", available=", static_cast<int64_t>(wspace->numel()), " for CUTLASS grouped GEMM.");
 
-  char* all_workspace = reinterpret_cast<char*>(wspace->data.dptr);
+  char* workspace_ptr = reinterpret_cast<char*>(wspace->data.dptr);
 
-  char* workspace_ptr = nullptr;
+  char* kernel_workspace_ptr = nullptr;
 
   char* host_workspace = reinterpret_cast<char*>(std::malloc(param_workspace_size));
 
@@ -249,21 +240,21 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
   ElementB** ptr_B_host = reinterpret_cast<ElementB**>(host_workspace + gemm_coord_size + ptr_size);
   ElementC** ptr_C_host =
       reinterpret_cast<ElementC**>(host_workspace + gemm_coord_size + 2 * ptr_size);
-  StrideA* lda_host =
-      reinterpret_cast<StrideA*>(host_workspace + gemm_coord_size + 3 * ptr_size + 0 * ldd_size);
-  StrideB* ldb_host =
-      reinterpret_cast<StrideB*>(host_workspace + gemm_coord_size + 3 * ptr_size + 1 * ldd_size);
-  StrideC* ldc_host =
-      reinterpret_cast<StrideC*>(host_workspace + gemm_coord_size + 3 * ptr_size + 2 * ldd_size);
+  int64_t* lda_host =
+      reinterpret_cast<int64_t*>(host_workspace + gemm_coord_size + 3 * ptr_size + 0 * ldd_size);
+  int64_t* ldb_host =
+      reinterpret_cast<int64_t*>(host_workspace + gemm_coord_size + 3 * ptr_size + 1 * ldd_size);
+  int64_t* ldc_host =
+      reinterpret_cast<int64_t*>(host_workspace + gemm_coord_size + 3 * ptr_size + 2 * ldd_size);
 
   for (size_t i = 0; i < num_gemms; i++) {
     const transformer_engine::Tensor* inputA = transformer_engine::convertNVTETensorCheck(A[i]);
     const transformer_engine::Tensor* inputB = transformer_engine::convertNVTETensorCheck(B[i]);
     transformer_engine::Tensor* outputD = transformer_engine::convertNVTETensor(D[i]);
 
-    const int m = transa ? inputA->data.shape[1] : inputA->data.shape[0];
-    const int k = transa ? inputA->data.shape[0] : inputA->data.shape[1];
-    const int n = transb ? inputB->data.shape[0] : inputB->data.shape[1];
+    const int m = trans_a ? inputA->data.shape[1] : inputA->data.shape[0];
+    const int k = trans_a ? inputA->data.shape[0] : inputA->data.shape[1];
+    const int n = trans_b ? inputB->data.shape[0] : inputB->data.shape[1];
 
     auto problem = ProblemShapeType(m, n, k);
     problem_sizes_host[i] = problem;
@@ -272,34 +263,31 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
     ptr_B_host[i] = reinterpret_cast<ElementB*>(inputB->data.dptr);
     ptr_C_host[i] = reinterpret_cast<ElementC*>(outputD->data.dptr);
 
-    lda_host[i] =
-        infer_stride<StrideA>(m, k, std::is_same_v<LayoutA, cutlass::layout::ColumnMajor>);
-    ldb_host[i] =
-        infer_stride<StrideB>(n, k, std::is_same_v<LayoutB, cutlass::layout::ColumnMajor>);
-    ldc_host[i] =
-        infer_stride<StrideC>(m, n, std::is_same_v<LayoutC, cutlass::layout::ColumnMajor>);
+    lda_host[i] = LayoutA::packed({m, k}).stride(0);
+    ldb_host[i] = LayoutB::packed({k, n}).stride(0);
+    ldc_host[i] = LayoutC::packed({m, n}).stride(0);
   }
 
-  cudaMemcpyAsync(all_workspace, host_workspace, param_workspace_size, cudaMemcpyHostToDevice,
+  cudaMemcpyAsync(workspace_ptr, host_workspace, param_workspace_size, cudaMemcpyHostToDevice,
                   stream);
 
-  char* param_workspace = all_workspace;
-  ProblemShapeType* problem_sizes_device = reinterpret_cast<ProblemShapeType*>(param_workspace);
+  char* param_workspace_ptr = workspace_ptr;
+  ProblemShapeType* problem_sizes_device = reinterpret_cast<ProblemShapeType*>(param_workspace_ptr);
   const ElementA** ptr_A = reinterpret_cast<const ElementA**>(
-      reinterpret_cast<char*>(param_workspace) + gemm_coord_size);
+      reinterpret_cast<char*>(param_workspace_ptr) + gemm_coord_size);
   const ElementB** ptr_B = reinterpret_cast<const ElementB**>(
-      reinterpret_cast<char*>(param_workspace) + gemm_coord_size + 1 * ptr_size);
-  ElementC** ptr_C = reinterpret_cast<ElementC**>(reinterpret_cast<char*>(param_workspace) +
+      reinterpret_cast<char*>(param_workspace_ptr) + gemm_coord_size + 1 * ptr_size);
+  ElementC** ptr_C = reinterpret_cast<ElementC**>(reinterpret_cast<char*>(param_workspace_ptr) +
                                                   gemm_coord_size + 2 * ptr_size);
 
-  StrideA* lda = reinterpret_cast<StrideA*>(reinterpret_cast<char*>(param_workspace) +
+  StrideA* lda = reinterpret_cast<StrideA*>(reinterpret_cast<char*>(param_workspace_ptr) +
                                             gemm_coord_size + 3 * ptr_size + 0 * ldd_size);
-  StrideB* ldb = reinterpret_cast<StrideB*>(reinterpret_cast<char*>(param_workspace) +
+  StrideB* ldb = reinterpret_cast<StrideB*>(reinterpret_cast<char*>(param_workspace_ptr) +
                                             gemm_coord_size + 3 * ptr_size + 1 * ldd_size);
-  StrideC* ldc = reinterpret_cast<StrideC*>(reinterpret_cast<char*>(param_workspace) +
+  StrideC* ldc = reinterpret_cast<StrideC*>(reinterpret_cast<char*>(param_workspace_ptr) +
                                             gemm_coord_size + 3 * ptr_size + 2 * ldd_size);
 
-  workspace_ptr = all_workspace + param_workspace_size;
+  kernel_workspace_ptr = workspace_ptr + param_workspace_size;
 
   arguments = MakeArguments<Gemm, ElementA, ElementB, ElementC, StrideA, StrideB, StrideC>(
       num_gemms, problem_sizes_host, problem_sizes_device, ptr_A, lda, ptr_B, ldb, ptr_C, ldc,
@@ -313,7 +301,7 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
   }
 
   // Initialize the kernel.
-  if (gemm.initialize(arguments, workspace_ptr) != cutlass::Status::kSuccess) {
+  if (gemm.initialize(arguments, kernel_workspace_ptr) != cutlass::Status::kSuccess) {
     NVTE_CHECK(false, "Failed to initialize CUTLASS Grouped GEMM");
   }
 
