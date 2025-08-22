@@ -669,7 +669,8 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
       CUBLAS_VERSION);
 #endif
   NVTE_CHECK(
-      transformer_engine::cuda::cudart_version() >= 12020 && transformer_engine::cuda::cudart_version() < 13000,
+      transformer_engine::cuda::cudart_version() >= 12020 &&
+          transformer_engine::cuda::cudart_version() < 13000,
       "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
       transformer_engine::cuda::cudart_version());
   NVTE_CHECK(
