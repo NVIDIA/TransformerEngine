@@ -25,6 +25,7 @@ from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 random.seed(42)
 torch.manual_seed(42)
 
+
 class RunConfiguration:
     def __init__(self):
         self.mixed_precision = "bf16"
