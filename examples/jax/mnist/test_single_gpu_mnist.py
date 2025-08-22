@@ -193,7 +193,9 @@ def train_and_evaluate(args):
     else:
         fp8_recipe = None
 
-    with te.fp8_autocast(enabled=args.use_fp8, fp8_recipe=fp8_recipe):
+    with te.fp8_autocast(
+        enabled=args.use_fp8, fp8_recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
+    ):
         cnn = Net(args.use_te)
         var_collect = cnn.init(init_rngs, jnp.empty(input_shape, dtype=jnp.bfloat16))
         tx = optax.sgd(args.lr, args.momentum)
