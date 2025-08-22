@@ -136,28 +136,28 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a1 == k, "Unsupported tensor dimensions");
+    NVTE_CHECK(a1 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, k, block_size(ctx, m), 0, 0, k,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a0 == k, "Unsupported tensor dimensions");
+    NVTE_CHECK(a0 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, block_size(ctx, m), k, 0, 0,
                                                      block_size(ctx, m), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
-    NVTE_CHECK(b0 == k, "Unsupported tensor dimensions");
+    NVTE_CHECK(b0 == k, "Unsupported tensor dimensionin B: expected ", k, ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), k, 0, 0,
                                                      block_size(ctx, n), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b1 == k, "Unsupported tensor dimensions");
+    NVTE_CHECK(b1 == k, "Unsupported tensor dimension in B: expected ", k, ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, k, block_size(ctx, n), 0, 0, k,
                                                      get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d0 == n, "Unsupported tensor dimensions");
+  NVTE_CHECK(d0 == n, "Unsupported tensor dimension in D: expected ", n, ", got ", d0);
   *ldd = block_size(ctx, m);
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, block_size(ctx, m), block_size(ctx, n), 0,
                                                    0, *ldd, get_cuda_dtype(d->dtype()),
@@ -175,28 +175,28 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a0 == m, "Unsupported tensor dimensions");
+    NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(a1 == m, "Unsupported tensor dimensions");
+    NVTE_CHECK(a1 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, m, block_size(ctx, k), 0, 0, m,
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
-    NVTE_CHECK(b1 == n, "Unsupported tensor dimensions");
+    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
         n, k, block_size(ctx, n), block_size(ctx, k), 0, 0, block_size(ctx, n),
         get_cuda_dtype(b->dtype()), ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimensions");
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
         k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
         get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m, "Unsupported tensor dimensions");
+  NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
@@ -214,7 +214,7 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   const auto d1 = d->flat_last_dim();
 
   if (transa) {
-    NVTE_CHECK(a0 == m, "Unsupported tensor dimensions");
+    NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(a->dtype()),
                                                      ctx->grid_col_major.get(), ctx->a_desc.get()));
@@ -224,12 +224,12 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   if (transb) {
     NVTE_ERROR("T transpose flag is not supported for input B");
   } else {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimensions");
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
                                                      block_size(ctx, k), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
-  NVTE_CHECK(d1 == m, "Unsupported tensor dimensions");
+  NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
