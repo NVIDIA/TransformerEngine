@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-import time
 import sys
 import IPython
 import random
@@ -10,26 +9,21 @@ import string
 
 from te_gemma_loading_weights import load_te_model
 import torch
-from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    get_linear_schedule_with_warmup,
     AutoConfig,
 )
 from transformers import DataCollatorForLanguageModeling
 from datasets import load_dataset
-from accelerate import Accelerator
-from accelerate.utils.dataclasses import FP8RecipeKwargs
 
 
 from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 
 random.seed(42)
 torch.manual_seed(42)
-
 
 class RunConfiguration:
     def __init__(self):
@@ -235,11 +229,6 @@ def run_forward_pass(model, run_config, num_iters):
     Runs the forward pass of the model with sample data. Intended to use for
     warmup and/or calibration.
     """
-    accelerator = Accelerator(
-        log_with="wandb",
-        gradient_accumulation_steps=run_config.gradient_accumulation_steps,
-        mixed_precision="no",
-    )
     train_dataloader = get_dataloaders(run_config)
 
     model.train()
