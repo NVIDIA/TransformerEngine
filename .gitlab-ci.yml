@@ -9,10 +9,10 @@ variables:
     # framework containers
     CORE_AMD64_IMAGE:
       description: Base Docker container for core AMD64 build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:12.9-devel-ubuntu24.04--main-amd64  # Last build with main branch
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.0-devel-ubuntu24.04--main-amd64  # Last build with main branch
     CORE_ARM64_IMAGE:
       description: Base Docker container for core ARM64 build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:12.9-devel-ubuntu24.04--main-arm64  # Last build with main branch
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.0-devel-ubuntu24.04--main-arm64  # Last build with main branch
     PYTORCH_AMD64_IMAGE:
       description: Base Docker container for PyTorch AMD64 build
       value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-amd64  # Last build with main branch (nightly build)
@@ -21,10 +21,10 @@ variables:
       value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-arm64  # Last build with main branch (nightly build)
     JAX_AMD64_IMAGE:
       description: Base Docker container for JAX build
-      value: ghcr.io/nvidia/jax:jax-2025-07-21
+      value: ghcr.io/nvidia/jax:jax-2025-08-20
     JAX_ARM64_IMAGE:
       description: Base Docker container for JAX build
-      value: ghcr.io/nvidia/jax:jax-2025-07-21
+      value: ghcr.io/nvidia/jax:jax-2025-08-20
 
     # variables that may be overridden by the pipeline vars
     GH_BRANCH:
