@@ -219,7 +219,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
-            all_gather_usage=True,
+            all_gather_usage=(block_scaling_dim == 1),
         )
         self._test_quantize_dequantize(
             quantizer=quantizer,

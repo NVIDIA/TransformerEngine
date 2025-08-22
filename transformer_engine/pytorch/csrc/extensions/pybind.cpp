@@ -111,7 +111,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
-        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
+        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
+        py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
@@ -201,6 +202,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
+  m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
+        "Fused backward of RMSNorm + add");
   m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
@@ -210,6 +213,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
+        "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
@@ -369,6 +375,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_and_scale_inv",
         &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Comm+GEMM Overlap
+  m.def("bulk_overlap_ag_with_external_gemm",
+        &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
+        "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
+        py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
+        py::arg("send_stream"), py::arg("recv_stream"));
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

@@ -203,6 +203,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 
+    // Trigger the next kernel, so its TMA load can be overlapped with the current kernel
+    if (stage == STAGES - 1) {
+      cudaTriggerProgrammaticLaunchCompletion();
+    }
+
     float thread_amax = 0.0f;
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
@@ -1001,9 +1006,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
                     Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
   using namespace mxfp8_kernel;
+  checkCuDriverContext(stream);
+
   bool use_rowwise_scaling = output->has_data();
   bool use_colwise_scaling = output->has_columnwise_data();
-  checkCuDriverContext(stream);
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
@@ -1121,6 +1127,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
           const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
+          cudaLaunchConfig_t cfg = {grid, block_size, dshmem_size, stream, NULL, 0};
+          // This kernel will only be called on sm100+, so no need to check sm_arch
+          cudaLaunchAttribute attribute[1];
+          attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+          attribute[0].val.programmaticStreamSerializationAllowed = 1; cfg.attrs = attribute;
+          cfg.numAttrs = 1;
+
           switch (scaling_type) {
             case ScalingType::ROWWISE:
               cudaFuncSetAttribute(
@@ -1128,13 +1141,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                   false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                       false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
             case ScalingType::COLWISE:
               cudaFuncSetAttribute(
@@ -1142,13 +1155,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
-                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
             case ScalingType::BIDIMENSIONAL:
               cudaFuncSetAttribute(
@@ -1156,13 +1169,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true, true,
-                                   CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
           }
 
@@ -1308,7 +1321,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
   if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
     // zhongboz: should we just ignore IS_ACT here?
     NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-               " on GPU with compute capability < 10.0.");
+               " or IS_DBIAS=true" + " on GPU with compute capability < 10.0.");
   }
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {

@@ -13,7 +13,6 @@ The implementation supports various normalization types, activation functions,
 quantization, and distributed training through sharding constraints.
 """
 
-import warnings
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
 
@@ -29,20 +28,6 @@ from .quantize import (
     noop_quantizer_set,
     TensorUsage,
 )
-from .sharding import (
-    get_non_contracting_logical_axes,
-    get_sequence_parallel_dim,
-)
-
-
-LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED = False
-
-
-def _issue_batch_first_warning(msg):
-    global LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED
-    if not LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED:
-        warnings.warn(msg, UserWarning)
-        LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED = True
 
 
 def layernorm_mlp(
@@ -62,7 +47,6 @@ def layernorm_mlp(
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
-    batch_first: bool = True,
     quantizer_sets: Tuple[QuantizerSet] = (noop_quantizer_set, noop_quantizer_set),
 ) -> jnp.ndarray:
     """Apply layer normalization followed by MLP block.
@@ -94,7 +78,6 @@ def layernorm_mlp(
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
         activation_type: Activation function(s) to apply after the first dense layer transformation
-        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
         quantizer_sets: Tuple of two quantizer sets for the two dense layer transformations
 
     Returns:
@@ -140,13 +123,12 @@ def layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
-        batch_first,
         quantizer_sets,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -166,7 +148,6 @@ def _layernorm_mlp(
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
-    batch_first: bool,
     quantizer_sets,
 ):
     """Internal implementation of layernorm_mlp with custom VJP.
@@ -192,7 +173,6 @@ def _layernorm_mlp(
         ffn1_ckpt_name: Name for first feed-forward network checkpointing
         ffn2_ckpt_name: Name for second feed-forward network checkpointing
         activation_type: Activation function(s)
-        batch_first: Assume that X is batched in the first dimension.
         quantizer_sets: Tuple of quantizer sets
 
     Returns:
@@ -217,7 +197,6 @@ def _layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
-        batch_first,
         quantizer_sets,
     )
     return output
@@ -242,7 +221,6 @@ def _layernorm_mlp_fwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
-    batch_first,
     quantizer_sets,
 ):
     """Forward pass rule for layernorm_mlp.
@@ -259,7 +237,7 @@ def _layernorm_mlp_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
-    del kernel_2_axes
+    del kernel_1_axes, kernel_2_axes
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
@@ -274,17 +252,6 @@ def _layernorm_mlp_fwd_rule(
     k_contracting_dims = (0,)
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
-
-    x_bdim = None
-    if x.ndim > 2:
-        if not batch_first:
-            _issue_batch_first_warning(
-                "TE/JAX `layernorm_mlp()` fused-layer implementation does not officially "
-                "support sequence-first inputs and may produce incorrect results when "
-                "`batch_first=False` or `transpose_batch_sequence=True`. Use sequence-first "
-                "inputs at your own discretion."
-            )
-        x_bdim = 0 if batch_first else x.ndim - 2
 
     use_bias_1 = bias_1 is not None
     use_bias_2 = bias_1 is not None
@@ -313,17 +280,9 @@ def _layernorm_mlp_fwd_rule(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
-        batched_dims=((x_bdim,), ()),
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
     )
-
-    if dot_1_input_axes is not None and kernel_1_axes is not None:
-        dot_1_output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
-        )
-        dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
         bias_1_shape = bias_1.shape
@@ -345,16 +304,12 @@ def _layernorm_mlp_fwd_rule(
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    sequence_dim = get_sequence_parallel_dim(norm_input_axes, x_contracting_dims, (x_bdim,))
     dot_2_output = tex.gemm(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
-        batched_dims=((x_bdim,), ()),
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
-        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
-        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     if use_bias_2 and tex.gemm_uses_jax_dot():
@@ -382,8 +337,6 @@ def _layernorm_mlp_fwd_rule(
         use_bias_1,
         use_bias_2,
         quantizer_sets,
-        x_bdim,
-        sequence_dim,
     )
 
     return dot_2_output, ctx
@@ -401,7 +354,6 @@ def _layernorm_mlp_bwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
-    batch_first,
     ctx,
     grad,
 ):
@@ -418,7 +370,7 @@ def _layernorm_mlp_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
-    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name, batch_first
+    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name
     (
         x,
         mu,
@@ -437,8 +389,6 @@ def _layernorm_mlp_bwd_rule(
         use_bias_1,
         use_bias_2,
         quantizer_sets,
-        x_bdim,
-        sequence_dim,
     ) = ctx
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
@@ -465,7 +415,6 @@ def _layernorm_mlp_bwd_rule(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel_2,
         contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
-        batched_dims=((x_bdim,), ()),
     )
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
@@ -480,7 +429,6 @@ def _layernorm_mlp_bwd_rule(
         casted_act_out,
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
-        batched_dims=((x_bdim,), (x_bdim,)),
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -508,9 +456,6 @@ def _layernorm_mlp_bwd_rule(
         casted_dact_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1,
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
-        batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
-        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
@@ -521,7 +466,6 @@ def _layernorm_mlp_bwd_rule(
         casted_ln_out,
         casted_dact_out.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
-        batched_dims=((x_bdim,), (x_bdim,)),
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
