@@ -49,28 +49,15 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
-    IS_FSDP_OUTER = bool(int(os.environ.get("NVTE_OUTER_BATCH_FSDP_DIM", False)))
-
-    batch_resources = (
-        [gsr.fsdp_resource, gsr.dp_resource]
-        if IS_FSDP_OUTER
-        else [gsr.dp_resource, gsr.fsdp_resource]
+    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
+    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
+    assert not (is_dp_enabled and is_fsdp_enabled), (
+        f"Data parallelism and full-sharded data parallelism should not be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
     )
 
-    batch_dim_rule = []
-    for resource in batch_resources:
-        if resource is not None and resource not in batch_dim_rule:
-            batch_dim_rule.append(resource)
-
-    if len(batch_dim_rule) <= 0:
-        batch_dim_rule = None
-    elif len(batch_dim_rule) == 1:
-        batch_dim_rule = batch_dim_rule[0]
-    else:
-        batch_dim_rule = tuple(batch_dim_rule)
-
     te_logical_axis_to_mesh_axis = {
-        BATCH_AXES: batch_dim_rule,
+        BATCH_AXES: gsr.dp_resource if is_dp_enabled else gsr.fsdp_resource,
         SEQLEN_AXES: None,
         SEQLEN_TP_AXES: gsr.tp_resource,
         SEQLEN_CP_AXES: gsr.cp_resource,
@@ -351,52 +338,3 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
-
-
-# Deprecating Items ---------------------------------------------------------------
-ShardingResource = MeshResource
-
-global_shard_resource = global_mesh_resource
-
-
-class MajorShardingType(Enum):
-    """Enumeration of major sharding types for distributed training.
-
-    This enum defines the basic sharding patterns available for distributed
-    training. Note that this class is deprecated and will be removed in the future.
-
-    Values:
-        SINGLE: Single process training
-        DP: Data parallel training
-        TP: Standard tensor parallel training
-        DPTP: Data and standard tensor parallel training
-    """
-
-    SINGLE = 0
-    DP = 1
-    TP = 2
-    DPTP = 3
-
-
-class ShardingType(Enum):
-    """Enumeration of detailed sharding types for distributed training.
-
-    This enum defines specific sharding patterns for distributed training,
-    including combinations of data parallelism and different tensor parallelism
-    strategies. Note that this class is deprecated and will be removed in the future.
-
-    Values:
-        SINGLE: No sharding
-        DP: Sharding along data parallelism
-        TP_COL: Sharding along column-split tensor parallelism
-        TP_ROW: Sharding along row-split tensor parallelism
-        DP_TP_COL: Sharding along data and column-split tensor parallelism
-        DP_TP_ROW: Sharding along data and row-split tensor parallelism
-    """
-
-    SINGLE = (MajorShardingType.SINGLE, "single")
-    DP = (MajorShardingType.DP, "dp")
-    TP_COL = (MajorShardingType.TP, "tp_col")
-    TP_ROW = (MajorShardingType.TP, "tp_row")
-    DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
-    DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
