@@ -21,8 +21,3 @@ RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
 RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \
     && rm -rf /opt/transformerengine/qa/L?_jax_* \
     || [[ "${FRAMEWORK}" =~ jax|all ]]
-
-# Remove PaddlePaddle tests if not needed
-RUN [[ ! "${FRAMEWORK}" =~ paddle|all ]] \
-    && rm -rf /opt/transformerengine/qa/L?_paddle_* \
-    || [[ "${FRAMEWORK}" =~ paddle|all ]]
