@@ -320,11 +320,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         self.to(dtype).cuda()
         self.hidden_size = config.hidden_size
 
-        self._model_context_phase = GemmaModelWrapper(
-            self.model,
-            dtype,
-            self.lm_head
-        )
+        self._model_context_phase = GemmaModelWrapper(self.model, dtype, self.lm_head)
 
         self._model_generation_phase = GemmaGenerationWrapper(
             lm_head=self.lm_head,
@@ -413,7 +409,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         )
         return generation_buffer
 
-    def setup_and_run_context_phase(self, input_ids: torch.Tensor, inference_params: InferenceParams):
+    def setup_and_run_context_phase(
+        self, input_ids: torch.Tensor, inference_params: InferenceParams
+    ):
         """
         Runs the context or prefill phase of the model.
 
@@ -461,11 +459,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
 
         # Both autocasts are needed: FP8 for operations that can run in lower
         # precision and BF16 for those that cannot.
-        with autocast('cuda',dtype=torch.bfloat16, cache_enabled=False), \
-             te.pytorch.fp8_autocast(
-                enabled=self.config.fp8,
-                fp8_recipe=self.fp8_recipe if self.config.fp8 else None
-             ):
+        with autocast("cuda", dtype=torch.bfloat16, cache_enabled=False), te.pytorch.fp8_autocast(
+            enabled=self.config.fp8, fp8_recipe=self.fp8_recipe if self.config.fp8 else None
+        ):
             lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze()
             # If padding is at the beginning, then shift it to the end
             TEGemmaForCausalLM._padding_to_end(
@@ -500,9 +496,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 dtype=torch.bfloat16,
                 is_paged=self.config.is_paged,
                 page_size=16,
-                total_num_pages=batch_size
-                * max_input_sequence_len
-                // 16,
+                total_num_pages=batch_size * max_input_sequence_len // 16,
             )
 
             # Set the inference params for both the context/prefill phase and
@@ -511,7 +505,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             self._model_generation_phase.set_inference_params(inference_params)
 
             # Context/prefill phase.
-            hidden_states, next_tokens = self.setup_and_run_context_phase(input_ids, inference_params)
+            hidden_states, next_tokens = self.setup_and_run_context_phase(
+                input_ids, inference_params
+            )
 
             # Generation phase.
             lengths_tensor = torch.ones((next_tokens.shape[0],), dtype=int)
@@ -532,8 +528,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 # for every sequence.
                 lengths_tensor = torch.ones((next_tokens.shape[0],), dtype=int)
                 inference_params.pre_step(
-                    OrderedDict(zip(list(range(len(lengths_tensor))),
-                    lengths_tensor.tolist()))
+                    OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist()))
                 )
 
                 # `next_tokens` is a static output tensor, so we need to clone
@@ -629,9 +624,9 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         )
 
         # Hardcoded value for the context length.
-        lengths = torch.tensor(
-            [9] * self.config.cuda_graphs_static_batch_size
-        ).to(device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([9] * self.config.cuda_graphs_static_batch_size).to(
+            device="cuda", dtype=torch.int32
+        )
         self.inference_params.pre_step(
             OrderedDict(zip(list(range(len(lengths))), lengths.tolist()))
         )
@@ -693,7 +688,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
 
         # We need both autocasts: FP8 for operations that can run in lower
         # precision and BF16 for those that cannot.
-        with autocast('cuda', dtype=torch.bfloat16, cache_enabled=False):
+        with autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
             graphed_function = te.pytorch.make_graphed_callables(
                 function,
                 (input_tensor,),
