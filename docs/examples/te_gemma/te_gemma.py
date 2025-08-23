@@ -20,6 +20,119 @@ from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConf
 
 import torch.nn.functional as F
 
+"""
+Top level description of the classes used in the tutorial from this file.
+----------------------------------------------------------------------
+
+HuggingFace Gemma Model implementation hierarchy:
+----------------------------------
+GemmaDecoderLayer:
+├── self_attn:
+│   ├── norm: (nn.LayerNorm)
+│   ├── qkv_proj: (nn.Linear)
+│   ├── attention: (SDPA, FlashAttention, etc.)
+│   └── o_proj: (nn.Linear)
+├── ffn:
+│   ├── norm: (nn.LayerNorm)
+│   ├── gate_proj: (nn.Linear)
+│   ├── up_proj: (nn.Linear)
+│   └── down_proj: (nn.Linear)
+
+GemmaModel:
+├── embed_tokens         : Token embedding layer
+├── layers               : GemmaDecoderLayer × N
+├── norm                 : GemmaRMSNorm
+└── rotary_emb           : GemmaRotaryEmbedding
+
+GemmaForCausalLM:
+├── model                : instance of GemmaModel
+├── lm_head              : (nn.Linear) hidden states to vocabulary logits for generation
+└── generate             : generate method (input prompt -> GemmaForCausalLM -> next tokens)
+
+How `generate()` works in HF's GemmaForCausalLM:
+    1. prefill (input prompt -> model -> lm_head -> logits -> next token)
+    2. loop until max_new_tokens:
+        - next token -> model -> lm_head -> logits -> next token
+    3. return all tokens
+
+NOTE: Notice how "prefill" and "loop until next tokens" are just part of the `generate()` method.
+      This is a common pattern in HF models.
+
+
+TransformerEngine's Gemma Model Hierarchy:
+----------------------------------------
+HF's `GemmaDecoderLayer` is monkey-patched with `TEGemmaDecoderLayer` before `GemmaForCausalLM` is initialized. This way,
+while the model is downloaded from HuggingFace and most of the code runs from HF's `GemmaForCausalLM`, the underlying
+blocks of "transformer layer" are actually from TransformerEngine.
+
+TEGemmaDecoderLayer (inherits from te.TransformerLayer):
+├── te.MultiHeadAttention:
+│   ├── linear_qkv: (te.LayerNormLinear)
+│   ├── attention: (te.DotProductAttention)
+│   └── out_proj: (te.LayerNormLinear)
+├── te.LayerNormMLP:
+│   ├── fc1: (te.LayerNormLinear)
+│   ├── fc2: (te.Linear)
+│   └── activation: (te.GeGLU)
+
+To be able to use `model.generate()`, an entry point is needed. `TEGemmaForCausalLM` is the entry point which
+subclasses HF's `GemmaForCausalLM` and adds a few attributes and methods.
+
+TEGemmaForCausalLM (inherits from HF's GemmaForCausalLM)
+├─ model                    : inherited from HF's GemmaForCausalLM but with monkey-patched TEGemmaDecoderLayer × N
+├─ lm_head                  : directly inherited from HF's GemmaForCausalLM
+├─ hidden_states_buffer     : shape [b, max_ctx, h]                             (static)
+├─ generation_buffer        : shape [b, 1, h] (view of `hidden_states_buffer`)  (static)
+├─ inference_params         : TransformerEngine KV cache
+├─ model_context_phase      : GemmaModelWrapper  → uses (model, lm_head, inference_params) for full-sequence prefill
+├─ model_generation_phase   : GemmaGenerationWrapper → uses (model, lm_head, inference_params) for single-token decode
+└─ generate                 : generate method (input prompt -> TEGemmaForCausalLM -> next tokens)
+
+Notice how "prefill" and "loop until next tokens" are specialized to wrapper subroutines - "model_context_phase" and
+"model_generation_phase" respectively which makes it easier to use CUDA Graphs. Just one more abstraction is needed:
+
+TEGemmaForCausalLMCudaGraphs (inherits from TEGemmaForCausalLM)
+├─ model                    : unchanged (HF's GemmaModel with monkey-patched TEGemmaDecoderLayer × N)
+├─ lm_head                  : unchanged
+├─ hidden_states_buffer     : unchanged
+├─ generation_buffer        : unchanged
+├─ inference_params         : unchanged
+├─ record                   : utility function to record the graphed callable
+├─ model_context_phase      : GraphedCallable(for Context/prefill) replaced by `record`
+├─ model_generation_phase   : GraphedCallable(for Generation) replaced by `record`
+└─ generate                 : unchanged
+
+How `generate()` works in TEGemmaForCausalLM/TEGemmaForCausalLMCudaGraphs:
+    1. model_context_phase (input prompt -> model -> lm_head -> logits -> next token)
+    2. model_generation_phase:
+        - loop until max_new_tokens:
+            - next token -> model -> lm_head -> logits -> next token
+    3. return all tokens
+
+NOTE: In the tutorial, `record` is called when initializing the model.
+
+Additional notes and clarifications
+-----------------------------------
+- Wrappers, not submodules:
+  `model_context_phase` and `model_generation_phase` are convenience wrappers over the same
+  `model` (GemmaModel) and `lm_head`. They own no parameters; they standardize buffer usage,
+  masks (context uses "padding_causal", generation uses "padding"), rotary embeddings, and
+  KV-cache (`InferenceParams`) flow for TE-optimized inference.
+
+- Buffer relationship:
+  `hidden_states_buffer` has shape [b, max_ctx, h]. `generation_buffer` is a contiguous view
+  of size [b, 1, h] carved from its start to avoid non-contiguous indexing. Generation updates
+  `generation_buffer` in-place with next-token embeddings.
+
+- Padding policy:
+  Inputs may arrive left-padded (HF-style). Before TE execution, padding is shifted to the end
+  to match TE attention mask expectations and to keep shapes contiguous for capture/replay.
+
+- CUDA Graphs specifics:
+  `record()` captures two separate callables (context/prefill and generation) with fixed shapes and
+  stable pointers, then replaces the wrappers with these GraphedCallables. Under graphs, the
+  functional behavior is identical; only allocation/pointer churn and CPU overhead are removed.
+"""
 
 class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
     """
