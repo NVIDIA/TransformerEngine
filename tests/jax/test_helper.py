@@ -146,15 +146,15 @@ class TestFP8Functions(unittest.TestCase):
         ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
 
         mesh_s = (
-            (MeshResource(None, None)),
-            (MeshResource("dp", None)),
-            (MeshResource(None, "tp")),
-            (MeshResource("dp", "tp")),
+            (MeshResource(dp_resource=None, tpsp_resource=None)),
+            (MeshResource(dp_resource="dp", tpsp_resource=None)),
+            (MeshResource(dp_resource=None, tpsp_resource="tpsp")),
+            (MeshResource(dp_resource="dp", tpsp_resource="tpsp")),
         )
         # TODO (Ming Huang): Support multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
-        with jax.sharding.Mesh(devices, ("dp", "tp")):
+        with jax.sharding.Mesh(devices, ("dp", "tpsp")):
             for sr in mesh_s:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=sr):
                     self.assertTrue(QuantizeConfig.is_fp8_enabled())
