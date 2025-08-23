@@ -493,10 +493,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
         if self.fp8_parameters or fp8_enabled:
-            if (
-                self.fp8_initialized
-                and fp8_autocast_recipe == self.fp8_meta["recipe"]
-            ):
+            if self.fp8_initialized and fp8_autocast_recipe == self.fp8_meta["recipe"]:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
             if fp8_autocast_recipe.delayed():

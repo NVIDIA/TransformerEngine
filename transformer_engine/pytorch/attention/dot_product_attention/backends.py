@@ -19,7 +19,10 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
 )
 from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
@@ -968,9 +971,7 @@ class FusedAttnFunc(torch.autograd.Function):
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
-                q_fp8, k_fp8, v_fp8 = combine_and_quantize(
-                    qkv_layout, q, k, v, QKV_quantizer
-                )
+                q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
 
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1217,11 +1218,16 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8._quantizer,
                         ctx.dP_quantizer,
                     ]
-                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
+                        int(os.getenv("NVTE_PRINT", "0"))
+                    ):
                         for i, x in enumerate(quantizers):
                             if x is not None:
                                 if x.amax.isnan():
-                                    print(f'>>>> before dqkv.isnan: {[x.isnan().sum() for x in [dq_, dk_, dv_]]}')
+                                    print(
+                                        ">>>> before dqkv.isnan:"
+                                        f" {[x.isnan().sum() for x in [dq_, dk_, dv_]]}"
+                                    )
 
                     # q_fp8, k_fp8, v_fp8, out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16,
                     #                               fp8_dtype = tex.DType.kFloat8E4M3
@@ -1265,7 +1271,10 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
                     dq, dk, dv = dq_, dk_, dv_
-                    if all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_]) and not ctx.is_input_fp8:
+                    if (
+                        all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_])
+                        and not ctx.is_input_fp8
+                    ):
                         dq, dk, dv = combine_and_dequantize(
                             ctx.qkv_layout,
                             dq_fp8,
@@ -1273,13 +1282,18 @@ class FusedAttnFunc(torch.autograd.Function):
                             dv_fp8,
                             src_nominal_dtype=dq_fp8.dtype,
                         )
-                    if not all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_]) and ctx.is_input_fp8:
+                    if (
+                        not all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_])
+                        and ctx.is_input_fp8
+                    ):
                         # return dq_fp8, dk_fp8, dv_fp8
                         dq, dk, dv = combine_and_quantize(
                             ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
 
-                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
+                        int(os.getenv("NVTE_PRINT", "0"))
+                    ):
                         for i, x in enumerate(quantizers):
                             if x is None:
                                 print(f">>>> {names[i]}: None")
@@ -1290,8 +1304,14 @@ class FusedAttnFunc(torch.autograd.Function):
                                     f" {x.scale=}, {x.amax=}"
                                 )
                                 if x.amax.isnan():
-                                    print(f'>>>> dqkv.isnan: {[(x.dtype, x.isnan().sum()) for x in [dq_, dk_, dv_]]}')
-                        print(f'>>>> dqkv.minmax: {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}')
+                                    print(
+                                        ">>>> dqkv.isnan:"
+                                        f" {[(x.dtype, x.isnan().sum()) for x in [dq_, dk_, dv_]]}"
+                                    )
+                        print(
+                            ">>>> dqkv.minmax:"
+                            f" {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}"
+                        )
 
                 else:
                     if isinstance(d_out, QuantizedTensor):

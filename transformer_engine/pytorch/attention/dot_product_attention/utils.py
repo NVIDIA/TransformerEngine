@@ -1814,10 +1814,10 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
-#    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
-#        names = ["QKV_quantizer", "O_quantizer", "S_quantizer", "dQKV_quantizer", "dO_quantizer", "dP_quantizer"]
-#        for i,x in enumerate([QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer]):
-#            print(f">>>> utils {names[i]}: {x}, {x.scale=}, {x.amax=}")
+    #    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+    #        names = ["QKV_quantizer", "O_quantizer", "S_quantizer", "dQKV_quantizer", "dO_quantizer", "dP_quantizer"]
+    #        for i,x in enumerate([QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer]):
+    #            print(f">>>> utils {names[i]}: {x}, {x.scale=}, {x.amax=}")
 
     # Force certain values to be fixed
     # Can be used in experiments: 1) DS, 2) CS + NVTE_DPA_FORCE_DS, 3) CS + not NVTE_DPA_FORCE_DS
