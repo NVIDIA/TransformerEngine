@@ -134,6 +134,7 @@ Additional notes and clarifications
   functional behavior is identical; only allocation/pointer churn and CPU overhead are removed.
 """
 
+
 class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
     """
     Wrapper class over TE's `TransformerLayer`. This makes the wrapper very
