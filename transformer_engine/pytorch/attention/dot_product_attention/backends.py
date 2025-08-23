@@ -19,7 +19,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
 )
 from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
-from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
@@ -927,17 +927,9 @@ class FusedAttnFunc(torch.autograd.Function):
         quantizers,
         deterministic,
         fp8_output,
+        layer_number,
     ):
         # pylint: disable=missing-function-docstring
-        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
-        orig_primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        primary_recipe = fp8_meta["recipe"]
-        if orig_primary_recipe.delayed():
-            pass
-        if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
-            primary_recipe = orig_primary_recipe
-        if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
-            pass
 
         # add NVTX range
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
@@ -977,7 +969,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(
-                    primary_recipe, qkv_layout, q, k, v, QKV_quantizer
+                    qkv_layout, q, k, v, QKV_quantizer
                 )
 
             # out_:
@@ -1017,10 +1009,11 @@ class FusedAttnFunc(torch.autograd.Function):
             # out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
             out_fp8 = out_
             out = out_
-            if primary_recipe.delayed():
+
+            if isinstance(out_, Float8Tensor):
                 if not is_output_fp8 or not is_bwd_fp8:
                     out = out_.dequantize().view(out_.shape)
-            if primary_recipe.float8_current_scaling():
+            else:
                 if is_output_fp8 or is_bwd_fp8:
                     out_fp8 = O_quantizer(out_)
 
@@ -1030,7 +1023,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # save appropriate tensors
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8) if is_bwd_fp8 else (None, None, None, None)
             if not is_bwd_fp8 and is_input_fp8:
-                q, k, v = combine_and_dequantize(primary_recipe, qkv_layout, q_fp8, k_fp8, v_fp8)
+                q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
             qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1104,11 +1097,10 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
         ctx.S_quantizer = S_quantizer
-        if ctx.fp8 and primary_recipe.delayed():
+        if ctx.fp8:
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
-        ctx.primary_recipe = primary_recipe
-        ctx.orig_primary_recipe = orig_primary_recipe
+        ctx.layer_number = layer_number
 
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -1130,7 +1122,6 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
-        primary_recipe = ctx.primary_recipe
         if ctx.is_output_fp8:
             assert isinstance(d_out, Float8Tensor), (
                 "Gradient of the DPA output is expected to be in Float8Tensor type but found"
@@ -1210,6 +1201,28 @@ class FusedAttnFunc(torch.autograd.Function):
                     # get tex.DType for dq, dk, dv data
                     dqkv_te_dtype = d_out_fp8._fp8_dtype
 
+                    names = [
+                        "QKV_quantizer ",
+                        "O_quantizer   ",
+                        "S_quantizer   ",
+                        "dQKV_quantizer",
+                        "dO_quantizer  ",
+                        "dP_quantizer  ",
+                    ]
+                    quantizers = [
+                        q_fp8._quantizer,
+                        out_fp8._quantizer,
+                        ctx.S_quantizer,
+                        ctx.dQKV_quantizer,
+                        d_out_fp8._quantizer,
+                        ctx.dP_quantizer,
+                    ]
+                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+                        for i, x in enumerate(quantizers):
+                            if x is not None:
+                                if x.amax.isnan():
+                                    print(f'>>>> before dqkv.isnan: {[x.isnan().sum() for x in [dq_, dk_, dv_]]}')
+
                     # q_fp8, k_fp8, v_fp8, out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16,
                     #                               fp8_dtype = tex.DType.kFloat8E4M3
                     # d_out_fp8:                    Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1252,41 +1265,21 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
                     dq, dk, dv = dq_, dk_, dv_
-                    if primary_recipe.delayed() and not ctx.is_input_fp8:
+                    if all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_]) and not ctx.is_input_fp8:
                         dq, dk, dv = combine_and_dequantize(
-                            primary_recipe,
                             ctx.qkv_layout,
                             dq_fp8,
                             dk_fp8,
                             dv_fp8,
                             src_nominal_dtype=dq_fp8.dtype,
                         )
-                    if primary_recipe.float8_current_scaling() and ctx.is_input_fp8:
+                    if not all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_]) and ctx.is_input_fp8:
                         # return dq_fp8, dk_fp8, dv_fp8
                         dq, dk, dv = combine_and_quantize(
-                            primary_recipe, ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
+                            ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
 
-                    names = [
-                        "QKV_quantizer ",
-                        "O_quantizer   ",
-                        "S_quantizer   ",
-                        "dQKV_quantizer",
-                        "dO_quantizer  ",
-                        "dP_quantizer  ",
-                    ]
-                    quantizers = [
-                        q_fp8._quantizer,
-                        out_fp8._quantizer,
-                        ctx.S_quantizer,
-                        ctx.dQKV_quantizer,
-                        d_out_fp8._quantizer,
-                        ctx.dP_quantizer,
-                    ]
-                    if torch.cuda.current_device() == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
-                        print(f">>>> autocast recipe: {ctx.orig_primary_recipe}")
-                        print(f">>>> Module recipe  : {ctx.fp8_meta["recipe"]}")
-                        print(f">>>> Func recipe    : {primary_recipe}")
+                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
                         for i, x in enumerate(quantizers):
                             if x is None:
                                 print(f">>>> {names[i]}: None")
@@ -1296,6 +1289,10 @@ class FusedAttnFunc(torch.autograd.Function):
                                     f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
                                     f" {x.scale=}, {x.amax=}"
                                 )
+                                if x.amax.isnan():
+                                    print(f'>>>> dqkv.isnan: {[(x.dtype, x.isnan().sum()) for x in [dq_, dk_, dv_]]}')
+                        print(f'>>>> dqkv.minmax: {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}')
+
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
@@ -1347,6 +1344,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             dbias,
+            None,
             None,
             None,
             None,
@@ -1659,6 +1657,7 @@ class FusedAttention(torch.nn.Module):
                     quantizers,
                     self.deterministic,
                     fp8_output,
+                    self.layer_number,
                 )
 
         # ...hd -> ...(hd)

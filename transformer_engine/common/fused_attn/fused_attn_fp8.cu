@@ -1784,16 +1784,14 @@ void fused_attn_fp8_fwd_impl_v1(
                                         .set_data_type(fe::DataType_t::FLOAT));
       descale_k = mha_graph->tensor_like(descale_q, "Descale_q");
       descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
+      descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
+      scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
 
       if (output_tensor_type == fwd_tensor_type) {
         // delayed scaling
-        descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
-        scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
         scale_o = mha_graph->tensor_like(descale_q, "Scale_O");
       } else {
         // current scaling
-        descale_s = mha_graph->tensor(1.0f / 448.0f);
-        scale_s = mha_graph->tensor(448.0f);
         scale_o = mha_graph->tensor(1.0f);
       }
 
@@ -1856,19 +1854,10 @@ void fused_attn_fp8_fwd_impl_v1(
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
 
-      if (output_tensor_type == fwd_tensor_type) {
-        // delayed scaling
-        amax_s->set_output(true)
-            .set_dim({1, 1, 1, 1})
-            .set_stride({1, 1, 1, 1})
-            .set_data_type(fe::DataType_t::FLOAT);
-      } else {
-        // current scaling
-        amax_s->set_output(false)
-            .set_dim({1, 1, 1, 1})
-            .set_stride({1, 1, 1, 1})
-            .set_data_type(fe::DataType_t::FLOAT);
-      }
+      amax_s->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
 
       Stats->set_output(true)
           .set_data_type(fe::DataType_t::FLOAT)
@@ -1935,17 +1924,17 @@ void fused_attn_fp8_fwd_impl_v1(
         {descale_q, devPtrDescaleQ},
         {descale_k, devPtrDescaleK},
         {descale_v, devPtrDescaleV},
+        {descale_s, devPtrDescaleS},
+        {scale_s, devPtrScaleS},
         {attn_scale, &scaling_factor},
         {O, devPtrO},
         {amax_o, devPtrAmaxO},
+        {amax_s, devPtrAmaxS},
         {Stats, devPtrM}};
 
     if (output_tensor_type == fwd_tensor_type) {
       // delayed scaling
-      variant_pack[descale_s] = devPtrDescaleS;
-      variant_pack[scale_s] = devPtrScaleS;
       variant_pack[scale_o] = devPtrScaleO;
-      variant_pack[amax_s] = devPtrAmaxS;
     }
 
     /* if (is_bias) {
@@ -2152,18 +2141,16 @@ void fused_attn_fp8_bwd_impl_v1(
       descale_dO = mha_graph->tensor_like(descale_q, "Descale_dO");
       descale_dP = mha_graph->tensor_like(descale_q, "Descale_dP");
       scale_dP = mha_graph->tensor_like(descale_q, "Scale_dP");
+      descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
+      scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
 
       if (output_tensor_type == bwd_tensor_type) {
         // delayed scaling
-        descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
-        scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
         scale_dQ = mha_graph->tensor_like(descale_q, "Scale_dQ");
         scale_dK = mha_graph->tensor_like(descale_q, "Scale_dK");
         scale_dV = mha_graph->tensor_like(descale_q, "Scale_dV");
       } else {
         // current scaling
-        descale_s = mha_graph->tensor(1.0f / 448.0f);
-        scale_s = mha_graph->tensor(448.0f);
         scale_dQ = mha_graph->tensor(1.0f);
         scale_dK = mha_graph->tensor(1.0f);
         scale_dV = mha_graph->tensor(1.0f);
@@ -2337,6 +2324,8 @@ void fused_attn_fp8_bwd_impl_v1(
         {descale_dO, devPtrDescaledO},
         {descale_dP, devPtrDescaledP},
         {scale_dP, devPtrScaledP},
+        {descale_s, devPtrDescaleS},
+        {scale_s, devPtrScaleS},
         {dQ, devPtrdQ},
         {dK, devPtrdK},
         {dV, devPtrdV},
@@ -2348,8 +2337,6 @@ void fused_attn_fp8_bwd_impl_v1(
 
     if (output_tensor_type == bwd_tensor_type) {
       // delayed scaling
-      variant_pack[descale_s] = devPtrDescaleS;
-      variant_pack[scale_s] = devPtrScaleS;
       variant_pack[scale_dQ] = devPtrScaledQ;
       variant_pack[scale_dK] = devPtrScaledK;
       variant_pack[scale_dV] = devPtrScaledV;

@@ -1808,53 +1808,29 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
     O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
 
-    S_quantizer = None
-    dP_quantizer = None
-    force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_DS", "0")))
-    orig_primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
-    primary_recipe = fp8_meta["recipe"]
-    if orig_primary_recipe.delayed():
-        pass
-    if orig_primary_recipe.float8_current_scaling() and not force_dpa_recipe_DS:
-        primary_recipe = orig_primary_recipe
-    if orig_primary_recipe.float8_current_scaling() and force_dpa_recipe_DS:
-        pass
-    if primary_recipe.delayed():
-        S_quantizer = quantizers["scaling_fwd"][META_S]
-        S_quantizer.internal = True
-        S_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer = quantizers["scaling_bwd"][META_DP]
-        dP_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer.interal = True
+    S_quantizer = quantizers["scaling_fwd"][META_S]
+    S_quantizer.set_usage(rowwise=True, columnwise=False)
+    S_quantizer.internal = True
+    dP_quantizer = quantizers["scaling_bwd"][META_DP]
+    dP_quantizer.set_usage(rowwise=True, columnwise=False)
+    dP_quantizer.interal = True
+#    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+#        names = ["QKV_quantizer", "O_quantizer", "S_quantizer", "dQKV_quantizer", "dO_quantizer", "dP_quantizer"]
+#        for i,x in enumerate([QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer]):
+#            print(f">>>> utils {names[i]}: {x}, {x.scale=}, {x.amax=}")
 
-        # these values can be set to validate between DS and CS
-        # S_quantizer.scale.fill_(448.0)
-        # O_quantizer.scale.fill_(1.0)
-        # dP_quantizer.scale.fill_(1.0)
-        # dQKV_quantizer.scale.fill_(1.0)
-
-    if primary_recipe.float8_current_scaling():
-        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-
-        dP_quantizer = quantizers["scaling_bwd"][META_DP]
-
-        # two options:
-        # 1) convert dP from Float8CurrentScalingQuantizer to Float8Quantizer;
-        #    dP.scale_inv gets updated as 1.0/dP.scale in Float8Quantizer.create_tensor();
-        #    mixed amax reduction/scale update is required: dP in DS stype and other tensors in CS;
-        dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
+    # Force certain values to be fixed
+    # Can be used in experiments: 1) DS, 2) CS + NVTE_DPA_FORCE_DS, 3) CS + not NVTE_DPA_FORCE_DS
+    # 1) and 2) are equivalent
+    # 3) has S, dP in DS; we can fix their scales here (so they're not delayed scaling), or let them be (and they will be DS style)
+    force_dpa_fixed_scales = bool(int(os.getenv("NVTE_DPA_Fixed_Scales", "0")))
+    if force_dpa_fixed_scales:
+        S_quantizer.scale.fill_(448.0)
         dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
-        dP_quantizer.amax.fill_(0.0)
 
-        # 2) stay with Float8CurrentScalingQuantizer;
-        #    set dP.scale to an estimate, and use the workaround in pytorch/extension/attention.cpp
-        #    to update dP.scale_inv;
-        #    different from 1), amax reduction/scale update is in CS style for all tensors;
-        #    quality of the gradients depend on the estimate of dP.scale, which can be collected from previous runs
-        # dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
-
-        dP_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer.interal = True
+        # CS + not NVTE_DPA_FORCE_DS: O.scale and dQKV.scale already set to 1 in cpp due to cuDNN requirements; no need to set here
+        # O_quantizer.scale.fill_(1.0)
+        # dQKV_quantizer.scale.fill_(1.0)
 
     if cp_specific_quantizers:
         return (
@@ -1871,7 +1847,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
 
-def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1919,7 +1895,7 @@ def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
 
 
 def combine_and_dequantize(
-    fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
+    qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")

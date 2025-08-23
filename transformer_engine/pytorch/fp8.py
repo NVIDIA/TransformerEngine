@@ -396,7 +396,7 @@ class FP8GlobalStateManager:
             if len(amax_buffer) == 0:
                 continue
 
-            if torch.cuda.current_device() == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
+            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
                 print(f">>>> reduce_and_update_fp8_tensors: {forward=}, {amax_buffer=}")
             # Retrieve autocast specific args and concat amaxes.
             recipe, group = cls.autocast_arguments[autocast_key]
@@ -417,6 +417,9 @@ class FP8GlobalStateManager:
                 or callable(recipe.scaling_factor_compute_algo)
             )
 
+            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))) and not forward:
+                print(f">>>> before reduce_and_update_fp8_tensors: {recipe.amax_compute_algo}, {cls.global_amax_history_buffer[buffer_key]=}")
+                print(f">>>> before reduce_and_update_fp8_tensors: {recipe.amax_compute_algo}, {cls.global_scale_buffer[buffer_key]=}")
             if not unfused_update:
                 tex.fused_amax_and_scale_update_after_reduction(
                     contiguous_amax,
@@ -436,6 +439,9 @@ class FP8GlobalStateManager:
                     _amax_and_scale_update(
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
+            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))) and not forward:
+                print(f">>>> after reduce_and_update_fp8_tensors: {cls.global_amax_history_buffer[buffer_key]=}")
+                print(f">>>> after reduce_and_update_fp8_tensors: {cls.global_scale_buffer[buffer_key]=}")
 
     @classmethod
     def get_unique_autocast_key(

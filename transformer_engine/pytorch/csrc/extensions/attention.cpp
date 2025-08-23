@@ -325,13 +325,6 @@ std::vector<py::object> fused_attn_bwd(
   std::tie(te_S, py_S) = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
   std::tie(te_dP, py_dP) =
       quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
-  if (detail::IsFloat8CurrentScalingQuantizers(dp_quantizer.ptr())) {
-    // workaround for dP: update scale_inv manually
-    const at::Tensor &scale = dp_quantizer.attr("scale").cast<at::Tensor>();
-    auto scale_inv = py_dP.attr("_scale_inv").cast<at::Tensor>();
-    scale_inv = at::reciprocal(scale);
-    te_dP.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
-  }
 
   // create dQ, dK, dV tensors
   TensorWrapper te_dQ, te_dK, te_dV;
