@@ -115,11 +115,10 @@ def _train(args):
         build_model_context = nullcontext
         build_model_context_args = {}
 
-
     # Build the model with the specified context
     with build_model_context(**build_model_context_args):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    
+
     # Move the model to the correct device
     model.to(device)
 
