@@ -16,6 +16,7 @@ from .tensor.float8_tensor import Float8Tensor
 __all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
+CPUOffloadedLayer = False
 
 
 def mark_activation_offload(*tensors):
@@ -408,6 +409,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor.clear()
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
+
+                    # Needed to differentiate non offloaded layer's attention
+                    # QKV layout of attention of non-offloaded layer needs
+                    # to be modified while reloading
+                    CPUOffloadedLayer = True
         else:
             tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
@@ -527,6 +533,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             # Increment the offload group count to keep track
             self.offloaded_group_count += 1
+
+        if current_group == (self.num_offload_group - 1):
+            CPUOffloadedLayer = False
 
         if not self.double_buffer_created:
             # Creating second copy of double buffer for tensors that are offloaded
