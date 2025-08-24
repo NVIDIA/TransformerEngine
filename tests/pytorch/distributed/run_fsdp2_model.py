@@ -105,13 +105,13 @@ def _train(args):
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
 
+    # Create build context manager
     if args.fp8_init:
         from transformer_engine.pytorch import fp8_model_init
 
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
     else:
-        # Build model context (FP8 init)
         build_model_context = nullcontext
         build_model_context_args = {}
 
