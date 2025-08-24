@@ -105,23 +105,22 @@ def _train(args):
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
 
-    if not args.fp8_init:
-        # Build model context (FP8 init)
-        build_model_context = nullcontext
-        build_model_context_args = {}
-
+    if args.fp8_init:
         from transformer_engine.pytorch import fp8_model_init
 
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
-
-        # Build the model with the specified context
-        with build_model_context(**build_model_context_args):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
     else:
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    # Move the model to the correct device
+        # Build model context (FP8 init)
+        build_model_context = nullcontext
+        build_model_context_args = {}
 
+
+    # Build the model with the specified context
+    with build_model_context(**build_model_context_args):
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
+    
+    # Move the model to the correct device
     model.to(device)
 
     if LOCAL_RANK == 0:
@@ -163,7 +162,8 @@ def _train(args):
         # Zero the parameter gradients
         optimizer.zero_grad()
         input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        output = model(input_data)
+        with te.fp8_autocast(enabled=True, recipe=fp8_recipe):
+            output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
         loss.backward()
