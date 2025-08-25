@@ -378,7 +378,6 @@ def _grouped_dense_fwd_rule(
 
     kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
     kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
-    original_quantizer_set_kernel_q_layout = quantizer_set.kernel.q_layout
 
     if is_noop_quantizer_set:
         grouped_gemm_x = x
@@ -390,6 +389,8 @@ def _grouped_dense_fwd_rule(
         if kernel_fsdp_enabled:
             kernel = _all_gather_kernel(kernel, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx)
     else:
+        original_quantizer_set_kernel_q_layout = quantizer_set.kernel.q_layout
+
         x_contracting_dims, k_contracting_dims = contracting_dims
         flatten_axis_x = -len(x_contracting_dims)
         flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
@@ -469,9 +470,9 @@ def _grouped_dense_fwd_rule(
         else:
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
 
-    # Reset quantizer_set.kernel.q_layout to align the PyTree as the given one.
-    # This is needed especially when kernel_fsdp_enabled == True AND FP8 enabled.
-    quantizer_set.kernel.q_layout = original_quantizer_set_kernel_q_layout
+        # Reset quantizer_set.kernel.q_layout to align the PyTree as the given one.
+        # This is needed especially when kernel_fsdp_enabled == True AND FP8 enabled.
+        quantizer_set.kernel.q_layout = original_quantizer_set_kernel_q_layout
 
     output = tex.grouped_gemm(
         grouped_gemm_x,
