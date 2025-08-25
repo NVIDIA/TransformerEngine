@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.module.base import get_workspace
 from ...cpp_extensions import general_gemm
 from ...distributed import (
     CudaRNGStatesTracker,
@@ -20,18 +19,24 @@ from ...distributed import (
     reduce_scatter_along_first_dim,
 )
 from ...fp8 import FP8GlobalStateManager, Recipe
-from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
+from ...module.base import (
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+    get_dummy_wgrad,
+    get_workspace,
+)
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
-from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
 )
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize, is_quantized_tensor
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -73,7 +78,8 @@ class BasicLinear(BasicOperation):
         weight's `main_grad` attribute instead of relying on PyTorch
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
-        meaningful.
+        meaningful. This is primarily intented to integrate with
+        Megatron-LM.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -979,20 +985,22 @@ class BasicLinear(BasicOperation):
         # Saved tensors from forward pass
         (x_local, w) = ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
-            if hasattr(self.weight, "__fsdp_param__"):
-                self.weight.main_grad = self.weight.get_main_grad()
-
-            if not hasattr(self.weight, "main_grad"):
+            weight_param = self.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = self.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -1019,6 +1027,17 @@ class BasicLinear(BasicOperation):
         # Clear input tensor if possible
         clear_tensor_data(x_local)
 
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
             grad_weight = None
+            weight_param = self.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
+
         return grad_input, [grad_weight]
