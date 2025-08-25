@@ -274,7 +274,15 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         self.original_shape = original_shape
         self.group_axis = group_axis
         super().__init__(
-            data, scale_inv, amax, scaling_mode, dq_dtype, _dq_func, is_colwise, data_layout, flatten_axis
+            data,
+            scale_inv,
+            amax,
+            scaling_mode,
+            dq_dtype,
+            _dq_func,
+            is_colwise,
+            data_layout,
+            flatten_axis,
         )
 
     def __post_init__(self):
@@ -417,7 +425,7 @@ class ScaledTensorFactory:
     def create_1x(
         data,
         scale_inv,
-        amax = None,
+        amax=None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         is_colwise=False,
@@ -512,7 +520,7 @@ class ScaledTensorFactory:
         scale_inv,
         colwise_data,
         colwise_scale_inv,
-        amax = None,
+        amax=None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
@@ -577,7 +585,7 @@ class ScaledTensorFactory:
         scale_inv: jnp.ndarray,
         colwise_data: jnp.ndarray,
         colwise_scale_inv: jnp.ndarray,
-        amax = None,
+        amax=None,
         scaling_mode: ScalingMode = ScalingMode.NO_SCALING,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         data_layout: str = "NN",
