@@ -1,0 +1,9 @@
+section_name_1:
+  enabled: true
+  layers:
+    layer_name_regex_pattern: ".*"
+  transformer_engine:
+    CustomPrecisionExampleFeature:
+      enabled: true
+      gemms: [fprop, wgrad, dgrad]
+      tensors: [activation, gradient]
