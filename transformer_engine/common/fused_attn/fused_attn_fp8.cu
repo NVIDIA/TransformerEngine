@@ -1111,6 +1111,7 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
         b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
         o_ragged_offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
@@ -1577,6 +1578,7 @@ void fused_attn_fp8_bwd_impl(
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
         b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
         o_ragged_offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
@@ -1933,6 +1935,7 @@ void fused_attn_fp8_fwd_impl_v1(
           b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }
@@ -2329,6 +2332,7 @@ void fused_attn_fp8_bwd_impl_v1(
           b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }

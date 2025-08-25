@@ -329,6 +329,7 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
           );                                                                  // NOLINT(*)
       );                                                                      // NOLINT(*)
   );                                                                          // NOLINT(*)
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // namespace dequantization
 
