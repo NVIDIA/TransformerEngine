@@ -177,7 +177,7 @@ class Float8Quantizer(Quantizer):
 
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
-        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item())
+        out = torch.ops.tex.fp8_dequantize(tensor._data, tensor._scale_inv)
         out = out.to(tensor.dtype)
         return out
 
@@ -350,15 +350,25 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Function using primitives with ONNX defined translations."""
-        raise NotImplementedError(
-            "Float8CurrentScalingQuantizer does not support ONNX quantization yet."
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data, scale_inv = torch.ops.tex.fp8_cs_quantize(tensor)
+        return Float8Tensor(
+            shape=data.shape,
+            dtype=torch.float32,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=False,
+            data_transpose=None,
+            quantizer=self,
         )
 
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
-        raise NotImplementedError(
-            "Float8CurrentScalingQuantizer does not support ONNX dequantization yet."
-        )
+        out = torch.ops.tex.fp8_dequantize(tensor._data, tensor._scale_inv)
+        out = out.to(tensor.dtype)
+        return out
 
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""
