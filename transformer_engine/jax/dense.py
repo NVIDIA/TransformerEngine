@@ -22,6 +22,7 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
 )
 
@@ -460,13 +461,17 @@ def _grouped_dense_fwd_rule(
                 ctx_kernel.scale_inv,
                 ctx_kernel.scaling_mode,
                 dq_dtype=ctx_kernel.dq_dtype,
-                is_colwise=True,
-                data_layout="T",
+                is_colwise=not is_fp8_gemm_with_all_layouts_supported(),
+                data_layout="N" if is_fp8_gemm_with_all_layouts_supported() else "T",
                 flatten_axis=ctx_kernel.flatten_axis,
                 group_sizes=ctx_kernel.group_sizes,
                 original_shape=kernel_shape,
                 group_axis=ctx_kernel.group_axis,
             )
+
+            if is_fp8_gemm_with_all_layouts_supported():
+                grouped_gemm_kernel, ctx_kernel = ctx_kernel, grouped_gemm_kernel
+
         else:
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
 
