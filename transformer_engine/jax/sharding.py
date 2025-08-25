@@ -40,6 +40,7 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
+
 def _validate_mesh_resource_configuration():
     """Validate that the mesh resource configuration is consistent and conflict-free."""
     gsr = global_mesh_resource()
