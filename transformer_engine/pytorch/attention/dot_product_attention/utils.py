@@ -1823,14 +1823,16 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     # Can be used in experiments: 1) DS, 2) CS + NVTE_DPA_FORCE_DS, 3) CS + not NVTE_DPA_FORCE_DS
     # 1) and 2) are equivalent
     # 3) has S, dP in DS; we can fix their scales here (so they're not delayed scaling), or let them be (and they will be DS style)
-    force_dpa_fixed_scales = bool(int(os.getenv("NVTE_DPA_Fixed_Scales", "0")))
-    if force_dpa_fixed_scales:
+    force_dpa_fix_S_scale = bool(int(os.getenv("NVTE_DPA_Fix_S_Scale", "0")))
+    if force_dpa_fix_S_scale:
         S_quantizer.scale.fill_(448.0)
+    force_dpa_fix_dP_scale = bool(int(os.getenv("NVTE_DPA_Fix_dP_Scale", "0")))
+    if force_dpa_fix_dP_scale:
         dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
 
-        # CS + not NVTE_DPA_FORCE_DS: O.scale and dQKV.scale already set to 1 in cpp due to cuDNN requirements; no need to set here
-        # O_quantizer.scale.fill_(1.0)
-        # dQKV_quantizer.scale.fill_(1.0)
+    # CS + not NVTE_DPA_FORCE_DS: O.scale and dQKV.scale already set to 1 in cpp due to cuDNN requirements; no need to set here
+    # O_quantizer.scale.fill_(1.0)
+    # dQKV_quantizer.scale.fill_(1.0)
 
     if cp_specific_quantizers:
         return (
