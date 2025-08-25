@@ -268,7 +268,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )[0]
 
         expected_underflows = (
-            ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
+            ((tensor_fp8.dequantize() == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
         )
 
         assert debug_api.transformer_engine.inspect_tensor_enabled(
