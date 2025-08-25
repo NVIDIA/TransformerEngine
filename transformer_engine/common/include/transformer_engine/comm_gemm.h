@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file gemm.h
+/*! \file comm_gemm.h
  *  \brief Functions for distributed (multi-GPU) matrix multiplication.
  *
  *  This API is a TE-native binding to cuBLASMp library.
