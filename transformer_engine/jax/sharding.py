@@ -42,6 +42,7 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
+
 def _validate_mesh_resource_configuration():
     """Validate that the mesh resource configuration is consistent and conflict-free."""
     gsr = global_mesh_resource()
@@ -51,13 +52,16 @@ def _validate_mesh_resource_configuration():
     is_tp_enabled = gsr.tp_resource is not None and physical_mesh.shape[gsr.tp_resource] > 1
     is_tpsp_enabled = gsr.tpsp_resource is not None and physical_mesh.shape[gsr.tpsp_resource] > 1
     is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
-    
+
     assert not (is_dp_enabled and is_fsdp_enabled), (
-        f"Data parallelism and full-sharded data parallelism cannot be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
+        "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
+        f" Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
     )
     assert not (is_tp_enabled and is_tpsp_enabled), (
-        f"Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time. Got tp_resource={gsr.tp_resource} and tpsp_resource={gsr.tpsp_resource}"
+        "Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time."
+        f" Got tp_resource={gsr.tp_resource} and tpsp_resource={gsr.tpsp_resource}"
     )
+
 
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
