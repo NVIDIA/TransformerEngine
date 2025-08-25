@@ -79,7 +79,18 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
+all_activations = [
+    "gelu",
+    "geglu",
+    "qgelu",
+    "qgeglu",
+    "relu",
+    "reglu",
+    "srelu",
+    "sreglu",
+    "silu",
+    "swiglu",
+]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -427,13 +438,16 @@ class TorchGroupedLinearWithPadding(nn.Module):
 
 
 _supported_act = {
-    "geglu": nn.GELU(approximate="tanh"),
     "gelu": nn.GELU(approximate="tanh"),
-    "reglu": nn.ReLU(),
-    "relu": nn.ReLU(),
-    "swiglu": nn.SiLU(),
+    "geglu": nn.GELU(approximate="tanh"),
     "qgelu": TorchQuickGELU(),
+    "qgeglu": TorchQuickGELU(),
+    "relu": nn.ReLU(),
+    "reglu": nn.ReLU(),
     "srelu": TorchSquaredRELU(),
+    "sreglu": TorchSquaredRELU(),
+    "silu": nn.SiLU(),
+    "swiglu": nn.SiLU(),
 }
 
 

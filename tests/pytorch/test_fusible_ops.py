@@ -1532,7 +1532,10 @@ class TestBasicOps:
         torch.testing.assert_close(y2_test, y2_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
+    @pytest.mark.parametrize(
+        "activation",
+        ("gelu", "geglu", "qgelu", "qgeglu", "relu", "reglu", "srelu", "sreglu", "silu", "swiglu"),
+    )
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1551,7 +1554,7 @@ class TestBasicOps:
 
         # Tensor dimensions
         in_shape = list(out_shape)
-        if activation in ("geglu", "reglu", "swiglu"):
+        if activation in ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"):
             in_shape[-1] *= 2
 
         # Skip invalid configurations
@@ -1578,14 +1581,26 @@ class TestBasicOps:
         y_ref: torch.Tensor
         if activation == "gelu":
             y_ref = torch.nn.functional.gelu(x_ref, approximate="tanh")
-        elif activation == "relu":
-            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "geglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.gelu(x1, approximate="tanh") * x2
+        elif activation == "qgelu":
+            y_ref = x_ref * torch.sigmoid(1.702 * x_ref)
+        elif activation == "qgeglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = x1 * torch.sigmoid(1.702 * x1) * x2
+        elif activation == "relu":
+            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "reglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.relu(x1) * x2
+        elif activation == "srelu":
+            y_ref = torch.nn.functional.relu(x_ref) ** 2
+        elif activation == "sreglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.relu(x1) ** 2 * x2
+        elif activation == "silu":
+            y_ref = torch.nn.functional.silu(x_ref)
         elif activation == "swiglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.silu(x1) * x2
@@ -1597,9 +1612,14 @@ class TestBasicOps:
         recipe = make_recipe(quantization)
         make_op = dict(
             gelu=te_ops.GELU,
-            relu=te_ops.ReLU,
             geglu=te_ops.GEGLU,
+            qgelu=te_ops.QGELU,
+            qgeglu=te_ops.QGEGLU,
+            relu=te_ops.ReLU,
             reglu=te_ops.ReGLU,
+            srelu=te_ops.SReLU,
+            sreglu=te_ops.SReGLU,
+            silu=te_ops.SiLU,
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
