@@ -14,7 +14,6 @@
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
-#include "common/util/cuda_runtime.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
@@ -167,12 +166,6 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
       tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
     }
   }
-
-// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
-// store to global memory.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaTriggerProgrammaticLaunchCompletion();
-#endif
 
   // Step 3: Store cast output, Step 4: do transpose within thread tile
   OVecCast tmp_output_c;
@@ -397,12 +390,6 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     }
   }
 
-// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
-// store to global memory.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaTriggerProgrammaticLaunchCompletion();
-#endif
-
   // Step 3: Store cast output, Step 4: do transpose within thread tile
   // Edge case: in the non-full tile case, there are three subcases
   // for full thread tile, it's the same thing here
@@ -526,15 +513,6 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
 
   const size_t num_blocks_x = DIVUP(row_length, BLOCK_TILE_DIM);
   const size_t num_blocks_y = DIVUP(num_rows, BLOCK_TILE_DIM);
-  dim3 grid(num_blocks_x, num_blocks_y, 1);
-  cudaLaunchAttribute attribute[1];
-  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attribute[0].val.programmaticStreamSerializationAllowed = 1;
-  cudaLaunchConfig_t cfg = {grid, THREADS_PER_BLOCK, 0, stream, NULL, 0};
-  if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) >= 90) {
-    cfg.attrs = attribute;
-    cfg.numAttrs = 1;
-  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
@@ -545,6 +523,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_transpose, kReturnTranspose,
 
+              dim3 grid(num_blocks_x, num_blocks_y, 1);
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
@@ -554,28 +533,26 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                   tensor_map_output_trans =
                       get_tensor_map<OutputType>(output_t, num_rows, row_length);
                 }
-                cudaLaunchKernelEx(&cfg,
-                                   block_scaled_cast_transpose_kernel<kReturnTranspose, float,
-                                                                      InputType, OutputType>,
-                                   reinterpret_cast<const InputType*>(input.dptr),
-                                   reinterpret_cast<OutputType*>(output.dptr),
-                                   reinterpret_cast<OutputType*>(output_t.dptr),
-                                   reinterpret_cast<float*>(scale_inv.dptr),
-                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                   scale_t_stride_y, epsilon, tensor_map_output_trans, pow_2_scale);
+                block_scaled_cast_transpose_kernel<kReturnTranspose, float, InputType, OutputType>
+                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                        reinterpret_cast<const InputType*>(input.dptr),
+                        reinterpret_cast<OutputType*>(output.dptr),
+                        reinterpret_cast<OutputType*>(output_t.dptr),
+                        reinterpret_cast<float*>(scale_inv.dptr),
+                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                        tensor_map_output_trans, pow_2_scale);
               } else {
-                cudaLaunchKernelEx(
-                    &cfg,
-                    block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float,
-                                                                  InputType, OutputType>,
-                    reinterpret_cast<const InputType*>(input.dptr),
-                    reinterpret_cast<OutputType*>(output.dptr),
-                    reinterpret_cast<OutputType*>(output_t.dptr),
-                    reinterpret_cast<float*>(scale_inv.dptr),
-                    reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                    scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                    pow_2_scale);
+                block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
+                                                              OutputType>
+                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                        reinterpret_cast<const InputType*>(input.dptr),
+                        reinterpret_cast<OutputType*>(output.dptr),
+                        reinterpret_cast<OutputType*>(output_t.dptr),
+                        reinterpret_cast<float*>(scale_inv.dptr),
+                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                        pow_2_scale);
               }  // full-tile
               )  // return_transpose
           )      // OutputType
