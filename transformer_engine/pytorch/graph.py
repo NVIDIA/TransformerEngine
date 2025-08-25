@@ -930,12 +930,12 @@ def make_graphed_callables(
         assert isinstance(fp8_enabled, bool), "fp8_enabled must be a bool or a tuple of bools"
         fp8_enabled = (fp8_enabled,) * len(modules)
     else:
-        assert len(fp8_enabled) == len(modules), "fp8_enabled must have the same length as modules"
+        assert len(fp8_enabled) == len(modules), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
     if any(fp8_enabled) and fp8_recipe is None:
         fp8_recipe = get_default_fp8_recipe()
     elif not any(fp8_enabled):
         fp8_recipe = None
-    module_uses_fp8 = dict(zip(modules, fp8_enabled))
+    module_uses_fp8 = dict(zip((id(m) for m in modules), fp8_enabled))
 
     # Store FP8 tensors to reset later.
     saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
@@ -952,7 +952,7 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            if not module_uses_fp8[self]:
+            if not module_uses_fp8.get(id(self), False):
                 fp8_context = contextlib.nullcontext()
             else:
                 fp8_context = fp8_autocast(
