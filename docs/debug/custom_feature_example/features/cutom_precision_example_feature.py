@@ -13,7 +13,6 @@ from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.pytorch.tensor import Quantizer
 
 
-
 def custom_precision_quantize(tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
     amax = torch.amax(tensor)
     scale = 1.0 / amax
@@ -34,7 +33,7 @@ class CustomPrecisionExampleFeature(TEConfigAPIMapper):
     @api_method
     def modify_tensor_enabled(
         self, config, layer_name: str, tensor_name: str, gemm: str, iteration: int
-    ):  
+    ):
         """API call used to determine whether to run process_tensor() in the forward."""
         return True, iteration + 1
 

@@ -10,12 +10,14 @@ from torch.utils.tensorboard import SummaryWriter
 
 writer = SummaryWriter(log_dir="runs/{}".format(time.time()))
 
+
 def init_model() -> torch.nn.Module:
     return te.TransformerLayer(
         hidden_size=1024,
         ffn_hidden_size=1024,
         num_attention_heads=16,
     )
+
 
 def run_example_fit(model: torch.nn.Module):
     output_tensor_ref = torch.randn(1, 1, 1024).cuda()
@@ -32,6 +34,7 @@ def run_example_fit(model: torch.nn.Module):
         get_tb_writer().add_scalar("Loss", loss.item(), i)
 
         debug_api.step()
+
 
 def get_tb_writer():
     return writer
