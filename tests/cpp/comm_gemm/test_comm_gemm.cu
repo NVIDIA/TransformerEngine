@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #include <cuda.h>
 #include <gtest/gtest.h>
 #include <mpi.h>
