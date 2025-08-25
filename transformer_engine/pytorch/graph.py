@@ -930,7 +930,9 @@ def make_graphed_callables(
         assert isinstance(fp8_enabled, bool), "fp8_enabled must be a bool or a tuple of bools"
         fp8_enabled = (fp8_enabled,) * len(modules)
     else:
-        assert len(fp8_enabled) == len(modules), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
+        assert len(fp8_enabled) == len(
+            modules
+        ), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
     if any(fp8_enabled) and fp8_recipe is None:
         fp8_recipe = get_default_fp8_recipe()
     elif not any(fp8_enabled):
