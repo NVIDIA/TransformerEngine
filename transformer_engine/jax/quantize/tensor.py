@@ -417,7 +417,7 @@ class ScaledTensorFactory:
     def create_1x(
         data,
         scale_inv,
-        amax = jnp.empty((1,), dtype=jnp.float32),
+        amax = None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         is_colwise=False,
@@ -438,13 +438,15 @@ class ScaledTensorFactory:
             is_colwise: Whether to use column-wise quantization (default: False)
             data_layout: The data_layout specification (default: "N")
             flatten_axis: The quantization axis for the tensor
-            group_sizes: Arra of ints containing the size of each group (default: None)
+            group_sizes: Array of ints containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
 
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
         """
+        amax = amax or jnp.empty((1,), dtype=jnp.float32)
+
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
         if group_sizes is not None:
@@ -509,7 +511,7 @@ class ScaledTensorFactory:
         scale_inv,
         colwise_data,
         colwise_scale_inv,
-        amax = jnp.empty((1,), dtype=jnp.float32),
+        amax = None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
@@ -536,6 +538,8 @@ class ScaledTensorFactory:
         Returns:
             A ScaledTensor2x instance
         """
+        amax = amax or jnp.empty((1,), dtype=jnp.float32)
+        
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
             data,
@@ -571,7 +575,7 @@ class ScaledTensorFactory:
         scale_inv: jnp.ndarray,
         colwise_data: jnp.ndarray,
         colwise_scale_inv: jnp.ndarray,
-        amax = jnp.empty((1,), dtype=jnp.float32),
+        amax = None,
         scaling_mode: ScalingMode = ScalingMode.NO_SCALING,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         data_layout: str = "NN",
