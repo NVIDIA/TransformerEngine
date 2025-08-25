@@ -37,9 +37,9 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto is_2x = static_cast<bool>(is_2x_int);
   auto flatten_axis = output_buf->dimensions().size() - 1;  // output does not have act axis
 
-  auto input_shape = std::vector<size_t>{m, act_len * n};
-  auto output_shape = std::vector<size_t>{m, n};
-  auto output_trans_shape = std::vector<size_t>{n, m};
+  auto input_shape = std::vector<size_t>{m, static_cast<size_t>(act_len * n)};
+  auto output_shape = std::vector<size_t>{m, static_cast<size_t>(n)};
+  auto output_trans_shape = std::vector<size_t>{static_cast<size_t>(n), m};
   auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
@@ -253,11 +253,11 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
   auto n = input_dims.back();
 
-  auto input_shape = std::vector<size_t>{m, n};
-  auto act_input_shape = std::vector<size_t>{m, n * act_len};
-  auto output_shape = std::vector<size_t>{m, n * act_len};
-  auto output_trans_shape = std::vector<size_t>{n * act_len, m};
-  auto dbias_shape = std::vector<size_t>{n * act_len};
+  auto input_shape = std::vector<size_t>{m, static_cast<size_t>(n)};
+  auto act_input_shape = std::vector<size_t>{m, static_cast<size_t>(n * act_len)};
+  auto output_shape = std::vector<size_t>{m, static_cast<size_t>(n * act_len)};
+  auto output_trans_shape = std::vector<size_t>{static_cast<size_t>(n * act_len), m};
+  auto dbias_shape = std::vector<size_t>{static_cast<size_t>(n * act_len)};
   std::vector<size_t> workspace_shape(workspace_dims.begin(), workspace_dims.end());
 
   auto input_tensor =
