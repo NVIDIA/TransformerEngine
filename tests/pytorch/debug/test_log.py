@@ -187,9 +187,7 @@ def test_numerics(fp8_recipe, feature_dirs):
         if "underflows%" in line:
             underflows = float(line.split("value=")[1])
             expected = (
-                ((dequantized_tensor == 0).sum() - (tensor == 0).sum())
-                / tensor.numel()
-                * 100
+                ((dequantized_tensor == 0).sum() - (tensor == 0).sum()) / tensor.numel() * 100
             )
             assert underflows == pytest.approx(expected.cpu(), abs=1e-4)
         if "mse" in line:
