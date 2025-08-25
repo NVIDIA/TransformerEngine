@@ -188,7 +188,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         assert scale_aval.dtype == jnp.float32
         return ffi.ffi_lowering(
             BaseDBiasQuantizePrimitive.name,
-            operand_output_aliases={ 2: 4}, # donate amax buffer to updated_amax
+            operand_output_aliases={2: 4},  # donate amax buffer to updated_amax
         )(
             ctx,
             x,

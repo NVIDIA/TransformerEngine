@@ -72,10 +72,10 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
 }
 
 Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
-                            Buffer_Type amax_buf,
-                            Result_Type output_buf, Result_Type output_trans_buf,
-                            Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
-                            Result_Type updated_amax_buf, Result_Type dbias_buf, Result_Type workspace_buf,
+                            Buffer_Type amax_buf, Result_Type output_buf,
+                            Result_Type output_trans_buf, Result_Type scale_inv_buf,
+                            Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
+                            Result_Type dbias_buf, Result_Type workspace_buf,
                             JAXX_Scaling_Mode scaling_mode, int64_t quantize_layout_enum,
                             bool is_dbias, int64_t flatten_axis) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
