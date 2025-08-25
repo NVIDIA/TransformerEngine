@@ -445,7 +445,8 @@ class ScaledTensorFactory:
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
         """
-        amax = amax or jnp.empty((1,), dtype=jnp.float32)
+        if amax is None:
+            amax = jnp.empty((1,), dtype=jnp.float32)
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
@@ -538,8 +539,9 @@ class ScaledTensorFactory:
         Returns:
             A ScaledTensor2x instance
         """
-        amax = amax or jnp.empty((1,), dtype=jnp.float32)
-        
+        if amax is None:
+            amax or jnp.empty((1,), dtype=jnp.float32)
+
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
             data,
