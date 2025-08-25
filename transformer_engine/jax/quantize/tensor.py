@@ -536,6 +536,7 @@ class ScaledTensorFactory:
             scale_inv: The row-wise inverse scaling factors
             colwise_data: The column-wise quantized data
             colwise_scale_inv: The column-wise inverse scaling factors
+            amax: The maximum absolute value of the tensor
             scaling_mode: The scaling mode for quantization
             dq_dtype: The data type for dequantized values (default: bfloat16)
             data_layout: The data_layout specification (default: "NN")
@@ -548,7 +549,7 @@ class ScaledTensorFactory:
             A ScaledTensor2x instance
         """
         if amax is None:
-            amax or jnp.empty((1,), dtype=jnp.float32)
+            amax = jnp.empty((1,), dtype=jnp.float32)
 
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
