@@ -211,23 +211,20 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     stats_to_num[stat_num] = len(stats_to_num)
     stats_to_num[stat_pct] = len(stats_to_num)
 
+    zero_values = torch.tensor([0, 127], device="cuda")
+
     STATS[stat_num] = (
-        lambda x, aux_dict: (
+        lambda x, aux_dict: 
             aux_dict[recipe_name].get_data_tensors(
                 rowwise_data=not columnwise, columnwise_data=columnwise
-            )
-            == 0
-        ).sum()
-        - (x == 0).sum(),
+            ).isin(zero_values).sum() - (x == 0).sum(),
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
     STATS[stat_pct] = (
         lambda x, aux_dict: (
             aux_dict[recipe_name].get_data_tensors(
                 rowwise_data=not columnwise, columnwise_data=columnwise
-            )
-            == 0
-        ).sum()
+            ).isin(zero_values).sum() - (x == 0).sum())
         / aux_dict[recipe_name].numel()
         * 100,
         lambda buffers, _sn_num=stat_num: 100
