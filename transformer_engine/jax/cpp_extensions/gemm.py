@@ -8,6 +8,7 @@ import operator
 from collections.abc import Iterable
 from typing import Tuple, Sequence, Union
 from functools import partial, reduce
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -657,6 +658,12 @@ class GemmPrimitive(BasePrimitive):
         del mesh, result_types
 
         prefix = "GemmPrimitive_"
+
+        warnings.warn(
+            "Known issues with TE GemmPrimitives when Shardy propagation is enabled. For now,"
+            " please turn off Shardy by exporting the environment variable"
+            " 'JAX_USE_SHARDY_PARTITIONER=0' if you experience any problems."
+        )
 
         def _generate_operand_rules(name, ndim, cdims):
             specs = []
