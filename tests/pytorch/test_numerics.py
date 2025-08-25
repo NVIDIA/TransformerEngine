@@ -109,6 +109,11 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
 
+use_cutlass_grouped_gemm = [False]
+# Only enable cutlass grouped gemm on Hopper
+if torch.cuda.get_device_capability() == (9, 0):
+    use_cutlass_grouped_gemm.append(True)
+
 
 def is_fused_attn_available(
     config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
@@ -1777,6 +1782,8 @@ def test_grouped_linear_accuracy(
     bias,
     delay_wgrad_compute,
     parallel_mode=None,
+    bitwise_match=True,
+    use_cutlass=False,
 ):
     fp8 = recipe is not None
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
@@ -1848,9 +1855,50 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
-    # Shoule be bit-wise match
-    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+    for o, o_ref in zip(outputs, outputs_ref):
+        if bitwise_match:
+            # cuBLAS implementation should be bit-wise match
+            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        elif use_cutlass:
+            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
+        else:
+            torch.testing.assert_close(o, o_ref)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (9, 0),
+    reason="Only enable CUTLASS grouped gemm on Hopper",
+)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+def test_grouped_linear_accuracy_cutlass(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute,
+):
+    os.environ["NVTE_USE_CUTLASS_GROUPGEMM"] = "1"
+    test_grouped_linear_accuracy(
+        dtype,
+        num_gemms,
+        bs,
+        model,
+        None,
+        False,
+        fuse_wgrad_accumulation,
+        False,
+        delay_wgrad_compute,
+        None,
+        bitwise_match=False,
+        use_cutlass=True,
+    )
+    os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2514,10 +2562,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         (16, 10027, 128, 512),
     ],
 )
-@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm(shape, dtype, layout, accumulate):
+@pytest.mark.parametrize("use_cutlass", use_cutlass_grouped_gemm)
+def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     torch.manual_seed(0)
     z, m, k, n = shape
 
@@ -2552,6 +2601,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         grad = True
         single_output = False
 
+    if use_cutlass:
+        os.environ["NVTE_USE_CUTLASS_GROUPGEMM"] = "1"
+
     for i in range(z):
         general_gemm(
             A[i],
@@ -2579,9 +2631,15 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         single_output=single_output,
     )
 
-    # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        if not use_cutlass:
+            # cublas implementation should be bit-wise match
+            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(o, o_ref)
+
+    if use_cutlass:
+        os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
 
 
 @pytest.mark.parametrize(
