@@ -12,17 +12,17 @@ using namespace transformer_engine::normalization;
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
-          int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL>
+          int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL, bool FUSED_ADD = false>
 void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
                    const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
-  auto kernel = &rmsnorm_bwd_tuned_kernel<Kernel_traits>;
+  auto kernel = &rmsnorm_bwd_tuned_kernel<Kernel_traits, FUSED_ADD>;
 
   if (configure_params) {
-    int ctas_per_sm;
-    cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES);
+    int ctas_per_sm = 0;
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES));
     launch_params.params.ctas_per_row = CTAS_PER_ROW;
     launch_params.params.ctas_per_col =
         launch_params.multiprocessorCount * ctas_per_sm / launch_params.params.ctas_per_row;
@@ -52,9 +52,9 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), Kernel_traits::SMEM_BYTES,
-                                stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_),
+                                                Kernel_traits::SMEM_BYTES, stream));
   }
 
   using Kernel_traits_f =
@@ -69,7 +69,7 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG_MAIN,
-          int BYTES_PER_LDG_FINAL>
+          int BYTES_PER_LDG_FINAL, bool FUSED_ADD = false>
 void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
                      const bool configure_params) {  // NOLINT(*)
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
@@ -77,7 +77,7 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   // Instantiate kernel
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       1, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
-  auto kernel = &rmsnorm_bwd_general_kernel<Kernel_traits>;
+  auto kernel = &rmsnorm_bwd_general_kernel<Kernel_traits, FUSED_ADD>;
 
   // Configure kernel params
   const int rows = launch_params.params.rows;
@@ -85,9 +85,9 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   int ctas_per_col = launch_params.params.ctas_per_col;
   int ctas_per_row = launch_params.params.ctas_per_row;
   if (configure_params) {
-    int ctas_per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
-                                                  Kernel_traits::THREADS_PER_CTA, 0);
+    int ctas_per_sm = 0;
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0));
     const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
     ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
     ctas_per_col = std::min(ceil_div(rows, WARPS_M), max_ctas / ctas_per_row);
@@ -112,8 +112,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_), 0, stream));
   }
 
   // Launch finalization kernel
@@ -143,7 +143,7 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE); \
   }  // namespace
 
-// Create rmsnorm tuned launch function and register. Macro signature:
+// Create rmsnorm bwd tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
@@ -171,7 +171,7 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
 
-// Create rmsnorm general launch function and register. Macro signature:
+// Create rmsnorm bwd general launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
@@ -204,3 +204,108 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, general, 4096, fp16, fp16, fp16, fp32,
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, general, 4096, fp16, fp32, fp16, fp32, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, general, 4096, bf16, bf16, bf16, fp32, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, general, 4096, bf16, fp32, bf16, fp32, 1, 4, 16, 4);
+
+// Create fused rmsnorm bwd + add tuned launch function and register. Macro signature:
+//  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
+//                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 512, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 512, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 512, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 768, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 768, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 768, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1024, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1024, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 2048, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 2048, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 2048, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 8192, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 8192, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
+                       true);
+
+// Create fused rmsnorm bwd + add general launch function and register. Macro signature:
+//  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, ...
+//                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 128, fp32, fp32, fp32, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 128, fp16, fp16, fp16, fp32, 4, 1, 8, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 128, fp16, fp32, fp16, fp32, 4, 1, 8, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 128, bf16, bf16, bf16, fp32, 4, 1, 8, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 128, bf16, fp32, bf16, fp32, 4, 1, 8, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 512, fp32, fp32, fp32, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 512, fp16, fp16, fp16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 512, fp16, fp32, fp16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 512, bf16, bf16, bf16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 512, bf16, fp32, bf16, fp32, 4, 1, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 1024, fp32, fp32, fp32, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 1024, fp16, fp16, fp16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 1024, fp16, fp32, fp16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 1024, bf16, bf16, bf16, fp32, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 1024, bf16, fp32, bf16, fp32, 4, 1, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 2048, fp32, fp32, fp32, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 2048, fp16, fp16, fp16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 2048, fp16, fp32, fp16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 2048, bf16, bf16, bf16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 2048, bf16, fp32, bf16, fp32, 1, 4, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 4096, fp32, fp32, fp32, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 4096, fp16, fp16, fp16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 4096, fp16, fp32, fp16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 4096, bf16, bf16, bf16, fp32, 1, 4, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, general, 4096, bf16, fp32, bf16, fp32, 1, 4, 16, 4,
+                       true);

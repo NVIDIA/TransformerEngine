@@ -115,7 +115,7 @@ def trt_fp8_dequantize(t, scale_inv):
 
 
 @onnx_op(
-    op_type="trt::TRT_MXFP8QuantizeLinear",
+    op_type="trt::TRT_MXFP8DynamicQuantize",
     domain="trt",
     inputs=[
         PyCustomOpDef.dt_float,
@@ -1177,7 +1177,7 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
                     custom_translation_table=te_translation_table,
                 )
 
-        os.system(f"trtexec --onnx={onnx_path} --saveEngine={onnx_path}.engine --stronglyTyped")
+        os.system(f"trtexec --onnx={onnx_path} --saveEngine={onnx_path}.engine")
 
         # Run TRT engine
         logger = trt.Logger(trt.Logger.WARNING)
@@ -1200,8 +1200,7 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
         rtol = 5e-2 if fp8_recipe is not None else 1e-4
         torch.testing.assert_close(out, out_ref, atol=atol, rtol=rtol)
     finally:
-        pass
-        # try:
-        #    os.remove(onnx_path)
-        # except FileNotFoundError:
-        #    pass
+        try:
+            os.remove(onnx_path)
+        except FileNotFoundError:
+            pass
