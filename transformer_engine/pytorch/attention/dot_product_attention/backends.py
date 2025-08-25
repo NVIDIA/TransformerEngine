@@ -1030,19 +1030,23 @@ class FusedAttnFunc(torch.autograd.Function):
                 "QKV_quantizer ",
                 "S_quantizer   ",
                 "O_quantizer   ",
-                #"dQKV_quantizer",
-                #"dO_quantizer  ",
-                #"dP_quantizer  ",
+                # "dQKV_quantizer",
+                # "dO_quantizer  ",
+                # "dP_quantizer  ",
             ]
             quantizers = [
                 QKV_quantizer,
                 S_quantizer,
                 O_quantizer,
-                #ctx.dQKV_quantizer,
-                #d_out_fp8._quantizer,
-                #ctx.dP_quantizer,
+                # ctx.dQKV_quantizer,
+                # d_out_fp8._quantizer,
+                # ctx.dP_quantizer,
             ]
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))) and layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1")):
+            if (
+                int(os.getenv("SLURM_PROCID", "0")) == 0
+                and bool(int(os.getenv("NVTE_PRINT", "0")))
+                and layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
+            ):
                 torch.cuda.synchronize()
                 for i, x in enumerate(quantizers):
                     if x is None:
@@ -1051,11 +1055,18 @@ class FusedAttnFunc(torch.autograd.Function):
                         print(
                             f">>>>{layer_number} {names[i]}:"
                             f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
-                            f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x amax)={(x.scale * x.amax).item():.4e}"
+                            f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x"
+                            f" amax)={(x.scale * x.amax).item():.4e}"
                         )
                         if x.amax.isnan():
-                            print(f'>>>>{layer_number} dqkv.isnan: {[(x.dtype, x.isnan().sum()) for x in [out_]]}')
-                print(f'>>>>{layer_number} out.minmax: {out_.__class__}, {[(x.abs().min().item(), x.abs().max().item()) for x in [out_]]}')
+                            print(
+                                f">>>>{layer_number} dqkv.isnan:"
+                                f" {[(x.dtype, x.isnan().sum()) for x in [out_]]}"
+                            )
+                print(
+                    f">>>>{layer_number} out.minmax: {out_.__class__},"
+                    f" {[(x.abs().min().item(), x.abs().max().item()) for x in [out_]]}"
+                )
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
             out_, aux_ctx_tensors = fused_attn_fwd(
@@ -1233,26 +1244,33 @@ class FusedAttnFunc(torch.autograd.Function):
                     dqkv_te_dtype = d_out_fp8._fp8_dtype
 
                     names = [
-                        #"QKV_quantizer ",
-                        #"O_quantizer   ",
-                        #"S_quantizer   ",
+                        # "QKV_quantizer ",
+                        # "O_quantizer   ",
+                        # "S_quantizer   ",
                         "dO_quantizer  ",
                         "dP_quantizer  ",
                         "dQKV_quantizer",
                     ]
                     quantizers = [
-                        #q_fp8._quantizer,
-                        #out_fp8._quantizer,
-                        #ctx.S_quantizer,
+                        # q_fp8._quantizer,
+                        # out_fp8._quantizer,
+                        # ctx.S_quantizer,
                         d_out_fp8._quantizer,
                         ctx.dP_quantizer,
                         ctx.dQKV_quantizer,
                     ]
-                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))) and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1")):
+                    if (
+                        int(os.getenv("SLURM_PROCID", "0")) == 0
+                        and bool(int(os.getenv("NVTE_PRINT", "0")))
+                        and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
+                    ):
                         for i, x in enumerate(quantizers):
                             if x is not None:
                                 if x.amax.isnan():
-                                    print(f'>>>>{layer_numer} before dqkv.isnan: {[x.isnan().sum() for x in [dq_, dk_, dv_]]}')
+                                    print(
+                                        f">>>>{layer_numer} before dqkv.isnan:"
+                                        f" {[x.isnan().sum() for x in [dq_, dk_, dv_]]}"
+                                    )
 
                     # q_fp8, k_fp8, v_fp8, out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16,
                     #                               fp8_dtype = tex.DType.kFloat8E4M3
@@ -1316,7 +1334,11 @@ class FusedAttnFunc(torch.autograd.Function):
                             ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
 
-                    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))) and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1")):
+                    if (
+                        int(os.getenv("SLURM_PROCID", "0")) == 0
+                        and bool(int(os.getenv("NVTE_PRINT", "0")))
+                        and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
+                    ):
                         torch.cuda.synchronize()
                         for i, x in enumerate(quantizers):
                             if x is None:
@@ -1325,11 +1347,18 @@ class FusedAttnFunc(torch.autograd.Function):
                                 print(
                                     f">>>>{ctx.layer_number} {names[i]}:"
                                     f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
-                                    f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x amax)={(x.scale * x.amax).item():.4e}"
+                                    f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale"
+                                    f" x amax)={(x.scale * x.amax).item():.4e}"
                                 )
                                 if x.amax.isnan():
-                                    print(f'>>>>{ctx.layer_number} dqkv.isnan: {[(x.dtype, x.isnan().sum()) for x in [dq_, dk_, dv_]]}')
-                        print(f'>>>>{ctx.layer_number} dqkv.minmax: {dq_.__class__} {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}')
+                                    print(
+                                        f">>>>{ctx.layer_number} dqkv.isnan:"
+                                        f" {[(x.dtype, x.isnan().sum()) for x in [dq_, dk_, dv_]]}"
+                                    )
+                        print(
+                            f">>>>{ctx.layer_number} dqkv.minmax:"
+                            f" {dq_.__class__} {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}"
+                        )
 
                 else:
                     if isinstance(d_out, QuantizedTensor):

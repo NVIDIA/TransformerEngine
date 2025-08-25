@@ -419,7 +419,9 @@ class FP8GlobalStateManager:
                 or callable(recipe.scaling_factor_compute_algo)
             )
 
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))): # and not forward:
+            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
+                int(os.getenv("NVTE_PRINT", "0"))
+            ):  # and not forward:
                 print(f">>>> before history: {cls.global_amax_history_buffer[buffer_key][layer-1]}")
                 print(f">>>> before scale  : {cls.global_scale_buffer[buffer_key][layer-1]}")
             if not unfused_update:
@@ -441,7 +443,9 @@ class FP8GlobalStateManager:
                     _amax_and_scale_update(
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))): # and not forward:
+            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
+                int(os.getenv("NVTE_PRINT", "0"))
+            ):  # and not forward:
                 print(f">>>> after history: {cls.global_amax_history_buffer[buffer_key][layer-1]}")
                 print(f">>>> after scale  : {cls.global_scale_buffer[buffer_key][layer-1]}")
 
