@@ -397,7 +397,7 @@ class FusedAttnRunner:
         self.mesh = Mesh(self.devices, self.mesh_axes)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
-        self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
+        self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
@@ -630,7 +630,7 @@ class FusedAttnRunner:
         self.qkvo_psec = PartitionSpec(
             self.mesh_resource.dp_resource,
             self.mesh_resource.cp_resource,
-            self.mesh_resource.tp_resource,
+            self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
@@ -658,7 +658,7 @@ class FusedAttnRunner:
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
-                None, self.mesh_resource.tp_resource, self.mesh_resource.cp_resource, None
+                None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
