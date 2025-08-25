@@ -40,16 +40,14 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
-
 def _validate_mesh_resource_configuration():
     """Validate that the mesh resource configuration is consistent and conflict-free."""
     gsr = global_mesh_resource()
-    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
 
-    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
-    is_tp_enabled = gsr.tp_resource is not None and physical_mesh.shape[gsr.tp_resource] > 1
-    is_tpsp_enabled = gsr.tpsp_resource is not None and physical_mesh.shape[gsr.tpsp_resource] > 1
-    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
+    is_dp_enabled = gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1
+    is_tp_enabled = gsr.tp_resource is not None and get_mesh_axis_size(gsr.tp_resource) > 1
+    is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
+    is_fsdp_enabled = gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1
 
     assert not (is_dp_enabled and is_fsdp_enabled), (
         "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
@@ -67,18 +65,21 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
+    is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
+    is_fsdp_enabled = gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1
+
     te_logical_axis_to_mesh_axis = {
-        BATCH_AXES: gsr.fsdp_resource or gsr.dp_resource,
+        BATCH_AXES: gsr.fsdp_resource if is_fsdp_enabled else gsr.dp_resource,
         SEQLEN_AXES: None,
         SEQLEN_TP_AXES: gsr.tpsp_resource,
         SEQLEN_CP_AXES: gsr.cp_resource,
-        HEAD_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        HEAD_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         HIDDEN_AXES: None,
-        HIDDEN_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        HIDDEN_TP_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         JOINED_AXES: None,
         W_NO_SHARD_AXES: None,
         W_FSDP_AXES: gsr.fsdp_resource,
-        W_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        W_TP_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         W_JOINED_AXES: None,
     }
     return te_logical_axis_to_mesh_axis
@@ -305,9 +306,6 @@ def global_shard_guard(resource: MeshResource):
         _GLOBAL_MESH_RESOURCE = resource
         _validate_mesh_resource_configuration()
         yield
-    except Exception as e:
-        _GLOBAL_MESH_RESOURCE = old_resources
-        raise e
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
 
