@@ -672,6 +672,12 @@ class GemmPrimitive(BasePrimitive):
 
         prefix = "GemmPrimitive_"
 
+        warnings.warn(
+            "Known issues with TE GemmPrimitives when Shardy propagation is enabled. For now,"
+            " please turn off Shardy by exporting the environment variable"
+            " 'JAX_USE_SHARDY_PARTITIONER=0' if you experience any problems."
+        )
+
         def _generate_operand_rules(name, ndim, cdims):
             specs = []
             ldims = tuple(i for i in range(ndim) if i not in cdims)

@@ -263,6 +263,16 @@ ATTRS = [
         _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_WINDOW_SIZE: (2, 2),
     },
+    # attrs29
+    {
+        _KEY_OF_RELATIVE_EMBEDDING: True,
+        _KEY_OF_SELF_ATTN_BIAS_TYPE: "pre_scale_bias",
+    },
+    # attrs30
+    {
+        _KEY_OF_RELATIVE_EMBEDDING: True,
+        _KEY_OF_SELF_ATTN_BIAS_TYPE: "post_scale_bias",
+    },
 ]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
