@@ -462,8 +462,8 @@ def initialize_ub(
                     methods[new_method].append(name)
 
         for name in (
-        methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-    ):
+            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
+        ):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
