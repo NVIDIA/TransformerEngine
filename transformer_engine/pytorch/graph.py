@@ -954,17 +954,13 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            if not module_uses_fp8.get(id(self), False):
-                fp8_context = contextlib.nullcontext()
-            else:
-                fp8_context = fp8_autocast(
-                    enabled=True,
-                    calibrating=fp8_calibrating,
-                    fp8_recipe=fp8_recipe,
-                    fp8_group=fp8_group,
-                    _graph=True,
-                )
-            with fp8_context:
+            with fp8_autocast(
+                enabled=module_uses_fp8.get(id(self), False),
+                calibrating=fp8_calibrating,
+                fp8_recipe=fp8_recipe,
+                fp8_group=fp8_group,
+                _graph=True,
+            ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)
             return outputs
 
