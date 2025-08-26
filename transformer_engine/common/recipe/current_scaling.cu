@@ -146,8 +146,6 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
              to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax", true);
 
-  // Optionally use config_ for future extension (e.g., for cuda graph/noop tensor)
-  // For now, config_ is unused, but the API is ready for future use.
   float *noop_ptr = nullptr;
   if (config_ != nullptr) {
     const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);

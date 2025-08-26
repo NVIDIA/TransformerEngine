@@ -518,7 +518,6 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
   // Compute amax
   if (compute_amax) {
-    // NVTE_SCOPED_GIL_RELEASE({ nvte_compute_amax(input.data(), out.data(), stream); });
     NVTE_SCOPED_GIL_RELEASE(
         { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
   }
