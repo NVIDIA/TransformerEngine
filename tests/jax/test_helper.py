@@ -71,20 +71,20 @@ class TestFP8Functions(unittest.TestCase):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
+        with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling(), mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=ds):
+        with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_delay_scaling(get_delayed_scaling(), ds)
 
         self._check_default_state()
 
         ds = DelayedScaling(margin=3.0, fp8_format=FP8Format.HYBRID, amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=ds):
+        with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_delay_scaling(get_delayed_scaling(), ds)
 
@@ -95,20 +95,21 @@ class TestFP8Functions(unittest.TestCase):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=Float8CurrentScaling()):
+        with fp8_autocast(enabled=False, fp8_recipe=Float8CurrentScaling(),
+                          mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.E4M3)
-        with fp8_autocast(enabled=True, fp8_recipe=cs):
+        with fp8_autocast(enabled=True, fp8_recipe=cs, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_current_scaling(cs)
 
         self._check_default_state()
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.HYBRID)
-        with fp8_autocast(enabled=True, fp8_recipe=cs):
+        with fp8_autocast(enabled=True, fp8_recipe=cs, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_current_scaling(cs)
 
@@ -119,20 +120,21 @@ class TestFP8Functions(unittest.TestCase):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=MXFP8BlockScaling()):
+        with fp8_autocast(enabled=False, fp8_recipe=MXFP8BlockScaling(),
+                          mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         bs = MXFP8BlockScaling(margin=5.0, fp8_format=FP8Format.E4M3)
-        with fp8_autocast(enabled=True, fp8_recipe=bs):
+        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_mxfp8_scaling(bs)
 
         self._check_default_state()
 
         bs = MXFP8BlockScaling(margin=3.0, fp8_format=FP8Format.HYBRID)
-        with fp8_autocast(enabled=True, fp8_recipe=bs):
+        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_mxfp8_scaling(bs)
 
