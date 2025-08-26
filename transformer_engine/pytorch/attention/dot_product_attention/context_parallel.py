@@ -1364,7 +1364,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         )
 
         kv = p2p_comm_buffers[-1]
-        if type(batch_dim) is int:
+        if batch_dim is not None:
             ctx.batch_size = out.shape[batch_dim]
 
         if cp_size_a2a > 1:
