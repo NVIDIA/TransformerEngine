@@ -15,6 +15,8 @@
  * @brief: cutlass group gemm kernel.
  **/
 
+#pragma once
+
 #include <transformer_engine/transformer_engine.h>
 
 #include <cub/cub.cuh>
@@ -197,6 +199,27 @@ int64_t inline getLddSize(int64_t num_gemms) {
   return (int64_t)(ROUND_UP(num_gemms * sizeof(int64_t), 128UL));
 }
 
+// cpu workspace size is 4MB
+static constexpr size_t kCPUWorkSpaceSize = 4 * 1024 * 1024;
+
+static char* getHostWorkspace() {
+  static std::once_flag flag;
+  static std::shared_ptr<char> workspace;
+
+  std::call_once(flag, [&]() {
+    workspace =
+        std::shared_ptr<char>(reinterpret_cast<char*>(std::malloc(kCPUWorkSpaceSize)), [](char* p) {
+          if (p) std::free(p);
+        });
+
+    if (!workspace) {
+      throw std::bad_alloc();
+    }
+  });
+
+  return workspace.get();
+}
+
 template <bool trans_a, bool trans_b, typename Element>
 void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
                         NVTETensor* workspace, float alpha, float beta, int num_gemms,
@@ -221,6 +244,11 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
   auto ldd_size = getLddSize(num_gemms);
   auto param_workspace_size = 3 * ptr_size + 3 * ldd_size + gemm_coord_size;
 
+  NVTE_CHECK(
+      param_workspace_size < kCPUWorkSpaceSize,
+      "Insufficient kCPUWorkSpaceSize size: required=", static_cast<int64_t>(param_workspace_size),
+      ", available=", static_cast<int64_t>(kCPUWorkSpaceSize), " for CUTLASS grouped GEMM.");
+
   auto total_workspace_size = param_workspace_size + kernel_workspace_size;
   transformer_engine::Tensor* wspace = transformer_engine::convertNVTETensor(workspace[0]);
 
@@ -232,7 +260,7 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
 
   char* kernel_workspace_ptr = nullptr;
 
-  char* host_workspace = reinterpret_cast<char*>(std::malloc(param_workspace_size));
+  char* host_workspace = getHostWorkspace();
 
   ProblemShapeType* problem_sizes_host = reinterpret_cast<ProblemShapeType*>(host_workspace);
 
@@ -309,8 +337,6 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
   if (gemm.run(stream) != cutlass::Status::kSuccess) {
     NVTE_CHECK(false, "Failed to run CUTLASS Grouped GEMM");
   }
-
-  std::free(host_workspace);
 }
 
 }  // namespace grouped_gemm
