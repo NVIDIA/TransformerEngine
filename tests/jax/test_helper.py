@@ -95,8 +95,9 @@ class TestFP8Functions(unittest.TestCase):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=Float8CurrentScaling(),
-                          mesh_resource=MeshResource()):
+        with fp8_autocast(
+            enabled=False, fp8_recipe=Float8CurrentScaling(), mesh_resource=MeshResource()
+        ):
             self._check_default_state()
 
         self._check_default_state()
@@ -120,8 +121,9 @@ class TestFP8Functions(unittest.TestCase):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=MXFP8BlockScaling(),
-                          mesh_resource=MeshResource()):
+        with fp8_autocast(
+            enabled=False, fp8_recipe=MXFP8BlockScaling(), mesh_resource=MeshResource()
+        ):
             self._check_default_state()
 
         self._check_default_state()
