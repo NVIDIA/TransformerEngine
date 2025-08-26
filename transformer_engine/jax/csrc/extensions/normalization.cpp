@@ -118,7 +118,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
         convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
         std::vector<size_t>{
             product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
-            scale_inv_buf->dimensions().back()});
+            static_cast<size_t>(scale_inv_buf->dimensions().back())});
   }
 
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
@@ -135,7 +135,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
         convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
         std::vector<size_t>{product(colwise_scale_inv_buf->dimensions(), 0,
                                     colwise_scale_inv_buf->dimensions().size() - 1),
-                            colwise_scale_inv_buf->dimensions().back()});
+                            static_cast<size_t>(colwise_scale_inv_buf->dimensions().back())});
   }
 
   if (_norm_type == NVTE_Norm_Type::LayerNorm) {
