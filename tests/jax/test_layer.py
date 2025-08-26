@@ -366,7 +366,10 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if get_quantize_config().get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING:
+                if (
+                    get_quantize_config().get_scaling_mode(UsageType.X)
+                    == ScalingMode.DELAYED_TENSOR_SCALING
+                ):
                     _, updated_quantize_meta = flax.core.pop(
                         updated_state[0], get_quantize_config().COLLECTION_NAME
                     )

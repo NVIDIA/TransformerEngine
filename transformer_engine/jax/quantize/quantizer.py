@@ -22,6 +22,7 @@ from .scaling_modes import ScalingMode
 from .tensor import ScaledTensor, ScaledTensor1x, ScaledTensor2x, ScaledTensorFactory
 from .helper import (
     get_quantize_config,
+    get_quantize_config_class,
     AmaxComputeAlgo,
     UsageType,
 )
@@ -56,7 +57,7 @@ def compute_scale_from_amax(
     fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
     if scale is None:
         scale = jnp.ones((1,))
-    sf = (fp8_max / amax) / (2**get_quantize_config().MARGIN)
+    sf = (fp8_max / amax) / (2 ** get_quantize_config().MARGIN)
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
     return sf
@@ -234,7 +235,7 @@ class CurrentScaleQuantizer(Quantizer):
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
         amax = jnp.max(jnp.abs(x)).reshape((1,))
         fp8_max = jnp.astype(jnp.finfo(self.q_dtype).max, jnp.float32)
-        scale = (fp8_max / amax) / (2**get_quantize_config().MARGIN)
+        scale = (fp8_max / amax) / (2 ** get_quantize_config().MARGIN)
         scaled_x = x.astype(compute_dtype) * scale
 
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
@@ -827,7 +828,14 @@ class QuantizerFactory:
 
     @staticmethod
     def _create_set(
-        x_scaling_mode, kernel_scaling_mode, grad_scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, n_groups, **kwargs
+        x_scaling_mode,
+        kernel_scaling_mode,
+        grad_scaling_mode,
+        fwd_dtype,
+        bwd_dtype,
+        is_2x2x,
+        n_groups,
+        **kwargs,
     ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
 
@@ -951,7 +959,7 @@ class QuantizerFactory:
                     bwd_dtype=bwd_dtype,
                     is_2x2x=is_2x2x,
                     n_groups=n_groups,
-                    **kwargs
+                    **kwargs,
                 )
             )
 

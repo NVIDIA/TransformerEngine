@@ -45,6 +45,7 @@ Collection = Union[Dict, FrozenDict]
 
 NVTE_FP8_COLLECTION_NAME = "fp8_metas"
 
+
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     """Check if delayed scaling FP8 is supported on the given GPU architecture.
 
@@ -178,8 +179,6 @@ class AmaxComputeAlgo(Enum):
     MOST_RECENT = "most_recent"
 
 
-
-
 @dataclass
 class BaseQuantizeConfig(ABC):
     """Configuration class for quantization settings.
@@ -238,7 +237,7 @@ class BaseQuantizeConfig(ABC):
 
     @abstractmethod
     def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
-        """ Gets the scaling mode for a specific tensor's usage type.
+        """Gets the scaling mode for a specific tensor's usage type.
 
         Args:
             usage_type: The usage type for which to get the scaling mode.
@@ -248,7 +247,7 @@ class BaseQuantizeConfig(ABC):
         """
 
     def is_supported(self) -> tuple[bool, str]:
-        """ Check if this QuantizeConfig class is supported on the available devices. 
+        """Check if this QuantizeConfig class is supported on the available devices.
 
         Returns:
             bool: True if the class is supported, False otherwise
@@ -264,16 +263,21 @@ class BaseQuantizeConfig(ABC):
                 return is_supported, reason
         return True, None
 
+
 class NoOpQuantizeConfig(BaseQuantizeConfig):
-    """Configuration class higher-precision non-quantized operation. """
+    """Configuration class higher-precision non-quantized operation."""
 
     def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
-        """ Initialize no-op configuration. """
-        raise NotImplementedError("NoOpQuantizeConfig cannot be initialize from a recipe as it represents higher-precision when no quantized recipe is set.")
+        """Initialize no-op configuration."""
+        raise NotImplementedError(
+            "NoOpQuantizeConfig cannot be initialize from a recipe as it represents"
+            " higher-precision when no quantized recipe is set."
+        )
 
     def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
-        """ Gets the scaling mode for a specific tensor's usage type. """
+        """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.NO_SCALING
+
 
 class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
     """Configuration class for delayed scaling FP8 recipe.
@@ -313,7 +317,7 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
         self.FP8_2X_ACC_WGRAD = True
 
     def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
-        """ Gets the scaling mode for a specific tensor's usage type. """
+        """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.DELAYED_TENSOR_SCALING
 
 
@@ -334,7 +338,7 @@ class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
         self.AMAX_HISTORY_LEN = 0
 
     def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
-        """ Gets the scaling mode for a specific tensor's usage type. """
+        """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.CURRENT_TENSOR_SCALING
 
 
@@ -355,14 +359,17 @@ class BlockScalingQuantizeConfig(BaseQuantizeConfig):
         self.AMAX_HISTORY_LEN = 0
 
     def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
-        """ Gets the scaling mode for a specific tensor's usage type. """
+        """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.MXFP8_1D_SCALING
+
 
 _QUANTIZE_CONFIG = NoOpQuantizeConfig()
 
+
 def get_quantize_config():
-    """ Global instance of BaseQuantizeConfig set by fp8_autocast context. """
+    """Global instance of BaseQuantizeConfig set by fp8_autocast context."""
     return _QUANTIZE_CONFIG
+
 
 def get_quantize_config_class(
     fp8_recipe: recipe.Recipe,

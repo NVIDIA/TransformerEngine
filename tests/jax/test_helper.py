@@ -61,13 +61,18 @@ class TestFP8Functions(unittest.TestCase):
     def _compare_current_scaling(self, test):
         self.assertEqual(get_quantize_config().FP8_FORMAT, test.fp8_format)
         for usage_type in UsageType:
-            self.assertEqual(get_quantize_config().get_scaling_mode(usage_type), ScalingMode.CURRENT_TENSOR_SCALING)
+            self.assertEqual(
+                get_quantize_config().get_scaling_mode(usage_type),
+                ScalingMode.CURRENT_TENSOR_SCALING,
+            )
 
     def _compare_mxfp8_scaling(self, test):
         self.assertEqual(get_quantize_config().MARGIN, test.margin)
         self.assertEqual(get_quantize_config().FP8_FORMAT, test.fp8_format)
         for usage_type in UsageType:
-            self.assertEqual(get_quantize_config().get_scaling_mode(usage_type), ScalingMode.MXFP8_1D_SCALING)
+            self.assertEqual(
+                get_quantize_config().get_scaling_mode(usage_type), ScalingMode.MXFP8_1D_SCALING
+            )
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_delayed_scaling(self):
