@@ -144,21 +144,21 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   TensorWrapper unquantized_D_tensor;
   py::object unquantized_out;
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  bool quantization_needed = !quantizer.is_none(); // TODO: Another use-case:
+  bool quantization_needed = !quantizer.is_none();  // TODO: Another use-case:
   // If already output is FP8, then no need for quantization, since cublas is gonna take care of it.
-  if(quantization_needed)
-  {
+  if (quantization_needed) {
     NoneQuantizer q{none};
     std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, gemm_output_dtype);
   }
 
-  TensorWrapper &out_tensor = quantization_needed ? unquantized_D_tensor : D_tensor;
+  TensorWrapper& out_tensor = quantization_needed ? unquantized_D_tensor : D_tensor;
   // Bias tensor
   TensorWrapper bias_tensor;
   MaybeTensor bias_grad = std::nullopt;
   if (bias.has_value()) {
     if (grad) {
-      auto opts = torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
+      auto opts =
+          torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
       bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
       bias_tensor = makeTransformerEngineTensor(*bias_grad);
     } else {
@@ -281,8 +281,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  if(quantization_needed)
-    my_quantizer->quantize(unquantized_D_tensor, D_tensor);
+  if (quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
   // Pack outputs
   std::vector<py::object> out;
   out.emplace_back(std::move(D));
