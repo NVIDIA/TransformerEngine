@@ -427,7 +427,7 @@ class QuantizedTensor(torch.Tensor):
                 dst.quantize_(src)
             else:
                 if isinstance(src, QuantizedTensor):
-                    src = src.dequantize()
+                    src = src.dequantize(dtype=dst.dtype)
                 dst.copy_(src)
             return None
 
