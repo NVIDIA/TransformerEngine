@@ -1324,7 +1324,12 @@ def normalization_fwd(
     if quantizer is None and noop_scaled_tensor:
         return (
             ScaledTensorFactory.create_2x(
-                output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype
+                output,
+                None,
+                output,
+                None,
+                scaling_mode=ScalingMode.NO_SCALING,
+                dq_dtype=output.dtype,
             ),
             mu,
             rsigma,
