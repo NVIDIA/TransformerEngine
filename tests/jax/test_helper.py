@@ -110,7 +110,6 @@ class TestFP8Functions(unittest.TestCase):
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.E4M3)
         with fp8_autocast(enabled=True, fp8_recipe=cs, mesh_resource=MeshResource()):
-            print(get_quantize_config())
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_current_scaling(cs)
 
