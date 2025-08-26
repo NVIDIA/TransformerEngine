@@ -682,8 +682,8 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         """
         Records the graph for the given function. The function is invoked on
         argument (self.hidden_states,) and all kernels are recorded.
-        `record_graph()` returns captured function, which can be run later with
-        lower usage of the CPU.
+        It then returns the captured callable, which can be run later while
+        minimizing CPU usage.
         """
         fp8_recipe = get_default_fp8_recipe()
 
