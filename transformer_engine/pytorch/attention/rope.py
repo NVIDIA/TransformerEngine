@@ -224,7 +224,9 @@ class FusedQKVRoPEFunc(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx, grad_output_q: torch.Tensor, grad_output_k: torch.Tensor, grad_output_v: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output_q: torch.Tensor, grad_output_k: torch.Tensor, grad_output_v: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Fused RoPE backward."""
         q_freqs, k_freqs = ctx.saved_tensors
 
@@ -472,6 +474,7 @@ def apply_rotary_pos_emb(
         interleaved=interleaved,
     )
 
+
 def apply_fused_qkv_rotary_pos_emb(
     qkv: torch.Tensor,
     q_freqs: torch.Tensor,
@@ -536,10 +539,16 @@ def apply_fused_qkv_rotary_pos_emb(
         cp_size > 1 and start_positions is not None
     ), """start_positions != None with CP SIZE > 1 is not supported!"""
 
-    assert (
-        tensor_format != "thd"
-    ), "'thd' tensor_format not supported currently."
-    
+    assert tensor_format != "thd", "'thd' tensor_format not supported currently."
+
     return FusedQKVRoPEFunc.apply(
-        qkv, q_freqs, k_freqs, qkv_split_arg_list, start_positions, tensor_format, interleaved, cp_size, cp_rank
+        qkv,
+        q_freqs,
+        k_freqs,
+        qkv_split_arg_list,
+        start_positions,
+        tensor_format,
+        interleaved,
+        cp_size,
+        cp_rank,
     )

@@ -18,11 +18,14 @@ def _overlapping_grad(query: torch.Tensor, key: torch.Tensor, value: torch.Tenso
 
 
 # Gradient is a full tensor
-def _non_overlapping_grad(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+def _non_overlapping_grad(
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+) -> torch.Tensor:
     t1 = torch.ones_like(query)
     t2 = torch.ones_like(key)
     t3 = torch.ones_like(value)
     return torch.sum(query * t1) + torch.sum(key * t2) + torch.sum(value * t3)
+
 
 @pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
@@ -62,7 +65,7 @@ def test_fused_qkv_rope(
     batch_size, head_num = 2, 64
 
     t = torch.rand(
-        (seq_length - margin, batch_size, head_num, hidden_size*6),
+        (seq_length - margin, batch_size, head_num, hidden_size * 6),
         dtype=dtype,
         device=device,
     )
@@ -89,8 +92,10 @@ def test_fused_qkv_rope(
         # for more accurate comparison
 
         t_clone = t.clone()
-        (query, key, value) = torch.split(t_clone, [hidden_size*4, hidden_size, hidden_size], dim=3)
-        query = query.reshape(query.shape[0], query.shape[1], head_num*4, hidden_size)
+        (query, key, value) = torch.split(
+            t_clone, [hidden_size * 4, hidden_size, hidden_size], dim=3
+        )
+        query = query.reshape(query.shape[0], query.shape[1], head_num * 4, hidden_size)
 
         query_unfused = apply_rotary_pos_emb(
             query,
@@ -133,7 +138,7 @@ def test_fused_qkv_rope(
             interleaved=interleaved,
             cp_size=cp_size,
             cp_rank=cp_rank,
-            qkv_split_arg_list=[hidden_size*4, hidden_size, hidden_size],
+            qkv_split_arg_list=[hidden_size * 4, hidden_size, hidden_size],
         )
         loss_fused = loss_func(query_fused, key_fused, value_fused)
 
