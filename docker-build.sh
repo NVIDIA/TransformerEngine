@@ -282,7 +282,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   REGISTRY="${CI_REGISTRY:-gitlab-master.nvidia.com:5005}"
   ########
   ## TEMPORARY WAR https://jirasw.nvidia.com/browse/DLR-316 - do not merge to master
-  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
+  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:main}"
   ########
   PULL_FLAG=""
   CACHE_FROM="--cache-from type=local,src=/tmp/docker-cache"
@@ -334,7 +334,7 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   REGISTRY="${CI_REGISTRY:-gitlab-master.nvidia.com:5005}"
   ########
   ## TEMPORARY WAR https://jirasw.nvidia.com/browse/DLR-316 - do not merge to master
-  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
+  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:main}"
   ########
   BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base-${ARCH}"
 
