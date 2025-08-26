@@ -101,6 +101,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   return grad_input_py;
 }
 
+/* GELU and variants*/
 py::object gelu(const at::Tensor& input, py::handle quantizer) {
   return activation_helper<nvte_gelu>(input, quantizer);
 }
@@ -109,44 +110,12 @@ py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle qua
   return dactivation_helper<nvte_dgelu>(grad, input, quantizer);
 }
 
-py::object relu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_relu>(input, quantizer);
-}
-
-py::object drelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_drelu>(grad, input, quantizer);
-}
-
 py::object geglu(const at::Tensor& input, py::handle quantizer) {
   return activation_helper<nvte_geglu>(input, quantizer, 2);
 }
 
-py::object qgeglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_qgeglu>(input, quantizer, 2);
-}
-
 py::object dgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
   return dactivation_helper<nvte_dgeglu>(grad, input, quantizer);
-}
-
-py::object dqgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dqgeglu>(grad, input, quantizer);
-}
-
-py::object reglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_reglu>(input, quantizer, 2);
-}
-
-py::object dreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dreglu>(grad, input, quantizer);
-}
-
-py::object swiglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_swiglu>(input, quantizer, 2);
-}
-
-py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dswiglu>(grad, input, quantizer);
 }
 
 py::object qgelu(const at::Tensor& input, py::handle quantizer) {
@@ -157,6 +126,31 @@ py::object dqgelu(const at::Tensor& grad, const at::Tensor& input, py::handle qu
   return dactivation_helper<nvte_dqgelu>(grad, input, quantizer);
 }
 
+py::object qgeglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_qgeglu>(input, quantizer, 2);
+}
+
+py::object dqgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dqgeglu>(grad, input, quantizer);
+}
+
+/* ReLU and variants*/
+py::object relu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_relu>(input, quantizer);
+}
+
+py::object drelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_drelu>(grad, input, quantizer);
+}
+
+py::object reglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_reglu>(input, quantizer, 2);
+}
+
+py::object dreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dreglu>(grad, input, quantizer);
+}
+
 py::object srelu(const at::Tensor& input, py::handle quantizer) {
   return activation_helper<nvte_srelu>(input, quantizer);
 }
@@ -165,4 +159,28 @@ py::object dsrelu(const at::Tensor& grad, const at::Tensor& input, py::handle qu
   return dactivation_helper<nvte_dsrelu>(grad, input, quantizer);
 }
 
+py::object sreglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_sreglu>(input, quantizer, 2);
+}
+
+py::object dsreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dsreglu>(grad, input, quantizer);
+}
+
+/* Silu and variants*/
+py::object silu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_silu>(input, quantizer);
+}
+
+py::object dsilu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dsilu>(grad, input, quantizer);
+}
+
+py::object swiglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_swiglu>(input, quantizer, 2);
+}
+
+py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dswiglu>(grad, input, quantizer);
+}
 }  // namespace transformer_engine::pytorch
