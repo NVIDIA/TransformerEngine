@@ -98,11 +98,14 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
  *  \param[in]     qkv_split_arg_list_2  The hidden size for V.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_qkv_rope_forward(const NVTETensor qkv_input, const NVTETensor q_freqs, const NVTETensor k_freqs,
-                                 const NVTETensor start_positions, NVTETensor q_out, NVTETensor k_out, NVTETensor v_out,
-                                 const NVTE_QKV_Format qkv_format, const bool interleaved, const int cp_size, const int cp_rank, const int s, const int b, const int h, const int d, const int d2,
-                                 const int qkv_split_arg_list_0, const int qkv_split_arg_list_1, const int qkv_split_arg_list_2,
-                                 cudaStream_t stream);
+void nvte_fused_qkv_rope_forward(const NVTETensor qkv_input, const NVTETensor q_freqs,
+                                 const NVTETensor k_freqs, const NVTETensor start_positions,
+                                 NVTETensor q_out, NVTETensor k_out, NVTETensor v_out,
+                                 const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                 const int cp_size, const int cp_rank, const int s, const int b,
+                                 const int h, const int d, const int d2,
+                                 const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
+                                 const int qkv_split_arg_list_2, cudaStream_t stream);
 
 /*! \brief Compute the backward of the fused qkv rope.
  *
@@ -126,11 +129,14 @@ void nvte_fused_qkv_rope_forward(const NVTETensor qkv_input, const NVTETensor q_
  *  \param[in]     qkv_split_arg_list_2  The hidden size for V.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor k_grad_out, const NVTETensor v_grad_out,
-                                 const NVTETensor q_freqs, const NVTETensor k_freqs, NVTETensor qkv_grad_input,
-                                 const NVTE_QKV_Format qkv_format, const bool interleaved, const int cp_size, const int cp_rank, const int s, const int b, const int h, const int d, const int d2,
-                                 const int qkv_split_arg_list_0, const int qkv_split_arg_list_1, const int qkv_split_arg_list_2,
-                                 cudaStream_t stream);
+void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor k_grad_out,
+                                  const NVTETensor v_grad_out, const NVTETensor q_freqs,
+                                  const NVTETensor k_freqs, NVTETensor qkv_grad_input,
+                                  const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                  const int cp_size, const int cp_rank, const int s, const int b,
+                                  const int h, const int d, const int d2,
+                                  const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
+                                  const int qkv_split_arg_list_2, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
