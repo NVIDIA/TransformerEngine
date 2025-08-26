@@ -38,7 +38,7 @@ from ..quantize import (
     QuantizeMeta,
     QuantizeMetaSet,
     ScalingMode,
-    UsageType,
+    TensorSource,
 )
 
 PRNGKey = Any
@@ -376,7 +376,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
         if get_quantize_config().get_scaling_mode(
-            UsageType.X
+            TensorSource.X
         ) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(fp8_recipe, recipe.DelayedScaling):
             x_meta = generate_quantize_meta("x")
             kernel_meta = generate_quantize_meta("kernel")

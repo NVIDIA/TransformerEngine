@@ -36,7 +36,7 @@ __all__ = [
     "apply_padding_to_scale_inv",
     "remove_padding_from_scale_inv",
     "NVTE_FP8_COLLECTION_NAME",
-    "UsageType",
+    "TensorSource",
 ]
 
 _is_fp8_available = None
@@ -159,11 +159,14 @@ def _format2dtypes(format_: recipe.Format):
     return jnp.bfloat16, jnp.bfloat16
 
 
-class UsageType(Enum):
-    """Enumeration for usage types in quantization."""
+class TensorSource(Enum):
+    """Enumeration for where a tensor's data comes from."""
 
+    # Input data
     X = 0
+    # Model parameters
     KERNEL = 1
+    # Gradients in the backward pass
     DGRAD = 2
 
 
@@ -236,11 +239,11 @@ class BaseQuantizeConfig(ABC):
         return self.INITIALIZED
 
     @abstractmethod
-    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+    def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type.
 
         Args:
-            usage_type: The usage type for which to get the scaling mode.
+            tensor_source: The usage type for which to get the scaling mode.
 
         Returns:
             The scaling mode for the specified usage type.
@@ -254,9 +257,9 @@ class BaseQuantizeConfig(ABC):
             str: Reason for being unsupported, if applicable.
         """
 
-        x_scaling_mode = self.get_scaling_mode(UsageType.X)
-        kernel_scaling_mode = self.get_scaling_mode(UsageType.KERNEL)
-        grad_scaling_mode = self.get_scaling_mode(UsageType.DGRAD)
+        x_scaling_mode = self.get_scaling_mode(TensorSource.X)
+        kernel_scaling_mode = self.get_scaling_mode(TensorSource.KERNEL)
+        grad_scaling_mode = self.get_scaling_mode(TensorSource.DGRAD)
         for scaling_mode in [x_scaling_mode, kernel_scaling_mode, grad_scaling_mode]:
             is_supported, reason = is_fp8_available(scaling_mode=scaling_mode)
             if not is_supported:
@@ -274,7 +277,7 @@ class NoOpQuantizeConfig(BaseQuantizeConfig):
             " higher-precision when no quantized recipe is set."
         )
 
-    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+    def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.NO_SCALING
 
@@ -316,7 +319,7 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
         self.FP8_2X_ACC_DGRAD = True
         self.FP8_2X_ACC_WGRAD = True
 
-    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+    def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.DELAYED_TENSOR_SCALING
 
@@ -337,7 +340,7 @@ class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
         super().initialize_from_recipe(fp8_recipe)
         self.AMAX_HISTORY_LEN = 0
 
-    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+    def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.CURRENT_TENSOR_SCALING
 
@@ -358,7 +361,7 @@ class BlockScalingQuantizeConfig(BaseQuantizeConfig):
         super().initialize_from_recipe(fp8_recipe)
         self.AMAX_HISTORY_LEN = 0
 
-    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+    def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.MXFP8_1D_SCALING
 

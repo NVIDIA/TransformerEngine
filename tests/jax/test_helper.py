@@ -18,7 +18,7 @@ from transformer_engine.jax.quantize import (
     is_fp8_available,
     ScalingMode,
     update_collections,
-    UsageType,
+    TensorSource,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 
@@ -60,18 +60,18 @@ class TestFP8Functions(unittest.TestCase):
 
     def _compare_current_scaling(self, test):
         self.assertEqual(get_quantize_config().FP8_FORMAT, test.fp8_format)
-        for usage_type in UsageType:
+        for tensor_source in TensorSource:
             self.assertEqual(
-                get_quantize_config().get_scaling_mode(usage_type),
+                get_quantize_config().get_scaling_mode(tensor_source),
                 ScalingMode.CURRENT_TENSOR_SCALING,
             )
 
     def _compare_mxfp8_scaling(self, test):
         self.assertEqual(get_quantize_config().MARGIN, test.margin)
         self.assertEqual(get_quantize_config().FP8_FORMAT, test.fp8_format)
-        for usage_type in UsageType:
+        for tensor_source in TensorSource:
             self.assertEqual(
-                get_quantize_config().get_scaling_mode(usage_type), ScalingMode.MXFP8_1D_SCALING
+                get_quantize_config().get_scaling_mode(tensor_source), ScalingMode.MXFP8_1D_SCALING
             )
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)

@@ -24,7 +24,7 @@ from .helper import (
     get_quantize_config,
     get_quantize_config_class,
     AmaxComputeAlgo,
-    UsageType,
+    TensorSource,
 )
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
@@ -923,17 +923,17 @@ class QuantizerFactory:
 
         if fp8_recipe is not None:
             quantize_config = get_quantize_config_class(fp8_recipe)()
-            x_scaling_mode = quantize_config.get_scaling_mode(UsageType.X)
-            kernel_scaling_mode = quantize_config.get_scaling_mode(UsageType.KERNEL)
-            grad_scaling_mode = quantize_config.get_scaling_mode(UsageType.DGRAD)
+            x_scaling_mode = quantize_config.get_scaling_mode(TensorSource.X)
+            kernel_scaling_mode = quantize_config.get_scaling_mode(TensorSource.KERNEL)
+            grad_scaling_mode = quantize_config.get_scaling_mode(TensorSource.DGRAD)
         elif scaling_mode is not None:
             x_scaling_mode = scaling_mode
             kernel_scaling_mode = scaling_mode
             grad_scaling_mode = scaling_mode
         else:
-            x_scaling_mode = get_quantize_config().get_scaling_mode(UsageType.X)
-            kernel_scaling_mode = get_quantize_config().get_scaling_mode(UsageType.KERNEL)
-            grad_scaling_mode = get_quantize_config().get_scaling_mode(UsageType.DGRAD)
+            x_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.X)
+            kernel_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.KERNEL)
+            grad_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.DGRAD)
 
         fwd_dtype = fwd_dtype or get_quantize_config().FWD_DTYPE
         bwd_dtype = bwd_dtype or get_quantize_config().BWD_DTYPE
