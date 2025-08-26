@@ -899,6 +899,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     )
     torch.cuda.synchronize()
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
@@ -912,23 +913,23 @@ def test_sanity_gemm_with_fp8quantization_and_unalignment(N, datatype):
     outp_type = datatype
     quantizer = Float8Quantizer(scales, amaxes, tex.DType.kFloat8E4M3)
     quantized_out, *_ = general_gemm(
-            weight,
-            inp,
-            get_workspace(),
-            outp_type,
-            quantization_params=quantizer,
-            bias=None,
-            use_split_accumulator=False,
-        )
+        weight,
+        inp,
+        get_workspace(),
+        outp_type,
+        quantization_params=quantizer,
+        bias=None,
+        use_split_accumulator=False,
+    )
     out, *_ = general_gemm(
-            weight,
-            inp,
-            get_workspace(),
-            outp_type,
-            quantization_params=None,
-            bias=None,
-            use_split_accumulator=False,
-        )
+        weight,
+        inp,
+        get_workspace(),
+        outp_type,
+        quantization_params=None,
+        bias=None,
+        use_split_accumulator=False,
+    )
     expected_quantized_out = quantizer(out)
     torch.testing.assert_close(expected_quantized_out, quantized_out)
 
