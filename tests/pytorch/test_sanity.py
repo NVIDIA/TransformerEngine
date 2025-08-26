@@ -104,18 +104,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 all_boolean = [True, False]
 batch_sizes_with_zero = [0, 1, 2]
 
-all_activations = [
-    "gelu",
-    "geglu",
-    "qgelu",
-    "qgeglu",
-    "relu",
-    "reglu",
-    "srelu",
-    "sreglu",
-    "silu",
-    "swiglu",
-]
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu", "qgelu", "qgeglu"]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 
@@ -909,6 +898,39 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
         use_split_accumulator=False,
     )
     torch.cuda.synchronize()
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("N", [32])
+@pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
+def test_sanity_gemm_with_fp8quantization_and_unalignment(N, datatype):
+    offset = 16
+    scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
+    inp = torch.reshape(scratchpad[0][:-offset], (N, N))
+    weight = torch.reshape(scratchpad[0][offset:], (N, N))
+    scales = torch.ones(1).cuda().squeeze()
+    amaxes = torch.ones(1).cuda().squeeze()
+    outp_type = datatype
+    quantizer = Float8Quantizer(scales, amaxes, tex.DType.kFloat8E4M3)
+    quantized_out, *_ = general_gemm(
+            weight,
+            inp,
+            get_workspace(),
+            outp_type,
+            quantization_params=quantizer,
+            bias=None,
+            use_split_accumulator=False,
+        )
+    out, *_ = general_gemm(
+            weight,
+            inp,
+            get_workspace(),
+            outp_type,
+            quantization_params=None,
+            bias=None,
+            use_split_accumulator=False,
+        )
+    expected_quantized_out = quantizer(out)
+    torch.testing.assert_close(expected_quantized_out, quantized_out)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

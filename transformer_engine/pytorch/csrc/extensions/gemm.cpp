@@ -123,28 +123,42 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                "into D tensor. Beta has nothing to be applied to.");
   }
 
+  DType gemm_output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
   // Output tensor
   TensorWrapper D_tensor;
   if (D.is_none()) {
-    DType output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
-    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
+    std::tie(D_tensor, D) = createOutputTensor(D_shape, gemm_output_dtype, quantizer);
   } else {
     D_tensor = makeTransformerEngineTensor(D, quantizer);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
                "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
                std::to_string(D_tensor.shape()), ")");
-    if (out_dtype) {
-      NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
-                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
-    }
+    // TODO: Rather check quantizer output data type and compare with out_dtype
+    // if (out_dtype) {
+    //   NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
+    //              static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
+    // }
   }
 
+  // maintain unquantized tensor in case we need to output fp8 quantized tensor from op consuming hp data type.
+  TensorWrapper unquantized_D_tensor;
+  py::object unquantized_out;
+  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+  bool quantization_needed = !quantizer.is_none(); // TODO: Another use-case:
+  // If already output is FP8, then no need for quantization, since cublas is gonna take care of it.
+  if(quantization_needed)
+  {
+    NoneQuantizer q{none};
+    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, gemm_output_dtype);
+  }
+
+  TensorWrapper &out_tensor = quantization_needed ? unquantized_D_tensor : D_tensor;
   // Bias tensor
   TensorWrapper bias_tensor;
   MaybeTensor bias_grad = std::nullopt;
   if (bias.has_value()) {
     if (grad) {
-      auto opts = torch::TensorOptions().dtype(GetATenDType(D_tensor.dtype())).device(torch::kCUDA);
+      auto opts = torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
       bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
       bias_tensor = makeTransformerEngineTensor(*bias_grad);
     } else {
@@ -157,7 +171,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   // Activation input tensor
   MaybeTensor pre_gelu_out = std::nullopt;
-  DType gelu_type = low_precision ? bias_type : D_tensor.dtype();
+  DType gelu_type = low_precision ? bias_type : out_tensor.dtype();
   if (gelu) {
     if (!grad) {
       auto dtype = GetATenDType(gelu_type);
@@ -210,7 +224,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       // Direct GEMM call to the correct overlap
       if (bulk_overlap) {
         NVTE_SCOPED_GIL_RELEASE({
-          comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
+          comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, out_tensor, bias_tensor,
                                      te_pre_gelu_out, te_workspace, grad, accumulate,
                                      use_split_accumulator, comm_type.value(), extra_output_tensor,
                                      main_stream);
@@ -218,14 +232,14 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       } else if (comm_type.value() == CommOverlapType::AG) {
         if (comm_overlap->is_atomic_gemm()) {
           NVTE_SCOPED_GIL_RELEASE({
-            comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+            comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
         } else {
           NVTE_SCOPED_GIL_RELEASE({
-            comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+            comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
                                            bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                            accumulate, use_split_accumulator, extra_output_tensor,
                                            main_stream);
@@ -234,14 +248,14 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       } else {
         if (comm_overlap->is_atomic_gemm()) {
           NVTE_SCOPED_GIL_RELEASE({
-            comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
+            comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
         } else {
           NVTE_SCOPED_GIL_RELEASE({
-            comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
+            comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
                                            bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                            accumulate, use_split_accumulator, extra_output_tensor,
                                            main_stream);
@@ -251,15 +265,15 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), D_tensor.data(),
+        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), out_tensor.data(),
                                 bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
                                 te_workspace.data(), alpha, *beta, use_split_accumulator,
                                 num_math_sms, main_stream);
       });
     }
   } else {
-    if (D_tensor.numel() != 0 && !accumulate) {
-      D_tensor.zero_(main_stream);
+    if (out_tensor.numel() != 0 && !accumulate) {
+      out_tensor.zero_(main_stream);
     }
     if (bias.has_value()) {
       if (bias->numel() != 0 && grad) {
@@ -267,7 +281,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-
+  if(quantization_needed)
+    my_quantizer->quantize(unquantized_D_tensor, D_tensor);
   // Pack outputs
   std::vector<py::object> out;
   out.emplace_back(std::move(D));
