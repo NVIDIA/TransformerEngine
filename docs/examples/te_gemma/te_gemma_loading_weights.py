@@ -86,7 +86,12 @@ def load_te_model(cls, config):
     https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
     """
     config.use_cache = False  # To make TransformerLayer compatible with GemmaModel
-    with fp8_model_init(config.fp8_model_init):
+
+    # Loading model with FP8 only weights needs both the following context managers.
+    # 1. fp8_model_init(config.fp8_model_init) to tell TE to use FP8 only weights.
+    # 2. torch.no_grad() during TE modules' initilization so that they respect
+    #    the `fp8_model_init` context manager.
+    with torch.no_grad(), fp8_model_init(config.fp8_model_init):
         # Just create a model with random weights.
         vanilla_model = cls(config).cuda()
 
