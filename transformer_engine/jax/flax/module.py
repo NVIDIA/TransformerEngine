@@ -32,7 +32,7 @@ from ..cpp_extensions import (
     jax_scaled_masked_softmax,
     jax_scaled_upper_triang_masked_softmax,
 )
-from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode, UsageType
+from ..quantize import QuantizerFactory, get_quantize_config, QuantizeMeta, QuantizeMetaSet, ScalingMode, UsageType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -350,7 +350,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             collection_name = (
                 variable_collection
                 if variable_collection is not None
-                else QuantizeConfig.COLLECTION_NAME
+                else get_quantize_config().COLLECTION_NAME
             )
             scale = self.variable(
                 collection_name,
@@ -363,12 +363,12 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
                 collection_name,
                 f"{quantizer_name}{postfix}_amax_history",
                 jnp.zeros,
-                (QuantizeConfig.AMAX_HISTORY_LEN,),
+                (get_quantize_config().AMAX_HISTORY_LEN,),
                 jnp.float32,
             ).value
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-        if QuantizeConfig.get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(
+        if get_quantize_config().get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(
             fp8_recipe, recipe.DelayedScaling
         ):
             x_meta = generate_quantize_meta("x")
@@ -483,7 +483,7 @@ class DenseGeneral(TransformerEngineBase):
             self.dtype,
         )
 
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
@@ -692,7 +692,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         quantizer_set = self.generate_quantizer_set()
 
         fuse_layernorm = (
-            QuantizeConfig.is_fp8_enabled()
+            get_quantize_config().is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -743,7 +743,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             kernel_shape,
             self.dtype,
         )
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -1005,7 +1005,7 @@ class LayerNormMLP(TransformerEngineBase):
         # TODO(Phuong): use fuse_layernorm for high-precision
         # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            QuantizeConfig.is_fp8_enabled()
+            get_quantize_config().is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -1088,7 +1088,7 @@ class LayerNormMLP(TransformerEngineBase):
             self.dtype,
         )
 
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel_1 = kernel_1.astype(input_dtype)
 
         hidden_size = inputs.shape[-1]
@@ -1100,7 +1100,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel_2_shape,
             self.dtype,
         )
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel_2 = kernel_2.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))

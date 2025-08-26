@@ -28,6 +28,7 @@ from .. import cpp_extensions as tex
 from .device_utils import get_device_compute_capability
 
 __all__ = [
+    "get_quantize_config",
     "fp8_autocast",
     "is_fp8_available",
     "update_collections",
@@ -180,7 +181,7 @@ class AmaxComputeAlgo(Enum):
 
 
 @dataclass
-class _QuantizeConfigBaseClass(ABC):
+class BaseQuantizeConfig(ABC):
     """Configuration class for quantization settings.
 
     This class manages global quantization settings including FP8 formats,
@@ -263,7 +264,7 @@ class _QuantizeConfigBaseClass(ABC):
                 return is_supported, reason
         return True, None
 
-class NoOpQuantizeConfig(_QuantizeConfigBaseClass):
+class NoOpQuantizeConfig(BaseQuantizeConfig):
     """Configuration class higher-precision non-quantized operation. """
 
     def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
@@ -274,7 +275,7 @@ class NoOpQuantizeConfig(_QuantizeConfigBaseClass):
         """ Gets the scaling mode for a specific tensor's usage type. """
         return ScalingMode.NO_SCALING
 
-class DelayedScalingQuantizeConfig(_QuantizeConfigBaseClass):
+class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
     """Configuration class for delayed scaling FP8 recipe.
 
     This class provides specific initialization and finalization for delayed scaling
@@ -316,7 +317,7 @@ class DelayedScalingQuantizeConfig(_QuantizeConfigBaseClass):
         return ScalingMode.DELAYED_TENSOR_SCALING
 
 
-class CurrentScalingQuantizeConfig(_QuantizeConfigBaseClass):
+class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
     """Configuration class for current scaling FP8 recipe.
 
     This class provides specific initialization and finalization for current scaling
@@ -337,7 +338,7 @@ class CurrentScalingQuantizeConfig(_QuantizeConfigBaseClass):
         return ScalingMode.CURRENT_TENSOR_SCALING
 
 
-class BlockScalingQuantizeConfig(_QuantizeConfigBaseClass):
+class BlockScalingQuantizeConfig(BaseQuantizeConfig):
     """Configuration class for block scaling FP8 recipe.
 
     This class provides specific initialization and finalization for block scaling
@@ -357,12 +358,15 @@ class BlockScalingQuantizeConfig(_QuantizeConfigBaseClass):
         """ Gets the scaling mode for a specific tensor's usage type. """
         return ScalingMode.MXFP8_1D_SCALING
 
-""" Global instance of _QuantizeConfigBaseClass set by fp8_autocast context. """
-QuantizeConfig = NoOpQuantizeConfig()
+_QUANTIZE_CONFIG = NoOpQuantizeConfig()
+
+def get_quantize_config():
+    """ Global instance of BaseQuantizeConfig set by fp8_autocast context. """
+    return _QUANTIZE_CONFIG
 
 def get_quantize_config_class(
     fp8_recipe: recipe.Recipe,
-) -> Type[_QuantizeConfigBaseClass]:
+) -> Type[BaseQuantizeConfig]:
     """Get the quantization configuration based on the FP8 recipe.
 
     Args:
@@ -425,24 +429,22 @@ def fp8_autocast(
     if fp8_recipe is None:
         fp8_recipe = recipe.DelayedScaling()
 
-    global QuantizeConfig
+    global _QUANTIZE_CONFIG
 
-    old_quantize_config = QuantizeConfig
-    
-    QuantizeConfig = NoOpQuantizeConfig()
+    old_quantize_config = _QUANTIZE_CONFIG
+
+    _QUANTIZE_CONFIG = NoOpQuantizeConfig()
 
     try:
         with global_shard_guard(mesh_resource):
             if enabled:
-                QuantizeConfig = get_quantize_config_class(fp8_recipe)()
-                print('Creating new QuantizeConfig', QuantizeConfig)
-                is_supported, reason = QuantizeConfig.is_supported()
+                _QUANTIZE_CONFIG = get_quantize_config_class(fp8_recipe)()
+                is_supported, reason = _QUANTIZE_CONFIG.is_supported()
                 assert is_supported, reason
-                QuantizeConfig.initialize_from_recipe(fp8_recipe)
+                _QUANTIZE_CONFIG.initialize_from_recipe(fp8_recipe)
             yield
     finally:
-        print('Exiting')
-        QuantizeConfig = old_quantize_config
+        _QUANTIZE_CONFIG = old_quantize_config
 
 
 def get_delayed_scaling():
@@ -460,12 +462,12 @@ def get_delayed_scaling():
         an instance of  DelayedScaling which is set via fp8_autocast.
     """
     amax_compute_algo = (
-        "max" if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX else "most_recent"
+        "max" if get_quantize_config().AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX else "most_recent"
     )
     return recipe.DelayedScaling(
-        margin=int(QuantizeConfig.MARGIN),
-        fp8_format=QuantizeConfig.FP8_FORMAT,
-        amax_history_len=QuantizeConfig.AMAX_HISTORY_LEN,
+        margin=int(get_quantize_config().MARGIN),
+        fp8_format=get_quantize_config().FP8_FORMAT,
+        amax_history_len=get_quantize_config().AMAX_HISTORY_LEN,
         amax_compute_algo=amax_compute_algo,
     )
 

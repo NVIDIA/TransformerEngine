@@ -23,7 +23,7 @@ from utils import EncoderLayer as RefEncoderLayer
 from transformer_engine.common import recipe
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.quantize import (
-    QuantizeConfig,
+    get_quantize_config,
     ScalingMode,
     is_fp8_available,
     update_collections,
@@ -357,7 +357,7 @@ class BaseRunner:
 
         ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        if QuantizeConfig.is_fp8_enabled():
+        if get_quantize_config().is_fp8_enabled():
             for _ in range(4):
                 _, updated_state = jax.value_and_grad(self._loss_fn, argnums=(3,), has_aux=False)(
                     inputs,
@@ -366,12 +366,12 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if QuantizeConfig.get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING:
+                if get_quantize_config().get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING:
                     _, updated_quantize_meta = flax.core.pop(
-                        updated_state[0], QuantizeConfig.COLLECTION_NAME
+                        updated_state[0], get_quantize_config().COLLECTION_NAME
                     )
                     test_others = update_collections(
-                        {QuantizeConfig.COLLECTION_NAME: updated_quantize_meta}, test_others
+                        {get_quantize_config().COLLECTION_NAME: updated_quantize_meta}, test_others
                     )
                     del updated_quantize_meta
                 del updated_state
@@ -501,7 +501,7 @@ class BaseTester:
 
     def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""
-        QuantizeConfig.finalize()  # Ensure FP8 disabled.
+        get_quantize_config().finalize()  # Ensure FP8 disabled.
         with global_shard_guard(
             MeshResource()
         ):  # Empty MeshResource is used as we are running on a single device
@@ -509,7 +509,7 @@ class BaseTester:
 
     def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
-        QuantizeConfig.finalize()  # Ensure FP8 disabled.
+        get_quantize_config().finalize()  # Ensure FP8 disabled.
         with global_shard_guard(
             MeshResource()
         ):  # Empty MeshResource is used as we are running on a single device
@@ -519,23 +519,23 @@ class BaseTester:
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
-        QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
+        get_quantize_config().initialize(fp8_recipe=fp8_recipe)
         with global_shard_guard(
             MeshResource()
         ):  # Empty MeshResource is used as we are running on a single device
             self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
-        QuantizeConfig.finalize()
+        get_quantize_config().finalize()
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
-        QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
+        get_quantize_config().initialize(fp8_recipe=fp8_recipe)
         with global_shard_guard(
             MeshResource()
         ):  # Empty MeshResource is used as we are running on a single device
             self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
-        QuantizeConfig.finalize()
+        get_quantize_config().finalize()
 
 
 class TestEncoderLayer(BaseTester):
