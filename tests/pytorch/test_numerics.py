@@ -4,6 +4,7 @@
 
 import math
 import os
+from pickletools import genops
 from typing import Dict, List, Tuple, Optional
 import pytest
 import random
@@ -93,6 +94,21 @@ all_activations = [
     "silu",
     "swiglu",
 ]
+
+act_ops = {
+    "gelu": te.ops.GELU,
+    "geglu": te.ops.GEGLU,
+    "qgelu": te.ops.QGELU,
+    "qgeglu": te.ops.QGEGLU,
+    "relu": te.ops.ReLU,
+    "reglu": te.ops.ReGLU,
+    "srelu": te.ops.SReLU,
+    "sreglu": te.ops.SReGLU,
+    "silu": te.ops.SiLU,
+    "swiglu": te.ops.SwiGLU,
+}
+
+gated_act_ops = (te.ops.GEGLU, te.ops.QGEGLU, te.ops.ReGLU, te.ops.SReGLU, te.ops.SwiGLU)
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -1722,14 +1738,20 @@ def _test_grouped_linear_accuracy(
     fp8,
     fuse_wgrad_accumulation,
     delay_wgrad_compute=False,
-    activation_func=None,  # assume gated activation function
+    activation_func=te.ops.Identity(),
 ):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
 
-    # assume gated activation function
-    hidden_size = config.hidden_size if activation_func is None else 2 * config.hidden_size
+    if isinstance(activation_func, gated_act_ops) or (
+        isinstance(activation_func, te.ops.Sequential)
+        and isinstance(activation_func[0], gated_act_ops)
+    ):
+        hidden_size = 2 * config.hidden_size
+    else:
+        hidden_size = config.hidden_size
+
     inp_hidden_states = torch.randn(
         (config.max_seqlen_q, bs, hidden_size),
         dtype=dtype,
@@ -2002,6 +2024,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("recipe", [recipe.MXFP8BlockScaling()])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("activation", all_activations)
 def test_grouped_linear_fp8_input(
     dtype,
     num_gemms,
@@ -2009,6 +2032,7 @@ def test_grouped_linear_fp8_input(
     model,
     recipe,
     fp8_model_params,
+    activation,
 ):
     config = model_configs[model]
     if config.max_seqlen_q % 32 != 0:
@@ -2048,9 +2072,9 @@ def test_grouped_linear_fp8_input(
             weight_i_copy = getattr(grouped_linear_fp8_input, f"weight{i}")
             weight_i_copy.main_grad = weight_i.main_grad.clone()
 
-    bf16_activation = te.ops.SwiGLU()
+    bf16_activation = act_ops[activation]()
     fp8_activation = te.ops.Sequential(
-        te.ops.SwiGLU(),
+        bf16_activation,
         te.ops.Quantize(forward=True, backward=False),  # Output QuantizedTensor in forward
     )
 
