@@ -27,6 +27,7 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     is_fp8_available,
     update_collections,
+    UsageType,
 )
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
@@ -365,7 +366,7 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
+                if QuantizeConfig.get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING:
                     _, updated_quantize_meta = flax.core.pop(
                         updated_state[0], QuantizeConfig.COLLECTION_NAME
                     )

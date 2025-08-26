@@ -23,7 +23,7 @@ from .tensor import ScaledTensor, ScaledTensor1x, ScaledTensor2x, ScaledTensorFa
 from .helper import (
     QuantizeConfig,
     AmaxComputeAlgo,
-    _get_scaling_mode,
+    UsageType,
 )
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
@@ -827,12 +827,14 @@ class QuantizerFactory:
 
     @staticmethod
     def _create_set(
-        scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, n_groups, **kwargs
+        x_scaling_mode, kernel_scaling_mode, grad_scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, n_groups, **kwargs
     ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
 
         Args:
-            scaling_mode: Scaling mode to use
+            x_scaling_mode: Scaling mode to use for input tensor 'x'
+            kernel_scaling_mode: Scaling mode to use for kernel tensor
+            grad_scaling_mode: Scaling mode to use for gradient tensor
             fwd_dtype: Data type for forward pass
             bwd_dtype: Data type for backward pass
             is_2x2x: Whether to use 2x2x quantization
@@ -846,7 +848,7 @@ class QuantizerFactory:
             q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE_COLWISE
         else:
             q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE
-            if scaling_mode.is_1d_block_scaling():
+            if kernel_scaling_mode.is_1d_block_scaling():
                 q_layout_kernel = QuantizeLayout.COLWISE
             if QuantizeConfig.INFERENCE_MODE:
                 q_layout_dgrad = None
@@ -868,12 +870,12 @@ class QuantizerFactory:
         else:
             args_x = args_kernel = args_grad = {}
 
-        q_x = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_x, n_groups, **args_x)
+        q_x = QuantizerFactory.create(1, x_scaling_mode, fwd_dtype, q_layout_x, n_groups, **args_x)
         q_kernel = QuantizerFactory.create(
-            1, scaling_mode, fwd_dtype, q_layout_kernel, n_groups, **args_kernel
+            1, kernel_scaling_mode, fwd_dtype, q_layout_kernel, n_groups, **args_kernel
         )
         q_dgrad = QuantizerFactory.create(
-            1, scaling_mode, bwd_dtype, q_layout_dgrad, n_groups, **args_grad
+            1, grad_scaling_mode, bwd_dtype, q_layout_dgrad, n_groups, **args_grad
         )
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
@@ -892,7 +894,7 @@ class QuantizerFactory:
 
         Args:
             n_quantizer_sets: Number of quantizer sets to create
-            scaling_mode: Scaling mode to use, default is QuantizeConfig.SCALING_MODE
+            scaling_mode: Scaling mode to use, default is QuantizeConfig.get_scaling_mode
             fwd_dtype: Data type for forward pass, default is QuantizeConfig.FWD_DTYPE
             bwd_dtype: Data type for backward pass, default is QuantizeConfig.BWD_DTYPE
             is_2x2x: Whether to use 2x2x quantization, default is QuantizeConfig.IF_QUANTIZE_2X
@@ -912,10 +914,19 @@ class QuantizerFactory:
         )
 
         if fp8_recipe is not None:
-            # TODO(jberchtold): once recipe and scaling mode are decoupled update this logic
-            scaling_mode = _get_scaling_mode(fp8_recipe)
+            quantize_config = get_quantize_config_class(fp8_recipe)()
+            x_scaling_mode = quantize_config.get_scaling_mode(UsageType.X)
+            kernel_scaling_mode = quantize_config.get_scaling_mode(UsageType.KERNEL)
+            grad_scaling_mode = quantize_config.get_scaling_mode(UsageType.DGRAD)
+        elif scaling_mode is not None:
+            x_scaling_mode = scaling_mode
+            kernel_scaling_mode = scaling_mode
+            grad_scaling_mode = scaling_mode
         else:
-            scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
+            x_scaling_mode = QuantizeConfig.get_scaling_mode(UsageType.X)
+            kernel_scaling_mode = QuantizeConfig.get_scaling_mode(UsageType.KERNEL)
+            grad_scaling_mode = QuantizeConfig.get_scaling_mode(UsageType.DGRAD)
+
         fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
         bwd_dtype = bwd_dtype or QuantizeConfig.BWD_DTYPE
         if is_2x2x is None:
@@ -932,7 +943,14 @@ class QuantizerFactory:
         for _ in range(n_quantizer_sets):
             q_set.append(
                 QuantizerFactory._create_set(
-                    scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, n_groups, **kwargs
+                    x_scaling_mode=x_scaling_mode,
+                    kernel_scaling_mode=kernel_scaling_mode,
+                    grad_scaling_mode=grad_scaling_mode,
+                    fwd_dtype=fwd_dtype,
+                    bwd_dtype=bwd_dtype,
+                    is_2x2x=is_2x2x,
+                    n_groups=n_groups,
+                    **kwargs
                 )
             )
 

@@ -7,9 +7,11 @@ Config module for quantization metadata management
 This module provides configuration and helper functions for managing quantization metadata
 in JAX, including support for different scaling modes and datatypes.
 """
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple, Dict, Union, Sequence
+from typing import Optional, Tuple, Dict, Union, Sequence, Type
 from functools import reduce
 import operator
 
@@ -26,7 +28,6 @@ from .. import cpp_extensions as tex
 from .device_utils import get_device_compute_capability
 
 __all__ = [
-    "QuantizeConfig",
     "fp8_autocast",
     "is_fp8_available",
     "update_collections",
@@ -34,12 +35,14 @@ __all__ = [
     "apply_padding_to_scale_inv",
     "remove_padding_from_scale_inv",
     "NVTE_FP8_COLLECTION_NAME",
+    "UsageType",
 ]
 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
+NVTE_FP8_COLLECTION_NAME = "fp8_metas"
 
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     """Check if delayed scaling FP8 is supported on the given GPU architecture.
@@ -154,6 +157,14 @@ def _format2dtypes(format_: recipe.Format):
     return jnp.bfloat16, jnp.bfloat16
 
 
+class UsageType(Enum):
+    """Enumeration for usage types in quantization."""
+
+    X = 0
+    KERNEL = 1
+    DGRAD = 2
+
+
 class AmaxComputeAlgo(Enum):
     """Enumeration for AMAX computation algorithms.
 
@@ -166,28 +177,10 @@ class AmaxComputeAlgo(Enum):
     MOST_RECENT = "most_recent"
 
 
-def _get_scaling_mode(fp8_recipe: recipe.Recipe) -> ScalingMode:
-    """Convert recipe.Recipe to ScalingMode.
-
-    Args:
-        fp8_recipe: The FP8 recipe to convert
-
-    Returns:
-        The corresponding ScalingMode
-
-    Raises:
-        ValueError: If the recipe type is not supported
-    """
-    if isinstance(fp8_recipe, recipe.DelayedScaling):
-        return ScalingMode.DELAYED_TENSOR_SCALING
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-        return ScalingMode.MXFP8_1D_SCALING
-    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
-        return ScalingMode.CURRENT_TENSOR_SCALING
-    raise ValueError("Invalid fp8_recipe!")
 
 
-class QuantizeConfig:
+@dataclass
+class _QuantizeConfigBaseClass(ABC):
     """Configuration class for quantization settings.
 
     This class manages global quantization settings including FP8 formats,
@@ -204,14 +197,13 @@ class QuantizeConfig:
         FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
         FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
         INFERENCE_MODE: Whether to enable optimization for inference
-        SCALING_MODE: Scaling mode
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
     """
 
     INITIALIZED = False
     MARGIN: float = 0.0
-    COLLECTION_NAME: str = "fp8_metas"
+    COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
     FP8_FORMAT: recipe.Format = recipe.Format.HYBRID
     FWD_DTYPE: DType = _format2dtypes(recipe.Format.HYBRID)[0]
     BWD_DTYPE: DType = _format2dtypes(recipe.Format.HYBRID)[1]
@@ -219,61 +211,77 @@ class QuantizeConfig:
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False
     INFERENCE_MODE: bool = False
-    SCALING_MODE: ScalingMode = ScalingMode.NO_SCALING
 
     # DelayedScaling
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
 
-    @staticmethod
-    def is_fp8_enabled():
-        """Check if FP8 quantization is enabled.
-
-        Returns:
-            bool: True if quantization is enabled, False otherwise
-        """
-        return QuantizeConfig.INITIALIZED
-
-    @classmethod
-    def initialize(cls, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
         """Initialize the quantization configuration.
 
         Args:
             fp8_recipe: The FP8 recipe to use for initialization
         """
-        cls.INITIALIZED = True
-        cls.MARGIN = fp8_recipe.margin if "margin" in dir(fp8_recipe) else 0.0
-        cls.FP8_FORMAT = fp8_recipe.fp8_format
-        cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
-        cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
+        self.INITIALIZED = True
+        self.MARGIN = fp8_recipe.margin if "margin" in dir(fp8_recipe) else 0.0
+        self.FP8_FORMAT = fp8_recipe.fp8_format
+        self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(self.FP8_FORMAT)
 
-    @classmethod
-    def finalize(cls) -> None:
-        """Reset the quantization configuration to default values."""
-        cls.INITIALIZED = False
-        cls.MARGIN = 0.0
-        cls.FP8_FORMAT = recipe.Format.HYBRID
-        cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
-        cls.SCALING_MODE = ScalingMode.NO_SCALING
-        cls.FP8_2X_ACC_FPROP = False
-        cls.FP8_2X_ACC_DGRAD = False
-        cls.FP8_2X_ACC_WGRAD = False
-        cls.SCALING_MODE = ScalingMode.NO_SCALING
-        cls.INFERENCE_MODE = False
-        # DelayedScaling
-        cls.AMAX_HISTORY_LEN = 1024
-        cls.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
+    def is_fp8_enabled(self) -> bool:
+        """Check if FP8 quantization is enabled.
 
+        Returns:
+            bool: True if quantization is enabled, False otherwise
+        """
+        return self.INITIALIZED
 
-class DelayedScalingQuantizeConfig:
+    @abstractmethod
+    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+        """ Gets the scaling mode for a specific tensor's usage type.
+
+        Args:
+            usage_type: The usage type for which to get the scaling mode.
+
+        Returns:
+            The scaling mode for the specified usage type.
+        """
+
+    def is_supported(self) -> tuple[bool, str]:
+        """ Check if this QuantizeConfig class is supported on the available devices. 
+
+        Returns:
+            bool: True if the class is supported, False otherwise
+            str: Reason for being unsupported, if applicable.
+        """
+
+        x_scaling_mode = self.get_scaling_mode(UsageType.X)
+        kernel_scaling_mode = self.get_scaling_mode(UsageType.KERNEL)
+        grad_scaling_mode = self.get_scaling_mode(UsageType.DGRAD)
+        for scaling_mode in [x_scaling_mode, kernel_scaling_mode, grad_scaling_mode]:
+            is_supported, reason = is_fp8_available(scaling_mode=scaling_mode)
+            if not is_supported:
+                return is_supported, reason
+        return True, None
+
+class NoOpQuantizeConfig(_QuantizeConfigBaseClass):
+    """Configuration class higher-precision non-quantized operation. """
+
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+        """ Initialize no-op configuration. """
+        raise NotImplementedError("NoOpQuantizeConfig cannot be initialize from a recipe as it represents higher-precision when no quantized recipe is set.")
+
+    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+        """ Gets the scaling mode for a specific tensor's usage type. """
+        return ScalingMode.NO_SCALING
+
+class DelayedScalingQuantizeConfig(_QuantizeConfigBaseClass):
     """Configuration class for delayed scaling FP8 recipe.
 
     This class provides specific initialization and finalization for delayed scaling
     FP8 quantization mode.
     """
 
-    @staticmethod
-    def initialize(fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
         """Initialize delayed scaling FP8 configuration.
 
         Args:
@@ -282,6 +290,8 @@ class DelayedScalingQuantizeConfig:
         Raises:
             AssertionError: If recipe parameters are not supported
         """
+        super().initialize_from_recipe(fp8_recipe)
+
         assert fp8_recipe.amax_compute_algo in [
             "max",
             "most_recent",
@@ -291,71 +301,82 @@ class DelayedScalingQuantizeConfig:
         ), "DelayedScaling scaling_factor_compute_algo isn't supported by TE/JAX."
         assert fp8_recipe.reduce_amax, "DelayedScaling reduce_amax should be enabled for TE/JAX."
 
-        cls = QuantizeConfig
-        cls.initialize(fp8_recipe)
-
-        cls.AMAX_HISTORY_LEN = fp8_recipe.amax_history_len
+        self.AMAX_HISTORY_LEN = fp8_recipe.amax_history_len
         string_to_amax_compute_algo = {
             "max": AmaxComputeAlgo.MAX,
             "most_recent": AmaxComputeAlgo.MOST_RECENT,
         }
-        cls.AMAX_COMPUTE_ALGO = string_to_amax_compute_algo[fp8_recipe.amax_compute_algo]
+        self.AMAX_COMPUTE_ALGO = string_to_amax_compute_algo[fp8_recipe.amax_compute_algo]
 
-        cls.FP8_2X_ACC_DGRAD = True
-        cls.FP8_2X_ACC_WGRAD = True
+        self.FP8_2X_ACC_DGRAD = True
+        self.FP8_2X_ACC_WGRAD = True
 
-    @staticmethod
-    def finalize() -> None:
-        """Reset the delayed scaling configuration."""
-        QuantizeConfig.finalize()
+    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+        """ Gets the scaling mode for a specific tensor's usage type. """
+        return ScalingMode.DELAYED_TENSOR_SCALING
 
 
-class CurrentScalingQuantizeConfig:
+class CurrentScalingQuantizeConfig(_QuantizeConfigBaseClass):
     """Configuration class for current scaling FP8 recipe.
 
     This class provides specific initialization and finalization for current scaling
     FP8 quantization mode.
     """
 
-    @staticmethod
-    def initialize(fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
         """Initialize current scaling FP8 configuration.
 
         Args:
             fp8_recipe: The FP8 recipe to use for initialization
         """
-        cls = QuantizeConfig
-        cls.initialize(fp8_recipe)
-        cls.AMAX_HISTORY_LEN = 0
+        super().initialize_from_recipe(fp8_recipe)
+        self.AMAX_HISTORY_LEN = 0
 
-    @staticmethod
-    def finalize() -> None:
-        """Reset the current scaling configuration."""
-        QuantizeConfig.finalize()
+    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+        """ Gets the scaling mode for a specific tensor's usage type. """
+        return ScalingMode.CURRENT_TENSOR_SCALING
 
 
-class BlockScalingQuantizeConfig:
+class BlockScalingQuantizeConfig(_QuantizeConfigBaseClass):
     """Configuration class for block scaling FP8 recipe.
 
     This class provides specific initialization and finalization for block scaling
     FP8 quantization mode.
     """
 
-    @staticmethod
-    def initialize(fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
         """Initialize block scaling FP8 configuration.
 
         Args:
             fp8_recipe: The FP8 recipe to use for initialization
         """
-        cls = QuantizeConfig
-        cls.initialize(fp8_recipe)
-        cls.AMAX_HISTORY_LEN = 0
+        super().initialize_from_recipe(fp8_recipe)
+        self.AMAX_HISTORY_LEN = 0
 
-    @staticmethod
-    def finalize() -> None:
-        """Reset the block scaling configuration."""
-        QuantizeConfig.finalize()
+    def get_scaling_mode(self, usage_type: UsageType) -> ScalingMode:
+        """ Gets the scaling mode for a specific tensor's usage type. """
+        return ScalingMode.MXFP8_1D_SCALING
+
+""" Global instance of _QuantizeConfigBaseClass set by fp8_autocast context. """
+QuantizeConfig = NoOpQuantizeConfig()
+
+def get_quantize_config_class(
+    fp8_recipe: recipe.Recipe,
+) -> Type[_QuantizeConfigBaseClass]:
+    """Get the quantization configuration based on the FP8 recipe.
+
+    Args:
+        fp8_recipe: The FP8 recipe to use for initialization
+    Returns:
+        The quantization config class corresponding to the given recipe.
+    """
+    if isinstance(fp8_recipe, recipe.DelayedScaling):
+        return DelayedScalingQuantizeConfig
+    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        return BlockScalingQuantizeConfig
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        return CurrentScalingQuantizeConfig
+    raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
 
 
 @contextmanager
@@ -404,22 +425,24 @@ def fp8_autocast(
     if fp8_recipe is None:
         fp8_recipe = recipe.DelayedScaling()
 
-    Config = DelayedScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-        Config = BlockScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
-        Config = CurrentScalingQuantizeConfig
+    global QuantizeConfig
+
+    old_quantize_config = QuantizeConfig
+    
+    QuantizeConfig = NoOpQuantizeConfig()
 
     try:
         with global_shard_guard(mesh_resource):
             if enabled:
-                fp8_available, reason_for_no_fp8 = is_fp8_available(_get_scaling_mode(fp8_recipe))
-                assert fp8_available, reason_for_no_fp8
-
-                Config.initialize(fp8_recipe)
+                QuantizeConfig = get_quantize_config_class(fp8_recipe)()
+                print('Creating new QuantizeConfig', QuantizeConfig)
+                is_supported, reason = QuantizeConfig.is_supported()
+                assert is_supported, reason
+                QuantizeConfig.initialize_from_recipe(fp8_recipe)
             yield
     finally:
-        Config.finalize()
+        print('Exiting')
+        QuantizeConfig = old_quantize_config
 
 
 def get_delayed_scaling():
@@ -581,6 +604,3 @@ def apply_padding_to_scale_inv(
     # Pad the scales with the lowest representable value (2^-127) and return
     pad_width = tuple((0, a - b) for a, b in zip(padded_scale_shape, unpadded_scale_shape))
     return jnp.pad(scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127)
-
-
-NVTE_FP8_COLLECTION_NAME = QuantizeConfig.COLLECTION_NAME

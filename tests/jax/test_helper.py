@@ -18,6 +18,7 @@ from transformer_engine.jax.quantize import (
     is_fp8_available,
     ScalingMode,
     update_collections,
+    UsageType,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 
@@ -59,16 +60,17 @@ class TestFP8Functions(unittest.TestCase):
 
     def _compare_current_scaling(self, test):
         self.assertEqual(QuantizeConfig.FP8_FORMAT, test.fp8_format)
-        self.assertEqual(QuantizeConfig.SCALING_MODE, ScalingMode.CURRENT_TENSOR_SCALING)
+        for usage_type in UsageType:
+            self.assertEqual(QuantizeConfig.get_scaling_mode(usage_type), ScalingMode.CURRENT_TENSOR_SCALING)
 
     def _compare_mxfp8_scaling(self, test):
         self.assertEqual(QuantizeConfig.MARGIN, test.margin)
         self.assertEqual(QuantizeConfig.FP8_FORMAT, test.fp8_format)
-        self.assertEqual(QuantizeConfig.SCALING_MODE, ScalingMode.MXFP8_1D_SCALING)
+        for usage_type in UsageType:
+            self.assertEqual(QuantizeConfig.get_scaling_mode(usage_type), ScalingMode.MXFP8_1D_SCALING)
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_delayed_scaling(self):
-        QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
@@ -92,7 +94,6 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_current_scaling(self):
-        QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=Float8CurrentScaling()):
@@ -102,6 +103,7 @@ class TestFP8Functions(unittest.TestCase):
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.E4M3)
         with fp8_autocast(enabled=True, fp8_recipe=cs):
+            print(QuantizeConfig)
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_current_scaling(cs)
 
@@ -116,7 +118,6 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_mxfp8_supported, reason=mxfp8_reason)
     def test_fp8_autocast_mxfp8_block_scaling(self):
-        QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=MXFP8BlockScaling()):
@@ -140,7 +141,6 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_with_sharding_resource(self):
-        QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
         ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)

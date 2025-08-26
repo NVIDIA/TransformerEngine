@@ -32,7 +32,7 @@ from ..cpp_extensions import (
     jax_scaled_masked_softmax,
     jax_scaled_upper_triang_masked_softmax,
 )
-from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
+from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode, UsageType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -368,7 +368,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             ).value
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-        if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(
+        if QuantizeConfig.get_scaling_mode(UsageType.X) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(
             fp8_recipe, recipe.DelayedScaling
         ):
             x_meta = generate_quantize_meta("x")
