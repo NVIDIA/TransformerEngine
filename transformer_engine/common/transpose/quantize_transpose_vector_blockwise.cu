@@ -622,8 +622,8 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
                   scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
                   columnwise_option, pow2_scale, noop_ptr);)  // kAligned
-          )                                         // OutputType
-      )                                             // InputType
+          )                                                   // OutputType
+      )                                                       // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
