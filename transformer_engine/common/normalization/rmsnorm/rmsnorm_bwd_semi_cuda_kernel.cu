@@ -13,8 +13,8 @@ using namespace transformer_engine::normalization;
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
           int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL, bool FUSED_ADD = false>
-void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
-                   const bool configure_params) {  // NOLINT(*)
+void launch_rmsnorm_bwd_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
+                               const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
   auto kernel = &rmsnorm_bwd_tuned_kernel<Kernel_traits, FUSED_ADD>;
@@ -72,8 +72,8 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG_MAIN,
           int BYTES_PER_LDG_FINAL, bool FUSED_ADD = false>
-void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
-                     const bool configure_params) {  // NOLINT(*)
+void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
+                                 const bool configure_params) {  // NOLINT(*)
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
   // Instantiate kernel
@@ -139,8 +139,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   void                                                                                                          \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(  \
           LaunchParams<NORM_STAGE##KernelParams> &launch_params, const bool configure_params) {                 \
-    launch_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, __VA_ARGS__>(                    \
-        launch_params, configure_params);                                                                       \
+    launch_rmsnorm_bwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                      \
+                                        __VA_ARGS__>(launch_params, configure_params);                          \
   }                                                                                                             \
   REGISTER_NORM_BASE(                                                                                           \
       NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                              \
