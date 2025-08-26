@@ -455,23 +455,22 @@ def _grouped_dense_fwd_rule(
                 group_axis=ctx_kernel.group_axis,
             )
 
-            grouped_gemm_kernel_data = global_ctx_kernel_data.transpose(0, 2, 1)
-            grouped_gemm_kernel = ScaledTensorFactory.create_1x(
-                grouped_gemm_kernel_data.reshape(-1),
-                ctx_kernel.scale_inv,
-                ctx_kernel.scaling_mode,
-                dq_dtype=ctx_kernel.dq_dtype,
-                is_colwise=not is_fp8_gemm_with_all_layouts_supported(),
-                data_layout="N" if is_fp8_gemm_with_all_layouts_supported() else "T",
-                flatten_axis=ctx_kernel.flatten_axis,
-                group_sizes=ctx_kernel.group_sizes,
-                original_shape=kernel_shape,
-                group_axis=ctx_kernel.group_axis,
-            )
-
             if is_fp8_gemm_with_all_layouts_supported():
-                grouped_gemm_kernel, ctx_kernel = ctx_kernel, grouped_gemm_kernel
-
+                grouped_gemm_kernel = ctx_kernel
+            else:
+                grouped_gemm_kernel_data = global_ctx_kernel_data.transpose(0, 2, 1)
+                grouped_gemm_kernel = ScaledTensorFactory.create_1x(
+                    grouped_gemm_kernel_data.reshape(-1),
+                    ctx_kernel.scale_inv,
+                    ctx_kernel.scaling_mode,
+                    dq_dtype=ctx_kernel.dq_dtype,
+                    is_colwise=True,
+                    data_layout="T",
+                    flatten_axis=ctx_kernel.flatten_axis,
+                    group_sizes=ctx_kernel.group_sizes,
+                    original_shape=kernel_shape,
+                    group_axis=ctx_kernel.group_axis,
+                )
         else:
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
 
