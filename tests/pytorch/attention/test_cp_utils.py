@@ -710,6 +710,300 @@ class TestContextParallelUtils(unittest.TestCase):
 
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
 
+    def test_bshd_format_basic(self):
+        """Test get_batch_on_this_cp_rank with bshd format."""
+        # Setup: batch_size=2, seq_len=8, CP size = 2
+        # For bshd format: (batch, sequence, heads, dim)
+        batch_size = 2
+        seq_len = 8  # Must be divisible by 2*cp_size = 4
+        
+        # Create test tensors in bshd format
+        input_ids = torch.arange(batch_size * seq_len).reshape(batch_size, seq_len)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,  # Not used for bshd format
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="bshd"
+        )
+        
+        # Rank 0 gets chunks 0 and 3 (indices 0,1 and 6,7 for each batch)
+        expected_shape = (batch_size, seq_len // 2)
+        self.assertEqual(input_ids_r0.shape, expected_shape)
+        self.assertEqual(labels_r0.shape, expected_shape)
+        self.assertEqual(pos_ids_r0.shape, expected_shape)
+        
+        # Verify the actual values for first batch
+        # Should get elements at indices [0,1,6,7] from each batch
+        expected_input_ids_batch0 = torch.tensor([0, 1, 6, 7])
+        expected_input_ids_batch1 = torch.tensor([8, 9, 14, 15])
+        expected_input_ids_r0 = torch.stack([expected_input_ids_batch0, expected_input_ids_batch1])
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        
+        # Test rank 1
+        self._mock_distributed_env(cp_size=2, cp_rank=1)
+        input_ids_r1, labels_r1, pos_ids_r1 = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="bshd"
+        )
+        
+        # Rank 1 gets chunks 1 and 2 (indices 2,3 and 4,5 for each batch)
+        expected_input_ids_batch0 = torch.tensor([2, 3, 4, 5])
+        expected_input_ids_batch1 = torch.tensor([10, 11, 12, 13])
+        expected_input_ids_r1 = torch.stack([expected_input_ids_batch0, expected_input_ids_batch1])
+        self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
+
+    def test_sbhd_format_basic(self):
+        """Test get_batch_on_this_cp_rank with sbhd format."""
+        # Setup: seq_len=8, batch_size=2, CP size = 2
+        # For sbhd format: (sequence, batch, heads, dim)
+        seq_len = 8  # Must be divisible by 2*cp_size = 4
+        batch_size = 2
+        
+        # Create test tensors in sbhd format (seq first)
+        input_ids = torch.arange(seq_len * batch_size).reshape(seq_len, batch_size)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len).unsqueeze(1).expand(seq_len, batch_size)
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,  # Not used for sbhd format
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="sbhd"
+        )
+        
+        # Rank 0 gets chunks 0 and 3 (indices 0,1 and 6,7)
+        expected_shape = (seq_len // 2, batch_size)
+        self.assertEqual(input_ids_r0.shape, expected_shape)
+        self.assertEqual(labels_r0.shape, expected_shape)
+        self.assertEqual(pos_ids_r0.shape, expected_shape)
+        
+        # Verify the actual values
+        # Should get rows at indices [0,1,6,7]
+        expected_indices = torch.tensor([0, 1, 6, 7])
+        expected_input_ids_r0 = input_ids[expected_indices]
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        
+        # Test rank 1
+        self._mock_distributed_env(cp_size=2, cp_rank=1)
+        input_ids_r1, labels_r1, pos_ids_r1 = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="sbhd"
+        )
+        
+        # Rank 1 gets chunks 1 and 2 (indices 2,3 and 4,5)
+        expected_indices = torch.tensor([2, 3, 4, 5])
+        expected_input_ids_r1 = input_ids[expected_indices]
+        self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
+
+    def test_bshd_format_device_placement(self):
+        """Test that bshd format processing maintains correct device placement."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        
+        batch_size = 2
+        seq_len = 8
+        device = torch.device("cuda:0")
+        
+        # Create tensors on GPU
+        input_ids = torch.arange(batch_size * seq_len, device=device).reshape(batch_size, seq_len)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_out, labels_out, pos_ids_out = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="bshd"
+        )
+        
+        # Verify outputs are on the same device
+        self.assertEqual(input_ids_out.device, device)
+        self.assertEqual(labels_out.device, device)
+        self.assertEqual(pos_ids_out.device, device)
+
+    def test_sbhd_format_device_placement(self):
+        """Test that sbhd format processing maintains correct device placement."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        
+        seq_len = 8
+        batch_size = 2
+        device = torch.device("cuda:0")
+        
+        # Create tensors on GPU
+        input_ids = torch.arange(seq_len * batch_size, device=device).reshape(seq_len, batch_size)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(1).expand(seq_len, batch_size)
+        
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_out, labels_out, pos_ids_out = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="sbhd"
+        )
+        
+        # Verify outputs are on the same device
+        self.assertEqual(input_ids_out.device, device)
+        self.assertEqual(labels_out.device, device)
+        self.assertEqual(pos_ids_out.device, device)
+
+    def test_bshd_format_error_handling(self):
+        """Test error handling for invalid inputs in bshd format."""
+        batch_size = 2
+        invalid_seq_len = 7  # Not divisible by 2*cp_size = 4
+        
+        input_ids = torch.randn(batch_size, invalid_seq_len)
+        labels = torch.randn(batch_size, invalid_seq_len)
+        position_ids = torch.randn(batch_size, invalid_seq_len)
+        
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        
+        # Should raise ValueError for invalid sequence length
+        with self.assertRaises(ValueError) as context:
+            get_batch_on_this_cp_rank(
+                cu_seqlens_padded=None,
+                input_ids_padded=input_ids,
+                labels_padded=labels,
+                position_ids_padded=position_ids,
+                cp_group=None,
+                qvk_format="bshd"
+            )
+        
+        self.assertIn("must be divisible by", str(context.exception))
+        
+        # Test with tensor that has insufficient dimensions
+        invalid_1d = torch.tensor([1, 2, 3, 4])
+        with self.assertRaises(ValueError) as context:
+            get_batch_on_this_cp_rank(
+                cu_seqlens_padded=None,
+                input_ids_padded=invalid_1d,
+                labels_padded=invalid_1d,
+                position_ids_padded=invalid_1d,
+                cp_group=None,
+                qvk_format="bshd"
+            )
+        
+        self.assertIn("at least 2 dimensions", str(context.exception))
+
+    def test_sbhd_format_error_handling(self):
+        """Test error handling for invalid inputs in sbhd format."""
+        invalid_seq_len = 7  # Not divisible by 2*cp_size = 4
+        batch_size = 2
+        
+        input_ids = torch.randn(invalid_seq_len, batch_size)
+        labels = torch.randn(invalid_seq_len, batch_size)
+        position_ids = torch.randn(invalid_seq_len, batch_size)
+        
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        
+        # Should raise ValueError for invalid sequence length
+        with self.assertRaises(ValueError) as context:
+            get_batch_on_this_cp_rank(
+                cu_seqlens_padded=None,
+                input_ids_padded=input_ids,
+                labels_padded=labels,
+                position_ids_padded=position_ids,
+                cp_group=None,
+                qvk_format="sbhd"
+            )
+        
+        self.assertIn("must be divisible by", str(context.exception))
+
+    def test_bshd_format_with_different_cp_sizes(self):
+        """Test bshd format with different CP sizes."""
+        batch_size = 2
+        seq_len = 16  # Divisible by 2*cp_size for cp_size in [1, 2, 4]
+        
+        input_ids = torch.arange(batch_size * seq_len).reshape(batch_size, seq_len)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+        
+        # Test with CP size = 1 (no parallelism)
+        self._mock_distributed_env(cp_size=1, cp_rank=0)
+        input_ids_cp1, _, _ = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="bshd"
+        )
+        # Should return original tensor
+        self.assertTrue(torch.equal(input_ids_cp1, input_ids))
+        
+        # Test with CP size = 4
+        self._mock_distributed_env(cp_size=4, cp_rank=0)
+        input_ids_cp4, _, _ = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="bshd"
+        )
+        # Should get 2 chunks of size 2 each (total 4 elements per batch)
+        self.assertEqual(input_ids_cp4.shape, (batch_size, seq_len // 4))
+
+    def test_sbhd_format_with_different_cp_sizes(self):
+        """Test sbhd format with different CP sizes."""
+        seq_len = 16  # Divisible by 2*cp_size for cp_size in [1, 2, 4]
+        batch_size = 2
+        
+        input_ids = torch.arange(seq_len * batch_size).reshape(seq_len, batch_size)
+        labels = input_ids * 10
+        position_ids = torch.arange(seq_len).unsqueeze(1).expand(seq_len, batch_size)
+        
+        # Test with CP size = 1 (no parallelism)
+        self._mock_distributed_env(cp_size=1, cp_rank=0)
+        input_ids_cp1, _, _ = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="sbhd"
+        )
+        # Should return original tensor
+        self.assertTrue(torch.equal(input_ids_cp1, input_ids))
+        
+        # Test with CP size = 4
+        self._mock_distributed_env(cp_size=4, cp_rank=0)
+        input_ids_cp4, _, _ = get_batch_on_this_cp_rank(
+            cu_seqlens_padded=None,
+            input_ids_padded=input_ids,
+            labels_padded=labels,
+            position_ids_padded=position_ids,
+            cp_group=None,
+            qvk_format="sbhd"
+        )
+        # Should get 2 chunks of size 2 each (total 4 elements)
+        self.assertEqual(input_ids_cp4.shape, (seq_len // 4, batch_size))
+
 
 if __name__ == "__main__":
     unittest.main()
