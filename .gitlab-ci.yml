@@ -1229,7 +1229,7 @@ send_result_to_slack:
       - dlcluster_ogb_mnnvl
     variables:
       CI_SCHEDULER_TYPE: docker
-      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --device /dev/nvidia-caps-imex-channels/ --label RUNNER_ID=$${RUNNER_ID}"
       CI_SLURM_TIME: 240
 
 .GB200NVL_4GPU:
@@ -1366,6 +1366,33 @@ L0_cppunittest--GB200_1GPU:
     extends:
     - .L0_test
     - .GB200_1GPU
+
+L1_cpp_distributed--H100_4GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_4GPU
+
+L1_cpp_distributed--B200_8GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_8GPU
+
+L1_cpp_distributed--GB200_4GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_4GPU
 
 L0_pytorch_unittest--A100_1GPU:
     variables:
