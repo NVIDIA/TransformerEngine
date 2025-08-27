@@ -931,6 +931,7 @@ def grouped_quantize(
     x: jnp.ndarray,
     quantizer: GroupedQuantizer,
     group_sizes: jnp.ndarray = None,
+    amax: jnp.ndarray = None,
     flatten_axis: int = -1,
 ) -> GroupedScaledTensor1x:
     """Quantize a tensor in grouped manner.
@@ -943,6 +944,7 @@ def grouped_quantize(
         x: Input tensor to quantize
         quantizer: The quantizer to use for quantization
         group_sizes: Array of ints containing the size of each group (default: None)
+        amax: The amax of x; if None, it is auto-generated. (default: None)
         flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
     Returns:
@@ -985,7 +987,10 @@ def grouped_quantize(
             scale = scale.at[i].set(quantizer_i.scale[0])
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
+        if amax is not None:
+            row_amax = amax
+        else:
+            row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
         segment_ids = jnp.repeat(
             jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
         )
