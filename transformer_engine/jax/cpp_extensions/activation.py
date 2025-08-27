@@ -1037,7 +1037,7 @@ def act_lu(
         out = out.reshape(output_shape)
         if noop_scaled_tensor:
             return ScaledTensorFactory.create_2x(
-                out, None, out, None, ScalingMode.NO_SCALING, dq_dtype=out.dtype
+                out, None, out, None, scaling_mode=ScalingMode.NO_SCALING, dq_dtype=out.dtype
             )
         return out
 
