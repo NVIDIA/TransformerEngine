@@ -20,7 +20,7 @@ import transformer_engine.pytorch.cpu_offload_old_path as old_code_path
 
 __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
 
-NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH = os.environ.get("NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH", "False").lower() == "true"
+NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH = os.environ.get("NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH", "0") == "1"
 
 DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2**20  # 1mb
 OFFLOAD_SYNCHRONIZER = None
@@ -705,6 +705,11 @@ def get_cpu_offload_context(
         offload_stream.synchronize()
         for i in range(num_layers):
             out[i].sum().backward()
+
+    Old code path
+    ----------
+    If you want to use the old code path for offloading,
+    please set the environment variable NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH to 1.
 
     """
     if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:

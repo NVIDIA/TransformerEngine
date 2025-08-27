@@ -65,8 +65,8 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
 from ..export import is_in_onnx_export_mode, assert_warmed_up
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 
@@ -423,7 +423,6 @@ class _Linear(torch.autograd.Function):
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates

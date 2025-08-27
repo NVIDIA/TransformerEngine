@@ -705,7 +705,6 @@ class FlashAttention(torch.nn.Module):
         else:
 
             from transformer_engine.pytorch.cpu_offload import (
-                is_cpu_offload_enabled,
                 mark_activation_offload,
             )
 
@@ -1079,12 +1078,11 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
         from transformer_engine.pytorch.cpu_offload import (
-            CPUOffloadEnabled,
             mark_activation_offload,
             NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH
         )
 
-        if CPUOffloadEnabled and NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
             if ctx.fp8:
                 tensor_list = fp8_tensors
             else:
