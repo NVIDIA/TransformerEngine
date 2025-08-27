@@ -243,18 +243,7 @@ __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *f
                 }
             }
         }
-      }
-      // copy the rest
-      if (d > d2) {
-#pragma unroll
-        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-          int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
-          int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
-          out[offset_dst] = src[offset_src];
-        }
-      }
     }
-  }
 }
 
 template <typename scalar_t>
@@ -310,19 +299,7 @@ __device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const fl
                 }
             }
         }
-      }
-
-      // copy the rest
-      if (d > d2) {
-#pragma unroll
-        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-          int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
-          int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
-          out[offset_dst] = grad_out[offset_src];
-        }
-      }
     }
-  }
 }
 
 template <typename scalar_t>
