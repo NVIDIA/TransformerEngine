@@ -64,6 +64,8 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         return
 
     def _mark_tensor_for_offload(t):
+        if t is None:
+            return
         # Attach an event to mark when the tensor is ready for reload.
         t.start_reload_event = torch.cuda.Event()
         t.start_reload_event.record(torch.cuda.current_stream())
@@ -71,8 +73,6 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
             setattr(t, "offload_base_tensor", True)
 
     for tensor in tensors:
-        if tensor is None:
-            continue
         if hasattr(tensor, "get_data_tensors"):
             for data_tensor in tensor.get_data_tensors(scales=True):
                 _mark_tensor_for_offload(data_tensor)
