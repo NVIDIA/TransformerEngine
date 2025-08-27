@@ -185,7 +185,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
     plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
-                  dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr, stream);
+                  dz.data.dptr, nullptr /*add*/, dbeta->data.dptr, dgamma->data.dptr,
+                  workspace->data.dptr, stream);
   }
   return;
 }

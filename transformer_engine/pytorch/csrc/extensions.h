@@ -154,37 +154,48 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = st
  * Activations
  **************************************************************************************************/
 
+/* GELU and variants*/
 py::object gelu(const at::Tensor &input, py::handle quantizer);
-
-py::object relu(const at::Tensor &input, py::handle quantizer);
-
-py::object geglu(const at::Tensor &input, py::handle quantizer);
-
-py::object qgeglu(const at::Tensor &input, py::handle quantizer);
-
-py::object reglu(const at::Tensor &input, py::handle quantizer);
-
-py::object swiglu(const at::Tensor &input, py::handle quantizer);
-
-py::object qgelu(const at::Tensor &input, py::handle quantizer);
-
-py::object srelu(const at::Tensor &input, py::handle quantizer);
 
 py::object dgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object drelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object geglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object dqgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
-
-py::object dreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
-
-py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object qgelu(const at::Tensor &input, py::handle quantizer);
 
 py::object dqgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+py::object qgeglu(const at::Tensor &input, py::handle quantizer);
+
+py::object dqgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+/* ReLU and variants*/
+py::object relu(const at::Tensor &input, py::handle quantizer);
+
+py::object drelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+py::object reglu(const at::Tensor &input, py::handle quantizer);
+
+py::object dreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+py::object srelu(const at::Tensor &input, py::handle quantizer);
+
 py::object dsrelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+py::object sreglu(const at::Tensor &input, py::handle quantizer);
+
+py::object dsreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+/* Silu and variants*/
+py::object silu(const at::Tensor &input, py::handle quantizer);
+
+py::object dsilu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
+py::object swiglu(const at::Tensor &input, py::handle quantizer);
+
+py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
 /***************************************************************************************************
  * LayerNorm
@@ -207,6 +218,11 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
                                     const int sm_margin, const bool zero_centered_gamma);
+
+std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &x,
+                                        const at::Tensor &add, const at::Tensor &rsigma,
+                                        const at::Tensor &gamma, const int sm_margin,
+                                        const bool zero_centered_gamma);
 
 std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
                                     py::object ln_out, py::handle quantizer, DType otype,

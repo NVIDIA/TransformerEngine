@@ -21,6 +21,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
+    BackwardAddRMSNorm,
     BackwardLinearAdd,
     BackwardLinearScale,
     ForwardLinearBiasActivation,
@@ -1531,7 +1532,10 @@ class TestBasicOps:
         torch.testing.assert_close(y2_test, y2_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
+    @pytest.mark.parametrize(
+        "activation",
+        ("gelu", "geglu", "qgelu", "qgeglu", "relu", "reglu", "srelu", "sreglu", "silu", "swiglu"),
+    )
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1550,7 +1554,7 @@ class TestBasicOps:
 
         # Tensor dimensions
         in_shape = list(out_shape)
-        if activation in ("geglu", "reglu", "swiglu"):
+        if activation in ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"):
             in_shape[-1] *= 2
 
         # Skip invalid configurations
@@ -1577,14 +1581,26 @@ class TestBasicOps:
         y_ref: torch.Tensor
         if activation == "gelu":
             y_ref = torch.nn.functional.gelu(x_ref, approximate="tanh")
-        elif activation == "relu":
-            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "geglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.gelu(x1, approximate="tanh") * x2
+        elif activation == "qgelu":
+            y_ref = x_ref * torch.sigmoid(1.702 * x_ref)
+        elif activation == "qgeglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = x1 * torch.sigmoid(1.702 * x1) * x2
+        elif activation == "relu":
+            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "reglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.relu(x1) * x2
+        elif activation == "srelu":
+            y_ref = torch.nn.functional.relu(x_ref) ** 2
+        elif activation == "sreglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.relu(x1) ** 2 * x2
+        elif activation == "silu":
+            y_ref = torch.nn.functional.silu(x_ref)
         elif activation == "swiglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.silu(x1) * x2
@@ -1596,9 +1612,14 @@ class TestBasicOps:
         recipe = make_recipe(quantization)
         make_op = dict(
             gelu=te_ops.GELU,
-            relu=te_ops.ReLU,
             geglu=te_ops.GEGLU,
+            qgelu=te_ops.QGELU,
+            qgeglu=te_ops.QGEGLU,
+            relu=te_ops.ReLU,
             reglu=te_ops.ReGLU,
+            srelu=te_ops.SReLU,
+            sreglu=te_ops.SReGLU,
+            silu=te_ops.SiLU,
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
@@ -2205,6 +2226,94 @@ class TestFusedOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+    @pytest.mark.parametrize("weight_shape", ((19,), (64,)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    def test_backward_add_rmsnorm(
+        self,
+        *,
+        weight_shape: Iterable[int],
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 0.3,
+        zero_centered_gamma: bool,
+    ) -> None:
+        """Fused backward RMNorm + add"""
+
+        # Make input and weight shapes consistent
+        in_shape = list(in_shape)[:-1] + list(weight_shape)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy1_ref, dy1_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        dy2_ref, dy2_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        inner_dims = tuple(range(len(in_shape) - len(weight_shape), len(in_shape)))
+        var_ref = x_ref.square().sum(dim=inner_dims, keepdim=True) / math.prod(weight_shape)
+        if zero_centered_gamma:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * (1 + w_ref)
+        else:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * w_ref
+        y2_ref = x_ref
+        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+
+        # Implementation with fusible operations
+        model = te_ops.Sequential(
+            te_ops.MakeExtraOutput(),
+            te_ops.RMSNorm(
+                weight_shape,
+                eps=eps,
+                device=device,
+                dtype=dtype,
+                zero_centered_gamma=zero_centered_gamma,
+            ),
+        )
+        with torch.no_grad():
+            model[1].weight.copy_(w_test)
+            del w_test
+        y1_test, y2_test = model(x_test)
+        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+
+        # Check that backward operations have been fused
+        backward_ops = model._module_groups[0]._backward_ops
+        assert len(backward_ops) == 1
+        assert isinstance(backward_ops[0][0], BackwardAddRMSNorm)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        y1_test = y1_test.to(dtype=torch.float64, device="cpu")
+        y2_test = y2_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y1_test, y1_ref, **tols)
+        torch.testing.assert_close(y2_test, y2_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
