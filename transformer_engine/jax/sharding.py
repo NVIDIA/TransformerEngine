@@ -165,7 +165,7 @@ def with_sharding_constraint_by_logical_axes(
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
             return flax.linen.with_logical_constraint(
-                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT
+                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.AXIS_IS_UNSHARDED
             )
     except ImportError:
         pass
