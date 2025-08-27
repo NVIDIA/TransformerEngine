@@ -11,6 +11,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "math.h"
 
 namespace transformer_engine {
 
@@ -534,8 +535,18 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
       const ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
 
-      ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = grad_val * Activation(gelu_in, p);
+      ComputeType act_in, dact_in;
+      if constexpr ((Activation == &silu<fp32, fp32>) && (Dactivation == &dsilu<fp32, fp32>)) {
+        const float s = sigmoidf(gelu_in);
+        dact_in = gelu_in * s * (1 - s) + s;
+        act_in = gelu_in * s;
+      } else {
+        dact_in = Dactivation(gelu_in, p);
+        act_in = Activation(gelu_in, p);
+      }
+
+      ComputeType after_dgelu = dact_in * grad_val * gate_in;
+      ComputeType after_dgate = grad_val * act_in;
 
       if (requires_amax) {
         __builtin_assume(max >= 0);

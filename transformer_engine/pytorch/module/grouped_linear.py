@@ -282,10 +282,16 @@ class _GroupedLinear(torch.autograd.Function):
                     weights[i] = w
 
             # Preprocess grad output
-            grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
+            grad_output_view = grad_output
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8:
+            if isinstance(grad_output_view, QuantizedTensorBase):
+                assert not ctx.use_bias, "Bias is not supported for quantized grad output"
+                grad_output = tex.split_quantized_tensor(grad_output_view, ctx.m_splits)
+            elif ctx.fp8:
+                grad_output_view = grad_output_view.contiguous().view(
+                    -1, grad_output_view.shape[-1]
+                )
                 if ctx.use_bias:
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                     recipe = ctx.fp8_recipe
@@ -313,6 +319,9 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.grad_output_quantizers,
                     )
             else:
+                grad_output_view = grad_output_view.contiguous().view(
+                    -1, grad_output_view.shape[-1]
+                )
                 # Only split grad output. Grad bias is fused with
                 # wgrad GEMM.
                 grad_output = torch.split(

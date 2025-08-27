@@ -4,7 +4,6 @@
 
 import math
 import os
-from pickletools import genops
 from typing import Dict, List, Tuple, Optional
 import pytest
 import random
@@ -107,8 +106,6 @@ act_ops = {
     "silu": te.ops.SiLU,
     "swiglu": te.ops.SwiGLU,
 }
-
-gated_act_ops = (te.ops.GEGLU, te.ops.QGEGLU, te.ops.ReGLU, te.ops.SReGLU, te.ops.SwiGLU)
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -1738,19 +1735,33 @@ def _test_grouped_linear_accuracy(
     fp8,
     fuse_wgrad_accumulation,
     delay_wgrad_compute=False,
-    activation_func=te.ops.Identity(),
+    activation_func=None,
+    fp8_activation=False,
 ):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
 
-    if isinstance(activation_func, gated_act_ops) or (
-        isinstance(activation_func, te.ops.Sequential)
-        and isinstance(activation_func[0], gated_act_ops)
-    ):
+    if activation_func in ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"):
         hidden_size = 2 * config.hidden_size
     else:
         hidden_size = config.hidden_size
+
+    if activation_func is None:
+        input_act_func = te.ops.Identity()
+        output_act_func = te.ops.Identity()
+    elif fp8_activation:
+        input_act_func = te.ops.Sequential(
+            act_ops[activation_func](),
+            te.ops.Quantize(forward=True, backward=False),  # Output QuantizedTensor in forward
+        )
+        output_act_func = te.ops.Sequential(
+            te.ops.Quantize(forward=False, backward=True),  # Output QuantizedTensor in backward
+            act_ops[activation_func](),
+        )
+    else:
+        input_act_func = act_ops[activation_func]()
+        output_act_func = act_ops[activation_func]()
 
     inp_hidden_states = torch.randn(
         (config.max_seqlen_q, bs, hidden_size),
@@ -1778,11 +1789,11 @@ def _test_grouped_linear_accuracy(
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
-            out = block(activation_func(inp_hidden_states), m_splits.tolist())
+            out = output_act_func(block(input_act_func(inp_hidden_states), m_splits.tolist()))
         else:
             out = torch.cat(
                 [
-                    block[i](activation_func(inp))
+                    output_act_func(block[i](input_act_func(inp)))
                     for i, inp in enumerate(torch.split(inp_hidden_states, m_splits.tolist()))
                 ]
             )
@@ -2072,12 +2083,6 @@ def test_grouped_linear_fp8_input(
             weight_i_copy = getattr(grouped_linear_fp8_input, f"weight{i}")
             weight_i_copy.main_grad = weight_i.main_grad.clone()
 
-    bf16_activation = act_ops[activation]()
-    fp8_activation = te.ops.Sequential(
-        bf16_activation,
-        te.ops.Quantize(forward=True, backward=False),  # Output QuantizedTensor in forward
-    )
-
     outputs_ref = _test_grouped_linear_accuracy(
         grouped_linear_bf16_input,
         num_gemms,
@@ -2087,7 +2092,8 @@ def test_grouped_linear_fp8_input(
         recipe,
         fp8=True,
         fuse_wgrad_accumulation=True,
-        activation_func=bf16_activation,
+        activation_func=activation,
+        fp8_activation=False,
     )
     outputs = _test_grouped_linear_accuracy(
         grouped_linear_fp8_input,
@@ -2098,7 +2104,8 @@ def test_grouped_linear_fp8_input(
         recipe,
         fp8=True,
         fuse_wgrad_accumulation=True,
-        activation_func=fp8_activation,
+        activation_func=activation,
+        fp8_activation=True,
     )
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):

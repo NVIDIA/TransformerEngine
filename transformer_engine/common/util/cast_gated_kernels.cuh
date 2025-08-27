@@ -44,8 +44,6 @@ constexpr size_t BUFFER_STAGES_NUM = BUFFER_DIM_Y / THREADS_PER_CHUNK_Y;  //  8 
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                 //   4 = 128 / 32
 static_assert(ITERATIONS >= 1);
 
-__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
-
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
