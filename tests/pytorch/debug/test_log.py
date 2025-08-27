@@ -165,6 +165,7 @@ def test_numerics(fp8_recipe, feature_dirs):
         )
 
         tensor = torch.randn(1024, 1024).cuda()
+        tensor[0, 100:200] = -0.0
         quantizer = recipe_state.make_quantizers()[0]
         quantized_tensor = quantizer(tensor)
 

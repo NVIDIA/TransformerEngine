@@ -302,7 +302,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )[0]
 
         # Second config in same yaml
-        tensor = torch.rand((100, 100, 5))
+        tensor = torch.rand((100, 100, 5)).cuda()
         debug_api.transformer_engine.inspect_tensor(
             "decoder.6.mlp.fc1",
             tensor_name="activation",
@@ -377,7 +377,7 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
             return quantizer(t.cuda())
 
         shape = [1024, 1024]
-        tensors = [torch.randn(shape) for _ in range(2)]
+        tensors = [torch.randn(shape).cuda() for _ in range(2)]
         tensors_fp8 = [fp8_tensor(tensors[i]) for i in range(2)]
 
         feed(tensors[0], tensors_fp8[0], quantizer)
