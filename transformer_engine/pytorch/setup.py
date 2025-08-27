@@ -26,7 +26,9 @@ FORCE_BUILD = os.getenv("NVTE_PYTORCH_FORCE_BUILD", "FALSE") == "TRUE"
 FORCE_CXX11_ABI = os.getenv("NVTE_PYTORCH_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("NVTE_PYTORCH_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 PACKAGE_NAME = "transformer_engine_torch"
-BASE_WHEEL_URL = "https://github.com/ko3n1g/TransformerEngine/releases/download/{tag_name}/{wheel_name}"
+BASE_WHEEL_URL = (
+    "https://github.com/ko3n1g/TransformerEngine/releases/download/{tag_name}/{wheel_name}"
+)
 # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
 # torch._C._GLIBCXX_USE_CXX11_ABI
 # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
@@ -86,18 +88,14 @@ def get_wheel_url():
     torch_cuda_version = parse(torch.version.cuda)
     # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
     # to save CI time. Minor versions should be compatible.
-    torch_cuda_version = (
-        parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
-    )
+    torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
     # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
     cuda_version = f"{torch_cuda_version.major}"
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
     wheel_filename = f"{PACKAGE_NAME}-{nvte_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
 
-    wheel_url = BASE_WHEEL_URL.format(
-        tag_name=f"v{nvte_version}", wheel_name=wheel_filename
-    )
+    wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{nvte_version}", wheel_name=wheel_filename)
 
     return wheel_url, wheel_filename
 
@@ -140,9 +138,7 @@ class CachedWheelsCommand(_bdist_wheel):
 if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
-    copy_common_headers(
-        current_file_path.parent, str(current_file_path / common_headers_dir)
-    )
+    copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
     ext_modules = [
         setup_pytorch_extension(
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
