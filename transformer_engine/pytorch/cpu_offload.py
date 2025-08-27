@@ -8,22 +8,33 @@ from __future__ import annotations
 import contextlib
 from collections import defaultdict
 from dataclasses import dataclass, field
+import os
 import warnings
 from typing import Any, Optional
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.cpu_offload_old_path as old_code_path
+
 
 __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
+
+NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH = os.environ.get("NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH", "False").lower() == "true"
 
 DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2**20  # 1mb
 OFFLOAD_SYNCHRONIZER = None
 
 def is_cpu_offload_enabled():
     """Returns True if CPU offload is enabled."""
+    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        return old_code_path.is_cpu_offload_enabled()
     return OFFLOAD_SYNCHRONIZER is not None
 
+def mark_activation_offload(*tensors):
+    """Set the type of the offloading needed for a tensor."""
+    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        old_code_path.mark_activation_offload(*tensors)
 
 def mark_not_offload(*tensors: torch.Tensor):
     """Marks tensors to prevent them from being offloaded."""
@@ -691,6 +702,13 @@ def get_cpu_offload_context(
             out[i].sum().backward()
 
     """
+    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        return old_code_path.get_cpu_offload_context(
+            enabled=enabled, num_layers=num_layers, model_layers=model_layers, 
+            offload_activations=offload_activations, offload_weights=offload_weights, 
+            double_buffering=double_buffering
+        )
+
     if not offload_weights and not offload_activations:
         raise ValueError(
             "CPU Offloading is enabled while it is not "
