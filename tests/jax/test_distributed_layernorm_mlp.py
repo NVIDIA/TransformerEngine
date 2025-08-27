@@ -62,16 +62,16 @@ BIAS_2_AXES = (W_NO_SHARD_AXES,)
 INTERMEDIATE = 64
 
 
-# Only test with FSDP and TP as DP is not used
-def generate_fsdp_and_tp_configs():
+# Only test with FSDP and TPSP as DP is not used
+def generate_fsdp_and_tpsp_configs():
     configs = []
     if is_devices_enough(2):
         configs.append(
-            [2, (1, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
+            [2, (1, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
         )
     if is_devices_enough(4):
         configs.append(
-            [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
+            [4, (2, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
         )
     return configs
 
@@ -186,12 +186,12 @@ class TestDistributedLayernormMLP:
             with mesh, fp8_autocast(
                 enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
             ):
-                k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
-                k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
+                k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tpsp"))
+                k2_sharding = NamedSharding(mesh, PartitionSpec("tpsp", "fsdp"))
                 k1_ = jax.device_put(k1, k1_sharding)
                 k2_ = jax.device_put(k2, k2_sharding)
                 if use_bias:
-                    b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
+                    b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tpsp"))
                     b1_ = jax.device_put(b1, b1_sharding)
                 else:
                     b1_sharding = b1_ = None
@@ -247,7 +247,7 @@ class TestDistributedLayernormMLP:
                     )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
@@ -276,7 +276,7 @@ class TestDistributedLayernormMLP:
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
@@ -408,7 +408,7 @@ class TestDistributedLayernormMLP:
         assert_allclose(mlp_out_sharded, mlp_out_single, dtype=dtype, atol=atol, rtol=rtol)
 
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
@@ -429,7 +429,7 @@ class TestDistributedLayernormMLP:
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
@@ -452,7 +452,7 @@ class TestDistributedLayernormMLP:
         )
 
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
@@ -473,7 +473,7 @@ class TestDistributedLayernormMLP:
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
