@@ -200,36 +200,48 @@ __global__ void fused_rope_backward_kernel(
 
 template <typename scalar_t>
 __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *freqs, scalar_t *out,
-                                             const bool interleaved, const int s_id,
-                                             const int offset_block, const int offset_block_dst,
-                                             const int h, const int d, const int d2,
-                                             const int row_offset, const int in_row_length,
-                                             const int out_row_length) {
-#pragma unroll
-  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-    for (int i = 0; i < out_row_length; i += d) {
-#pragma unroll
-      for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-        int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
-        int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
-
+                                         const bool interleaved, const int s_id, const int offset_block, const int offset_block_dst,
+                                         const int h, const int d, const int d2, const int row_offset, const int in_row_length, const int out_row_length) {
+    #pragma unroll
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+        float v_cos=1.0, v_sin=0.0;
         if (freqs != nullptr) {
-          float v_cos, v_sin;
-          sincosf(freqs[s_id * d2 + d_id], &v_sin, &v_cos);
-          float v_src = src[offset_src];
-          float v_src_rotate;
-          if (!interleaved) {
-            v_src_rotate = (d_id + d2 / 2 < d2)
-                               ? -static_cast<float>(src[offset_src + (d2 / 2)])
-                               : static_cast<float>(src[offset_src + (d2 / 2 - d2)]);
-          } else {
-            v_src_rotate = (d_id % 2 == 0) ? -static_cast<float>(src[offset_src + 1])
-                                           : static_cast<float>(src[offset_src - 1]);
-          }
-          out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
-        } else {
-          out[offset_dst] = src[offset_src];
+            sincosf(freqs[s_id * d2 + d_id], &v_sin, &v_cos);
+        }
+        #pragma unroll
+        for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+            #pragma unroll
+            for (int i = 0; i < out_row_length; i+=d) {
+                  int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
+                  int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
+                  float v_src = src[offset_src];
+                  float v_src_rotate;
+                  if (!interleaved) {
+                      v_src_rotate = (d_id + d2 / 2 < d2)
+                                    ? -static_cast<float>(src[offset_src + (d2 / 2)])
+                                    : static_cast<float>(src[offset_src + (d2 / 2 - d2)]);
+                  } else {
+                      v_src_rotate = (d_id % 2 == 0)
+                                  ? -static_cast<float>(src[offset_src + 1])
+                                  : static_cast<float>(src[offset_src - 1]);
+                  }
+                  out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+            }
+        }
+    }
+    // copy the rest
+    if (d > d2) {
+        #pragma unroll
+        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
+            #pragma unroll
+            for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+                #pragma unroll
+                for (int i = 0; i < out_row_length; i+=d) {
+                    int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
+                    int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
+                    out[offset_dst] = src[offset_src];
+                }
+            }
         }
       }
       // copy the rest
@@ -246,44 +258,57 @@ __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *f
 }
 
 template <typename scalar_t>
-__device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const float *freqs,
-                                              scalar_t *out, const bool interleaved, const int s_id,
-                                              const int offset_block, const int offset_block_dst,
-                                              const int h, const int d, const int d2,
-                                              const int row_offset, const int in_row_length,
-                                              const int out_row_length) {
-#pragma unroll
-  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-    for (int i = 0; i < out_row_length; i += d) {
-#pragma unroll
-      for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-        int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
-        int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
-
+__device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const float *freqs, scalar_t *out,
+                                         const bool interleaved, const int s_id, const int offset_block, const int offset_block_dst,
+                                         const int h, const int d, const int d2, const int row_offset, const int in_row_length, const int out_row_length) {
+    #pragma unroll
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+        float v_cos=1.0, v_sin=0.0;
         if (freqs != nullptr) {
-          float v_cos, v_sin;
-          v_cos = cosf(freqs[s_id * d2 + d_id]);
-          if (!interleaved) {
-            v_sin = (d_id + d2 / 2 < d2) ? sinf(freqs[s_id * d2 + d_id + d2 / 2])
-                                         : -sinf(freqs[s_id * d2 + d_id + d2 / 2 - d2]);
-          } else {
-            v_sin = (d_id % 2 == 0) ? sinf(freqs[s_id * d2 + d_id + 1])
-                                    : -sinf(freqs[s_id * d2 + d_id - 1]);
-          }
-          float v_src = grad_out[offset_src];
-          float v_src_rotate;
-          if (!interleaved) {
-            v_src_rotate = (d_id + d2 / 2 < d2)
-                               ? static_cast<float>(grad_out[offset_src + (d2 / 2)])
-                               : static_cast<float>(grad_out[offset_src + (d2 / 2 - d2)]);
-          } else {
-            v_src_rotate = (d_id % 2 == 0) ? static_cast<float>(grad_out[offset_src + 1])
-                                           : static_cast<float>(grad_out[offset_src - 1]);
-          }
-          out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
-        } else {
-          out[offset_dst] = grad_out[offset_src];
+            v_cos = cosf(freqs[s_id * d2 + d_id]);
+            if (!interleaved) {
+                v_sin = (d_id + d2 / 2 < d2) ? sinf(freqs[s_id * d2 + d_id + d2 / 2])
+                                            : -sinf(freqs[s_id * d2 + d_id + d2 / 2 - d2]);
+            } else {
+                v_sin = (d_id % 2 == 0) ? sinf(freqs[s_id * d2 + d_id + 1])
+                                      : -sinf(freqs[s_id * d2 + d_id - 1]);
+            }
+        }
+        #pragma unroll
+        for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+            #pragma unroll
+            for (int i = 0; i < out_row_length; i+=d) {
+                int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
+                int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
+
+                float v_src = grad_out[offset_src];
+                float v_src_rotate;
+                if (!interleaved) {
+                    v_src_rotate = (d_id + d2 / 2 < d2)
+                                  ? static_cast<float>(grad_out[offset_src + (d2 / 2)])
+                                  : static_cast<float>(grad_out[offset_src + (d2 / 2 - d2)]);
+                } else {
+                    v_src_rotate = (d_id % 2 == 0)
+                                ? static_cast<float>(grad_out[offset_src + 1])
+                                : static_cast<float>(grad_out[offset_src - 1]);
+                }
+                out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+            }
+        }
+    }
+    // copy the rest
+    if (d > d2) {
+        #pragma unroll
+        for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+            #pragma unroll
+            for (int i = 0; i < out_row_length; i+=d) {
+                #pragma unroll
+                for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
+                    int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
+                    int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
+                    out[offset_dst] = grad_out[offset_src];
+                }
+            }
         }
       }
 
@@ -343,7 +368,7 @@ __global__ void fused_qkv_rope_forward_kernel(
   fused_qkv_rope_block_forward(qkv_input, k_freqs, k_out, interleaved, s_id_for_freqs, offset_block,
                                offset_block_dst_k, h, d, d2, q_limit, total_d, k_split_arg);
   fused_qkv_rope_block_forward(qkv_input, nullptr, v_out, interleaved, s_id_for_freqs, offset_block,
-                               offset_block_dst_v, h, d, d2, k_limit, total_d, v_split_arg);
+                               offset_block_dst_v, h, d, 0 /*d2*/, k_limit, total_d, v_split_arg);
 }
 
 template <typename scalar_t>
@@ -389,7 +414,7 @@ __global__ void fused_qkv_rope_backward_kernel(
                                 offset_block, offset_block_dst_k, h, d, d2, q_limit, total_d,
                                 k_split_arg);
   fused_qkv_rope_block_backward(grad_out_v, nullptr, qkv_grad, interleaved, s_id_for_freqs,
-                                offset_block, offset_block_dst_v, h, d, d2, k_limit, total_d,
+                                offset_block, offset_block_dst_v, h, d, 0 /*d2*/, k_limit, total_d,
                                 v_split_arg);
 }
 
