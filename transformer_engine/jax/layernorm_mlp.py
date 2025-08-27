@@ -291,7 +291,9 @@ def _layernorm_mlp_fwd_rule(
 
     # This sharding constraint is needed to correct the Shardy sharding propagation
     if dot_2_input_axes is not None:
-        dot_1_output_axes = dot_2_input_axes[:-1] + (None,) + dot_2_input_axes[-1:] # add the act_num axis
+        dot_1_output_axes = (
+            dot_2_input_axes[:-1] + (None,) + dot_2_input_axes[-1:]
+        )  # add the act_num axis
         dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
 
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
