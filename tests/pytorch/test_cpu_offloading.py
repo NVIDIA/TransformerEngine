@@ -215,9 +215,7 @@ class Utils:
 class TestsOffloadableLayerState:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    @pytest.mark.parametrize("start_offload_synchronize_with_main_stream", [True, False])
-    @pytest.mark.parametrize("end_reload_synchronize_with_main_stream", [True, False])
-    def test_general(self, random_num_tensors, recipe_name, start_offload_synchronize_with_main_stream, end_reload_synchronize_with_main_stream):
+    def test_general(self, random_num_tensors, recipe_name):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
         for each layer offload random number of random tensors.
@@ -245,10 +243,9 @@ class TestsOffloadableLayerState:
                 assert tensor.device.type == "cuda"
                 tensors_ids.append(tensor_id)
 
-            offload_layer_state.start_offload(synchronize_with_main_stream=start_offload_synchronize_with_main_stream)
-            offload_layer_state.end_offload()
+            offload_layer_state.start_offload()
+            offload_layer_state.release_activation_forward_gpu_memory()
             offload_layer_state.start_reload()
-            offload_layer_state.end_reload(synchronize_with_main_stream=end_reload_synchronize_with_main_stream)
 
             for j in range(len(tensors_ids)):
                 tensor_gpu = offload_layer_state.pop_tensor(tensors_ids[j])
@@ -277,12 +274,11 @@ class TestsOffloadableLayerState:
         x2_id = offload_layer_state.push_tensor(x_2)
         del x_1, x_2
         offload_layer_state.start_offload()
-        offload_layer_state.end_offload()
+        offload_layer_state.release_activation_forward_gpu_memory()
 
         assert offload_layer_state.get_offloaded_total_size_mb() == pytest.approx(x_size, 0.1)
 
         offload_layer_state.start_reload()
-        offload_layer_state.end_reload()
         x_1 = offload_layer_state.pop_tensor(x1_id)
         x_2 = offload_layer_state.pop_tensor(x2_id)
         assert x_1.device.type == "cuda"
@@ -675,16 +671,14 @@ class TestTELayers:
 
         memory_before_offload = Utils.get_cuda_memory_mb()
         manual_controller.start_offload_layer(0)
-        manual_controller.end_offload_layer(0)
+        manual_controller.release_activation_forward_gpu_memory(0)
         manual_controller.start_offload_layer(1)
-        manual_controller.end_offload_layer(1)
+        manual_controller.release_activation_forward_gpu_memory(1)
         memory_after_offload = Utils.get_cuda_memory_mb()
         assert memory_after_offload + EPSILON < memory_before_offload
 
         manual_controller.start_reload_layer(0)
         manual_controller.start_reload_layer(1)
-        manual_controller.end_reload_layer(0)
-        manual_controller.end_reload_layer(1)
 
         memory_after_reload = Utils.get_cuda_memory_mb()
         assert memory_after_reload == pytest.approx(memory_before_offload, 0.1)
@@ -695,6 +689,7 @@ class TestTELayers:
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
+    @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
     @pytest.mark.parametrize("backend", ["FlashAttention", "FusedAttention", "UnfusedAttention"])
     def test_numerics(
         self,
@@ -702,12 +697,13 @@ class TestTELayers:
         layer_type,
         use_cuda_graphs,
         backend,
+        retain_pinned_cpu_buffers,
     ):
         recipe_ctx = Utils.create_recipe_ctx(recipe_name)
         Utils.skip_if_recipe_not_supported(recipe_name)
 
-        if use_cuda_graphs:
-            pytest.skip("Cuda graphs are not yet supported with cpu offloading.")
+        if use_cuda_graphs and not retain_pinned_cpu_buffers:   
+            pytest.skip("Cuda graphs are not yet supported with cpu offloading when retain_pinned_cpu_buffers is False.")
 
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"
@@ -726,6 +722,7 @@ class TestTELayers:
             model_layers=2,
             offload_activations=True,
             offload_weights=False,
+            retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
         )
 
         class Callable(torch.nn.Module):
@@ -805,28 +802,28 @@ class TestTELayers:
         torch.cuda.synchronize()
     
     def test_example_from_doc(self):
+        offload_stream = torch.cuda.Stream()
         num_layers = 10
-        cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
-            enabled=True,
-            model_layers=num_layers,
-            manual_synchronization=True,
-        )
-        layers = [Utils.create_layer("linear") for _ in range(num_layers)]
+        layers = [Utils.create_layer("transformer_layer") for _ in range(num_layers)]
         inp = [Utils.create_tensor("high precision") for _ in range(num_layers)]
         out = [None] * num_layers
+        cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
+            enabled=True, model_layers=num_layers, manual_synchronization=True, offload_stream=offload_stream)
 
         for i in range(num_layers):
             with cpu_offload_context:
                 out[i] = layers[i].forward(inp[i])
             out[i] = sync_function(out[i])
-            if i > 0:
-                manual_controller.end_offload_layer(i - 1)
             manual_controller.start_offload_layer(i)
-        
-        manual_controller.end_offload_layer(num_layers - 1)
-        
+
+        offload_stream.synchronize()
+        for i in range(num_layers):
+            manual_controller.release_activation_forward_gpu_memory(i)
+
         for i in range(num_layers - 1, -1, -1):
             # these calls are intended to be done in the backward pass
             manual_controller.start_reload_layer(i)
-            manual_controller.end_reload_layer(i)
+        
+        offload_stream.synchronize()
+        for i in range(num_layers):
             out[i].sum().backward()
