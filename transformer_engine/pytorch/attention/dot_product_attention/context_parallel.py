@@ -234,12 +234,28 @@ def get_thd_batch_on_this_cp_rank(
         def process_tensor(val):
             if val is not None:
                 # Determine which dimension is the sequence dimension
-                if val.shape[1] == cu_seqlens_padded[-1]:
-                    current_seq_dim = 1
-                elif val.shape[0] == cu_seqlens_padded[-1]:
-                    current_seq_dim = 0
+                # TODO: Add support for if the cu_seqlens_padded gives you a tensor of shape (1,)
+                # Ensure cu_seqlens_padded[-1] is a Python int, not a 0-dim tensor
+                if isinstance(cu_seqlens_padded[-1], torch.Tensor):
+                    seq_len_val = cu_seqlens_padded[-1].item()
                 else:
-                    raise ValueError("Make sure the inputs are in THD format and padded correctly.")
+                    seq_len_val = cu_seqlens_padded[-1]
+                
+                # Handle 1D tensors (like position_ids that don't have batch dimension)
+                if val.ndim == 1:
+                    if val.shape[0] == seq_len_val:
+                        current_seq_dim = 0
+                    else:
+                        raise ValueError("1D tensor shape doesn't match expected sequence length. Make sure the inputs are in THD format and padded correctly.")
+                elif val.ndim >= 2:
+                    if val.shape[1] == seq_len_val:
+                        current_seq_dim = 1
+                    elif val.shape[0] == seq_len_val:
+                        current_seq_dim = 0
+                    else:
+                        raise ValueError("Make sure the inputs are in THD format and padded correctly.")
+                else:
+                    raise ValueError("Tensor must be at least 1D")
 
                 # On this particular rank, for each sequence, get two slices, one from the beginning
                 # and one from the end.

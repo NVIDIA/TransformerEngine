@@ -544,21 +544,226 @@ class TestSequencePadding(unittest.TestCase):
         self.assertTrue(torch.equal(positional_ids_padded, expected_positional_ids))
         self.assertTrue(torch.equal(cu_seqlens_q_padded, expected_cu_seqlens_padded))
 
-# Now let's write a test that utilizes the pad sequence to divisibility function
-# and then shards that on the CP ranks.
-def test_shard_on_cp_ranks():
-    # Make some dummy data.
-    input_ids = torch.tensor([[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
-    labels = torch.tensor([[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
-    positional_ids = torch.tensor([[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
-    cu_seqlens_q = torch.tensor([0, 5])
-    divisibility_factor = 2
-    padding_token_id = 0
-    padding_label_id = -100
-    input_ids_padded, labels_padded, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(input_ids, labels, positional_ids, cu_seqlens_q, divisibility_factor, padding_token_id, padding_label_id)
-    assert input_ids_padded.shape == (2, 10)
+class TestContextParallelUtils(unittest.TestCase):
+    """Test utilities for context parallel functionality."""
     
-    # Ok now we are going to split the data on the CP ranks. I think we can mock the groups?
+    def setUp(self):
+        """Set up mock distributed environment."""
+        # Mock torch.distributed functions
+        self.original_get_world_size = torch.distributed.get_world_size
+        self.original_get_rank = torch.distributed.get_rank
+        
+    def tearDown(self):
+        """Restore original torch.distributed functions."""
+        torch.distributed.get_world_size = self.original_get_world_size
+        torch.distributed.get_rank = self.original_get_rank
+    
+    def _mock_distributed_env(self, cp_size, cp_rank):
+        """Mock the distributed environment for testing."""
+        def mock_get_world_size(group=None):
+            return cp_size
+        def mock_get_rank(group=None):
+            return cp_rank
+            
+        torch.distributed.get_world_size = mock_get_world_size
+        torch.distributed.get_rank = mock_get_rank
+
+    def test_cp_rank_slicing_simple_case(self):
+        """Test CP rank slicing with a simple 2-rank, single sequence case."""
+        # Setup: Single sequence of length 8, CP size = 2
+        # Each sequence gets divided into 2*cp_size = 4 slices of size 2 each
+        # Rank 0 gets slices [0,1] and [6,7] (first and last)
+        # Rank 1 gets slices [2,3] and [4,5] (second and second-to-last)
+        
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])  # Shape: (1, 8) - batch first
+        labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80]])
+        position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])  # Shape: (8,) - 1D as expected
+        cu_seqlens_q = torch.tensor([0, 8])
+        cu_seqlens_kv = torch.tensor([0, 8])
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # Rank 0 should get indices [0,1] and [6,7]
+        expected_input_ids_r0 = torch.tensor([[1, 2, 7, 8]])
+        expected_labels_r0 = torch.tensor([[10, 20, 70, 80]])
+        expected_pos_ids_r0 = torch.tensor([0, 1, 6, 7])
+        
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
+        self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
+        
+        # Test rank 1
+        self._mock_distributed_env(cp_size=2, cp_rank=1)
+        input_ids_r1, labels_r1, pos_ids_r1 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # Rank 1 should get indices [2,3] and [4,5]
+        expected_input_ids_r1 = torch.tensor([[3, 4, 5, 6]])
+        expected_labels_r1 = torch.tensor([[30, 40, 50, 60]])
+        expected_pos_ids_r1 = torch.tensor([2, 3, 4, 5])
+        
+        self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
+        self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
+        self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
+
+    def test_cp_rank_slicing_multiple_sequences(self):
+        """Test CP rank slicing with multiple sequences."""
+        # Setup: Two sequences of length 8 each, CP size = 2
+        # Total sequence length = 16, cu_seqlens = [0, 8, 16]
+        
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18]])
+        labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 110, 120, 130, 140, 150, 160, 170, 180]])
+        position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7])
+        cu_seqlens_q = torch.tensor([0, 8, 16])
+        cu_seqlens_kv = torch.tensor([0, 8, 16])
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # For each sequence, rank 0 gets first and last slices
+        # Seq 1: indices [0,1] and [6,7] -> values [1,2] and [7,8]
+        # Seq 2: indices [8,9] and [14,15] -> values [11,12] and [17,18]
+        expected_input_ids_r0 = torch.tensor([[1, 2, 7, 8, 11, 12, 17, 18]])
+        expected_labels_r0 = torch.tensor([[10, 20, 70, 80, 110, 120, 170, 180]])
+        expected_pos_ids_r0 = torch.tensor([0, 1, 6, 7, 0, 1, 6, 7])
+        
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
+        self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
+
+    def test_cp_rank_slicing_with_cp_size_1(self):
+        """Test that CP size = 1 returns original tensors unchanged."""
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
+        labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80]])
+        position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        cu_seqlens_q = torch.tensor([0, 8])
+        cu_seqlens_kv = torch.tensor([0, 8])
+        
+        self._mock_distributed_env(cp_size=1, cp_rank=0)
+        input_ids_result, labels_result, pos_ids_result = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # With CP size = 1, should return original tensors
+        self.assertTrue(torch.equal(input_ids_result, input_ids))
+        self.assertTrue(torch.equal(labels_result, labels))
+        self.assertTrue(torch.equal(pos_ids_result, position_ids))
+
+    def test_cp_rank_slicing_sequence_dim_detection(self):
+        """Test that the function correctly detects sequence dimension."""
+        # Test with sequence dimension = 0 (sequence_length, batch_size)
+        input_ids = torch.tensor([[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]])  # (8, 2)
+        labels = torch.tensor([[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]])
+        position_ids = torch.tensor([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6], [7, 7]])
+        cu_seqlens_q = torch.tensor([0, 8])
+        cu_seqlens_kv = torch.tensor([0, 8])
+        
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # Should get indices [0,1] and [6,7] along dimension 0
+        expected_input_ids_r0 = torch.tensor([[1, 10], [2, 20], [7, 70], [8, 80]])
+        expected_labels_r0 = torch.tensor([[1, 10], [2, 20], [7, 70], [8, 80]])
+        expected_pos_ids_r0 = torch.tensor([[0, 0], [1, 1], [6, 6], [7, 7]])
+        
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
+        self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
+
+    def test_cp_rank_slicing_mixed_dimensions(self):
+        """Test CP rank slicing where input_ids/labels are 1D but position_ids has batch dimension."""
+        # Setup: Single sequence of length 8, CP size = 2
+        # This tests the opposite case from the simple test:
+        # - input_ids and labels: 1D (no batch dimension)
+        # - position_ids: 2D (has batch dimension)
+        
+        input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])  # Shape: (8,) - 1D
+        labels = torch.tensor([10, 20, 30, 40, 50, 60, 70, 80])  # Shape: (8,) - 1D
+        position_ids = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])  # Shape: (1, 8) - 2D with batch
+        cu_seqlens_q = torch.tensor([0, 8])
+        cu_seqlens_kv = torch.tensor([0, 8])
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # Rank 0 should get indices [0,1] and [6,7]
+        expected_input_ids_r0 = torch.tensor([1, 2, 7, 8])  # 1D result
+        expected_labels_r0 = torch.tensor([10, 20, 70, 80])  # 1D result
+        expected_pos_ids_r0 = torch.tensor([[0, 1, 6, 7]])  # 2D result (preserves batch dim)
+        
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+        self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
+        self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
+        
+        # Test rank 1
+        self._mock_distributed_env(cp_size=2, cp_rank=1)
+        input_ids_r1, labels_r1, pos_ids_r1 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
+        )
+        
+        # Rank 1 should get indices [2,3] and [4,5]
+        expected_input_ids_r1 = torch.tensor([3, 4, 5, 6])  # 1D result
+        expected_labels_r1 = torch.tensor([30, 40, 50, 60])  # 1D result
+        expected_pos_ids_r1 = torch.tensor([[2, 3, 4, 5]])  # 2D result (preserves batch dim)
+        
+        self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
+        self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
+        self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
+
+    def test_integration_with_padding_and_cp_slicing(self):
+        """Integration test: pad sequences then slice for CP ranks."""
+        # Start with unpadded sequences
+        input_ids = torch.tensor([1, 1, 2, 2, 2])  # Two sequences: [1,1] and [2,2,2]
+        labels = torch.tensor([10, 11, 20, 21, 22])
+        positional_ids = torch.tensor([0, 1, 0, 1, 2])
+        cu_seqlens_q = torch.tensor([0, 2, 5])
+        divisibility_factor = 4  # Will pad to lengths 4 and 4
+        
+        # First, pad sequences
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
+            input_ids.unsqueeze(0),
+            labels.unsqueeze(0),
+            positional_ids,
+            cu_seqlens_q,
+            divisibility_factor,
+            padding_token_id=0,
+            padding_label_id=-100,
+        )
+        
+        # Expected after padding: [1,1,0,0,2,2,2,0] with cu_seqlens [0,4,8]
+        expected_padded = torch.tensor([1, 1, 0, 0, 2, 2, 2, 0])
+        self.assertTrue(torch.equal(input_ids_padded, expected_padded))
+        
+        # Now test CP slicing with cp_size=2
+        cu_seqlens_kv_padded = cu_seqlens_q_padded  # Same for self-attention
+        
+        # Test rank 0
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
+            cu_seqlens_q_padded, cu_seqlens_kv_padded, 
+            input_ids_padded.unsqueeze(0), labels_padded.unsqueeze(0), positional_ids_padded
+        )
+        
+        # Each sequence of length 4 gets divided into 4 slices of size 1
+        # Rank 0 gets slices [0] and [3] from each sequence
+        # Seq 1: indices [0] and [3] -> values [1] and [0]
+        # Seq 2: indices [4] and [7] -> values [2] and [0]
+        expected_input_ids_r0 = torch.tensor([[1, 0, 2, 0]])
+        
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
 
 
 
