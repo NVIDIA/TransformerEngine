@@ -81,6 +81,7 @@ subclasses HF's `GemmaForCausalLM` and adds a few attributes and methods.
 TEGemmaForCausalLM (inherits from HF's GemmaForCausalLM)
 ├─ model                    : inherited from HF's GemmaForCausalLM but with monkey-patched TEGemmaDecoderLayer × N
 ├─ lm_head                  : directly inherited from HF's GemmaForCausalLM
+├─ te_rope_emb              : RotaryPositionEmbedding (reusing the same for all layers for CUDA graphs compatibility)
 ├─ hidden_states_buffer     : shape [b, max_ctx, h]                             (static)
 ├─ generation_buffer        : shape [b, 1, h] (view of `hidden_states_buffer`)  (static)
 ├─ inference_params         : TransformerEngine KV cache
