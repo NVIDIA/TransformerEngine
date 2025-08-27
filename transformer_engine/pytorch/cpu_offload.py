@@ -551,6 +551,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         buffer_idx = 0
         double_buffer_idx = group_to_reload % 2
 
+        main_stream = torch.cuda.current_stream()
+
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self.tensor_tag_to_state.items():
@@ -559,7 +561,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     if self.double_buffering:
                         reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
                     else:
-                        reload_buffer = None
+                        with torch.cuda.stream(main_stream):
+                            reload_buffer = torch.empty_like(state[1], device = torch.cuda.current_device())
 
                     if isinstance(state, tuple):
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(
@@ -575,7 +578,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                     buffer_idx
                                 ]
                             else:
-                                reload_buffer = None
+                                with torch.cuda.stream(main_stream):
+                                    reload_buffer = torch.empty_like(state_tuple[1], device = torch.cuda.current_device())
 
                             if isinstance(state_tuple, tuple):
                                 tensor_list.append(
