@@ -28,7 +28,7 @@ from ..quantize import (
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
-    QuantizeConfig,
+    get_quantize_config,
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
@@ -754,7 +754,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
-    use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
+    use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -1107,7 +1107,7 @@ def _jax_gemm(
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                 jax.lax.Precision.HIGHEST
-                if QuantizeConfig.FP8_2X_ACC_FPROP
+                if get_quantize_config().FP8_2X_ACC_FPROP
                 else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)

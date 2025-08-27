@@ -396,7 +396,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             The quantize layout for the tensor usage
         """
         # If we need to support 1x1x for inference in the future
-        # if QuantizeConfig.INFERENCE_MODE:
+        # if get_quantize_config().INFERENCE_MODE:
         #     assert usage not in (TensorUsage.LHS_TRANS, TensorUsage.RHS_TRANS), (f"Invalid usage {usage} as we are in MXFP8_1D_SCALING 1x1x (FWD only) mode so no transposed usage is needed!")
         #     if usage == TensorUsage.LHS:
         #         return QuantizeLayout.ROWWISE
