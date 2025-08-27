@@ -122,7 +122,11 @@ if fp8_available:
 
 
 def is_fused_attn_available(
-    config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True, deterministic=False,
+    config: ModelConfig,
+    dtype: torch.dtype,
+    qkv_layout="bshd_bshd_bshd",
+    is_training=True,
+    deterministic=False,
 ):
     _, _, fused_attn_backends = get_available_attention_backends(
         config,
@@ -888,7 +892,9 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True):
+    if not is_fused_attn_available(
+        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
+    ):
         pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
@@ -1000,7 +1006,9 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True):
+    if not is_fused_attn_available(
+        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
+    ):
         pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(
