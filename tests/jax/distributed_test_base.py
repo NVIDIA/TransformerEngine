@@ -22,7 +22,7 @@ def generate_configs():
             pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
         )
         configs.append(
-            pytest.param(2, (2,), ("tp",), MeshResource(tp_resource="tp"), id="n2_dp1_tp2")
+            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2")
         )
 
     if is_devices_enough(4):
@@ -30,8 +30,8 @@ def generate_configs():
             pytest.param(
                 4,
                 (2, 2),
-                ("dp", "tp"),
-                MeshResource(dp_resource="dp", tp_resource="tp"),
+                ("dp", "tpsp"),
+                MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
                 id=f"n4_dp2_tp2",
             )
         )
@@ -43,8 +43,8 @@ def generate_context_parallel_configs_for_attn():
     """Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only"""
     configsL1 = []
     configsL2 = []
-    mr = MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp")
-    axes = ("dp", "cp", "tp")
+    mr = MeshResource(dp_resource="dp", cp_resource="cp", tpsp_resource="tpsp")
+    axes = ("dp", "cp", "tpsp")
     DP_sizes = (1, 2)
     CP_sizes = (1, 2, 4, 8)
     TP_sizes = (1, 2)

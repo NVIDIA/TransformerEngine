@@ -8,6 +8,7 @@ import operator
 from collections.abc import Iterable
 from typing import Tuple, Sequence, Union
 from functools import partial, reduce
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -452,6 +453,19 @@ class GemmPrimitive(BasePrimitive):
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
+        gsr = global_mesh_resource()
+
+        # Ensure that tensor sequence parallelism is not used via setting tp_resource
+        if gsr.tp_resource is not None:
+            for i in range(len(lhs_specs) - 1):
+                if lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource:
+                    warnings.warn(
+                        "Tensor sequence parallelism is detected as"
+                        f" tp_resource='{gsr.tp_resource}' appears twice consecutively in"
+                        f" lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource for"
+                        " tensor sequence parallelism to avoid potential issues."
+                    )
+
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
         lhs_non_cdims, rhs_non_cdims = map(
@@ -491,7 +505,7 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             rhs_non_cspecs = tuple(
-                None if spec is not None and spec == global_mesh_resource().fsdp_resource else spec
+                None if spec is not None and spec == gsr.fsdp_resource else spec
                 for spec in rhs_non_cspecs
             )
 
@@ -657,6 +671,12 @@ class GemmPrimitive(BasePrimitive):
         del mesh, result_types
 
         prefix = "GemmPrimitive_"
+
+        warnings.warn(
+            "Known issues with TE GemmPrimitives when Shardy propagation is enabled. For now,"
+            " please turn off Shardy by exporting the environment variable"
+            " 'JAX_USE_SHARDY_PARTITIONER=0' if you experience any problems."
+        )
 
         def _generate_operand_rules(name, ndim, cdims):
             specs = []

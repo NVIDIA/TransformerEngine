@@ -591,7 +591,7 @@ def _quantize_dbias_impl(
                     None,
                     x,
                     None,
-                    ScalingMode.NO_SCALING,
+                    scaling_mode=ScalingMode.NO_SCALING,
                     dq_dtype=x.dtype,
                     data_layout="NN",
                     flatten_axis=flatten_axis,
