@@ -68,7 +68,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 from ..cpp_extensions import (
@@ -406,6 +406,9 @@ class _LayerNormLinear(torch.autograd.Function):
             # Weight with column-wise usage is needed for dgrad GEMM.
             if isinstance(weightmat, QuantizedTensorBase):
                 weightmat.update_usage(columnwise_usage=True)
+            
+            if cpu_offloading:
+                mark_activation_offload(inputmat, mu, rsigma, ln_out)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -429,6 +432,14 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_weight,
                     ln_bias,
                 )
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_object = weight
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
@@ -444,6 +455,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
+            ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -553,6 +565,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
+
+            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
+            # we need to connect them into one.
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    origin_weight = ctx.weight_object
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -938,13 +958,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(main_grad.shape),
+                        list(origin_weight.main_grad.shape),
                         origin_weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(main_grad.shape),
+                        list(origin_weight.main_grad.shape),
                         origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:

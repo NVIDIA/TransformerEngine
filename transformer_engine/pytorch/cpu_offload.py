@@ -38,6 +38,9 @@ def mark_activation_offload(*tensors):
 
 def mark_not_offload(*tensors: torch.Tensor):
     """Marks tensors to prevent them from being offloaded."""
+    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        return
+
     for tensor in tensors:
         if tensor is not None:
             if hasattr(tensor, "get_data_tensors"):
@@ -57,6 +60,8 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         It is useful when multiple tensors are views of the same base tensor,
         for example in MultiHeadAttention for interleaved q, k, v tensors.
     """
+    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        return
 
     def _mark_tensor_for_offload(t):
         # Attach an event to mark when the tensor is ready for reload.

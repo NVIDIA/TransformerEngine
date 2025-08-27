@@ -65,7 +65,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload
+from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -95,7 +95,7 @@ class _Linear(torch.autograd.Function):
         grad_weight_quantizer: Optional[Quantizer],
         grad_output_quantizer: Optional[Quantizer],
         fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool,  # pylint: disable=unused-argument
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -377,6 +377,9 @@ class _Linear(torch.autograd.Function):
             if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
+            
+            if cpu_offloading and saved_inputmat is not None:
+                mark_activation_offload(saved_inputmat)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
@@ -388,6 +391,18 @@ class _Linear(torch.autograd.Function):
                 weightmat if fp8 and not isinstance(weight, QuantizedTensorBase) else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
+
+            if cpu_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_object = weight
+
 
             mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
@@ -420,6 +435,7 @@ class _Linear(torch.autograd.Function):
                     ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
@@ -470,11 +486,18 @@ class _Linear(torch.autograd.Function):
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
 
+            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
                 ctx.main_grad_func()
                 if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
                 else None
             )
+
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    weight = ctx.weight_object
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -869,13 +892,13 @@ class _Linear(torch.autograd.Function):
                 weight.grad_added_to_main_grad = True
                 if getattr(weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(main_grad.shape),
+                        list(weight.main_grad.shape),
                         weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(main_grad.shape),
+                        list(weight.main_grad.shape),
                         weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
