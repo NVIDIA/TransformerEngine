@@ -1129,7 +1129,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         temp_layout = temp_layout + s
                     else:
                         rep_count = int(s)
-                for i in range(rep_count):
+                for _ in range(rep_count):
                     reload_layout = reload_layout + temp_layout + "_"
             ctx.qkv_layout = reload_layout[:-1]
         else:

@@ -354,6 +354,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.h2d_stream = torch.cuda.Stream()
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        global CPUOffloadedLayer
 
         torch_stray_tensor = isinstance(
             tensor,
@@ -423,6 +424,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def tensor_pop(self, tensor_tag, **kwargs):
         """Tensor pop."""
+        global CPUOffloadedLayer
+
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
 
@@ -486,6 +489,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
+        global CPUOffloadedLayer
 
         # For the first group, kickstart the offload after we have
         # the first compute completion
