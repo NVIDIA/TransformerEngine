@@ -87,39 +87,45 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         # bf16 (recipe is None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
-            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, None),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         return {
             "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     # no activation fusion written yet
     # Per-tensor current scaling or fp8 blockwise scaling: []
     if recipe.float8_current_scaling() or recipe.float8_block_scaling():
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
-            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, None),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
@@ -1375,7 +1381,7 @@ class _LayerNormMLP(torch.autograd.Function):
 class LayerNormMLP(TransformerEngineBaseModule):
     r"""
     Applies layer normalization on the input followed by the MLP module, consisting of
-    2 successive linear transformations, separated by the GeLU activation.
+    2 successive linear transformations, separated by the activation function.
 
     Parameters
     ----------
@@ -1391,7 +1397,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu', 'srelu'.
+          Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
+                   'silu', and 'swiglu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -1592,7 +1599,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["reglu", "geglu", "qgeglu", "swiglu"]:
+        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu"]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
@@ -1973,14 +1980,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
-            "relu": torch.nn.functional.relu,
             "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
-            "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
-            "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
             * x.chunk(2, -1)[1],
-            "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
-            "srelu": torch.nn.functional.softplus,
+            "relu": torch.nn.functional.relu,
+            "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "srelu": lambda x: torch.nn.functional.relu(x) ** 2,
+            "sreglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) ** 2
+            * x.chunk(2, -1)[1],
+            "silu": torch.nn.functional.silu,
+            "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
         }
         if self.activation not in activation_map:
             raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
