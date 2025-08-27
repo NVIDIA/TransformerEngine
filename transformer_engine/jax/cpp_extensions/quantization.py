@@ -183,9 +183,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         te_dbias_quantize_p lowering rules
         """
         del out_dtype, scale_dtype, is_outer
-        x_aval, scale_aval = ctx.avals_in
+        x_aval, scale_aval, amax_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert scale_aval.dtype == jnp.float32
+        assert scale_aval.dtype == amax_aval.dtype == jnp.float32
         return ffi.ffi_lowering(
             BaseDBiasQuantizePrimitive.name,
             operand_output_aliases={2: 4},  # donate amax buffer to updated_amax
@@ -515,7 +515,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
-            (x_axes, ("…1",)),
+            (x_axes, ("…1",), amax),
             (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
         )
 
