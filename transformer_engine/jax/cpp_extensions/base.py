@@ -219,7 +219,7 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
     """
     Helper function to manage primitive states by name without modifying environment variables.
     Allows enabling specific primitives, disabling specific primitives, or disabling all primitives.
-    This helper is used in the QuantizeConfig.initialize() methods.
+    This helper is used in the get_quantize_config().initialize() methods.
 
     Args:
         enable_names: List of strings, each representing the name of a primitive class to enable. Defaults to None.
