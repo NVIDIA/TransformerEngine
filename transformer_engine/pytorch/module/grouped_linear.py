@@ -434,7 +434,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    wgrad_list, grad_biases_, _ = grouped_gemm_wgrad(
+                    _, grad_biases_, _ = grouped_gemm_wgrad(
                         inputmats, grad_output, wgrad_list
                     )
 
@@ -492,7 +492,6 @@ class _GroupedLinear(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,

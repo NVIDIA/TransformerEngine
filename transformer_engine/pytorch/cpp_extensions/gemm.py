@@ -183,8 +183,9 @@ def general_grouped_gemm(
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
         if single_output:
-            out_init = out
+            out_init = out[0]
             start_idx = 0
+            out = [None] * num_gemms
             for i in range(num_gemms):
                 size = m_splits[i]
                 out[i] = out_init[start_idx : start_idx + size]
