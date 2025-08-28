@@ -308,9 +308,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Dropout
   m.def("dropout_fwd", transformer_engine::pytorch::dropout_fwd, "Dropout forward with 8-bit RNG",
         py::arg("input"), py::arg("dropout_probability"), py::arg("out") = std::nullopt);
-  m.def("dropout_bwd", transformer_engine::pytorch::dropout_bwd,
-        "Dropout backward with 8-bit RNG", py::arg("grad_output"), py::arg("mask"),
-        py::arg("dropout_probability"), py::arg("grad_input") = std::nullopt);
+  m.def("dropout_bwd", transformer_engine::pytorch::dropout_bwd, "Dropout backward with 8-bit RNG",
+        py::arg("grad_output"), py::arg("mask"), py::arg("dropout_probability"),
+        py::arg("grad_input") = std::nullopt);
 
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,

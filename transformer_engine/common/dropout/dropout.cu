@@ -4,16 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/dropout.h"
-
-#include <algorithm>
-#include <cmath>
-
 #include <curand.h>
 #include <curand_kernel.h>
 #include <curand_philox4x32_x.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include "../common.h"
+#include "transformer_engine/dropout.h"
 
 namespace transformer_engine {
 namespace {
@@ -36,13 +35,9 @@ inline __device__ uint16_t packed_le_8bit(unsigned A, unsigned B) {
 }
 
 template <typename T>
-__global__ void dropout_kernel_fwd_f16(const T *input,
-                                       T *output,
-                                       uint16_t *mask,
-                                       int64_t *rng_state,
-                                       int n_rng_blocks,
-                                       unsigned p_dropout_in_uint32_t,
-                                       float inv_prob) {
+__global__ void dropout_kernel_fwd_f16(const T *input, T *output, uint16_t *mask,
+                                       int64_t *rng_state, int n_rng_blocks,
+                                       unsigned p_dropout_in_uint32_t, float inv_prob) {
   int tid = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
   int num_threads = gridDim.y * gridDim.x * blockDim.x;
   uint16_t result = 0;
@@ -83,14 +78,9 @@ __global__ void dropout_kernel_fwd_f16(const T *input,
 }
 
 template <typename T, typename O>
-__global__ void dropout_kernel_fwd_fp8(const T *input,
-                                       float *scale_inv,
-                                       O *output,
-                                       uint16_t *mask,
-                                       int64_t *rng_state,
-                                       int n_rng_blocks,
-                                       unsigned p_dropout_in_uint32_t,
-                                       float inv_prob,
+__global__ void dropout_kernel_fwd_fp8(const T *input, float *scale_inv, O *output, uint16_t *mask,
+                                       int64_t *rng_state, int n_rng_blocks,
+                                       unsigned p_dropout_in_uint32_t, float inv_prob,
                                        bool is_training) {
   int tid = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
   int num_threads = gridDim.y * gridDim.x * blockDim.x;
@@ -171,7 +161,6 @@ __global__ void dropout_kernel_bwd_f16(const T *grad_out, const uint16_t *in_mas
 
 }  // namespace
 
-
 void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_state,
                  float dropout_probability, cudaStream_t stream) {
   // Check tensors
@@ -180,34 +169,29 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
              "Input tensor must be FP16/BF16 tensor or tensor-scaled FP8 tensor, ",
              "but scaling mode is ", to_string(input.scaling_mode), ".");
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Output tensor must be FP16/BF16 tensor, ",
-             "but scaling mode is ", to_string(output.scaling_mode), ".");
-  NVTE_CHECK(mask.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Mask tensor must be INT16 tensor, ",
+             "Output tensor must be FP16/BF16 tensor, ", "but scaling mode is ",
+             to_string(output.scaling_mode), ".");
+  NVTE_CHECK(mask.scaling_mode == NVTE_DELAYED_TENSOR_SCALING, "Mask tensor must be INT16 tensor, ",
              "but scaling mode is ", to_string(mask.scaling_mode), ".");
   NVTE_CHECK(rng_state.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "RNG state tensor must be INT64 tensor with two entries, ",
-             "but scaling mode is ", to_string(rng_state.scaling_mode), ".");
+             "RNG state tensor must be INT64 tensor with two entries, ", "but scaling mode is ",
+             to_string(rng_state.scaling_mode), ".");
   NVTE_CHECK(output.dtype() == DType::kFloat16 || output.dtype() == DType::kBFloat16,
-             "Output tensor must be FP16/BF16 tensor, but dtype is ",
-             to_string(output.dtype()), ".");
-  NVTE_CHECK(mask.dtype() == DType::kInt16,
-             "Mask tensor must be INT16 tensor, but dtype is ",
+             "Output tensor must be FP16/BF16 tensor, but dtype is ", to_string(output.dtype()),
+             ".");
+  NVTE_CHECK(mask.dtype() == DType::kInt16, "Mask tensor must be INT16 tensor, but dtype is ",
              to_string(mask.dtype()), ".");
   NVTE_CHECK(rng_state.dtype() == DType::kInt64,
-             "RNG state tensor must be INT64 tensor with two entries, ",
-             "but dtype is ", to_string(rng_state.dtype()), ".");
+             "RNG state tensor must be INT64 tensor with two entries, ", "but dtype is ",
+             to_string(rng_state.dtype()), ".");
   NVTE_CHECK(numel % 16 == 0,
              "Input tensor number of elements must be divisible by 16, but shape is ",
              input.shape(), ".");
-  NVTE_CHECK(numel == output.numel(),
-             "Input tensor (shape=", input.shape(), ") and output tensor (shape=",
-             output.shape(), ") do not match.");
-  NVTE_CHECK(numel / 16 == mask.numel(),
-             "Input tensor (shape=", input.shape(), ") and mask tensor (shape=",
-             mask.shape(), ") do not match.");
-  NVTE_CHECK(rng_state.numel() == 2,
-             "RNG state tensor must be INT64 tensor with two entries, ",
+  NVTE_CHECK(numel == output.numel(), "Input tensor (shape=", input.shape(),
+             ") and output tensor (shape=", output.shape(), ") do not match.");
+  NVTE_CHECK(numel / 16 == mask.numel(), "Input tensor (shape=", input.shape(),
+             ") and mask tensor (shape=", mask.shape(), ") do not match.");
+  NVTE_CHECK(rng_state.numel() == 2, "RNG state tensor must be INT64 tensor with two entries, ",
              "but shape is ", rng_state.shape(), ".");
   NVTE_CHECK(input.data.dptr != nullptr, "Input tensor is missing data.");
   NVTE_CHECK(output.data.dptr != nullptr, "Output tensor is missing data.");
@@ -215,12 +199,12 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
   NVTE_CHECK(rng_state.data.dptr != nullptr, "RNG state tensor is missing data.");
 
   // Convert dropout probablity to scale and 8-bit representation
-  NVTE_CHECK(dropout_probability >= 0 && dropout_probability < 1,
-             "Invalid dropout probability (", dropout_probability, ").");
+  NVTE_CHECK(dropout_probability >= 0 && dropout_probability < 1, "Invalid dropout probability (",
+             dropout_probability, ").");
   const float scale = 1 / (1 - dropout_probability);
   const uint8_t prob_uint8 = static_cast<uint8_t>(std::floor(dropout_probability * 256));
-  NVTE_CHECK(prob_uint8 == dropout_probability * 256,
-             "Dropout probability (", dropout_probability, ") is not representable in 8 bits");
+  NVTE_CHECK(prob_uint8 == dropout_probability * 256, "Dropout probability (", dropout_probability,
+             ") is not representable in 8 bits");
   uint32_t prob4 = prob_uint8;
   prob4 = (prob4 << 8) | prob4;
   prob4 = (prob4 << 16) | prob4;
@@ -231,41 +215,36 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
   const size_t block_size = std::min(num_rng_blocks, static_cast<size_t>(128));
   const size_t num_blocks = DIVUP(num_rng_blocks, block_size);
   NVTE_CHECK(numel >= num_blocks * rng_block_size,
-             "Input tensor has invalid shape (shape=", input.shape(),
-             ", num_blocks=", num_blocks, ", rng_block_size=", rng_block_size, ").");
+             "Input tensor has invalid shape (shape=", input.shape(), ", num_blocks=", num_blocks,
+             ", rng_block_size=", rng_block_size, ").");
 
   // Launch kernel depending on input dtype
   if (input.dtype() == DType::kFloat16 || input.dtype() == DType::kBFloat16) {
-    NVTE_CHECK(input.dtype() == output.dtype(),
-               "Input tensor (dtype=", to_string(input.dtype()),
+    NVTE_CHECK(input.dtype() == output.dtype(), "Input tensor (dtype=", to_string(input.dtype()),
                ") and output tensor (dtype=", to_string(output.dtype()), ") do not match.");
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-      input.dtype(), DType,
-      dropout_kernel_fwd_f16<DType><<<num_blocks, block_size, 0, stream>>>(
-          reinterpret_cast<const DType *>(input.data.dptr),
-          reinterpret_cast<DType *>(output.data.dptr),
-          reinterpret_cast<uint16_t *>(mask.data.dptr),
-          reinterpret_cast<int64_t *>(rng_state.data.dptr),
-          num_rng_blocks, prob4, scale);
-    );
+        input.dtype(), DType,
+        dropout_kernel_fwd_f16<DType><<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const DType *>(input.data.dptr),
+            reinterpret_cast<DType *>(output.data.dptr),
+            reinterpret_cast<uint16_t *>(mask.data.dptr),
+            reinterpret_cast<int64_t *>(rng_state.data.dptr), num_rng_blocks, prob4, scale););
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else if (input.dtype() == DType::kFloat8E4M3 || input.dtype() == DType::kFloat8E5M2) {
-    NVTE_CHECK(input.scale_inv.dptr != nullptr,
-               "Input tensor scale-inverse is not allocated.");
+    NVTE_CHECK(input.scale_inv.dptr != nullptr, "Input tensor scale-inverse is not allocated.");
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-          output.dtype(), OType,
-          dropout_kernel_fwd_fp8<IType, OType><<<num_blocks, block_size, 0, stream>>>(
-              reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<float *>(input.scale_inv.dptr),
-              reinterpret_cast<OType *>(output.data.dptr),
-              reinterpret_cast<uint16_t *>(mask.data.dptr),
-              reinterpret_cast<int64_t *>(rng_state.data.dptr),
-              num_rng_blocks, prob4, scale, true);
+        input.dtype(), IType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
+            output.dtype(), OType,
+            dropout_kernel_fwd_fp8<IType, OType><<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<float *>(input.scale_inv.dptr),
+                reinterpret_cast<OType *>(output.data.dptr),
+                reinterpret_cast<uint16_t *>(mask.data.dptr),
+                reinterpret_cast<int64_t *>(rng_state.data.dptr), num_rng_blocks, prob4, scale,
+                true);
 
-      );
-    );
+        ););
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     NVTE_ERROR("Input tensor must be FP16/BF16 tensor or tensor-scaled FP8 tensor, ",
@@ -273,48 +252,40 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
   }
 }
 
-void dropout_bwd(const Tensor &grad_output,
-                 const Tensor &mask,
-                 Tensor &grad_input,
-                 float dropout_probability,
-                 cudaStream_t stream) {
+void dropout_bwd(const Tensor &grad_output, const Tensor &mask, Tensor &grad_input,
+                 float dropout_probability, cudaStream_t stream) {
   // Check tensors
   const size_t numel = grad_output.numel();
   NVTE_CHECK(grad_output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Grad output tensor must be FP16/BF16 tensor, ",
-             "but scaling mode is ", to_string(grad_output.scaling_mode), ".");
+             "Grad output tensor must be FP16/BF16 tensor, ", "but scaling mode is ",
+             to_string(grad_output.scaling_mode), ".");
   NVTE_CHECK(grad_input.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Grad input tensor must be FP16/BF16 tensor, ",
-             "but scaling mode is ", to_string(grad_input.scaling_mode), ".");
-  NVTE_CHECK(mask.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Mask tensor must be INT16 tensor, ",
+             "Grad input tensor must be FP16/BF16 tensor, ", "but scaling mode is ",
+             to_string(grad_input.scaling_mode), ".");
+  NVTE_CHECK(mask.scaling_mode == NVTE_DELAYED_TENSOR_SCALING, "Mask tensor must be INT16 tensor, ",
              "but scaling mode is ", to_string(mask.scaling_mode), ".");
   NVTE_CHECK(grad_output.dtype() == DType::kFloat16 || grad_output.dtype() == DType::kBFloat16,
              "Grad output tensor must be FP16/BF16 tensor, but dtype is ",
              to_string(grad_output.dtype()), ".");
   NVTE_CHECK(grad_output.dtype() == grad_input.dtype(),
              "Grad output tensor (dtype=", to_string(grad_output.dtype()),
-             ") and grad input tensor (dtype=", to_string(grad_input.dtype()),
-             ") do not match.");
-  NVTE_CHECK(mask.dtype() == DType::kInt16,
-             "Mask tensor must be INT16 tensor, but dtype is ",
+             ") and grad input tensor (dtype=", to_string(grad_input.dtype()), ") do not match.");
+  NVTE_CHECK(mask.dtype() == DType::kInt16, "Mask tensor must be INT16 tensor, but dtype is ",
              to_string(mask.dtype()), ".");
   NVTE_CHECK(numel % 16 == 0,
              "Grad output tensor number of elements must be divisible by 16, but shape is ",
              grad_output.shape(), ".");
-  NVTE_CHECK(numel == grad_input.numel(),
-             "Grad output tensor (shape=", grad_output.shape(),
+  NVTE_CHECK(numel == grad_input.numel(), "Grad output tensor (shape=", grad_output.shape(),
              ") and grad input tensor (shape=", grad_input.shape(), ") do not match.");
-  NVTE_CHECK(numel / 16 == mask.numel(),
-             "Grad output tensor (shape=", grad_output.shape(), ") and mask tensor (shape=",
-             mask.shape(), ") do not match.");
+  NVTE_CHECK(numel / 16 == mask.numel(), "Grad output tensor (shape=", grad_output.shape(),
+             ") and mask tensor (shape=", mask.shape(), ") do not match.");
   NVTE_CHECK(grad_output.data.dptr != nullptr, "Grad output tensor is missing data.");
   NVTE_CHECK(grad_input.data.dptr != nullptr, "Grad input tensor is missing data.");
   NVTE_CHECK(mask.data.dptr != nullptr, "Mask tensor is missing data.");
 
   // Convert dropout probablity to scale
-  NVTE_CHECK(dropout_probability >= 0 && dropout_probability < 1,
-             "Invalid dropout probability (", dropout_probability, ").");
+  NVTE_CHECK(dropout_probability >= 0 && dropout_probability < 1, "Invalid dropout probability (",
+             dropout_probability, ").");
   const float scale = 1 / (1 - dropout_probability);
 
   // CUDA config
@@ -329,16 +300,14 @@ void dropout_bwd(const Tensor &grad_output,
       dropout_kernel_bwd_f16<DType><<<num_blocks, block_size, 0, stream>>>(
           reinterpret_cast<const DType *>(grad_output.data.dptr),
           reinterpret_cast<const uint16_t *>(mask.data.dptr),
-          reinterpret_cast<DType *>(grad_input.data.dptr), num_rng_blocks, scale);
-  );
+          reinterpret_cast<DType *>(grad_input.data.dptr), num_rng_blocks, scale););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace transformer_engine
 
-void nvte_dropout_fwd(const NVTETensor input,
-                      NVTETensor output, NVTETensor mask, NVTETensor rng_state,
-                      float dropout_probability, cudaStream_t stream) {
+void nvte_dropout_fwd(const NVTETensor input, NVTETensor output, NVTETensor mask,
+                      NVTETensor rng_state, float dropout_probability, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dropout_fwd);
   using namespace transformer_engine;
   dropout_fwd(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
@@ -346,9 +315,8 @@ void nvte_dropout_fwd(const NVTETensor input,
               dropout_probability, stream);
 }
 
-void nvte_dropout_bwd(const NVTETensor grad_output, const NVTETensor mask,
-                      NVTETensor grad_input, float dropout_probability,
-                      cudaStream_t stream) {
+void nvte_dropout_bwd(const NVTETensor grad_output, const NVTETensor mask, NVTETensor grad_input,
+                      float dropout_probability, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dropout_bwd);
   using namespace transformer_engine;
   dropout_bwd(*convertNVTETensorCheck(grad_output), *convertNVTETensorCheck(mask),

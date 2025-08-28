@@ -24,8 +24,7 @@ void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
   });
 }
 
-std::vector<py::object> dropout_fwd(const py::handle &input,
-                                    float dropout_probability,
+std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_probability,
                                     std::optional<at::Tensor> out) {
   using namespace transformer_engine::pytorch::detail;
 
@@ -64,8 +63,7 @@ std::vector<py::object> dropout_fwd(const py::handle &input,
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_dropout_fwd(input_nvte.data(), out_nvte.data(), mask_nvte.data(),
-                     rng_state_nvte.data(),
+    nvte_dropout_fwd(input_nvte.data(), out_nvte.data(), mask_nvte.data(), rng_state_nvte.data(),
                      dropout_probability, at::cuda::getCurrentCUDAStream());
   });
 
@@ -73,8 +71,7 @@ std::vector<py::object> dropout_fwd(const py::handle &input,
 }
 
 py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
-                       const float dropout_probability,
-                       std::optional<at::Tensor> grad_input) {
+                       const float dropout_probability, std::optional<at::Tensor> grad_input) {
   const auto grad_output_nvte = makeTransformerEngineTensor(grad_output);
   const auto mask_nvte = makeTransformerEngineTensor(mask);
   if (!grad_input) {
