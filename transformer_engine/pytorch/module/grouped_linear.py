@@ -434,9 +434,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    _, grad_biases_, _ = grouped_gemm_wgrad(
-                        inputmats, grad_output, wgrad_list
-                    )
+                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
 
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
