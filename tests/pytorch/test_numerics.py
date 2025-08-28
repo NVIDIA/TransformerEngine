@@ -919,8 +919,8 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
             parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
-        .eval()
         .cuda()
+        .eval()
     )
 
     # Share params
@@ -1029,7 +1029,8 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
         )
         .to(dtype=dtype)
         .cuda()
-    ).eval()
+        .eval()
+    )
 
     # Share params
     with torch.no_grad():
