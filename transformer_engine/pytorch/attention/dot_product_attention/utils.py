@@ -822,7 +822,7 @@ def get_attention_backend(
     #     flash-attn >=2.4.1       | yes
     # FusedAttention               |
     #     sub-backend 0            | yes
-    #     sub-backend 1            | workspace optimization path and sm90+: yes;
+    #     sub-backend 1            | workspace optimization path and sm90: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
