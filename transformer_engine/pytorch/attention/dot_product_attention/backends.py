@@ -133,6 +133,9 @@ else:
 
     fa_utils.set_flash_attention_3_params()
 
+def _rmse(a, b):
+    return torch.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
+
 
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
@@ -962,6 +965,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attention:       torch.float16 or torch.bfloat16
         out_nominal_dtype = q.dtype
 
+        aux_ctx_tensors_clone = []
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
 
@@ -1004,6 +1008,57 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
             )
+            # repeat FP8 in F16
+            if bool(int(os.getenv("NVTE_REPEAT_in_F16", "0"))):
+                q_clone, k_clone, v_clone = [x.detach().clone() for x in [q,k,v]]
+                out_clone, aux_ctx_tensors_clone = fused_attn_fwd(
+                    is_training,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    q_clone,
+                    k_clone,
+                    v_clone,
+                    out_nominal_dtype,
+                    FusedAttnBackend["F16_arbitrary_seqlen"],
+                    attn_bias,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                    None,
+                    None,
+                    None,  # s_quantizer
+                    None,  # o_quantizer
+                    attn_scale,
+                    dropout_p,
+                    fast_zero_fill,
+                    qkv_layout,
+                    attn_bias_type,
+                    attn_mask_type,
+                    window_size,
+                    rng_gen,
+                )
+                if bool(int(os.getenv("NVTE_PRINT", "0"))):
+                    layer = int(os.getenv("NVTE_LAYER_NUMBER", str(layer_number)))
+                    procid = int(os.getenv("SLURM_PROCID", "0"))
+                    atol = float(os.getenv("NVTE_ATOL", "1e-2"))
+                    rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
+                    if layer_number == layer and procid == 0:
+                        out_tensors = [out_, out_clone]
+                        lse_tensors = [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]]
+                        out_minmax = [(x.min().item(), x.max().item()) for x in out_tensors]
+                        lse_minmax = [(x.min().item(), x.max().item()) for x in lse_tensors]
+                        out_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in out_minmax]
+                        lse_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in lse_minmax]
+                        out_close = torch.allclose(out_, out_clone, atol=atol, rtol=rtol)
+                        lse_close = torch.allclose(aux_ctx_tensors[0], aux_ctx_tensors_clone[0], atol=atol, rtol=rtol)
+                        minmax_strs = [f"({mi:.4e}, {ma:.4e})" for mm in [out_minmax, lse_minmax] for (mi,ma) in mm]
+                        minmax_strs = " ".join(minmax_strs)
+                        rmse = [_rmse(x,y) for x,y in [[out_, out_clone], [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]]]]
+                        print(f">>>> fwd p{procid} l{layer_number} out/lse {minmax_strs} {out_close=} {lse_close=} {rmse=}")
+                #out_, aux_ctx_tensors = out_clone, aux_ctx_tensors
+                #out_.copy_(out_clone)
+                #aux_ctx_tensors[0].copy_(aux_ctx_tensors_clone[0])
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1130,6 +1185,7 @@ class FusedAttnFunc(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
+            *aux_ctx_tensors_clone,
         )
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
@@ -1187,7 +1243,8 @@ class FusedAttnFunc(torch.autograd.Function):
             *other_tensors,
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
 
-        aux_ctx_tensors = other_tensors
+        aux_ctx_tensors = other_tensors[:3]
+        aux_ctx_tensors_clone = other_tensors[3:]
 
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
@@ -1359,6 +1416,50 @@ class FusedAttnFunc(torch.autograd.Function):
                             f">>>>{ctx.layer_number} dqkv.minmax:"
                             f" {dq_.__class__} {[(x.abs().min().item(), x.abs().max().item()) for x in [dq_, dk_, dv_]]}"
                         )
+                    # repeat FP8 in F16
+                    if bool(int(os.getenv("NVTE_REPEAT_in_F16", "0"))):
+                        assert all(isinstance(x,torch.Tensor) for x in [q,k,v,out,d_out]), "BWD: qkv must be F16"
+                        q_clone, k_clone, v_clone, out_clone, d_out_clone = [x.detach().clone() for x in [q,k,v,out,d_out]]
+                        dq_clone, dk_clone, dv_clone, *rest_clone = fused_attn_bwd(
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv,
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            q_clone,
+                            k_clone,
+                            v_clone,
+                            out_clone,
+                            d_out_clone,
+                            dqkv_nominal_dtype,
+                            TE_DType[dqkv_nominal_dtype], #dqkv_te_dtype,
+                            aux_ctx_tensors_clone,
+                            FusedAttnBackend["F16_arbitrary_seqlen"],
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                            None,
+                            None,
+                            None,
+                            ctx.attn_scale,
+                            ctx.dropout_p,
+                            ctx.fast_zero_fill,
+                            ctx.qkv_layout,
+                            ctx.attn_bias_type,
+                            ctx.attn_mask_type,
+                            ctx.window_size,
+                            ctx.deterministic,
+                        )
+                        if bool(int(os.getenv("NVTE_PRINT", "0"))):
+                            layer = int(os.getenv("NVTE_LAYER_NUMBER", str(ctx.layer_number)))
+                            procid = int(os.getenv("SLURM_PROCID", "0"))
+                            atol = float(os.getenv("NVTE_ATOL", "1e-2"))
+                            rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
+                            if ctx.layer_number == layer and procid == 0:
+                                dqkv_minmax = [(x.min().item(), x.max().item()) for p in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone]) for x in p]
+                                dqkv_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in dqkv_minmax]
+                                minmax_strs = " ".join(dqkv_minmax_strs)
+                                dqkv_close = [torch.allclose(x, y, atol=atol, rtol=rtol) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
+                                rmse = [_rmse(x,y) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
+                                print(f">>>> bwd p{procid} l{ctx.layer_number} dqkv {minmax_strs} {dqkv_close=} {rmse=}")
 
                 else:
                     if isinstance(d_out, QuantizedTensor):
