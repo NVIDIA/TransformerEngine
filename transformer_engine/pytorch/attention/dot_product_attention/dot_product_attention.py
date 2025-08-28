@@ -471,6 +471,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         # fp8_autocast_recipe=CS, NVTE_DPA_FORCE_DS=0: CS for QKV, O, dO, dQKV; DS for S, dP
         # fp8_autocast_recipe=CS, NVTE_DPA_FORCE_DS=1: DS for all tensors
         recipes = []
+        recipe_ = primary_recipe
         if fp8_autocast_recipe.delayed():
             # recipes: [DS]
             recipes = [primary_recipe]
@@ -478,13 +479,17 @@ class DotProductAttention(TransformerEngineBaseModule):
             secondary_recipe = fake_secondary_recipe
             # recipes: [CS, DS]
             recipes = [primary_recipe, secondary_recipe]
+            recipe_ = secondary_recipe
         if fp8_autocast_recipe.float8_current_scaling() and force_dpa_recipe_DS:
             primary_recipe = fake_secondary_recipe
             # recipes: [DS]
             recipes = [primary_recipe]
+            recipe_ = primary_recipe
 
         # only reduce over TP group for now; need to consider CP group later
-        fp8_group = self.tp_group  # FP8GlobalStateManager.get_fp8_group()
+        reduce_over_tp_group_only = True
+        if reduce_over_tp_group_only:
+            fp8_group = self.tp_group  # FP8GlobalStateManager.get_fp8_group()
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
@@ -496,16 +501,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             if self.fp8_initialized and fp8_autocast_recipe == self.fp8_meta["recipe"]:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            if fp8_autocast_recipe.delayed():
-                # DS
-                self.fp8_meta["recipe"] = primary_recipe
-            if fp8_autocast_recipe.float8_current_scaling():
-                if force_dpa_recipe_DS:
-                    # DS
-                    self.fp8_meta["recipe"] = primary_recipe
-                else:
-                    # DS
-                    self.fp8_meta["recipe"] = secondary_recipe
+            self.fp8_meta["recipe"] = recipe_
+            if reduce_over_tp_group_only or fp8_autocast_recipe.float8_current_scaling():
+                # Either fp8_group has changed or both fp8_recipe and fp8_group have changed.
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     self.fp8_meta["recipe"], fp8_group
                 )
@@ -535,16 +533,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.init_fp8_meta_tensors(recipes)
             self.fp8_initialized = True
 
-            if fp8_autocast_recipe.delayed():
-                # DS
-                self.fp8_meta["recipe"] = primary_recipe
-            if fp8_autocast_recipe.float8_current_scaling():
-                if force_dpa_recipe_DS:
-                    # DS
-                    self.fp8_meta["recipe"] = primary_recipe
-                else:
-                    # DS
-                    self.fp8_meta["recipe"] = secondary_recipe
+            self.fp8_meta["recipe"] = recipe_
+            if reduce_over_tp_group_only or fp8_autocast_recipe.float8_current_scaling():
+                # Either fp8_group has changed or both fp8_recipe and fp8_group have changed.
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     self.fp8_meta["recipe"], fp8_group
                 )
