@@ -30,7 +30,7 @@ from .misc import (
 )
 from .quantization import _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory
+from ..quantize import ScaledTensor, ScaledTensorFactory, HighPrecisionTensor
 from ..quantize import (
     Quantizer,
     QuantizeLayout,
@@ -930,7 +930,7 @@ def layernorm_fwd(
             scale_dtype=jnp.float32,
             is_outer=True,
         )
-        return output, mu, rsigma
+        return HighPrecisionTensor(data=output, amax=None), mu, rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
@@ -939,7 +939,7 @@ def layernorm_fwd(
         out, mu, rsigma = layernorm_fwd(
             x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
         )
-        out, _ = _quantize_dbias_impl(out, quantizer)
+        out, _ = _quantize_dbias_impl(out.data, quantizer)
         return out, mu, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -952,7 +952,9 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out.data, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
+        )
         return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()
@@ -1133,14 +1135,14 @@ def rmsnorm_fwd(
             scale_dtype=jnp.float32,
             is_outer=True,
         )
-        return output, rsigma
+        return HighPrecisionTensor(data=output, amax=None), rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
         out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None)
-        out, _ = _quantize_dbias_impl(out, quantizer)
+        out, _ = _quantize_dbias_impl(out.data, quantizer)
         return out, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1152,7 +1154,9 @@ def rmsnorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out.data, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
+        )
         return out, rsigma
 
     is_2x2x = quantizer.is_2x2x()
@@ -1276,7 +1280,6 @@ def normalization_fwd(
     epsilon: float,
     norm_type: str,
     quantizer: Optional[Quantizer],
-    noop_scaled_tensor: bool = False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1293,7 +1296,6 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
-        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         A tuple containing:
@@ -1320,20 +1322,6 @@ def normalization_fwd(
         mu = None
     else:
         raise ValueError(f"{norm_type=} is not supported.")
-
-    if quantizer is None and noop_scaled_tensor:
-        return (
-            ScaledTensorFactory.create_2x(
-                output,
-                None,
-                output,
-                None,
-                scaling_mode=ScalingMode.NO_SCALING,
-                dq_dtype=output.dtype,
-            ),
-            mu,
-            rsigma,
-        )
 
     return output, mu, rsigma
 

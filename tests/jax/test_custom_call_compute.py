@@ -31,6 +31,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
+    HighPrecisionTensor,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
@@ -765,7 +766,8 @@ class TestFusedQuantize:
                 te_output, jax_output, precise_comparison=precise_comparison
             )
         else:
-            assert_allclose(te_output, jax_output)
+            assert isinstance(te_output, HighPrecisionTensor)
+            assert_allclose(te_output.data, jax_output)
 
         if is_dbias:
             # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
