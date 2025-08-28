@@ -285,18 +285,17 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
 
   if (is_tensor_scaling) {
-    cudaStream_t stream_0 = nvte_get_compute_stream(0);
     size_t dpitch = tensor_scaling_sinv_aligment;
     size_t spitch = lhs_sinv_dtype_bytes;
     size_t width = lhs_sinv_dtype_bytes;
     size_t height = lhs_sinv_size;
     cudaMemcpy2DAsync(lhs_scatter_aligned_ptr, dpitch, lhs_sinv_ptr, spitch, width, height,
-                      cudaMemcpyDeviceToDevice, stream_0);
+                      cudaMemcpyDeviceToDevice, stream);
     spitch = rhs_sinv_dtype_bytes;
     width = rhs_sinv_dtype_bytes;
     height = rhs_sinv_size;
     cudaMemcpy2DAsync(rhs_scatter_aligned_ptr, dpitch, rhs_sinv_ptr, spitch, width, height,
-                      cudaMemcpyDeviceToDevice, stream_0);
+                      cudaMemcpyDeviceToDevice, stream);
     lhs_sinv_ptr = lhs_scatter_aligned_ptr;
     rhs_sinv_ptr = rhs_scatter_aligned_ptr;
   }
