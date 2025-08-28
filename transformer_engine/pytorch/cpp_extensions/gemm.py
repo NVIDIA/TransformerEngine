@@ -183,9 +183,15 @@ def general_grouped_gemm(
 
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
-        out = [None] * num_gemms
+        if single_output:
+            out_init = out
+            start_idx = 0
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out[i] = out_init[start_idx:start_idx+size]
+                start_idx += size
         for i in range(num_gemms):
-            out[i] = general_gemm(
+            general_gemm(
                 A[i],
                 B[i],
                 workspaces[i],
@@ -193,7 +199,7 @@ def general_grouped_gemm(
                 out_dtype=out_dtype,
                 layout=layout,
                 accumulate=accumulate,
-                out=None,
+                out=out[i],
                 bias=bias[i] if use_bias else None,
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
