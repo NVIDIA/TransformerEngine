@@ -822,7 +822,7 @@ def get_attention_backend(
     #     flash-attn >=2.4.1       | yes
     # FusedAttention               |
     #     sub-backend 0            | yes
-    #     sub-backend 1            | workspace optimization path and sm90+: yes;
+    #     sub-backend 1            | workspace optimization path and sm90: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
@@ -838,8 +838,9 @@ def get_attention_backend(
             use_flash_attention_2 = False
     if use_fused_attention and deterministic:
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
-            logger.debug("Disabling FusedAttention for determinism reasons")
+            logger.debug("Disabling FusedAttention for determinism reasons with FP8")
             use_fused_attention = False
+            fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
@@ -849,8 +850,13 @@ def get_attention_backend(
                 or cudnn_version < (8, 9, 5)
             )
         ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
+            logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
+            fused_attention_backend = None
+        if is_training and device_compute_capability >= (10, 0) and cudnn_version <= (9, 14, 0):
+            logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
+            use_fused_attention = False
+            fused_attention_backend = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
