@@ -4,7 +4,7 @@
 """JAX/TE custom ops for quantization"""
 import operator
 from functools import reduce
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 import math
 from packaging import version
 
@@ -65,7 +65,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         7,
         8,
         9,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, is_outer, amax_aval
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -571,7 +571,7 @@ def _jax_quantize_dbias(
 
 
 def _quantize_dbias_impl(
-    x: jnp.ndarray,
+    x: Union[jnp.ndarray, HighPrecisionTensor],
     quantizer: Quantizer,
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
@@ -585,19 +585,15 @@ def _quantize_dbias_impl(
         quantizer is not None
     ), "quantizer must be provided if dq_dtype is provided"
 
-    if isinstance(x, HighPrecisionTensor):
-        x = x.data
+    if isinstance(x, jnp.ndarray):
+        x = HighPrecisionTensor(data=x, amax=None)
 
     # Early-exit for non-quantized call
-    dq_dtype = dq_dtype or x.dtype
+    dq_dtype = dq_dtype or x.data.dtype
     if quantizer is None:
         dbias = None
         if is_dbias:
-            dbias = _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
-        x = HighPrecisionTensor(
-            data=x,
-            amax=None,
-        )
+            dbias = _jax_dbias(x.data, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, dbias
 
     # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
@@ -625,21 +621,25 @@ def _quantize_dbias_impl(
             dq_dtype=dq_dtype,
             flatten_axis=flatten_axis,
         )
-        dbias = _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
+        dbias = _jax_dbias(x.data, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
 
     scale = jnp.empty((), jnp.float32)
+    amax = None
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Globally reduce amax across all devices for current scaling so we have a single global scale.
         # This differs from the PyTorch implementation which uses a local amax and scale per-device and persists this
         # until the tensor is dequantized (e.g. in the GEMM).
-        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
+        amax = x.amax
+        if amax is None:
+            amax = jnp.amax(jnp.abs(x.data), keepdims=True).astype(jnp.float32)
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
 
     # Make sure amax is init with zero
-    amax = jnp.zeros((1,), jnp.float32)
+    if amax is None:
+        amax = jnp.zeros((1,), jnp.float32)
 
     # It is faster to use 1x quantization for tensor scaling
     is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
@@ -660,7 +660,7 @@ def _quantize_dbias_impl(
         updated_amax,
         dbias,
     ) = PrimitiveClass.outer_primitive.bind(
-        x,
+        x.data,
         scale,
         amax,
         out_dtype=quantizer.q_dtype,
@@ -701,7 +701,7 @@ def _quantize_dbias_impl(
 
 
 def quantize(
-    x: jnp.ndarray,
+    x: Union[jnp.ndarray, HighPrecisionTensor],
     quantizer: Quantizer,
     flatten_axis: int = -1,
 ) -> Tuple[ScaledTensor]:
@@ -727,7 +727,7 @@ def quantize(
 
 
 def quantize_dbias(
-    dz: jnp.ndarray,
+    dz: Union[jnp.ndarray, HighPrecisionTensor],
     quantizer: Quantizer,
     is_dbias: bool = True,
     flatten_axis: int = -1,
