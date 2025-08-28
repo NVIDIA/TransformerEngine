@@ -1051,7 +1051,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
-            softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1) if self.softmax_offset is not None else None
+            softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32) if self.softmax_offset is not None else None
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
