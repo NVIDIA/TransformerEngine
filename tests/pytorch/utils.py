@@ -266,8 +266,8 @@ def get_available_attention_backends(
         )
         (
             use_flash_attention,
-            use_fused_attention,
             flash_attention_backend,
+            use_fused_attention,
             fused_attention_backend,
             use_unfused_attention,
             available_backends,
