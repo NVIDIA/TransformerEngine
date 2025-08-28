@@ -329,7 +329,7 @@ class _GroupedLinear(torch.autograd.Function):
                     cast_if_needed(grad_output_view, ctx.activation_dtype),
                     ctx.m_splits,
                 )
-                
+
                 if ctx.debug:
                     # For debug mode, we compute grad biad by hand.
                     for i in range(ctx.num_gemms):
