@@ -50,8 +50,8 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import any_feature_enabled
 
 __all__ = ["GroupedLinear"]
 
@@ -131,13 +131,10 @@ class _GroupedLinear(torch.autograd.Function):
         inputmats: list
         if fp8 and not debug:
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
+        elif debug:
+            inputmats = DebugQuantizer.multi_tensor_quantize(inp_view, input_quantizers)
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
-            if debug:
-                new_inputmats = []
-                for i in range(num_gemms):
-                    new_inputmats.append(input_quantizers[i](inp_view))
-                inputmats = new_inputmats
 
         # Initialize weights
         weights_fp8: list
@@ -334,10 +331,7 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.m_splits,
                 )
                 if ctx.debug:
-                    new_grad_output = []
-                    for i in range(ctx.num_gemms):
-                        new_grad_output.append(ctx.grad_output_quantizers[i](grad_output_view))
-                    grad_output = new_grad_output
+                    grad_output = DebugQuantizer.multi_tensor_quantize(grad_output_view, ctx.grad_output_quantizers)
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -616,9 +610,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.name = name
 
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 
         self._offsets = {"input": 0, "weight": 1, "output": 2, "grad_output": 0, "grad_input": 1}
@@ -767,9 +758,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+        debug = self.is_debug_iter()
 
         assert not isinstance(
             inp, QuantizedTensorBase
@@ -799,10 +788,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                  grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers = quantizers
 
             if debug:
-                if not any_feature_enabled(list(chain(*quantizers))):
-                    # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers()
+                if self.no_debug_features_active(quantizers):
                     debug = False
+                    quantizers = self._get_quantizers()
 
                 if isinstance(weight_tensors, QuantizedTensorBase):
                     raise RuntimeError("FP8 weights are not supported in debug mode.")
@@ -962,7 +950,6 @@ class GroupedLinear(TransformerEngineBaseModule):
     def _get_debug_quantizers(self):
         original_quantizers = self._get_quantizers()
         assert TEDebugState.debug_enabled
-        from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]

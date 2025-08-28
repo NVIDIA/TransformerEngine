@@ -9,7 +9,7 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+from typing import Optional, Tuple, Iterable, Union, List
 import torch
 
 import transformer_engine_torch as tex
@@ -555,6 +555,16 @@ class DebugQuantizer(Quantizer):
         super().set_usage(rowwise=rowwise, columnwise=columnwise)
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
+    
+    @classmethod
+    def multi_tensor_quantize(cls, tensors: List[torch.Tensor], quantizers: List[Quantizer]) -> List[DebugQuantizedTensor]:
+        """
+        Quantizes a list of tensors using a list of quantizers.
+        """
+        output = []
+        for tensor, quantizer in zip(tensors, quantizers):
+            output.append(quantizer(tensor))
+        return output
 
 
 class DebugQuantizedTensor(QuantizedTensorBase):
