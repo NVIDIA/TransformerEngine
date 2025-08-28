@@ -576,17 +576,18 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     elif isinstance(state, list):
                         tensor_list = []
                         for state_tuple in state:
-                            if self.double_buffering:
-                                reload_buffer = self.reload_double_buffer[double_buffer_idx][
-                                    buffer_idx
-                                ]
-                            else:
-                                with torch.cuda.stream(main_stream):
-                                    reload_buffer = torch.empty_like(
-                                        state_tuple[1], device=torch.cuda.current_device()
-                                    )
 
                             if isinstance(state_tuple, tuple):
+                                if self.double_buffering:
+                                    reload_buffer = self.reload_double_buffer[double_buffer_idx][
+                                        buffer_idx
+                                    ]
+                                else:
+                                    with torch.cuda.stream(main_stream):
+                                        reload_buffer = torch.empty_like(
+                                            state_tuple[1], device=torch.cuda.current_device()
+                                        )
+
                                 tensor_list.append(
                                     SynchronizedGroupOffloadHandler.reload(
                                         state_tuple,
