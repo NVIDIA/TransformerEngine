@@ -132,7 +132,8 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
-                torch.split(inp_view, m_splits), input_quantizers)
+                torch.split(inp_view, m_splits), input_quantizers
+            )
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
 
@@ -161,7 +162,6 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
-
 
         out = torch.empty(
             [sum(m_splits), weights_fp8[0].size(0)],
@@ -226,7 +226,6 @@ class _GroupedLinear(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
-
 
             ctx.grad_input_quantizers = grad_input_quantizers
             ctx.grad_output_quantizers = grad_output_quantizers
@@ -329,10 +328,9 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.m_splits,
                 )
                 for i in range(ctx.num_gemms):
-                        grad_biases[i] = grad_output[i].sum(dim=0)
+                    grad_biases[i] = grad_output[i].sum(dim=0)
                 grad_output = DebugQuantizer.multi_tensor_quantize(
-                    torch.split(grad_output_view, ctx.m_splits), 
-                    ctx.grad_output_quantizers
+                    torch.split(grad_output_view, ctx.m_splits), ctx.grad_output_quantizers
                 )
             else:
                 # Only split grad output. Grad bias is fused with
@@ -341,7 +339,6 @@ class _GroupedLinear(torch.autograd.Function):
                     cast_if_needed(grad_output_view, ctx.activation_dtype),
                     ctx.m_splits,
                 )
-                    
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -437,7 +434,9 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    wgrad_list, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
+                    wgrad_list, grad_biases_, _ = grouped_gemm_wgrad(
+                        inputmats, grad_output, wgrad_list
+                    )
 
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
@@ -518,7 +517,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             *wgrad_list,
-            *grad_biases
+            *grad_biases,
         )
 
 
@@ -793,14 +792,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
-            quantizers = (
-                self._get_quantizers()
-                if not debug
-                else self._get_debug_quantizers()
-            )
+            quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
-            input_quantizers, weight_quantizers, output_quantizers,\
-                 grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers = quantizers
+            (
+                input_quantizers,
+                weight_quantizers,
+                output_quantizers,
+                grad_input_quantizers,
+                grad_weight_quantizers,
+                grad_output_quantizers,
+            ) = quantizers
 
             if debug:
                 if self.no_debug_features_active(list(chain(*quantizers))):
@@ -931,15 +932,18 @@ class GroupedLinear(TransformerEngineBaseModule):
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = True
         return weight_quantizers
-    
+
     def _get_quantizers(self):
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (
             [None] * self.num_gemms,
             [None] * self.num_gemms,
         )
-        grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers =\
-            [None] * self.num_gemms, [None] * self.num_gemms, [None] * self.num_gemms
+        grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers = (
+            [None] * self.num_gemms,
+            [None] * self.num_gemms,
+            [None] * self.num_gemms,
+        )
         if self.fp8:
             input_quantizers = [
                 self.quantizers["scaling_fwd"][
@@ -959,16 +963,24 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
-        return input_quantizers, weight_quantizers, output_quantizers,\
-                 grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers
-        
+        return (
+            input_quantizers,
+            weight_quantizers,
+            output_quantizers,
+            grad_input_quantizers,
+            grad_weight_quantizers,
+            grad_output_quantizers,
+        )
+
     def _get_debug_quantizers(self):
         original_quantizers = self._get_quantizers()
         assert TEDebugState.debug_enabled
 
-
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            [DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group) for q_id, q in enumerate(qs)]
+            [
+                DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group)
+                for q_id, q in enumerate(qs)
+            ]
             for name, qs in zip(names, original_quantizers)
         )

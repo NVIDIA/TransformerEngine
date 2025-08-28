@@ -165,7 +165,6 @@ def general_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     gelu_input = empty_tensors
-    
 
     sm_count = get_sm_count()
     if grad and use_bias:
@@ -174,7 +173,7 @@ def general_grouped_gemm(
         ]
     else:
         grad_bias = empty_tensors
-    
+
     bias = bias if use_bias else empty_tensors
     if use_bias:
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
@@ -188,7 +187,7 @@ def general_grouped_gemm(
             start_idx = 0
             for i in range(num_gemms):
                 size = m_splits[i]
-                out[i] = out_init[start_idx:start_idx+size]
+                out[i] = out_init[start_idx : start_idx + size]
                 start_idx += size
         for i in range(num_gemms):
             general_gemm(
@@ -206,7 +205,7 @@ def general_grouped_gemm(
             )[0]
         if single_output:
             out = torch.cat(out, dim=0)
-        
+
         return out, bias, None
 
     if gelu:

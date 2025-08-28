@@ -276,5 +276,3 @@ def test_log_grouped_gemm(feature_dirs):
     assert "gemm_0" in output, "gemm0 not found in output"
     assert "gemm_1" in output, "gemm1 not found in output"
     assert "gemm_2" in output, "gemm2 not found in output"
-        
-        

@@ -555,9 +555,11 @@ class DebugQuantizer(Quantizer):
         super().set_usage(rowwise=rowwise, columnwise=columnwise)
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
-    
+
     @classmethod
-    def multi_tensor_quantize(cls, tensors: List[torch.Tensor], quantizers: List[Quantizer]) -> List[DebugQuantizedTensor]:
+    def multi_tensor_quantize(
+        cls, tensors: List[torch.Tensor], quantizers: List[Quantizer]
+    ) -> List[DebugQuantizedTensor]:
         """
         Quantizes a list of tensors using a list of quantizers.
         """
