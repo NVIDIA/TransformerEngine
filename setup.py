@@ -70,10 +70,6 @@ def setup_common_extension() -> CMakeExtension:
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
-        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
-            f"nvidia-cublasmp-cu{cuda_version()[0]}"
-        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
-        cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
         nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
             f"nvidia-nvshmem-cu{cuda_version()[0]}"
         ).locate_file("nvidia/nvshmem")

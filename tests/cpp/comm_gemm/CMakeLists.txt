@@ -12,7 +12,7 @@ find_library(NCCL_LIB
              NAMES nccl libnccl
              PATH_SUFFIXES lib
              REQUIRED)
-target_include_directories(test_comm_gemm PRIVATE ${MPI_CXX_INCLUDE_PATH} $ENV{CUBLASMP_HOME}/include)
+target_include_directories(test_comm_gemm PRIVATE ${MPI_CXX_INCLUDE_PATH})
 target_link_libraries(test_comm_gemm PUBLIC CUDA::cuda_driver CUDA::cudart GTest::gtest ${TE_LIB} CUDA::nvrtc CUDNN::cudnn MPI::MPI_CXX ${NCCL_LIB} OpenMP::OpenMP_CXX)
 
 include(GoogleTest)
