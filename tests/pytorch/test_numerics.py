@@ -909,7 +909,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
         qkv_weight_interleaved=False,
         parallel_attention_mlp=parallel_attention_mlp,
         device="cuda",
-    )
+    ).eval()
 
     torch_gpt = (
         TorchGPT(
@@ -919,6 +919,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
             parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
+        .eval()
         .cuda()
     )
 
@@ -1019,7 +1020,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
         qkv_weight_interleaved=False,
         input_layernorm=False,
         device="cuda",
-    )
+    ).eval()
 
     torch_mha = (
         TorchMHA(
@@ -1028,7 +1029,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
         )
         .to(dtype=dtype)
         .cuda()
-    )
+    ).eval()
 
     # Share params
     with torch.no_grad():
