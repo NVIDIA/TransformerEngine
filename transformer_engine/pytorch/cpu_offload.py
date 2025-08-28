@@ -558,15 +558,16 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             for tensor_label, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
-                    if self.double_buffering:
-                        reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
-                    else:
-                        with torch.cuda.stream(main_stream):
-                            reload_buffer = torch.empty_like(
-                                state[1], device=torch.cuda.current_device()
-                            )
 
                     if isinstance(state, tuple):
+                        if self.double_buffering:
+                            reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                        else:
+                            with torch.cuda.stream(main_stream):
+                                reload_buffer = torch.empty_like(
+                                    state[1], device=torch.cuda.current_device()
+                                )
+
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(
                             state, True, reload_buffer
                         )
