@@ -1358,5 +1358,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
                     inference_params=inference_params,
+                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                    fp8_meta=self.fp8_meta,
+                    quantizers=self.quantizers,
                 )
             return None

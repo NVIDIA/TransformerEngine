@@ -137,6 +137,35 @@ def _rmse(a, b):
     return torch.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
 
 
+class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
+        if quantizer_name == "QKV_quantizer":
+            query_layer, key_layer, value_layer = tensor1, tensor2, tensor3
+            query_layer, key_layer, value_layer = [x.contiguous() for x in [query_layer, key_layer, value_layer]]
+            q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, query_layer, key_layer, value_layer, quantizer)
+            tensors_q = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
+        elif quantizer_name == "S_quantizer":
+            s_fp8 = quantizer(tensor1)
+            tensors_q = (s_fp8.dequantize(), tensor2, tensor3)
+        else:
+            tensors_q = (tensor1, tensor2, tensor3)
+        ctx.quantizer = quantizer
+        ctx.quantizer_name = quantizer_name
+        return tensors_q[0], tensors_q[1], tensors_q[2]
+    @staticmethod
+    def backward(ctx, grad1, grad2, grad3):
+        if ctx.quantizer_name == "dP_quantizer":
+            dp_fp8 = ctx.quantizer(grad1)
+            tensors_q = dp_fp8.dequantize(), grad2, grad3
+        elif ctx.quantizer_name == "dO_quantizer":
+            do_fp8 = ctx.quantizer(grad1)
+            tensors_q = do_fp8.dequantize(), grad2, grad3
+        else:
+            tensors_q = grad1, grad2, grad3
+        return tensors_q[0], tensors_q[1], tensors_q[2], None, None, None
+
+
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
@@ -192,6 +221,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         inference_params: Optional[InferenceParams] = None,
+        fp8: bool = False,
+        fp8_meta: Optional[Dict[str, Any]] = None,
+        quantizers=None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
         assert (
@@ -289,6 +321,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if apply_qk_layer_scaling:
             scale /= self.layer_number
 
+        # get quantizers from DPA; all Nones if not fp8
+        QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
+            dpa_utils.get_attention_quantizers(
+                fp8, fp8_meta, quantizers, cp_specific_quantizers=False
+            )
+        )
+        S_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=S_quantizer.dtype, device="cuda")
+        dP_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=dP_quantizer.dtype, device="cuda")
+
+        # quantize and dequantize q,k,v to simulate CS
+        query_layer, key_layer, value_layer = _UnfusedDPAQuantizationEmulator.apply(query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout)
+
         # Raw attention scores. [b * np, sq, sk]
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
@@ -333,6 +377,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 dtype=query_layer.dtype
             )
 
+        # quantize and dequantize dP to simulate CS
+        matmul_result, *_ = _UnfusedDPAQuantizationEmulator.apply(matmul_result, None, None, dP_quantizer, "dP_quantizer", None)
+
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
@@ -363,6 +410,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         # change view [b * np, sq, sk]
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
+
+        # quantize and dequantize S to simulate CS
+        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(attention_probs, None, None, S_quantizer, "S_quantizer", None)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
@@ -397,6 +447,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
             # [tq, np, hn] --> [tq, hp]
             context_layer = context_layer.view(total_tokens, -1)
+
+        # quantize and dequantize dO to simulate CS
+        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(attention_probs, None, None, dO_quantizer, "dO_quantizer", None)
 
         return context_layer
 
