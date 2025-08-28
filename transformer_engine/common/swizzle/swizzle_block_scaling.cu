@@ -45,7 +45,9 @@ namespace swizzle_kernel_1d {
     uint32_t u32[4];
   };
 
-  void __global__ kernel(const void* const in, void* const out, size_t sz) {
+  void __global__ swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* const in,
+                                                                           void* const out,
+                                                                           size_t sz) {
     const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     // uniform branch (sz % 128 == 0)
@@ -74,7 +76,9 @@ namespace swizzle_kernel_2d {
   constexpr size_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
   constexpr size_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
 
-  void __global__ kernel(const void* const in, void* const out, size_t sz) {
+  void __global__ swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(const void* const in,
+                                                                           void* const out,
+                                                                           size_t sz) {
     const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     static_assert(SF_PER_WARP == 1);
@@ -132,7 +136,8 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
                "for every input scaling factor (for a 1x128 tile)");
 
     const size_t blocks = DIVUP(numel, SF_PER_TB);
-    kernel<<<blocks, TB_SIZE, 0, stream>>>(input->scale_inv.dptr, output->scale_inv.dptr, numel);
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(
+        input->scale_inv.dptr, output->scale_inv.dptr, numel);
   } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
     using namespace swizzle_kernel_2d;
     NVTE_CHECK(output->scale_inv.numel() == numel * 512,
@@ -140,7 +145,8 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
                "for every input scaling factor (for a 128x128 tile)");
 
     const size_t blocks = DIVUP(numel, SF_PER_TB);
-    kernel<<<blocks, TB_SIZE, 0, stream>>>(input->scale_inv.dptr, output->scale_inv.dptr, numel);
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(
+        input->scale_inv.dptr, output->scale_inv.dptr, numel);
   }
 }
 
