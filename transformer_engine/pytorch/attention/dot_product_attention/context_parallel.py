@@ -102,12 +102,20 @@ def pad_sequences_to_divisibility(
     labels_padded = torch.cat(padded_labels)
 
     # Create padded positional_ids (positions continue incrementing through padding)
-    positional_ids_padded = create_padded_positional_ids(positional_ids, cu_seqlens_q, padding_amounts)
+    positional_ids_padded = create_padded_positional_ids(
+        positional_ids, cu_seqlens_q, padding_amounts
+    )
 
     # Create padded cumulative sequence lengths
     cu_seqlens_q_padded = create_padded_cu_seqlens(cu_seqlens_q, padding_amounts)
 
-    return input_ids_padded, labels_padded, positional_ids, positional_ids_padded, cu_seqlens_q_padded
+    return (
+        input_ids_padded,
+        labels_padded,
+        positional_ids,
+        positional_ids_padded,
+        cu_seqlens_q_padded,
+    )
 
 
 def extract_sequences(input_ids: torch.Tensor, cu_seqlens_q: torch.Tensor) -> List[torch.Tensor]:
@@ -178,7 +186,9 @@ def create_padded_positional_ids(
     return torch.cat(padded_pos_ids)
 
 
-def create_padded_cu_seqlens(cu_seqlens_q: torch.Tensor, padding_amounts: List[int]) -> torch.Tensor:
+def create_padded_cu_seqlens(
+    cu_seqlens_q: torch.Tensor, padding_amounts: List[int]
+) -> torch.Tensor:
     """Create cumulative sequence lengths accounting for padding."""
     cu_seqlens_padded = [cu_seqlens_q[0].item()]
 
@@ -201,7 +211,7 @@ def get_thd_batch_on_this_cp_rank(
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
 
-    This function is inteded for use in self attention. It will not work for cross attention because 
+    This function is inteded for use in self attention. It will not work for cross attention because
     it does not handle the case where the sequence length of the query and key are different.
 
     Which are parallelized across GPUs in a context parallel group.
@@ -215,20 +225,23 @@ def get_thd_batch_on_this_cp_rank(
         # Get cumulative sequence lengths from batch
         cu_seqlens_padded = cu_seqlens_q_padded
         assert cu_seqlens_padded is not None, (
-            "cu_seqlens_padded is required for THD format to calculate "
-            "the right chunk sizes for each sequence. cu_seqlens_q_padded is required for THD format to calculate "
-            "the right chunk sizes for each sequence."
+            "cu_seqlens_padded is required for THD format to calculate the right chunk sizes for"
+            " each sequence. cu_seqlens_q_padded is required for THD format to calculate the right"
+            " chunk sizes for each sequence."
         )
 
         # Get the cu_seqlens_kv_padded
         cu_seqlens_kv_padded = cu_seqlens_kv_padded
         assert cu_seqlens_kv_padded is not None, (
-            "cu_seqlens_kv_padded is required for THD format to calculate the right chunk sizes for each sequence."
+            "cu_seqlens_kv_padded is required for THD format to calculate the right chunk sizes for"
+            " each sequence."
         )
 
         # Calculate the chunk sizes for each sequence
         total_slices_of_any_sequence = 2 * cp_size
-        slice_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices_of_any_sequence
+        slice_sizes = (
+            cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+        ) // total_slices_of_any_sequence
 
         # Process each tensor directly instead of using keys_to_change loop
         def process_tensor(val):
@@ -240,20 +253,25 @@ def get_thd_batch_on_this_cp_rank(
                     seq_len_val = cu_seqlens_padded[-1].item()
                 else:
                     seq_len_val = cu_seqlens_padded[-1]
-                
+
                 # Handle 1D tensors (like position_ids that don't have batch dimension)
                 if val.ndim == 1:
                     if val.shape[0] == seq_len_val:
                         current_seq_dim = 0
                     else:
-                        raise ValueError("1D tensor shape doesn't match expected sequence length. Make sure the inputs are in THD format and padded correctly.")
+                        raise ValueError(
+                            "1D tensor shape doesn't match expected sequence length. Make sure the"
+                            " inputs are in THD format and padded correctly."
+                        )
                 elif val.ndim >= 2:
                     if val.shape[1] == seq_len_val:
                         current_seq_dim = 1
                     elif val.shape[0] == seq_len_val:
                         current_seq_dim = 0
                     else:
-                        raise ValueError("Make sure the inputs are in THD format and padded correctly.")
+                        raise ValueError(
+                            "Make sure the inputs are in THD format and padded correctly."
+                        )
                 else:
                     raise ValueError("Tensor must be at least 1D")
 
@@ -288,6 +306,7 @@ def get_thd_batch_on_this_cp_rank(
         position_ids_padded = process_tensor(position_ids_padded)
 
     return input_ids_padded, labels_padded, position_ids_padded
+
 
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm

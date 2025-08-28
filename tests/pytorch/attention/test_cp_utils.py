@@ -6,7 +6,10 @@
 import torch
 import unittest
 from typing import Tuple
-from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import get_thd_batch_on_this_cp_rank, pad_sequences_to_divisibility
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    get_thd_batch_on_this_cp_rank,
+    pad_sequences_to_divisibility,
+)
 
 
 class TestSequencePadding(unittest.TestCase):
@@ -20,14 +23,16 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 4
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),  # Add batch dimension
-            labels.unsqueeze(0),  # Add batch dimension
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=0,
-            padding_label_id=-100,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),  # Add batch dimension
+                labels.unsqueeze(0),  # Add batch dimension
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=0,
+                padding_label_id=-100,
+            )
         )
 
         # Assert
@@ -54,8 +59,14 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 4
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0), labels.unsqueeze(0), positional_ids, cu_seqlens_q, divisibility_factor
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+            )
         )
 
         # Assert - no padding should be added
@@ -74,14 +85,16 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 5
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),
-            labels.unsqueeze(0),
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=99,
-            padding_label_id=-100,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=99,
+                padding_label_id=-100,
+            )
         )
 
         # Assert - need 2 padding tokens to make length 5
@@ -106,10 +119,18 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 3
 
         # Execute
-        input_ids_padded, labels_padded, original_pos_ids, positional_ids_padded, cu_seqlens_q_padded = (
-            pad_sequences_to_divisibility(
-                input_ids.unsqueeze(0), labels.unsqueeze(0), positional_ids, cu_seqlens_q, divisibility_factor
-            )
+        (
+            input_ids_padded,
+            labels_padded,
+            original_pos_ids,
+            positional_ids_padded,
+            cu_seqlens_q_padded,
+        ) = pad_sequences_to_divisibility(
+            input_ids.unsqueeze(0),
+            labels.unsqueeze(0),
+            positional_ids,
+            cu_seqlens_q,
+            divisibility_factor,
         )
 
         # Assert
@@ -117,7 +138,9 @@ class TestSequencePadding(unittest.TestCase):
         # Seq 2: length 3 -> needs 0 padding tokens, stays [0,1,2]
         # Seq 3: length 5 -> needs 1 padding token, positions continue [0,1,2,3,4] -> [0,1,2,3,4,5]
         expected_input_ids = torch.tensor([1, 0, 0, 2, 2, 2, 3, 3, 3, 3, 3, 0])
-        expected_labels = torch.tensor([100, -100, -100, 200, 201, 202, 300, 301, 302, 303, 304, -100])
+        expected_labels = torch.tensor(
+            [100, -100, -100, 200, 201, 202, 300, 301, 302, 303, 304, -100]
+        )
         expected_positional_ids_padded = torch.tensor([0, 1, 2, 0, 1, 2, 0, 1, 2, 3, 4, 5])
         expected_cu_seqlens_padded = torch.tensor([0, 3, 6, 12])
 
@@ -137,8 +160,14 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 1
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0), labels.unsqueeze(0), positional_ids, cu_seqlens_q, divisibility_factor
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+            )
         )
 
         # Assert - everything divisible by 1, no padding
@@ -157,14 +186,16 @@ class TestSequencePadding(unittest.TestCase):
         divisibility_factor = 3
 
         # Execute with custom padding values
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),
-            labels.unsqueeze(0),
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=777,
-            padding_label_id=-999,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=777,
+                padding_label_id=-999,
+            )
         )
 
         # Assert - need 1 padding token to make length 3
@@ -192,16 +223,20 @@ class TestSequencePadding(unittest.TestCase):
         pid = 777
         label_pad = -200
 
-        input_ids_padded, labels_padded, positional_ids, positional_ids_padded, cu_seqlens_q_padded = (
-            pad_sequences_to_divisibility(
-                input_ids.unsqueeze(0),
-                labels.unsqueeze(0),
-                positional_ids,
-                cu_seqlens_q,
-                divisibility_factor,
-                padding_token_id=pid,
-                padding_label_id=label_pad,
-            )
+        (
+            input_ids_padded,
+            labels_padded,
+            positional_ids,
+            positional_ids_padded,
+            cu_seqlens_q_padded,
+        ) = pad_sequences_to_divisibility(
+            input_ids.unsqueeze(0),
+            labels.unsqueeze(0),
+            positional_ids,
+            cu_seqlens_q,
+            divisibility_factor,
+            padding_token_id=pid,
+            padding_label_id=label_pad,
         )
 
         # Sequence: [ a a a p p p p p b b pppppp ccccpppp]
@@ -211,7 +246,32 @@ class TestSequencePadding(unittest.TestCase):
         print("cu_seqlens_q_padded: ", cu_seqlens_q_padded)
 
         expected_input_ids = torch.tensor(
-            [1, 1, 1, pid, pid, pid, pid, pid, 2, 2, pid, pid, pid, pid, pid, pid, 3, 3, 3, 3, pid, pid, pid, pid]
+            [
+                1,
+                1,
+                1,
+                pid,
+                pid,
+                pid,
+                pid,
+                pid,
+                2,
+                2,
+                pid,
+                pid,
+                pid,
+                pid,
+                pid,
+                pid,
+                3,
+                3,
+                3,
+                3,
+                pid,
+                pid,
+                pid,
+                pid,
+            ]
         )
         expected_cu_seqlens_q_padded = torch.tensor([0, 8, 16, 24])
         expected_labels_padded = torch.tensor(
@@ -259,11 +319,39 @@ class TestSequencePadding(unittest.TestCase):
         # Seq 3: length 4 (shorter than 6, needs 2 padding)
         # Seq 4: length 10 (longer than 6, needs 2 padding to reach 12)
 
-        input_ids = torch.tensor([1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4])
-        labels = torch.tensor(
-            [10, 11, 20, 21, 22, 23, 24, 25, 26, 30, 31, 32, 33, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+        input_ids = torch.tensor(
+            [1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
         )
-        positional_ids = torch.tensor([0, 1, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        labels = torch.tensor(
+            [
+                10,
+                11,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                30,
+                31,
+                32,
+                33,
+                40,
+                41,
+                42,
+                43,
+                44,
+                45,
+                46,
+                47,
+                48,
+                49,
+            ]
+        )
+        positional_ids = torch.tensor(
+            [0, 1, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        )
         cu_seqlens_q = torch.tensor([0, 2, 9, 13, 23])
         divisibility_factor = 6
 
@@ -271,14 +359,16 @@ class TestSequencePadding(unittest.TestCase):
         label_pad = -300
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),
-            labels.unsqueeze(0),
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=pid,
-            padding_label_id=label_pad,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=pid,
+                padding_label_id=label_pad,
+            )
         )
 
         # Assert
@@ -478,7 +568,9 @@ class TestSequencePadding(unittest.TestCase):
                 304,
             ]
         )
-        positional_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 1, 2, 3, 4])
+        positional_ids = torch.tensor(
+            [0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 1, 2, 3, 4]
+        )
         cu_seqlens_q = torch.tensor([0, 7, 18, 23])
         divisibility_factor = 4
 
@@ -486,14 +578,16 @@ class TestSequencePadding(unittest.TestCase):
         label_pad = -400
 
         # Execute
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),
-            labels.unsqueeze(0),
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=pid,
-            padding_label_id=label_pad,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=pid,
+                padding_label_id=label_pad,
+            )
         )
 
         # Assert
@@ -502,7 +596,36 @@ class TestSequencePadding(unittest.TestCase):
         # Seq 3: 5 + 3 pads = 8 (divisible by 4)
 
         expected_input_ids = torch.tensor(
-            [1, 1, 1, 1, 1, 1, 1, pid, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, pid, 3, 3, 3, 3, 3, pid, pid, pid]
+            [
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                pid,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                pid,
+                3,
+                3,
+                3,
+                3,
+                3,
+                pid,
+                pid,
+                pid,
+            ]
         )
 
         expected_labels = torch.tensor(
@@ -549,27 +672,30 @@ class TestSequencePadding(unittest.TestCase):
         self.assertTrue(torch.equal(positional_ids_padded, expected_positional_ids))
         self.assertTrue(torch.equal(cu_seqlens_q_padded, expected_cu_seqlens_padded))
 
+
 class TestContextParallelUtils(unittest.TestCase):
     """Test utilities for context parallel functionality."""
-    
+
     def setUp(self):
         """Set up mock distributed environment."""
         # Mock torch.distributed functions
         self.original_get_world_size = torch.distributed.get_world_size
         self.original_get_rank = torch.distributed.get_rank
-        
+
     def tearDown(self):
         """Restore original torch.distributed functions."""
         torch.distributed.get_world_size = self.original_get_world_size
         torch.distributed.get_rank = self.original_get_rank
-    
+
     def _mock_distributed_env(self, cp_size, cp_rank):
         """Mock the distributed environment for testing."""
+
         def mock_get_world_size(group=None):
             return cp_size
+
         def mock_get_rank(group=None):
             return cp_rank
-            
+
         torch.distributed.get_world_size = mock_get_world_size
         torch.distributed.get_rank = mock_get_rank
 
@@ -579,39 +705,39 @@ class TestContextParallelUtils(unittest.TestCase):
         # Each sequence gets divided into 2*cp_size = 4 slices of size 2 each
         # Rank 0 gets slices [0,1] and [6,7] (first and last)
         # Rank 1 gets slices [2,3] and [4,5] (second and second-to-last)
-        
+
         input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])  # Shape: (1, 8) - batch first
         labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80]])
         position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])  # Shape: (8,) - 1D as expected
         cu_seqlens_q = torch.tensor([0, 8])
         cu_seqlens_kv = torch.tensor([0, 8])
-        
+
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # Rank 0 should get indices [0,1] and [6,7]
         expected_input_ids_r0 = torch.tensor([[1, 2, 7, 8]])
         expected_labels_r0 = torch.tensor([[10, 20, 70, 80]])
         expected_pos_ids_r0 = torch.tensor([0, 1, 6, 7])
-        
+
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
         self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
         self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
-        
+
         # Test rank 1
         self._mock_distributed_env(cp_size=2, cp_rank=1)
         input_ids_r1, labels_r1, pos_ids_r1 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # Rank 1 should get indices [2,3] and [4,5]
         expected_input_ids_r1 = torch.tensor([[3, 4, 5, 6]])
         expected_labels_r1 = torch.tensor([[30, 40, 50, 60]])
         expected_pos_ids_r1 = torch.tensor([2, 3, 4, 5])
-        
+
         self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
         self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
@@ -620,26 +746,28 @@ class TestContextParallelUtils(unittest.TestCase):
         """Test CP rank slicing with multiple sequences."""
         # Setup: Two sequences of length 8 each, CP size = 2
         # Total sequence length = 16, cu_seqlens = [0, 8, 16]
-        
+
         input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18]])
-        labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 110, 120, 130, 140, 150, 160, 170, 180]])
+        labels = torch.tensor(
+            [[10, 20, 30, 40, 50, 60, 70, 80, 110, 120, 130, 140, 150, 160, 170, 180]]
+        )
         position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7])
         cu_seqlens_q = torch.tensor([0, 8, 16])
         cu_seqlens_kv = torch.tensor([0, 8, 16])
-        
+
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # For each sequence, rank 0 gets first and last slices
         # Seq 1: indices [0,1] and [6,7] -> values [1,2] and [7,8]
         # Seq 2: indices [8,9] and [14,15] -> values [11,12] and [17,18]
         expected_input_ids_r0 = torch.tensor([[1, 2, 7, 8, 11, 12, 17, 18]])
         expected_labels_r0 = torch.tensor([[10, 20, 70, 80, 110, 120, 170, 180]])
         expected_pos_ids_r0 = torch.tensor([0, 1, 6, 7, 0, 1, 6, 7])
-        
+
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
         self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
         self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
@@ -651,12 +779,12 @@ class TestContextParallelUtils(unittest.TestCase):
         position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         cu_seqlens_q = torch.tensor([0, 8])
         cu_seqlens_kv = torch.tensor([0, 8])
-        
+
         self._mock_distributed_env(cp_size=1, cp_rank=0)
         input_ids_result, labels_result, pos_ids_result = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # With CP size = 1, should return original tensors
         self.assertTrue(torch.equal(input_ids_result, input_ids))
         self.assertTrue(torch.equal(labels_result, labels))
@@ -665,22 +793,28 @@ class TestContextParallelUtils(unittest.TestCase):
     def test_cp_rank_slicing_sequence_dim_detection(self):
         """Test that the function correctly detects sequence dimension."""
         # Test with sequence dimension = 0 (sequence_length, batch_size)
-        input_ids = torch.tensor([[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]])  # (8, 2)
-        labels = torch.tensor([[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]])
-        position_ids = torch.tensor([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6], [7, 7]])
+        input_ids = torch.tensor(
+            [[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]]
+        )  # (8, 2)
+        labels = torch.tensor(
+            [[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60], [7, 70], [8, 80]]
+        )
+        position_ids = torch.tensor(
+            [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6], [7, 7]]
+        )
         cu_seqlens_q = torch.tensor([0, 8])
         cu_seqlens_kv = torch.tensor([0, 8])
-        
+
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # Should get indices [0,1] and [6,7] along dimension 0
         expected_input_ids_r0 = torch.tensor([[1, 10], [2, 20], [7, 70], [8, 80]])
         expected_labels_r0 = torch.tensor([[1, 10], [2, 20], [7, 70], [8, 80]])
         expected_pos_ids_r0 = torch.tensor([[0, 0], [1, 1], [6, 6], [7, 7]])
-        
+
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
         self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
         self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
@@ -691,39 +825,39 @@ class TestContextParallelUtils(unittest.TestCase):
         # This tests the opposite case from the simple test:
         # - input_ids and labels: 1D (no batch dimension)
         # - position_ids: 2D (has batch dimension)
-        
+
         input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])  # Shape: (8,) - 1D
         labels = torch.tensor([10, 20, 30, 40, 50, 60, 70, 80])  # Shape: (8,) - 1D
         position_ids = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])  # Shape: (1, 8) - 2D with batch
         cu_seqlens_q = torch.tensor([0, 8])
         cu_seqlens_kv = torch.tensor([0, 8])
-        
+
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # Rank 0 should get indices [0,1] and [6,7]
         expected_input_ids_r0 = torch.tensor([1, 2, 7, 8])  # 1D result
         expected_labels_r0 = torch.tensor([10, 20, 70, 80])  # 1D result
         expected_pos_ids_r0 = torch.tensor([[0, 1, 6, 7]])  # 2D result (preserves batch dim)
-        
+
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
         self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
         self.assertTrue(torch.equal(pos_ids_r0, expected_pos_ids_r0))
-        
+
         # Test rank 1
         self._mock_distributed_env(cp_size=2, cp_rank=1)
         input_ids_r1, labels_r1, pos_ids_r1 = get_thd_batch_on_this_cp_rank(
             cu_seqlens_q, cu_seqlens_kv, input_ids, labels, position_ids
         )
-        
+
         # Rank 1 should get indices [2,3] and [4,5]
         expected_input_ids_r1 = torch.tensor([3, 4, 5, 6])  # 1D result
         expected_labels_r1 = torch.tensor([30, 40, 50, 60])  # 1D result
         expected_pos_ids_r1 = torch.tensor([[2, 3, 4, 5]])  # 2D result (preserves batch dim)
-        
+
         self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
         self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
@@ -736,40 +870,44 @@ class TestContextParallelUtils(unittest.TestCase):
         positional_ids = torch.tensor([0, 1, 0, 1, 2])
         cu_seqlens_q = torch.tensor([0, 2, 5])
         divisibility_factor = 4  # Will pad to lengths 4 and 4
-        
+
         # First, pad sequences
-        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = pad_sequences_to_divisibility(
-            input_ids.unsqueeze(0),
-            labels.unsqueeze(0),
-            positional_ids,
-            cu_seqlens_q,
-            divisibility_factor,
-            padding_token_id=0,
-            padding_label_id=-100,
+        input_ids_padded, labels_padded, _, positional_ids_padded, cu_seqlens_q_padded = (
+            pad_sequences_to_divisibility(
+                input_ids.unsqueeze(0),
+                labels.unsqueeze(0),
+                positional_ids,
+                cu_seqlens_q,
+                divisibility_factor,
+                padding_token_id=0,
+                padding_label_id=-100,
+            )
         )
-        
+
         # Expected after padding: [1,1,0,0,2,2,2,0] with cu_seqlens [0,4,8]
         expected_padded = torch.tensor([1, 1, 0, 0, 2, 2, 2, 0])
         self.assertTrue(torch.equal(input_ids_padded, expected_padded))
-        
+
         # Now test CP slicing with cp_size=2
         cu_seqlens_kv_padded = cu_seqlens_q_padded  # Same for self-attention
-        
+
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_thd_batch_on_this_cp_rank(
-            cu_seqlens_q_padded, cu_seqlens_kv_padded, 
-            input_ids_padded.unsqueeze(0), labels_padded.unsqueeze(0), positional_ids_padded
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            input_ids_padded.unsqueeze(0),
+            labels_padded.unsqueeze(0),
+            positional_ids_padded,
         )
-        
+
         # Each sequence of length 4 gets divided into 4 slices of size 1
         # Rank 0 gets slices [0] and [3] from each sequence
         # Seq 1: indices [0] and [3] -> values [1] and [0]
         # Seq 2: indices [4] and [7] -> values [2] and [0]
         expected_input_ids_r0 = torch.tensor([[1, 0, 2, 0]])
-        
-        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
 
+        self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
 
 
 if __name__ == "__main__":
