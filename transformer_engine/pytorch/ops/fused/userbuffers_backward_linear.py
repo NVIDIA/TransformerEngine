@@ -409,7 +409,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
-                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
 
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 

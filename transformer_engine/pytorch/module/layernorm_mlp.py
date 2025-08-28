@@ -869,7 +869,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ub_obj_fc2_dgrad.get_communication_stream()
                     )
 
-                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
+                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad", ctx.fp8)
 
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -1539,7 +1539,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
-            # FIXME: Properly retrieve the type of this layer to query the correct UB config
             and all(
                 ("fc1_fprop", use_fp8) not in _ub_communicators
                 or not get_ub("fc1_fprop", use_fp8).is_atomic_gemm()
