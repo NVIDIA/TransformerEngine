@@ -46,6 +46,8 @@ std::string to_string(const DType type) {
       return "Float8E8M0";
     case DType::kFloat4E2M1:
       return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
     case DType::kInt32:
       return "Int32";
     case DType::kInt64:
@@ -195,7 +197,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     }
   } else {
     NVTE_CHECK(t.scale.dptr == nullptr, "Scale is not supported for non-FP8 output ", name);
-    NVTE_CHECK(t.amax.dptr == nullptr, "Amax is not supported for non-FP8 output ", name);
+    // Note: amax is supported for non-FP8 output as it can be fused into the computation
+    //       and later used for quantization with no need to compute it separately
     NVTE_CHECK(t.scale_inv.dptr == nullptr, "Scale_inv is not supported for non-FP8 output ", name);
     NVTE_CHECK(t.columnwise_scale_inv.dptr == nullptr,
                "Scale_inv is not supported for non-FP8 input ", name);

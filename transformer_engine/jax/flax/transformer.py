@@ -26,6 +26,7 @@ from .module import LayerNorm, Softmax
 from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
+from ..attention import CPStrategy
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -180,8 +181,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
+        # (b, h, q, k): Last two axes are always replicated
         attn_weights = with_sharding_constraint_by_logical_axes(
-            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES)
+            attn_weights, (BATCH_AXES, HEAD_AXES, None, None)
         )
 
         # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
@@ -273,6 +275,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT
+    context_checkpoint_name: str = "context"
 
     @nn.compact
     def __call__(
@@ -321,6 +325,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_parallel_strategy=self.context_parallel_strategy,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
@@ -347,6 +353,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_parallel_strategy=self.context_parallel_strategy,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
@@ -368,6 +376,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_parallel_strategy=self.context_parallel_strategy,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -500,6 +510,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
     context_parallel_axis (str): The name of the context parallel axis.
+    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
+    context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
 
     Optimization parameters
     -----------------------
@@ -523,6 +535,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
+    context_parallel_strategy: str = "DEFAULT"
+    context_checkpoint_name: str = "context"
 
     @nn.compact
     def __call__(
@@ -641,6 +655,24 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             scale_factor = self.scale_factor
         del self.scale_factor
 
+        # case-insensitive mapping for context parallel strategy
+        cp_strategy_map = {
+            "DEFAULT": CPStrategy.DEFAULT,
+            "ALL_GATHER": CPStrategy.ALL_GATHER,
+            "ALLGATHER": CPStrategy.ALL_GATHER,  # Alternative spelling
+            "RING": CPStrategy.RING,
+        }
+
+        strategy_key = self.context_parallel_strategy.upper()
+        if strategy_key in cp_strategy_map:
+            context_parallel_strategy = cp_strategy_map[strategy_key]
+        else:
+            valid_strategies = list(cp_strategy_map.keys())
+            raise ValueError(
+                f"Invalid context parallel strategy: {self.context_parallel_strategy}. "
+                f"Valid options are: {valid_strategies} (case insensitive)"
+            )
+
         if not use_fused_attn:
             # unfused attention only supports splitted query, key, value
             if qkv_layout.is_qkvpacked():
@@ -689,6 +721,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_parallel_strategy=context_parallel_strategy,
+                context_checkpoint_name=self.context_checkpoint_name,
             )(
                 query,
                 key,
@@ -1159,7 +1193,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=(3, self.num_attention_heads * self.head_dim),
-                    transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.return_layernorm_output,
                     scale_axes=(W_NO_SHARD_AXES,),
                     ln_bias_axes=(W_NO_SHARD_AXES,),
@@ -1186,7 +1219,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=self.num_attention_heads * self.head_dim,
-                    transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=(self.return_layernorm_output or is_self_attn),
                     scale_axes=(W_NO_SHARD_AXES,),
                     ln_bias_axes=(W_NO_SHARD_AXES,),
@@ -1211,7 +1243,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 kv_proj = DenseGeneral(
                     axis=-1,
                     features=(2, self.num_gqa_groups * self.head_dim),
-                    transpose_batch_sequence=self.transpose_batch_sequence,
                     kernel_axes=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
                     kernel_init=kv_init,
                     use_bias=self.use_bias,
@@ -1230,7 +1261,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 DenseGeneral,
                 axis=-1,
                 features=self.num_gqa_groups * self.head_dim,
-                transpose_batch_sequence=self.transpose_batch_sequence,
                 kernel_axes=(W_FSDP_AXES, W_TP_AXES),
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
@@ -1247,7 +1277,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 epsilon=self.layernorm_epsilon,
                 axis=-1,
                 features=self.num_attention_heads * self.head_dim,
-                transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
                 scale_axes=(W_NO_SHARD_AXES,),
                 ln_bias_axes=(W_NO_SHARD_AXES,),
@@ -1412,7 +1441,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         out = DenseGeneral(
             features=inputs_q.shape[-1],
-            transpose_batch_sequence=self.transpose_batch_sequence,
             axis=-1,
             kernel_init=self.kernel_init,
             kernel_axes=(W_TP_AXES, W_FSDP_AXES),
@@ -2014,7 +2042,6 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             layernorm_type=self.layernorm_type,
             zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.layernorm_epsilon,
-            transpose_batch_sequence=self.transpose_batch_sequence,
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
@@ -2069,7 +2096,6 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 epsilon=self.layernorm_epsilon,
                 scale_axes=(W_NO_SHARD_AXES,),
                 bias_axes=(W_NO_SHARD_AXES,),
-                transpose_batch_sequence=self.transpose_batch_sequence,
                 dtype=self.dtype,
                 name="output_layernorm",
             )(z)

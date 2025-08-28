@@ -15,12 +15,14 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from ..dense import dense, _issue_batch_first_warning as _dense_warning
+from transformer_engine.common import recipe
+
+from ..dense import dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
-from ..layernorm_dense import layernorm_dense, _issue_batch_first_warning as _ln_dense_warning
-from ..layernorm_mlp import layernorm_mlp, _issue_batch_first_warning as _ln_mlp_warning
+from ..layernorm_dense import layernorm_dense
+from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -30,8 +32,14 @@ from ..cpp_extensions import (
     jax_scaled_masked_softmax,
     jax_scaled_upper_triang_masked_softmax,
 )
-from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
-from ..sharding import get_non_contracting_logical_axes
+from ..quantize import (
+    QuantizerFactory,
+    get_quantize_config,
+    QuantizeMeta,
+    QuantizeMetaSet,
+    ScalingMode,
+    TensorSource,
+)
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -274,10 +282,6 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = False
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     epsilon: float = 1e-6
@@ -288,7 +292,6 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ("embed",)
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
@@ -343,29 +346,38 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
     Base class of transformer engine
     """
 
-    def generate_quantizer_set(self, postfix: str = ""):
+    def generate_quantizer_set(
+        self, postfix: str = "", variable_collection: str = None, fp8_recipe=None
+    ):
         """
         Generate a set of FP8 meta for a GEMM.
         """
 
         def generate_quantize_meta(quantizer_name: str):
+            collection_name = (
+                variable_collection
+                if variable_collection is not None
+                else get_quantize_config().COLLECTION_NAME
+            )
             scale = self.variable(
-                QuantizeConfig.COLLECTION_NAME,
+                collection_name,
                 f"{quantizer_name}{postfix}_scale",
                 jnp.ones,
                 (1,),
                 jnp.float32,
             ).value
             amax_history = self.variable(
-                QuantizeConfig.COLLECTION_NAME,
+                collection_name,
                 f"{quantizer_name}{postfix}_amax_history",
                 jnp.zeros,
-                (QuantizeConfig.AMAX_HISTORY_LEN,),
+                (get_quantize_config().AMAX_HISTORY_LEN,),
                 jnp.float32,
             ).value
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-        if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
+        if get_quantize_config().get_scaling_mode(
+            TensorSource.X
+        ) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(fp8_recipe, recipe.DelayedScaling):
             x_meta = generate_quantize_meta("x")
             kernel_meta = generate_quantize_meta("kernel")
             grad_meta = generate_quantize_meta("grad")
@@ -374,7 +386,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         else:
             kwargs = {}
 
-        quantizer_set = QuantizerFactory.create_set(**kwargs)
+        quantizer_set = QuantizerFactory.create_set(fp8_recipe=fp8_recipe, **kwargs)
         return quantizer_set
 
 
@@ -420,10 +432,6 @@ class DenseGeneral(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     features: Union[Iterable[int], int]
@@ -437,16 +445,9 @@ class DenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _dense_warning(
-                "TE/JAX DenseGeneral() module does not officially support sequence-first inputs "
-                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
-                "sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype
@@ -489,7 +490,7 @@ class DenseGeneral(TransformerEngineBase):
             self.dtype,
         )
 
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
@@ -628,10 +629,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     depth_scaling: float, default = None
         The factor to scale the output from `DenseGeneral`. It should be a float
         value or None. When None is set, then no scaling is applied.
@@ -657,18 +654,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _ln_dense_warning(
-                "TE/JAX LayerNormDenseGeneral() module does not officially support sequence-first "
-                "inputs and may produce incorrect results when `transpose_batch_sequence=True`. "
-                "Use sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0,
@@ -709,7 +699,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         quantizer_set = self.generate_quantizer_set()
 
         fuse_layernorm = (
-            QuantizeConfig.is_fp8_enabled()
+            get_quantize_config().is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -760,7 +750,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             kernel_shape,
             self.dtype,
         )
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -936,15 +926,16 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input of 2nd dot, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    ffn1_ckpt_name: str = "ffn1"
+        Checkpoint name for the output of the first fully-connected layer in the MLP block.
+    ffn2_ckpt_name: str = "ffn2"
+        Checkpoint name for the output of the second fully-connected layer in the MLP block.
+
 
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     intermediate_dim: int = 2048
@@ -973,18 +964,13 @@ class LayerNormMLP(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
     dot_2_input_axes: Tuple[str, ...] = None
+    ffn1_ckpt_name: str = "ffn1"
+    ffn2_ckpt_name: str = "ffn2"
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _ln_mlp_warning(
-                "TE/JAX LayerNormMLP() module does not officially support sequence-first inputs "
-                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
-                "sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype
@@ -1026,7 +1012,7 @@ class LayerNormMLP(TransformerEngineBase):
         # TODO(Phuong): use fuse_layernorm for high-precision
         # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            QuantizeConfig.is_fp8_enabled()
+            get_quantize_config().is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -1109,7 +1095,7 @@ class LayerNormMLP(TransformerEngineBase):
             self.dtype,
         )
 
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel_1 = kernel_1.astype(input_dtype)
 
         hidden_size = inputs.shape[-1]
@@ -1121,7 +1107,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel_2_shape,
             self.dtype,
         )
-        if not QuantizeConfig.is_fp8_enabled():
+        if not get_quantize_config().is_fp8_enabled():
             kernel_2 = kernel_2.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -1146,9 +1132,6 @@ class LayerNormMLP(TransformerEngineBase):
             bias_1 = None
             bias_2 = None
 
-        ffn1_ckpt_name = "ffn1"
-        ffn2_ckpt_name = "ffn2"
-
         if use_fused_layernorm_mlp:
             out = layernorm_mlp(
                 y,
@@ -1164,8 +1147,8 @@ class LayerNormMLP(TransformerEngineBase):
                 dot_2_input_axes=self.dot_2_input_axes,
                 kernel_1_axes=self.kernel_axes_1,
                 kernel_2_axes=self.kernel_axes_2,
-                ffn1_ckpt_name=ffn1_ckpt_name,
-                ffn2_ckpt_name=ffn2_ckpt_name,
+                ffn1_ckpt_name=self.ffn1_ckpt_name,
+                ffn2_ckpt_name=self.ffn2_ckpt_name,
                 activation_type=normalized_acts,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
             )
@@ -1197,15 +1180,6 @@ class LayerNormMLP(TransformerEngineBase):
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
-
-            if self.dot_1_input_axes is not None and self.kernel_axes_1 is not None:
-                dot_1_output_axes = (
-                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                    *get_non_contracting_logical_axes(
-                        kernel_1.ndim, self.kernel_axes_1, contract_ind
-                    ),
-                )
-                x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (
@@ -1247,7 +1221,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 x += jnp.reshape(bias_1, bias_1_shape)
 
-            x = checkpoint_name(x, ffn1_ckpt_name)
+            x = checkpoint_name(x, self.ffn1_ckpt_name)
             if is_act_implemented:
                 z = activation(x, normalized_acts)
             else:
@@ -1310,7 +1284,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
-            out = checkpoint_name(out, ffn2_ckpt_name)
+            out = checkpoint_name(out, self.ffn2_ckpt_name)
 
         assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output

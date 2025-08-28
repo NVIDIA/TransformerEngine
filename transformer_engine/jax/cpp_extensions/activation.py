@@ -915,11 +915,11 @@ register_primitive(BaseDActLuDBiasQuantizePrimitive)
 
 
 class DActLuDBiasQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
-    """Subclass of BaseDActLuDBiasQuantizePrimitive for DBias and fused activation quantization. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for DBias and fused activation quantization. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
 class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
-    """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
 def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
@@ -1037,7 +1037,7 @@ def act_lu(
         out = out.reshape(output_shape)
         if noop_scaled_tensor:
             return ScaledTensorFactory.create_2x(
-                out, None, out, None, ScalingMode.NO_SCALING, dq_dtype=out.dtype
+                out, None, out, None, scaling_mode=ScalingMode.NO_SCALING, dq_dtype=out.dtype
             )
         return out
 

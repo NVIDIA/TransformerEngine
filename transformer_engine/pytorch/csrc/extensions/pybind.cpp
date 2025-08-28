@@ -111,39 +111,55 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
-        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
+        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
+        py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
-        py::arg("quantizer"));
-  m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("geglu", transformer_engine::pytorch::geglu, "GeGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
+        py::arg("quantizer"));
   m.def("qgeglu", transformer_engine::pytorch::qgeglu, "QuickGeGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* ReLU and variants */
+  m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("reglu", transformer_engine::pytorch::reglu, "ReGLU activation", py::arg("input"),
         py::arg("quantizer"));
-  m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
-        py::arg("quantizer"));
-  m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
-        py::arg("quantizer"));
   m.def("srelu", transformer_engine::pytorch::srelu, "Squared ReLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("sreglu", transformer_engine::pytorch::sreglu, "Squared ReGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* SwiGLU and variants */
+  m.def("silu", transformer_engine::pytorch::silu, "SiLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dgeglu", transformer_engine::pytorch::dgeglu, "Backward of GeGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dqgeglu", transformer_engine::pytorch::dqgeglu, "Backward of QuickGeGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  /* Backward of ReLU and variants */
+  m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dreglu", transformer_engine::pytorch::dreglu, "Backward of ReGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dsrelu", transformer_engine::pytorch::dsrelu, "Backward of Squared ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsreglu", transformer_engine::pytorch::dsreglu, "Backward of Squared ReGLU",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  /* Backward of SiLU and variants */
+  m.def("dsilu", transformer_engine::pytorch::dsilu, "Backward of SiLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dbias_dsilu", transformer_engine::pytorch::dbias_dsilu, "DSiLU + DBias + Quantize",
@@ -201,6 +217,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
+  m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
+        "Fused backward of RMSNorm + add");
   m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
@@ -210,6 +228,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
+        "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
@@ -370,6 +391,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_and_scale_inv",
         &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Comm+GEMM Overlap
+  m.def("bulk_overlap_ag_with_external_gemm",
+        &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
+        "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
+        py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
+        py::arg("send_stream"), py::arg("recv_stream"));
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

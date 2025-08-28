@@ -83,7 +83,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
             instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
@@ -136,9 +136,15 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
-        return self._rowwise_data, self._columnwise_data
+        if rowwise_data and columnwise_data:
+            return self._rowwise_data, self._columnwise_data
+        if rowwise_data:
+            return self._rowwise_data
+        if columnwise_data:
+            return self._columnwise_data
+        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""

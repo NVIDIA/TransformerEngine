@@ -4,8 +4,9 @@
 import logging
 import math
 import os
-from typing import Any, Dict, List, Tuple, Union, Optional
-from contextlib import contextmanager
+import sys
+import pathlib
+from typing import Any, Dict, Tuple, Union
 
 import pytest
 import torch
@@ -19,11 +20,8 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
-    get_attention_backend,
     check_set_window_size,
-    AttentionParams,
 )
-from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -48,21 +46,21 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import (
+    reset_rng_states,
+    ModelConfig,
+    dtype_tols,
+    get_available_attention_backends,
+)
+
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 
-# Initialize RNG state
 seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
-
-
-def reset_rng_states() -> None:
-    """Revert back to initial RNG state"""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
+# Reset RNG states
+reset_rng_states()
 
 
 @pytest.fixture(autouse=True)
@@ -71,170 +69,20 @@ def reset_global_fp8_state():
     fp8.FP8GlobalStateManager.reset()
 
 
-class ModelConfig:
-    def __init__(
-        self,
-        batch_size: int,
-        num_heads: int,
-        num_gqa_groups: int,
-        head_dim_qk: int,
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
-        dropout_p: float,
-        attn_mask_type: str,
-        attn_bias_type: str,
-        head_dim_v: int = None,
-        alibi_type: str = "none",
-        num_layers: int = 1,
-        bias_shape: str = "1hss",
-        window_size: Tuple[int, int] = (-1, -1),
-        total_requests: int = None,
-        max_ctx_len: int = None,
-    ):
-        self.batch_size = batch_size
-        self.num_heads = num_heads
-        self.num_gqa_groups = num_gqa_groups
-        self.head_dim_qk = head_dim_qk
-        self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
-        self.hidden_size = num_heads * head_dim_qk
-        self.hidden_size_kv = num_gqa_groups * self.head_dim_v
-        self.max_seqlen_q = max_seqlen_q
-        self.max_seqlen_kv = max_seqlen_kv
-        self.dropout_p = dropout_p
-        self.attn_mask_type = attn_mask_type
-        self.attn_bias_type = attn_bias_type
-        self.alibi_type = alibi_type
-        self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
-        self.num_layers = num_layers
-        self.bias_shape = bias_shape
-        self.window_size = window_size
-        self.total_requests = total_requests
-        self.max_ctx_len = max_ctx_len
-
-
-@contextmanager
-def logging_context(highest_level=logging.WARNING):
-    previous_level = logging.root.manager.disable
-    logging.disable(highest_level)
-    try:
-        yield
-    finally:
-        logging.disable(previous_level)
-
-
-def _get_attention_backends(
-    config: ModelConfig,
-    qkv_dtype: torch.dtype,
-    qkv_layout: str,
-    window_size: Tuple[int, int] = (-1, -1),
-    pad_between_seqs: bool = False,
-    context_parallel: bool = False,
-    deterministic: bool = False,
-    fp8: bool = False,
-    fp8_meta: Optional[Dict[str, Any]] = None,
-    is_training: bool = True,
-    inference_params: Optional[InferenceParams] = None,
-) -> Tuple[List, List]:
-    """Check if what attention backends support a model configuration"""
-
-    os.environ["NVTE_FLASH_ATTN"] = "1"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    alibi_slopes_shape = None
-    if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
-        if config.bias_shape == "1hss":
-            alibi_slopes_shape = [config.num_heads]
-        if config.bias_shape == "bhss":
-            alibi_slopes_shape = [config.batch_size, config.num_heads]
-
-    core_attention_bias_shape = (
-        config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
-    )
-    core_attention_bias_requires_grad = False
-    # d=256 is supported by cuDNN 9.0+ for inference but not training
-    if (
-        config.attn_bias_type == "post_scale_bias"
-        and config.head_dim_qk <= 128
-        and config.head_dim_v <= 128
-    ):
-        core_attention_bias_requires_grad = True
-
-    fused_attn_backends = []
-    available_backends = None
-    flash_attention_backend = None
-    fused_attention_backend = None
-
-    def test():
-        attention_params = AttentionParams(
-            qkv_dtype=qkv_dtype,
-            qkv_layout=qkv_layout,
-            batch_size=config.batch_size,
-            num_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            max_seqlen_q=config.max_seqlen_q,
-            max_seqlen_kv=config.max_seqlen_kv,
-            head_dim_qk=config.head_dim_qk,
-            head_dim_v=config.head_dim_v,
-            attn_mask_type=config.attn_mask_type,
-            window_size=window_size,
-            alibi_slopes_shape=alibi_slopes_shape,
-            core_attention_bias_type=config.attn_bias_type,
-            core_attention_bias_shape=core_attention_bias_shape,
-            core_attention_bias_requires_grad=core_attention_bias_requires_grad,
-            pad_between_seqs=pad_between_seqs,
-            attention_dropout=config.dropout_p,
-            context_parallel=context_parallel,
-            deterministic=deterministic,
-            fp8=fp8,
-            fp8_meta=fp8_meta,
-            is_training=is_training,
-            inference_params=inference_params,
-        )
-        (
-            use_flash_attention,
-            use_fused_attention,
-            flash_attention_backend,
-            fused_attention_backend,
-            use_unfused_attention,
-            available_backends,
-        ) = get_attention_backend(attention_params)
-        # Set attention.py _attention_backends var using return value
-        # from get_attention_backend()
-        _attention_backends["use_flash_attention"] = use_flash_attention
-        _attention_backends["use_fused_attention"] = use_fused_attention
-        _attention_backends["flash_attention_backend"] = flash_attention_backend
-        _attention_backends["fused_attention_backend"] = fused_attention_backend
-        _attention_backends["use_unfused_attention"] = use_unfused_attention
-        _attention_backends["backend_selection_requires_update"] = False
-        return available_backends, flash_attention_backend, fused_attention_backend
-
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    with logging_context():
-        for i in range(3):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, flash_attention_backend, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
-    return available_backends, flash_attention_backend, fused_attn_backends
-
-
 model_configs_base = {
     #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
-    "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_4_0": ModelConfig(8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_4_1": ModelConfig(8, 16, 16, 192, 128, 2048, 0.0, "no_mask", "no_bias"),
-    "base_5_0": ModelConfig(8, 16, 16, 512, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),
-    "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),
+    "base_1_0": ModelConfig(8, 128, 16, 64),
+    "base_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
+    "base_2_0": ModelConfig(2, 2048, 24, 128),
+    "base_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    "base_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048),
+    "base_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
+    "base_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
+    "base_4_1": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048),
+    "base_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
+    "base_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
+    "base_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
+    "base_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
 }
 
 
@@ -278,7 +126,7 @@ def test_dot_product_attention(
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -289,7 +137,7 @@ def test_dot_product_attention(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
         is_training = False
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -413,33 +261,21 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 
 model_configs_mla = {
     #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
-    "mla_1_0": ModelConfig(
-        8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # self , 0
-    "mla_1_1": ModelConfig(
-        4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # cross, 0
-    "mla_1_2": ModelConfig(
-        4, 16, 16, 192, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # cross, 0
-    "mla_2_0": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64
-    ),  # self , 1
+    "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),  # self , 0
+    "mla_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
+    "mla_1_2": ModelConfig(4, 128, 16, 192, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
+    "mla_2_0": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal", head_dim_v=64),  # self , 1
     "mla_2_1": ModelConfig(
-        1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64
+        1, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=64
     ),  # cross, 1
     "mla_2_2": ModelConfig(
-        1, 24, 24, 192, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=128
+        1, 2048, 24, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
     ),  # cross, 1
-    "mla_3_0": ModelConfig(
-        8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64
-    ),  # inference
-    "mla_3_1": ModelConfig(
-        8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # inference
-    "mla_3_2": ModelConfig(
-        8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # inference
+    "mla_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048, head_dim_v=64),  # inference
+    "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
 }
 
 
@@ -454,40 +290,46 @@ def test_dpa_mla(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    "mask_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "mask_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "mask_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "mask_5_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    "mask_1_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal"),
+    "mask_1_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="causal"),
+    "mask_1_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal"),
+    "mask_2_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal_bottom_right"),
+    "mask_2_1": ModelConfig(
+        2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="causal_bottom_right"
     ),
+    "mask_2_2": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal_bottom_right"
+    ),
+    "mask_3_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding"),
+    "mask_3_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding"),
+    "mask_3_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
+    "mask_4_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal"),
+    "mask_4_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal"),
+    "mask_4_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal"),
+    "mask_5_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal_bottom_right"),
     "mask_5_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal_bottom_right"
     ),
     "mask_5_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
     ),
-    "mask_6_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_6_0": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal"),
+    "mask_6_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal"),
+    "mask_7_0": ModelConfig(
+        2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
+    ),
+    "mask_7_1": ModelConfig(
+        2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
+    ),
+    "mask_8_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding"),
+    "mask_8_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding"),
+    "mask_9_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
+    "mask_9_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
     "mask_10_0": ModelConfig(
-        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
     ),
     "mask_10_1": ModelConfig(
-        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
     ),
 }
 
@@ -503,44 +345,102 @@ def test_dpa_mask(dtype, model_configs, model):
 
 model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "bias_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "alibi"),  # skipped
-    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "alibi"),  # skipped
-    "bias_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),  # skipped
-    "bias_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "padding", "post_scale_bias"),  # skipped
+    "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias"),
+    "bias_1_1": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_bias_type="post_scale_bias"),
+    "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias"),
+    "bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
+    "bias_1_4": ModelConfig(4, 2048, 24, 128, attn_bias_type="alibi"),  # skipped
+    "bias_1_5": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"
+    ),  # skipped
+    "bias_2_0": ModelConfig(
+        4, 128, 16, 64, attn_mask_type="padding", attn_bias_type="post_scale_bias"
+    ),  # skipped
+    "bias_2_1": ModelConfig(
+        2,
+        128,
+        16,
+        64,
+        max_seqlen_kv=256,
+        attn_mask_type="padding",
+        attn_bias_type="post_scale_bias",
+    ),  # skipped
     "bias_2_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "padding", "post_scale_bias"
+        4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="post_scale_bias"
     ),  # skipped
     "bias_2_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "post_scale_bias"
+        2,
+        2048,
+        24,
+        128,
+        max_seqlen_kv=4096,
+        attn_mask_type="padding",
+        attn_bias_type="post_scale_bias",
     ),  # skipped
-    "bias_2_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding", "alibi"),  # skipped
-    "bias_2_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "alibi"),  # skipped
-    "bias_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "bias_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "post_scale_bias"),
-    "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),
+    "bias_2_4": ModelConfig(
+        4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"
+    ),  # skipped
+    "bias_2_5": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", attn_bias_type="alibi"
+    ),  # skipped
+    "bias_3_0": ModelConfig(
+        4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+    "bias_3_1": ModelConfig(
+        2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+    "bias_3_2": ModelConfig(
+        4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
     "bias_3_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "causal", "post_scale_bias"
+        2,
+        2048,
+        24,
+        128,
+        max_seqlen_kv=4096,
+        attn_mask_type="causal",
+        attn_bias_type="post_scale_bias",
     ),  # skipped
-    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi"),
-    "bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi"),  # skipped
+    "bias_3_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="alibi"),
+    "bias_3_5": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", attn_bias_type="alibi"
+    ),  # skipped
     "bias_4_0": ModelConfig(
-        4, 16, 16, 64, 128, 128, 0.0, "padding_causal", "post_scale_bias"
+        4, 128, 16, 64, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
     ),  # skipped
     "bias_4_1": ModelConfig(
-        2, 16, 16, 64, 128, 256, 0.0, "padding_causal", "post_scale_bias"
+        2,
+        128,
+        16,
+        64,
+        max_seqlen_kv=256,
+        attn_mask_type="padding_causal",
+        attn_bias_type="post_scale_bias",
     ),  # skipped
     "bias_4_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "post_scale_bias"
+        4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
     ),  # skipped
     "bias_4_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"
+        2,
+        2048,
+        24,
+        128,
+        max_seqlen_kv=4096,
+        attn_mask_type="padding_causal",
+        attn_bias_type="post_scale_bias",
     ),  # skipped
-    "bias_4_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "alibi"),  # skipped
-    "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "alibi"),  # skipped
+    "bias_4_4": ModelConfig(
+        4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="alibi"
+    ),  # skipped
+    "bias_4_5": ModelConfig(
+        2,
+        2048,
+        24,
+        128,
+        max_seqlen_kv=4096,
+        attn_mask_type="padding_causal",
+        attn_bias_type="alibi",
+    ),  # skipped
 }
 
 
@@ -555,33 +455,29 @@ def test_dpa_bias(dtype, model_configs, model):
 
 model_configs_bias_shapes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,
-    "bias_1_0": ModelConfig(
-        4,
-        16,
-        16,
-        64,
-        128,
-        128,
-        0.0,
-        #        mask,                     bias,       bias_shape,
-        "no_mask",
-        "post_scale_bias",
-        bias_shape="11ss",
-    ),
-    "bias_1_1": ModelConfig(
-        2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias", bias_shape="1hss"
-    ),
-    "bias_1_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias", bias_shape="b1ss"
-    ),
-    "bias_1_3": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias", bias_shape="bhss"
-    ),
+    "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="11ss"),
+    "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
+    "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
+    "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
     "bias_1_4": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", bias_shape="1hss", alibi_type="custom"
+        4,
+        2048,
+        24,
+        128,
+        attn_mask_type="causal",
+        attn_bias_type="alibi",
+        bias_shape="1hss",
+        alibi_type="custom",
     ),
     "bias_1_5": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", bias_shape="bhss", alibi_type="custom"
+        2,
+        2048,
+        24,
+        128,
+        attn_mask_type="causal",
+        attn_bias_type="alibi",
+        bias_shape="bhss",
+        alibi_type="custom",
     ),
 }
 
@@ -597,29 +493,31 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 model_configs_swa = {
     #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "swa_1_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "swa_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "swa_3_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "swa_5_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_5_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_5_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "swa_6_1": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    "swa_1_1": ModelConfig(2, 2048, 16, 64),
+    "swa_1_2": ModelConfig(2, 2048, 24, 128, num_gqa_groups=4),
+    "swa_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096),
+    "swa_2_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal"),
+    "swa_2_2": ModelConfig(2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="causal"),
+    "swa_2_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal"),
+    "swa_3_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal_bottom_right"),
+    "swa_3_2": ModelConfig(
+        2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="causal_bottom_right"
     ),
+    "swa_3_3": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal_bottom_right"
+    ),
+    "swa_4_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding"),
+    "swa_4_2": ModelConfig(2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="padding"),
+    "swa_4_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
+    "swa_5_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal"),
+    "swa_5_2": ModelConfig(2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
+    "swa_5_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal"),
+    "swa_6_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal_bottom_right"),
     "swa_6_2": ModelConfig(
-        2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="padding_causal_bottom_right"
     ),
     "swa_6_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
     ),
 }
 
@@ -635,13 +533,31 @@ def test_dpa_sliding_window(dtype, model_configs, model):
 
 model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
-    "alibi_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_1_1": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "causal", "alibi", alibi_type="vanilla"),
+    "alibi_1_0": ModelConfig(
+        2, 128, 16, 64, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="vanilla"
+    ),
+    "alibi_1_1": ModelConfig(
+        1,
+        128,
+        16,
+        64,
+        max_seqlen_kv=256,
+        attn_mask_type="causal",
+        attn_bias_type="alibi",
+        alibi_type="vanilla",
+    ),
     "alibi_2_0": ModelConfig(
-        2, 24, 24, 128, 1024, 1024, 0.0, "causal", "alibi", alibi_type="custom"
+        2, 1024, 24, 128, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="custom"
     ),
     "alibi_2_1": ModelConfig(
-        1, 24, 24, 128, 1024, 2048, 0.0, "causal", "alibi", alibi_type="custom"
+        1,
+        1024,
+        24,
+        128,
+        max_seqlen_kv=2048,
+        attn_mask_type="causal",
+        attn_bias_type="alibi",
+        alibi_type="custom",
     ),
 }
 
@@ -671,16 +587,38 @@ qkv_layouts = [
 
 model_configs_layout = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "layout_0_1": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "layout_0_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding_causal", "post_scale_bias"),
-    "layout_1_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),
-    "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
-    "layout_2_0": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "layout_2_1": ModelConfig(2, 24, 24, 256, 2048, 2048, 0.0, "causal", "post_scale_bias"),
+    "layout_0_0": ModelConfig(2, 128, 16, 64),
+    "layout_0_1": ModelConfig(
+        2, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+    "layout_0_2": ModelConfig(1, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="padding"),
+    "layout_0_3": ModelConfig(
+        1,
+        128,
+        16,
+        64,
+        max_seqlen_kv=256,
+        attn_mask_type="padding_causal",
+        attn_bias_type="post_scale_bias",
+    ),
+    "layout_1_0": ModelConfig(2, 2048, 24, 128),
+    "layout_1_1": ModelConfig(
+        2, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+    "layout_1_2": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
+    "layout_1_3": ModelConfig(
+        1,
+        2048,
+        24,
+        128,
+        max_seqlen_kv=4096,
+        attn_mask_type="padding_causal",
+        attn_bias_type="post_scale_bias",
+    ),
+    "layout_2_0": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048),
+    "layout_2_1": ModelConfig(
+        2, 2048, 24, 256, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
 }
 
 
@@ -697,55 +635,54 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_0_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "layout_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "layout_2_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    "layout_0_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding"),
+    "layout_0_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding"),
+    "layout_0_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
+    "layout_1_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal"),
+    "layout_1_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal"),
+    "layout_1_2": ModelConfig(
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal"
     ),
+    "layout_2_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal_bottom_right"),
     "layout_2_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal_bottom_right"
     ),
     "layout_2_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
     ),
-    "layout_3_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
-    ),
+    "layout_3_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding", window_size=(4, 4)),
     "layout_3_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+        2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding", window_size=(4, 4)
     ),
     "layout_3_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", window_size=(4, 4)
     ),
-    "layout_4_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
+    "layout_4_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal", window_size=(4, 0)),
     "layout_4_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+        2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal", window_size=(4, 0)
     ),
     "layout_4_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal", window_size=(4, 0)
     ),
     "layout_5_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+        2, 2048, 16, 64, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)
     ),
     "layout_5_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+        2,
+        2048,
+        24,
+        128,
+        num_gqa_groups=1,
+        attn_mask_type="padding_causal_bottom_right",
+        window_size=(4, 0),
     ),
     "layout_5_2": ModelConfig(
         2,
-        24,
+        2048,
         24,
         128,
-        2048,
-        4096,
-        0.0,
-        "padding_causal_bottom_right",
-        "no_bias",
+        max_seqlen_kv=4096,
+        attn_mask_type="padding_causal_bottom_right",
         window_size=(4, 0),
     ),
 }
@@ -1135,16 +1072,22 @@ def _run_dot_product_attention(
 
 model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
-    "te_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
-    "te_1_1": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "te_1_2": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),
-    "te_1_3": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "te_2_0": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
-    "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
+    "te_1_0": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias"),
+    "te_1_1": ModelConfig(
+        4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+    "te_1_2": ModelConfig(
+        2, 128, 16, 64, attn_mask_type="padding", attn_bias_type="post_scale_bias"
+    ),
+    "te_1_3": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="padding"),
+    "te_2_0": ModelConfig(1, 2048, 16, 64, attn_mask_type="causal"),
+    "te_2_1": ModelConfig(2, 2048, 16, 64),
+    "te_2_2": ModelConfig(1, 2048, 16, 64, attn_mask_type="padding"),
+    "te_2_3": ModelConfig(
+        1, 2048, 16, 64, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
+    ),
+    "te_3_0": ModelConfig(4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
+    "te_3_1": ModelConfig(4, 2048, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
 }
 
 
@@ -1168,7 +1111,7 @@ def test_transformer_layer(
 
     # Test backend availability
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=(
@@ -1179,7 +1122,7 @@ def test_transformer_layer(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
         is_training = False
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=(
@@ -1492,20 +1435,164 @@ def _run_transformer_layer(
     return out, inp.grad
 
 
+model_configs_fp8_extra_state = {
+    "large": ModelConfig(2, 128, 4, 128, num_layers=1),
+}
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
+@pytest.mark.parametrize("model", ["large"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_sanity_attention_extra_state(model, dtype):
+    config = model_configs_fp8_extra_state[model]
+    # Test backend availability
+    is_training = True
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout="sb3hd",
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if not fused_attn_supported and not flash_attn_supported:
+        pytest.skip("No attention backend available.")
+
+    outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
+    outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
+    outputs_checkpoint_v1_6 = _run_attention_extra_state(
+        dtype, config, mimic_v1_6=True, checkpoint=True
+    )
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols.update(dict(rtol=2e-2, atol=2e-3))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            **tols,
+        )
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint_v1_6)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            **tols,
+        )
+
+
+def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
+    steps = 10
+    path = "checkpoint.pt"
+    fp8_enabled = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=fp8_enabled,
+        fp8_mha=False,
+    )
+
+    reset_rng_states()
+    hidden_states = torch.randn(
+        (config.max_seqlen_q, config.batch_size, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+
+    def get_model(dtype, config):
+        sigma = 0.023
+        init_method = init_method_normal(sigma)
+        output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+        with fp8_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
+            block = TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_heads,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
+                fuse_qkv_params=True,
+                params_dtype=dtype,
+                device="cuda",
+            )
+        return block
+
+    block = get_model(dtype, config)
+    for i in range(steps // 2):
+        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+            output = block(hidden_states, None)
+            loss = output.sum()
+            loss.backward()
+
+    if checkpoint:
+        sd = block.state_dict()
+        if mimic_v1_6:
+            sd["self_attention.core_attention.fused_attention._extra_state"] = sd[
+                "self_attention.core_attention._extra_state"
+            ]
+            del sd["self_attention.core_attention._extra_state"]
+        torch.save(sd, path)
+
+        param_grads = []
+        for p in block.parameters():
+            if p.requires_grad:
+                param_grads.append(p.grad.clone())
+
+        _cpu_rng_state_new = torch.get_rng_state()
+        _cuda_rng_state_new = torch.cuda.get_rng_state()
+
+        del block
+        block = get_model(dtype, config)
+        block.load_state_dict(torch.load(path, weights_only=False))
+        torch.set_rng_state(_cpu_rng_state_new)
+        torch.cuda.set_rng_state(_cuda_rng_state_new)
+
+        for p in block.parameters():
+            if p.requires_grad:
+                p.grad = param_grads.pop(0)
+
+        assert not param_grads, "Oops!"
+
+    for i in range((steps + 1) // 2):
+        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+            output = block(hidden_states, None)
+            loss = output.sum()
+            loss.backward()
+
+    torch.cuda.synchronize()
+
+    if os.path.exists(path):
+        os.remove(path)
+
+    outputs = [output, hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+
+    return outputs
+
+
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_9": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_10": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_11": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "no_mask", "no_bias"),
-    "fp8_12": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_13": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_14": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),
-    "fp8_15": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "fp8_16": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "fp8_17": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding", "no_bias"),
-    "fp8_18": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "fp8_19": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "fp8_20": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding_causal", "no_bias"),
+    "fp8_9": ModelConfig(2, 2048, 16, 128),
+    "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
+    "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
+    "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
+    "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
+    "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
+    "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
+    "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
+    "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
+    "fp8_18": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),
+    "fp8_19": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding_causal"),
+    "fp8_20": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
 }
 
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
@@ -1554,18 +1641,30 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
-    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (
-        9,
-        7,
-        0,
-    ):
-        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
 
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    # Test backend availability
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout=qkv_format.replace("hd", "h3d"),
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # Skip if only unfused backend is supported
+    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
+    if not fp8_dpa_bwd:
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_format.replace("hd", "h3d"),
+            is_training=is_training,
+        )
+        _, fused_attn_supported, _ = available_backends
+        if not fused_attn_supported:
+            pytest.skip("No attention backend available.")
+
+    if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1591,11 +1690,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    if flash_attn_supported:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1768,23 +1863,34 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     #    if get_device_compute_capability() >= (10, 0):
     #        config.dropout_p = 0.1
 
-    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (
-        9,
-        7,
-        0,
-    ):
-        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
-
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    # Test backend availability
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # Skip if only unfused backend is supported
+    if flash_attn_supported + fused_attn_supported < 1:
+        pytest.skip("No FP8 attention backend available.")
+    if not fp8_dpa_bwd:
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            is_training=is_training,
+        )
+        _, fused_attn_supported, _ = available_backends
+        if not fused_attn_supported:
+            pytest.skip("No attention backend available.")
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+
+    if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1813,11 +1919,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    if flash_attn_supported:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1991,14 +2093,14 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
 
 model_configs_fp8 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_1": ModelConfig(1, 1, 1, 64, 512, 512, 0.0, "no_mask", "no_bias"),
-    "fp8_2": ModelConfig(4, 16, 16, 64, 512, 512, 0.0, "no_mask", "no_bias"),
-    "fp8_3": ModelConfig(1, 1, 1, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_4": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_5": ModelConfig(1, 1, 1, 64, 512, 512, 0.0, "causal", "no_bias"),
-    "fp8_6": ModelConfig(4, 16, 16, 64, 512, 512, 0.0, "causal", "no_bias"),
-    "fp8_7": ModelConfig(1, 1, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_8": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "fp8_1": ModelConfig(1, 512, 1, 64),
+    "fp8_2": ModelConfig(4, 512, 16, 64),
+    "fp8_3": ModelConfig(1, 2048, 1, 128),
+    "fp8_4": ModelConfig(2, 2048, 24, 128),
+    "fp8_5": ModelConfig(1, 512, 1, 64, attn_mask_type="causal"),
+    "fp8_6": ModelConfig(4, 512, 16, 64, attn_mask_type="causal"),
+    "fp8_7": ModelConfig(1, 2048, 1, 128, attn_mask_type="causal"),
+    "fp8_8": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
 }
 param_types_fp8 = [torch.float16, torch.bfloat16]
 cudnn_frontend_version = int(os.getenv("NVTE_FUSED_ATTN_FE_VER", "1"))
@@ -2026,6 +2128,18 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     Both paths take F16 input and output. QKV layout is t3hd or bs3hd"""
 
     config = model_configs_fp8[model]
+
+    # Test backend availability
+    is_training = True
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout="t3hd" if cudnn_frontend_version == 0 else "bs3hd",
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if not (fused_attn_backends and unfused_attn_supported):
+        pytest.skip("Not enough backends to run this test with.")
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
     unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedAttention")

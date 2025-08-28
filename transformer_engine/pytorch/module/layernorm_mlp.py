@@ -68,7 +68,6 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
-    QuantizedTensor,
     QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
@@ -77,7 +76,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-from ...debug.pytorch.utils import any_feature_enabled
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["LayerNormMLP"]
@@ -88,39 +87,45 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         # bf16 (recipe is None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
-            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, None),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         return {
             "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     # no activation fusion written yet
     # Per-tensor current scaling or fp8 blockwise scaling: []
     if recipe.float8_current_scaling() or recipe.float8_block_scaling():
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
-            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "relu": (tex.relu, tex.drelu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
             "srelu": (tex.srelu, tex.dsrelu, None),
+            "sreglu": (tex.sreglu, tex.dsreglu, None),
+            "silu": (tex.silu, tex.dsilu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
         }
     raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
@@ -222,6 +227,12 @@ class _LayerNormMLP(torch.autograd.Function):
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug:  # turn off userbuffers in debug mode
+            ub_overlap_ag = False
+            ub_overlap_rs = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
@@ -237,9 +248,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if fc1_input_quantizer is None:
                 raise ValueError("Missing quantizer for FC1 input tensor")
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
-            if sequence_parallel and isinstance(
-                fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-            ):
+            if sequence_parallel and fc1_input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
                 fc1_input_quantizer.set_usage(columnwise=False)
 
@@ -848,26 +857,37 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
-                    # UB does not support overlapping grad output
+                    # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
                     # for the dgrad GEMM. We work around by explicitly
-                    # overlapping the NCCL operation with the dgrad GEMM.
+                    # overlapping the AG operation with the dgrad GEMM.
+
+                    # Get the communication stream from the dgrad GEMM to use for the AG
+                    dgrad_send_stream, dgrad_recv_stream = (
+                        ub_obj_fc2_dgrad.get_communication_stream()
+                    )
+
+                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
+
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
-                    with torch.cuda.stream(dgrad_comm_stream):
-                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                        grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
+
+                    # We use the send stream to copy into the userbuffers.
+                    # This is the same stream that we will use to access the data in the AG,
+                    # so we dont need to add any syncs yet.
+                    with torch.cuda.stream(dgrad_send_stream):
+                        grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                            ub_obj_fc2_wgrad,
                             grad_outputs[0],
+                            ctx.fc2_grad_output_quantizer,
                             ctx.tp_group,
-                            async_op=True,
-                            quantizer=ctx.fc2_grad_output_quantizer,
                         )
-                    # Synchronize with the main stream
-                    mxfp8_fc2_grad_output_work.wait()
+
+                    # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
+                    tex.bulk_overlap_ag_with_external_gemm(
+                        ub_obj_fc2_wgrad, dgrad_send_stream, dgrad_recv_stream
+                    )
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -1361,7 +1381,7 @@ class _LayerNormMLP(torch.autograd.Function):
 class LayerNormMLP(TransformerEngineBaseModule):
     r"""
     Applies layer normalization on the input followed by the MLP module, consisting of
-    2 successive linear transformations, separated by the GeLU activation.
+    2 successive linear transformations, separated by the activation function.
 
     Parameters
     ----------
@@ -1377,7 +1397,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu', 'qgelu', 'srelu'.
+          Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
+                   'silu', and 'swiglu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -1522,9 +1543,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
         self.name = name
 
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if tp_group is None:
@@ -1581,7 +1599,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["reglu", "geglu", "qgeglu", "swiglu"]:
+        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu"]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
@@ -1641,6 +1659,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 warmup_jit_bias_gelu_all_dtypes(
                     self.size_per_partition, seq_length, micro_batch_size
                 )
+        if self.wgrad_store.delay_wgrad_compute():
+            for name, param in self.named_parameters():
+                if name in ["fc1_weight", "fc2_weight", "fc1_bias", "fc2_bias"]:
+                    param.skip_backward_post_hook = True
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -1721,9 +1743,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp)
+
+        debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1737,7 +1760,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop").is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        with torch.cuda.device(
+            getattr(self, list(self.named_parameters())[0][0]).device
+        ), self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
                 self._get_quantizers(fp8_output)
@@ -1745,12 +1770,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output)
             )
             if debug:
-                if not any_feature_enabled(quantizers):
-                    quantizers = self._get_quantizers(fp8_output)
+                if self.no_debug_features_active(quantizers):
                     debug = False
-
-                if isinstance(self.fc1_weight, QuantizedTensor):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+                    quantizers = self._get_quantizers(fp8_output)
 
             # Get quantizers
             (
@@ -1910,6 +1932,92 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         )
 
+    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        from ..export import onnx_layernorm, onnx_gemm
+
+        assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
+        assert_warmed_up(self)
+        (
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers(False)
+        inp_dtype = inp.dtype
+
+        fc1_weight, fc2_weight = self._get_weight_tensors()
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        fc2_bias = self.fc2_bias if self.use_bias else None
+
+        # layernorm + fp8 cast
+        ln_out, ln_out_return = onnx_layernorm(
+            inp,
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            self.eps,
+            self.normalization,
+            self.zero_centered_gamma,
+            inp_dtype,
+            self.return_layernorm_output,
+            fc1_input_quantizer,
+        )
+
+        if fc1_weight_quantizer is not None:
+            fc1_weight_q = fc1_weight_quantizer.onnx_quantize(fc1_weight)
+            fc1_weight = fc1_weight_quantizer.onnx_dequantize(fc1_weight_q)
+        fc1_weight = fc1_weight.to(inp_dtype)
+
+        fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
+
+        fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
+
+        activation_map = {
+            "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
+            * x.chunk(2, -1)[1],
+            "relu": torch.nn.functional.relu,
+            "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "srelu": lambda x: torch.nn.functional.relu(x) ** 2,
+            "sreglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) ** 2
+            * x.chunk(2, -1)[1],
+            "silu": torch.nn.functional.silu,
+            "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+        }
+        if self.activation not in activation_map:
+            raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
+        act_out = activation_map[self.activation](fc1_out)
+        if fc2_weight_quantizer is not None:
+            fc2_weight_q = fc2_weight_quantizer.onnx_quantize(fc2_weight)
+            fc2_weight = fc2_weight_quantizer.onnx_dequantize(fc2_weight_q)
+        fc2_weight = fc2_weight.to(inp_dtype)
+
+        if fc2_input_quantizer is not None:
+            act_out_q = fc2_input_quantizer.onnx_quantize(act_out)
+            act_out = fc2_input_quantizer.onnx_dequantize(act_out_q)
+        act_out = act_out.to(inp_dtype)
+
+        fc2_out = onnx_gemm(fc2_weight, act_out, fc2_bias)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+
+        if self.return_layernorm_output:
+            if self.return_bias:
+                return fc2_out, fc2_bias.to(inp_dtype), ln_out_return
+            return fc2_out, ln_out_return
+        if self.return_bias:
+            return fc2_out, fc2_bias.to(inp_dtype)
+        return fc2_out
+
     def _get_debug_quantizers(self, fp8_output):
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -2064,3 +2172,5 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()

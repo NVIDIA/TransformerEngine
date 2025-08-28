@@ -24,22 +24,17 @@ def test_transformer_engine_no_config(feature_dirs):
         # FP8 enabled - true by the default
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
 
-        # modify_tensor_enabled - False by default
+        # modify_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
 
-        # inspect_tensor_enabled - False by default
+        # inspect_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.attn.qkv", tensor_name="activation", iteration=0
-        )
-
-        # inspect_tensor_postquantize - False by default
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
 
     finally:
         debug_api.end_debug()
@@ -51,24 +46,24 @@ def test_disable_fp8_gemm(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
 
         # caching
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
 
     finally:
         debug_api.end_debug()
@@ -80,22 +75,22 @@ def test_disable_fp8_layer(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="wgrad", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
 
     finally:
         debug_api.end_debug()
@@ -111,22 +106,22 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
         # check modify_tensor_enabled
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="weight", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="gradient", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="weight", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="wgrad", tensor_name="gradient", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="wgrad", tensor_name="activation", iteration=0
-        )
+        )[0]
 
         # check modify_tensor
 
@@ -168,14 +163,14 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
             gemm="wgrad",
             tensor_name="gradient",
             iteration=0,
-        )
+        )[0]
 
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc4",
             gemm="fprop",
             tensor_name="activation",
             iteration=0,
-        )
+        )[0]
     finally:
         debug_api.end_debug()
 
@@ -191,11 +186,11 @@ def test_fake_quant(configs_dir, feature_dirs):
         # modify_tensor_enabled
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
 
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="gradient", iteration=0
-        )
+        )[0]
 
         # modify_tensor
         debug_api.transformer_engine.modify_tensor(
@@ -218,11 +213,11 @@ def test_fake_quant(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.fc2", gemm="wgrad", iteration=0
-        )
+        )[0]
         # caching
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.fc2", gemm="wgrad", iteration=0
-        )
+        )[0]
     finally:
         debug_api.end_debug()
 
@@ -236,13 +231,12 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )
 
         tensor = torch.randn((100, 100, 5)).cuda()
-        tensor_fp8 = Float8Tensor(
-            data=tensor.to(torch.uint8).cuda(),
-            fp8_scale_inv=torch.full([1], 1.0).cuda(),
+        quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda(),
+            amax=torch.full([1], 1.0).cuda(),
             fp8_dtype=tex.DType.kFloat8E4M3,
-            shape=tensor.shape,
-            dtype=torch.float32,
         )
+        tensor_fp8 = quantizer(tensor)
 
         def log():
             from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
@@ -260,54 +254,64 @@ def test_statistics_collection(configs_dir, feature_dirs):
             tensor_name="activation",
             iteration=200,
             tp_group=None,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         assert stats[("decoder.1.mlp.fc1", "activation", "cur_amax", 200)] == tensor.abs().max()
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
-        )
+        )[0]
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.2.mlp.fc1", tensor_name="activation", iteration=200
-        )
-        assert not debug_api.transformer_engine.inspect_tensor_enabled(
-            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
+        )[0]
+
+        expected_underflows = (
+            ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
         )
 
-        expected_underflows = (tensor_fp8._data == 0).sum() * 100 / (100 * 100 * 5)
-        expected_overflows = (tensor_fp8._data == 126).sum() * 100 / (100 * 100 * 5)
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
+        )[0]
 
         # TE FP8 tensor stats --
-        assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
-        )
-        debug_api.transformer_engine.inspect_tensor_postquantize(
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
+        )[0]
+        debug_api.transformer_engine.inspect_tensor(
             "decoder.1.mlp.fc1",
-            tensor=tensor_fp8,
             tensor_name="gradient",
             iteration=200,
-            rowwise=True,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         torch.testing.assert_close(
             stats[("decoder.1.mlp.fc1", "gradient", "underflows%", 200)], expected_underflows
         )
 
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="activation", gemm="fprop", iteration=201
-        )
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.2.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
-        )
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
+        )[0]
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.2.mlp.fc1", tensor_name="gradient", iteration=200
+        )[0]
 
         # Second config in same yaml
         tensor = torch.rand((100, 100, 5))
         debug_api.transformer_engine.inspect_tensor(
             "decoder.6.mlp.fc1",
-            tensor=tensor,
             tensor_name="activation",
             iteration=200,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         stats_names = [x[3] for x in stats.keys()]
@@ -316,10 +320,13 @@ def test_statistics_collection(configs_dir, feature_dirs):
 
         debug_api.transformer_engine.inspect_tensor(
             "decoder.7.mlp.fc1",
-            tensor=tensor,
             tensor_name="weight",
             iteration=200,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         stats_names = [x[3] for x in stats.keys()]
@@ -328,7 +335,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
 
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.7.mlp.fc1", tensor_name="weight", iteration=201
-        )
+        )[0]
         assert_empty()
 
     finally:
@@ -343,21 +350,16 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
             default_logging_enabled=False,
         )
 
-        def feed(tensor, tensor_fp8):
+        def feed(tensor, tensor_fp8, quantizer):
             debug_api.transformer_engine.inspect_tensor(
                 "decoder.5.mlp.fc1",
                 tensor=tensor,
                 tensor_name="activation",
                 iteration=1,
                 tp_group=None,
-            )
-            debug_api.transformer_engine.inspect_tensor_postquantize(
-                "decoder.5.mlp.fc1",
-                tensor=tensor_fp8,
-                tensor_name="activation",
-                iteration=1,
-                rowwise=True,
-                tp_group=None,
+                quantizer=quantizer,
+                rowwise_quantized_tensor=tensor_fp8,
+                columnwise_quantized_tensor=tensor_fp8,
             )
 
         def log_stats():
@@ -365,26 +367,26 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
 
             return STATS_BUFFERS.log_stats()
 
+        quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+
         def fp8_tensor(t):
-            return Float8Tensor(
-                data=t.to(torch.uint8).cuda(),
-                fp8_scale_inv=torch.ones([1]).cuda(),
-                fp8_dtype=tex.DType.kFloat8E4M3,
-                shape=t.shape,
-                dtype=torch.float32,
-            )
+            return quantizer(t.cuda())
 
         shape = [1024, 1024]
         tensors = [torch.randn(shape) for _ in range(2)]
         tensors_fp8 = [fp8_tensor(tensors[i]) for i in range(2)]
 
-        feed(tensors[0], tensors_fp8[0])
-        feed(tensors[1], tensors_fp8[1])
+        feed(tensors[0], tensors_fp8[0], quantizer)
+        feed(tensors[1], tensors_fp8[1], quantizer)
         stats1 = log_stats()
 
         tensor2 = torch.cat((tensors[0], tensors[1])).cuda()
         fp8tensor2 = fp8_tensor(tensor2)
-        feed(tensor2, fp8tensor2)
+        feed(tensor2, fp8tensor2, quantizer)
         stats2 = log_stats()
 
         assert len(stats1.keys()) > 0

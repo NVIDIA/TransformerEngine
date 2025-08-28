@@ -2,9 +2,7 @@
 #
 # See LICENSE for license information.
 
-from dataclasses import dataclass
-import itertools
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Union
 import pytest
 
 import torch
@@ -23,54 +21,33 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-
+from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
-)
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 
+# Reset RNG states.
+reset_rng_states()
 
-# Record initial RNG state.
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
+model_configs = {
+    "small": ModelConfig(32, 2, 2, 32),
+}
 
-
-@dataclass
-class ModelConfig:
-    """Data tensor dimensions within Transformer model"""
-
-    sequence_length: int
-    batch_size: int
-    hidden_size: int
-    num_heads: int
-    kv_channels: int
-
-
-model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
-
-fp8_recipes = [
-    recipe.DelayedScaling(),
-    recipe.MXFP8BlockScaling(),
-    recipe.Float8CurrentScaling(),
-    recipe.Float8BlockScaling(),
-]
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+if fp8_block_scaling_available:
+    fp8_recipes.append(recipe.Float8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
-
-
-def reset_rng_states() -> None:
-    """Revert to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +84,7 @@ def generate_data(
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
     return gen_func(
-        model_config.sequence_length,
+        model_config.max_seqlen_q,
         model_config.batch_size,
         model_config.hidden_size,
         device="cuda",
@@ -145,10 +122,12 @@ class _Sequential(torch.nn.Sequential):
 
 # Supported modules
 _test_cuda_graphs_modules: List[str] = [
+    # Put linear first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
+    "linear",
     "transformer",
     "layernorm_mlp",
     "layernorm_linear",
-    "linear",
     "mha",
     "linear_op",
 ]
@@ -298,35 +277,27 @@ def _test_cuda_graphs(
 
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("fp8", (False, True))
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None])
 def test_make_graphed_callables(
     *,
     module: str,
     model_config: str = "small",
     num_layers: int = 3,
     dtype: torch.dtype,
-    fp8: bool,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
     fp8_weight_caching: bool = False,
 ) -> None:
 
-    # Skip invalid configurations.
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    fp8 = fp8_recipe is not None
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
-    if fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-
-    if fp8_recipe.float8_block_scaling() and module == "linear_op":
+    if fp8 and fp8_recipe.float8_block_scaling() and module == "linear_op":
         pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
+
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
     kwargs = dict(
@@ -339,9 +310,11 @@ def test_make_graphed_callables(
         fp8_weight_caching=fp8_weight_caching,
         fp8_recipe=fp8_recipe,
     )
-    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+    # Put graphed callables first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
     graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
     graph_outputs_mode2 = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
 
     # Check that results match.
     assert_all_equal(outputs, graph_outputs_mode1)
@@ -357,7 +330,6 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 ]
 
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize(
     "module",
     _test_make_graphed_callables_with_fp8_weight_caching_modules,
@@ -373,7 +345,6 @@ def test_make_graphed_callables_with_fp8_weight_caching(
     test_make_graphed_callables(
         module=module,
         dtype=torch.float32,
-        fp8=True,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,
@@ -389,7 +360,7 @@ def generate_data_for_dot_product_attention(
     gen_func = torch.ones if warmup else torch.randn
     return [
         gen_func(
-            model_config.sequence_length,
+            model_config.max_seqlen_q,
             model_config.batch_size,
             model_config.num_heads,
             model_config.kv_channels,
@@ -483,8 +454,8 @@ def _test_cuda_graphs_with_kwargs(
             (
                 model_config.batch_size,
                 1,
-                model_config.sequence_length,
-                model_config.sequence_length,
+                model_config.max_seqlen_q,
+                model_config.max_seqlen_kv,
             ),
             dtype=torch.bool,
             device="cuda",
@@ -510,8 +481,8 @@ def _test_cuda_graphs_with_kwargs(
                 (
                     model_config.batch_size,
                     1,
-                    model_config.sequence_length,
-                    model_config.sequence_length,
+                    model_config.max_seqlen_q,
+                    model_config.max_seqlen_kv,
                 ),
                 dtype=torch.bool,
                 device="cuda",

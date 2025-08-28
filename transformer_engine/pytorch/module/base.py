@@ -42,11 +42,12 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..utils import torch_get_autocast_gpu_dtype
+from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
+from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -150,7 +151,7 @@ def initialize_ub(
              ```
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
-             "fc2_fprop", "fc2_dgrad"]`.
+             "fc2_fprop", "fc2_wgrad"]`.
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -249,22 +250,31 @@ def initialize_ub(
         "qkv_fprop",
         "qkv_dgrad",
         "proj_dgrad",
+        "proj_wgrad",
         "fc1_fprop",
         "fc1_dgrad",
         "fc2_dgrad",
+        "fc2_wgrad",
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
-        "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
+        "ring_exchange": [
+            "qkv_fprop",
+            "fc1_fprop",
+            "proj_dgrad",
+            "fc2_dgrad",
+        ],
         "pipeline": ["proj_fprop", "fc2_fprop"],
         "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+        "external": ["proj_wgrad", "fc2_wgrad"],
     }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
+    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -318,7 +328,7 @@ def initialize_ub(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if method == "bulk":
+            if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
@@ -346,6 +356,16 @@ def initialize_ub(
             else:
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+
+        if name in external_gemm_to_overlap:
+            assert method == "external", (
+                f"At {name}, `external` overlap method is specified, but the selected method is"
+                f" {method}"
+            )
+            assert external_gemm_to_overlap[name] in methods["ring_exchange"], (
+                f"At {name}, `external` overlap method is specified, but the external gemm"
+                f" {external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
+            )
 
         buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
         if method == "ring_exchange":
@@ -395,7 +415,9 @@ def initialize_ub(
                 new_method = ub_cfgs[name]["method"]
                 methods[new_method].append(name)
 
-    for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+    for name in (
+        methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
+    ):
         ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
             fp8_buf = (name in layers_all_gather_overlap) or (
@@ -564,6 +586,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
         self.name = None
+        self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
         self.fp8_calibration = False
@@ -582,6 +605,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
+        self.wgrad_accumulation_and_reduce_hooks = []
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -989,6 +1013,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
@@ -1292,21 +1317,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Try getting workspace from cache
         out = None
-
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
-            if quantizer is not None and isinstance(out, MXFP8TensorBase):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    out = None
-                    del self._fp8_workspaces[cache_name]
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    out = None
-                    del self._fp8_workspaces[cache_name]
 
-            is_debug = isinstance(quantizer, DebugQuantizer)
-            is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)
-            if is_debug != is_out_debug_tensor:
+        # Reset cache if workspace is invalid
+        if out is not None and quantizer is not None:
+            reset_cache = False
+            if isinstance(out, Float8TensorBase):
+                if (
+                    not is_non_tn_fp8_gemm_supported()
+                    and quantizer.columnwise_usage
+                    and out._transpose is None
+                ):
+                    reset_cache = True
+            elif isinstance(out, MXFP8TensorBase):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            if isinstance(out, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
+                reset_cache = True
+            if reset_cache:
                 out = None
+                del self._fp8_workspaces[cache_name]
 
         # Gather cached Fp8 workspace if it's distributed
         # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
@@ -1374,6 +1407,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
+    def register_wgrad_accumulation_and_reduce_hooks(self, wgrad_accumulation_and_reduce_hook):
+        """
+        This method is used to manually control the weight gradient accumulation and reduce.
+        This method should be called before the backward() method.
+        Set the skip_wgrad_accumulation_and_reduce to True to skip the weight gradient accumulation
+        and reduce in backward();
+        And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
+        """
+        self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -1384,14 +1427,58 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
-                unfused_weights = [getattr(self, name) for name in self.weight_names]
-                weight_tensor = noop_cat(unfused_weights)
+                weight_tensor = noop_cat(self._get_weight_tensors())
                 if weight_tensor.grad is None:
                     weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
+            del wgrad
+            del bgrad
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
+
+    def is_debug_iter(self) -> bool:
+        """
+        This function checks if the debug should be enabled for this layer.
+        """
+        debug = TEDebugState.debug_enabled
+        if not debug:
+            return False
+        self._validate_name()
+
+        # If layer is run first time in new iteration,
+        # we need to check if the debug should be enabled for this layer -
+        # maybe in previous iterations debug features returned information
+        # that no feature will be active for this layer for multiple next iterations.
+        started_new_iteration = TEDebugState.get_iteration() != getattr(
+            self, "debug_last_iteration", None
+        )
+        if started_new_iteration:
+            if self.next_iter_when_debug_should_be_run is None:
+                debug = False
+            else:
+                debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
+        self.debug_last_iteration = TEDebugState.get_iteration()
+        return debug
+
+    def no_debug_features_active(self, quantizers):
+        """
+        Checks if any debug feature is active for this layer.
+        """
+        run_current = any_feature_enabled(quantizers)
+
+        # Sometimes features inform that they will not be enabled for particular layer
+        # for multiple next iterations.
+        self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+
+        if not run_current:
+            return True
+
+        if self.primary_weights_in_fp8:
+            raise RuntimeError("FP8 weights are not supported in debug mode.")
+        return False
 
     def _validate_name(self):
         """
@@ -1399,6 +1486,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
         If no name is assigned, it creates a default name with layer count as the variable.
         """
+        if self.name is not None:
+            return
         assert TEDebugState.debug_enabled
         import nvdlfw_inspect.api as debug_api
 
@@ -1447,29 +1536,3 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         " Please check the recipes assigned during fp8_model_init() and"
                         " fp8_autocast() calls."
                     )
-
-    def _turn_off_unsupported_features_in_debug(self):
-        if (
-            getattr(self, "ub_bulk_wgrad", False)
-            or getattr(self, "ub_bulk_dgrad", False)
-            or getattr(self, "ub_overlap_ag", False)
-            or getattr(self, "ub_overlap_rs_dgrad", False)
-            or getattr(self, "ub_overlap_rs", False)
-        ):
-            import nvdlfw_inspect.api as debug_api
-
-            debug_api.log_message(
-                "UserBuffers are not supported in debug module. "
-                "Using UB optimization will not affect the debug module. ",
-                level=logging.WARNING,
-            )
-            if hasattr(self, "ub_bulk_wgrad"):
-                self.ub_bulk_wgrad = None
-            if hasattr(self, "ub_bulk_dgrad"):
-                self.ub_bulk_dgrad = None
-            if hasattr(self, "ub_overlap_ag"):
-                self.ub_overlap_ag = None
-            if hasattr(self, "ub_overlap_rs_dgrad"):
-                self.ub_overlap_rs_dgrad = None
-            if hasattr(self, "ub_overlap_rs"):
-                self.ub_overlap_rs = None

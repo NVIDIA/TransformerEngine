@@ -21,6 +21,15 @@ __all__ = [
 ]
 
 
+def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
+    """Validate whether a GEMM scaling factor is consistent with its usage"""
+    if required:
+        return scale if scale is not None else 1.0
+    if scale not in (0.0, None):
+        raise ValueError("scale must be zero")
+    return 0.0
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -29,6 +38,8 @@ def general_gemm(
     quantization_params: Optional[Quantizer] = None,
     gelu: bool = False,
     gelu_in: torch.Tensor = None,
+    alpha: float = 1.0,
+    beta: Optional[float] = None,
     accumulate: bool = False,
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,
@@ -46,6 +57,9 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     # assert quantization_params is None, "FP8 output not supported yet"
+
+    alpha = validate_gemm_scale(alpha, True)
+    beta = validate_gemm_scale(beta, accumulate)
 
     if ub_type is not None:
         assert ub is not None, (
@@ -108,6 +122,8 @@ def general_gemm(
         "comm_type": ub_type,
         "extra_output": extra_output,
         "bulk_overlap": bulk_overlap,
+        "alpha": alpha,
+        "beta": beta,
     }
 
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)

@@ -28,60 +28,6 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-void quantize_impl(const TensorWrapper &input, py::handle &quantizer_py,
-                   std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &output,
-                   TensorWrapper &noop_flag) {
-  // Check tensor dims
-  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output),
-             "Input tensor (shape=", get_tensor_shape(input),
-             ") and output tensor (shape=", get_tensor_shape(output), ") do not match");
-  if (input.numel() == 0) {
-    return;
-  }
-
-  // Recipe-specific configuration
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_noop_tensor(noop_flag.data());
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream()); });
-    // check if we need to do amax reudction (depending on model parallel configs)
-    if (my_quantizer_cs->with_amax_reduction) {
-      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
-      // construct torch tesnor from NVTEBasicTensor without reallocating memory
-      at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
-      std::vector<at::Tensor> tensors = {amax_tensor_torch};
-      // allreduce amax tensor
-      c10d::AllreduceOptions allreduce_opts;
-      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
-      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
-    }
-    // this config is used for cs scaling factor computation
-    // because compute scale is cannot be fused with quantize kernel
-    // so in nvte_quantize_v2 with current scaling, the quant config is not used again
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-    });
-    // set amax ptr to null in output TensorWrapper to avoid atomic amax updates in kernel
-    output.set_amax(nullptr, DType::kFloat32, output.defaultShape);
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
-    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
-    if (my_quantizer_bw->all_gather_usage) {
-      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
-    }
-  }
-
-  // Perform quantization
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_quantize_v2(input.data(), output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-  });
-}
-
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -101,18 +47,17 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
     const auto fake_dtype = input_cpp.dtype();
     std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
   } else {
-    output_py = output;
-    output_cpp = makeTransformerEngineTensor(output_py, quantizer);
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
   // Initialize no-op flag
-  TensorWrapper noop_flag_cpp;
+  std::optional<TensorWrapper> noop_flag_cpp;
   if (noop_flag.has_value()) {
     noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
   }
 
   // Perform quantization
-  quantize_impl(input_cpp, quantizer, quantizer_cpp, output_cpp, noop_flag_cpp);
+  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
   return output_py;
 }
@@ -160,7 +105,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       with_fused_kernel = false;
       break;
     }
-    if (nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
+    if (nvte_tensor_data(output_list[i].data()) == nullptr ||
+        nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
       with_fused_kernel = false;
       break;
     }
@@ -181,10 +127,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     });
   } else {
     // Quantize kernels individually
-    TensorWrapper dummy_noop_flag;
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantize_impl(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
-                    dummy_noop_flag);
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
     }
   }
 }
@@ -454,11 +398,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -497,11 +438,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -647,67 +585,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
 
   return output_py_list;
-}
-
-template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                       cudaStream_t)>
-std::vector<py::object> dbias_dact(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                   py::handle quantizer) {
-  init_extension();
-  auto my_quantizer = convert_quantizer(quantizer);
-
-  auto grad_tensor = makeTransformerEngineTensor(grad_output);
-
-  auto grad_bias = allocateTorchTensor(grad_output.size(-1), grad_tensor.dtype());
-  auto act_input_tensor = makeTransformerEngineTensor(act_input);
-
-  const auto &shape = convertShape(grad_tensor.shape());
-  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype());
-
-  auto dbias_tensor = makeTransformerEngineTensor(grad_bias);
-
-  // Query workspace size and allocate workspace
-  transformer_engine::TensorWrapper workspace;
-  NVTE_SCOPED_GIL_RELEASE({
-    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-         workspace.data(), at::cuda::getCurrentCUDAStream());
-  });
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-
-  // Launch kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-         workspace.data(), at::cuda::getCurrentCUDAStream());
-  });
-
-  return {py::cast(grad_bias), dact};
-}
-
-std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dgelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dsilu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dsilu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_drelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dqgelu>(grad_output, act_input, quantizer);
-}
-
-std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dbias_dact<nvte_quantize_dbias_dsrelu>(grad_output, act_input, quantizer);
 }
 
 }  // namespace pytorch
