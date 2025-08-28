@@ -17,7 +17,6 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 
 from .quantize import (
-    ScaledTensor,
     Quantizer,
 )
 
