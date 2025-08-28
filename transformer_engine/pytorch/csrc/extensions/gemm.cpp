@@ -102,6 +102,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   const bool low_precision =
       detail::is_low_precision(A_tensor.dtype()) || detail::is_low_precision(B_tensor.dtype());
+  const bool fp8_block_scaling = A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
+                                 A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D ||
+                                 B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
+                                 B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D;
 
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
@@ -196,6 +200,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
     swizzled_scale_inverses_list.emplace_back(
         std::move(swizzle_scaling_factors(B_tensor, !transb)));
+
+    // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
+    // as it is not natively supported by cublasLt
+    if (fp8_block_scaling && transformer_engine::cuda::sm_arch() > 90) {
+      // Convert tensors to mxfp8 and swizzle their scaling factors
+      swizzled_scale_inverses_list.emplace_back(
+          std::move(convert_block_scaling_to_mxfp8_tensor(A_tensor, transa)));
+      swizzled_scale_inverses_list.emplace_back(
+          std::move(convert_block_scaling_to_mxfp8_tensor(B_tensor, !transb)));
+      // Use TN GEMM to avoid having to transpose data.
+      transa = true;
+      transb = false;
+    }
 
     if (comm_overlap) {
       // Prepare extra output tensor
