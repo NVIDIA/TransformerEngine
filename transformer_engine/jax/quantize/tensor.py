@@ -745,7 +745,7 @@ def with_sharding_constraint_by_logical_axes(x, logical_axis_names: Tuple[str, .
     if isinstance(x, GroupedScaledTensor1x):
         raise NotImplementedError
 
-    if isinstance(x, ScaledTensor):
+    if isinstance(x, AbstractBaseTensor):
         return x.apply_sharding_constraint_by_logical_axes(logical_axis_names)
 
     return original_with_sharding_constraint_by_logical_axes(x, logical_axis_names)
