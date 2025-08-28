@@ -120,7 +120,7 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
   NVTE_CHECK(input->scale_inv.dptr != nullptr, "Input must have rowwise scaling factors");
   NVTE_CHECK(input->scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Output must have rowwise scaling factors");
-  NVTE_CHECK(input->scale_inv.dtype == DType::kFloat8E8M0,
+  NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
              "Output must have E8M0 scaling factors");
 
   const size_t numel = input->scale_inv.numel();
