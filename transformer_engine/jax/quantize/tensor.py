@@ -198,12 +198,6 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             0 < self.flatten_axis < len(self.data.shape)
         ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
-        # Get a dictionary of all dataclass fields and their values
-        field_dict = {
-            field.name: getattr(self, field.name) for field in self.__dataclass_fields__.values()
-        }
-        print("ScaledTensor1x fields:", field_dict)
-
         if self.scaling_mode == ScalingMode.NO_SCALING:
             self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
         else:

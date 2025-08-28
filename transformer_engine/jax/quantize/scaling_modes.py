@@ -173,7 +173,7 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
     """
 
     def get_scale_dtype(self) -> jnp.dtype:
-        """Get the data type for scale tensors in delayed scaling.
+        """Get the data type for scale tensors. This is a placeholder and won't be used for higher-precision values that don't have scaling.
 
         Returns:
             The data type used for scale tensors (float32)
@@ -187,7 +187,7 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
         is_padded: bool = True,
         flatten_axis: int = -1,
     ) -> Tuple[int, ...]:
-        """Get the shape for scale tensors in delayed scaling.
+        """Get the shape for scale tensors. This always returns an empty shape because this mode applies no scaling.
 
         Args:
             data_shape: The shape of the tensor being scaled
