@@ -348,9 +348,16 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        
-        if get_device_compute_capability(0) == 100 and self.dropout_prob == 0.1 and self.attn_bias_type is not AttnBiasType.NO_BIAS:
-            pytest.skip("For Blackwell, there is no bprop kernel support for dropout + deterministic (bias) config ")
+
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For Blackwell, there is no bprop kernel support for dropout + deterministic (bias)"
+                " config "
+            )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
