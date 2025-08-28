@@ -633,9 +633,9 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         """Is used in the python gemm() to get tensor or transpose of the tensor."""
         return self.rowwise_gemm_tensor if not transpose else self.columnwise_gemm_tensor
 
-    def size(self):
+    def size(self, *args):
         """Size of the tensor."""
-        return self.rowwise_gemm_tensor.size()
+        return self.rowwise_gemm_tensor.size(*args)
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""

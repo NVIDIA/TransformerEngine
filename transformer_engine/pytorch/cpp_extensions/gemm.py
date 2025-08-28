@@ -165,43 +165,43 @@ def general_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     gelu_input = empty_tensors
-    out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
+    
 
     sm_count = get_sm_count()
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].shape[1], dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
+    
     bias = bias if use_bias else empty_tensors
     if use_bias:
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if isinstance(quantization_params, DebugQuantizer):
+    if isinstance(quantization_params[0], DebugQuantizer):
+        assert not gelu, "GELU not supported in debug mode"
+        out = [None] * num_gemms
         for i in range(num_gemms):
-            general_gemm(
+            out[i] = general_gemm(
                 A[i],
                 B[i],
                 workspaces[i],
                 quantization_params=quantization_params[i],
                 out_dtype=out_dtype,
                 layout=layout,
-                gelu=gelu,
-                gelu_in=gelu_input[i],
                 accumulate=accumulate,
-                out=out[i],
+                out=None,
                 bias=bias[i] if use_bias else None,
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
-            )
+            )[0]
         if single_output:
             out = torch.cat(out, dim=0)
         
-        return out, bias, gelu_input
-
+        return out, bias, None
 
     if gelu:
         gelu_input = [
@@ -209,6 +209,7 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
+    out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
