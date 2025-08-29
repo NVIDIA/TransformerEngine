@@ -4,7 +4,7 @@
 
 """Context Parallelism."""
 import os
-from typing import List, Union
+from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
 
@@ -46,6 +46,266 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
+
+
+def pad_sequences_to_divisibility(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    positional_ids: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    divisibility_factor: int,
+    padding_token_id: int = 0,
+    padding_label_id: int = -100,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pads sequences to be divisible by the divisibility factor.
+
+    Args:
+        input_ids: Tensor of shape (1, N) containing concatenated sequences
+        labels: Tensor of shape (1, N) containing labels for each token
+        positional_ids: Tensor of shape (N,) containing position IDs for each token
+        cu_seqlens_q: Tensor of shape (M,) containing cumulative sequence lengths
+        divisibility_factor: Each sequence length must be divisible by this factor
+        padding_token_id: Token ID to use for padding (default: 0)
+        padding_label_id: Label ID to use for padding (default: -100)
+
+    Returns:
+        Tuple of:
+        - input_ids_padded: Padded input_ids tensor
+        - labels_padded: Padded labels tensor
+        - positional_ids: Original positional_ids (unchanged)
+        - positional_ids_padded: Padded positional_ids tensor with continued positions
+        - cu_seqlens_q_padded: Cumulative sequence lengths accounting for padding
+    """
+    # Flatten input_ids and labels if needed
+    if input_ids.dim() == 2:
+        input_ids = input_ids.squeeze(0)
+    if labels.dim() == 2:
+        labels = labels.squeeze(0)
+
+    # Extract individual sequences
+    batch_sequences = extract_sequences(input_ids, cu_seqlens_q)
+    batch_labels = extract_sequences(labels, cu_seqlens_q)
+
+    # Calculate padding needed for each sequence
+    padding_amounts = calculate_padding_amounts(batch_sequences, divisibility_factor)
+
+    # Pad the sequences
+    padded_sequences = pad_batch_sequences(batch_sequences, padding_amounts, padding_token_id)
+
+    # Pad the labels
+    padded_labels = pad_batch_sequences(batch_labels, padding_amounts, padding_label_id)
+
+    # Create padded input_ids tensor
+    input_ids_padded = torch.cat(padded_sequences)
+
+    # Create padded labels tensor
+    labels_padded = torch.cat(padded_labels)
+
+    # Create padded positional_ids (positions continue incrementing through padding)
+    positional_ids_padded = create_padded_positional_ids(
+        positional_ids, cu_seqlens_q, padding_amounts
+    )
+
+    # Create padded cumulative sequence lengths
+    cu_seqlens_q_padded = create_padded_cu_seqlens(cu_seqlens_q, padding_amounts)
+
+    return (
+        input_ids_padded,
+        labels_padded,
+        positional_ids,
+        positional_ids_padded,
+        cu_seqlens_q_padded,
+    )
+
+
+def extract_sequences(input_ids: torch.Tensor, cu_seqlens_q: torch.Tensor) -> List[torch.Tensor]:
+    """Extract individual sequences from concatenated input_ids."""
+    sequences = []
+    for i in range(len(cu_seqlens_q) - 1):
+        start_idx = cu_seqlens_q[i].item()
+        end_idx = cu_seqlens_q[i + 1].item()
+        sequences.append(input_ids[start_idx:end_idx])
+    return sequences
+
+
+def calculate_padding_amounts(sequences: List[torch.Tensor], divisibility_factor: int) -> List[int]:
+    """Calculate padding needed for each sequence to be divisible by factor."""
+    padding_amounts = []
+    for seq in sequences:
+        seq_len = len(seq)
+        remainder = seq_len % divisibility_factor
+        padding_needed = (divisibility_factor - remainder) % divisibility_factor
+        padding_amounts.append(padding_needed)
+    return padding_amounts
+
+
+def pad_batch_sequences(
+    sequences: List[torch.Tensor], padding_amounts: List[int], padding_value: int
+) -> List[torch.Tensor]:
+    """Pad each sequence with the specified amount of padding tokens."""
+    padded_sequences = []
+    for seq, pad_amount in zip(sequences, padding_amounts):
+        if pad_amount > 0:
+            padding = torch.full((pad_amount,), padding_value, dtype=seq.dtype)
+            padded_seq = torch.cat([seq, padding])
+        else:
+            padded_seq = seq
+        padded_sequences.append(padded_seq)
+    return padded_sequences
+
+
+def create_padded_positional_ids(
+    positional_ids: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    padding_amounts: List[int],
+) -> torch.Tensor:
+    """Create padded version of positional_ids tensor.
+
+    Position IDs continue incrementing through the padding tokens.
+    """
+    padded_pos_ids = []
+
+    for i in range(len(cu_seqlens_q) - 1):
+        start_idx = cu_seqlens_q[i].item()
+        end_idx = cu_seqlens_q[i + 1].item()
+
+        # Get original position IDs for this sequence
+        seq_pos_ids = positional_ids[start_idx:end_idx]
+        padded_pos_ids.append(seq_pos_ids)
+
+        # Add padding position IDs if needed - continue counting from last position
+        pad_amount = padding_amounts[i]
+        if pad_amount > 0:
+            last_position = seq_pos_ids[-1].item()
+            # Continue position IDs through the padding
+            padding_positions = torch.arange(
+                last_position + 1, last_position + 1 + pad_amount, dtype=positional_ids.dtype
+            )
+            padded_pos_ids.append(padding_positions)
+
+    return torch.cat(padded_pos_ids)
+
+
+def create_padded_cu_seqlens(
+    cu_seqlens_q: torch.Tensor, padding_amounts: List[int]
+) -> torch.Tensor:
+    """Create cumulative sequence lengths accounting for padding."""
+    cu_seqlens_padded = [cu_seqlens_q[0].item()]
+
+    for i in range(len(cu_seqlens_q) - 1):
+        prev_cu_len = cu_seqlens_padded[-1]
+        orig_seq_len = cu_seqlens_q[i + 1].item() - cu_seqlens_q[i].item()
+        padded_seq_len = orig_seq_len + padding_amounts[i]
+        cu_seqlens_padded.append(prev_cu_len + padded_seq_len)
+
+    return torch.tensor(cu_seqlens_padded, dtype=cu_seqlens_q.dtype)
+
+
+def get_thd_batch_on_this_cp_rank(
+    cu_seqlens_q_padded: torch.Tensor,
+    cu_seqlens_kv_padded: torch.Tensor,
+    input_ids_padded: torch.Tensor,
+    labels_padded: torch.Tensor,
+    position_ids_padded: torch.Tensor,
+    cp_group: torch.distributed.ProcessGroup = None,
+):
+    """Slice batch input along sequence dimension into multiple chunks for THD format.
+
+    This function is inteded for use in self attention. It will not work for cross attention because
+    it does not handle the case where the sequence length of the query and key are different.
+
+    Which are parallelized across GPUs in a context parallel group.
+    This version works with variable-length sequences using cumulative sequence lengths.
+    """
+    # Get context parallel size and rank
+    cp_size = torch.distributed.get_world_size(group=cp_group)
+    if cp_size > 1:
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+
+        # Get cumulative sequence lengths from batch
+        cu_seqlens_padded = cu_seqlens_q_padded
+        assert cu_seqlens_padded is not None, (
+            "cu_seqlens_padded is required for THD format to calculate the right chunk sizes for"
+            " each sequence. cu_seqlens_q_padded is required for THD format to calculate the right"
+            " chunk sizes for each sequence."
+        )
+
+        # Get the cu_seqlens_kv_padded
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded
+        assert cu_seqlens_kv_padded is not None, (
+            "cu_seqlens_kv_padded is required for THD format to calculate the right chunk sizes for"
+            " each sequence."
+        )
+
+        # Calculate the chunk sizes for each sequence
+        total_slices_of_any_sequence = 2 * cp_size
+        slice_sizes = (
+            cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+        ) // total_slices_of_any_sequence
+
+        # Process each tensor directly instead of using keys_to_change loop
+        def process_tensor(val):
+            if val is not None:
+                # Determine which dimension is the sequence dimension
+                # TODO: Add support for if the cu_seqlens_padded gives you a tensor of shape (1,)
+                # Ensure cu_seqlens_padded[-1] is a Python int, not a 0-dim tensor
+                if isinstance(cu_seqlens_padded[-1], torch.Tensor):
+                    seq_len_val = cu_seqlens_padded[-1].item()
+                else:
+                    seq_len_val = cu_seqlens_padded[-1]
+
+                # Handle 1D tensors (like position_ids that don't have batch dimension)
+                if val.ndim == 1:
+                    if val.shape[0] == seq_len_val:
+                        current_seq_dim = 0
+                    else:
+                        raise ValueError(
+                            "1D tensor shape doesn't match expected sequence length. Make sure the"
+                            " inputs are in THD format and padded correctly."
+                        )
+                elif val.ndim >= 2:
+                    if val.shape[1] == seq_len_val:
+                        current_seq_dim = 1
+                    elif val.shape[0] == seq_len_val:
+                        current_seq_dim = 0
+                    else:
+                        raise ValueError(
+                            "Make sure the inputs are in THD format and padded correctly."
+                        )
+                else:
+                    raise ValueError("Tensor must be at least 1D")
+
+                # On this particular rank, for each sequence, get two slices, one from the beginning
+                # and one from the end.
+                cp_rank_slices = []
+                for slice_size, seq_start in zip(slice_sizes, cu_seqlens_padded[:-1]):
+                    # 1st segment
+                    cp_rank_slices.append(
+                        torch.arange(
+                            seq_start + (cp_rank * slice_size),
+                            seq_start + ((cp_rank + 1) * slice_size),
+                            device=val.device,
+                        )
+                    )
+
+                    # 2nd segment
+                    cp_rank_slices.append(
+                        torch.arange(
+                            seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
+                            seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
+                            device=val.device,
+                        )
+                    )
+
+                return val.index_select(current_seq_dim, torch.cat(cp_rank_slices))
+            return val
+
+        # Process each tensor directly
+        input_ids_padded = process_tensor(input_ids_padded)
+        labels_padded = process_tensor(labels_padded)
+        position_ids_padded = process_tensor(position_ids_padded)
+
+    return input_ids_padded, labels_padded, position_ids_padded
 
 
 def flash_attn_p2p_communicate(
