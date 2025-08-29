@@ -42,7 +42,7 @@ struct MultiPaddingArgs {
   int num_tensors;
 };
 
-template <int nvec, typename Type>
+template <int nvec, typename Type, bool aligned>
 __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiPaddingArgs args) {
   using Vec = Vec<Type, nvec>;
 
@@ -84,8 +84,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   const int tile_col = tile_id_n * tile_dim_n;
 
   // Load input and store to registers
-  // Note: Each thread loads n_iterations subtiles, casts to output
-  // type, and transposes in registers.
+  // Note: Each thread loads n_iterations subtiles
   Type local_zero = static_cast<Type>(0.f);
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
@@ -96,30 +95,42 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       const int row = tile_row + i1 * nvec + i2;
       const int col = tile_col + j1 * nvec;
       Vec local_input;
-      Vec local_output;
-      local_input.clear();
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row * row_length + col + j2];
-          }
+      if constexpr (aligned) {
+        if (row < num_rows) {
+          local_input.load_from(&input[row * row_length + col]);
+        } else if (row < padded_num_rows) {
+          // padding
+          local_input.clear();
         }
-      }
+      } else {
+        if (row < num_rows) {
 #pragma unroll
-      for (int j2 = 0; j2 < nvec; ++j2) {
-        local_output.data.elt[j2] = local_input.data.elt[j2];
-      }
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_output.data.elt[j2];
+          for (int j2 = 0; j2 < nvec; ++j2) {
+            if (col + j2 < row_length) {
+              local_input.data.elt[j2] = input[row * row_length + col + j2];
+            }
           }
         }
-      } else if (row < padded_num_rows) {
-        // padding
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_zero;
+      }
+      if constexpr (aligned) {
+        if (row < padded_num_rows) {
+          local_input.store_to(&output[row * row_length + col]);
+        }
+      } else {
+        if (row < num_rows) {
+#pragma unroll
+          for (int j2 = 0; j2 < nvec; ++j2) {
+            if (col + j2 < row_length) {
+              output[row * row_length + col + j2] = local_input.data.elt[j2];
+            }
+          }
+        } else if (row < padded_num_rows) {
+          // padding
+#pragma unroll
+          for (int j2 = 0; j2 < nvec; ++j2) {
+            if (col + j2 < row_length) {
+              output[row * row_length + col + j2] = local_zero;
+            }
           }
         }
       }
@@ -127,7 +138,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   }
 }
 
-template <int nvec, typename Type>
+template <int nvec, typename Type, bool aligned>
 __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(MultiPaddingArgs args) {
   using Vec = Vec<Type, nvec>;
 
@@ -168,8 +179,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   const int tile_col = tile_id_n * tile_dim_n;
 
   // Load input and store to registers
-  // Note: Each thread loads n_iterations subtiles, casts to output
-  // type, and transposes in registers.
+  // Note: Each thread loads n_iterations subtiles
   Type local_zero = static_cast<Type>(0.f);
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
@@ -180,23 +190,31 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       const int row = tile_row + i1 * nvec + i2;
       const int col = tile_col + j1 * nvec;
       Vec local_input;
-      Vec local_output;
-      local_input.clear();
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row * row_length + col + j2];
+      if constexpr (aligned) {
+        if (row < num_rows) {
+          local_input.load_from(&input[row * row_length + col]);
+        }
+      } else {
+        if (row < num_rows) {
+#pragma unroll
+          for (int j2 = 0; j2 < nvec; ++j2) {
+            if (col + j2 < row_length) {
+              local_input.data.elt[j2] = input[row * row_length + col + j2];
+            }
           }
         }
       }
+      if constexpr (aligned) {
+        if (row < num_rows) {
+          local_input.store_to(&output[row * row_length + col]);
+        }
+      } else {
+        if (row < num_rows) {
 #pragma unroll
-      for (int j2 = 0; j2 < nvec; ++j2) {
-        local_output.data.elt[j2] = local_input.data.elt[j2];
-      }
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_output.data.elt[j2];
+          for (int j2 = 0; j2 < nvec; ++j2) {
+            if (col + j2 < row_length) {
+              output[row * row_length + col + j2] = local_input.data.elt[j2];
+            }
           }
         }
       }
@@ -233,23 +251,35 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
 
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec x nvec subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size * 8 / typeToNumBits(type);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size * 8 / typeToNumBits(type);
+  auto bits = typeToNumBits(type);
+  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size * 8 / bits;
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size * 8 / bits;
 
   // Add tensors to kernel argument struct
-  MultiPaddingArgs kernel_args;
-  kernel_args.num_tensors = 0;
-  kernel_args.block_range[0] = 0;
+  MultiPaddingArgs kernel_args_aligned, kernel_args_unaligned;
+  kernel_args_aligned.num_tensors = 0;
+  kernel_args_aligned.block_range[0] = 0;
+  kernel_args_unaligned.num_tensors = 0;
+  kernel_args_unaligned.block_range[0] = 0;
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     // Launch kernel if argument struct is full
-    if (kernel_args.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
-          const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-          multi_padding_kernel<nvec, Type>
-          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    if (kernel_args_aligned.num_tensors == kMaxTensorsPerKernel) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+          bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+          const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+          multi_padding_kernel<nvec, Type, true>
+          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
       NVTE_CHECK_CUDA(cudaGetLastError());
-      kernel_args.num_tensors = 0;
+      kernel_args_aligned.num_tensors = 0;
+    }
+    if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+          bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+          const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+          multi_padding_kernel<nvec, Type, false>
+          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      kernel_args_unaligned.num_tensors = 0;
     }
 
     // Calculate number of thread blocks needed for tensor
@@ -259,6 +289,10 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
     const int num_tiles_m = (padded_num_rows + tile_dim_m - 1) / tile_dim_m;
     const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
     const int num_tiles = num_tiles_m * num_tiles_n;
+
+    // Figure out whether to use aligned or unaligned kernel
+    const bool aligned = (num_tiles_n * tile_dim_n == row_length);
+    auto& kernel_args = aligned ? kernel_args_aligned : kernel_args_unaligned;
 
     // Add tensor to kernel argument struct
     const int pos = kernel_args.num_tensors;
@@ -272,13 +306,21 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
   }
 
   // Launch kernel
-  if (kernel_args.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
-        const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-        multi_padding_kernel<nvec, Type>
-        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
-    NVTE_CHECK_CUDA(cudaGetLastError());
+  if (kernel_args_aligned.num_tensors > 0) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+        bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+        const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+        multi_padding_kernel<nvec, Type, true>
+        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+  if (kernel_args_unaligned.num_tensors > 0) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+        bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+        const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+        multi_padding_kernel<nvec, Type, false>
+        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -309,23 +351,35 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
 
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec x nvec subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
+  auto bits = typeToNumBits(type);
+  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size * 8 / bits;
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size * 8 / bits;
 
   // Add tensors to kernel argument struct
-  MultiPaddingArgs kernel_args;
-  kernel_args.num_tensors = 0;
-  kernel_args.block_range[0] = 0;
+  MultiPaddingArgs kernel_args_aligned, kernel_args_unaligned;
+  kernel_args_aligned.num_tensors = 0;
+  kernel_args_aligned.block_range[0] = 0;
+  kernel_args_unaligned.num_tensors = 0;
+  kernel_args_unaligned.block_range[0] = 0;
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     // Launch kernel if argument struct is full
-    if (kernel_args.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
-          const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-          multi_unpadding_kernel<nvec, Type>
-          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    if (kernel_args_aligned.num_tensors == kMaxTensorsPerKernel) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+          bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+          const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+          multi_unpadding_kernel<nvec, Type, true>
+          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
       NVTE_CHECK_CUDA(cudaGetLastError());
-      kernel_args.num_tensors = 0;
+      kernel_args_aligned.num_tensors = 0;
+    }
+    if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+          bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+          const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+          multi_unpadding_kernel<nvec, Type, false>
+          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      kernel_args_unaligned.num_tensors = 0;
     }
 
     // Calculate number of thread blocks needed for tensor
@@ -334,6 +388,10 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
     const int num_tiles_m = (num_rows + tile_dim_m - 1) / tile_dim_m;
     const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
     const int num_tiles = num_tiles_m * num_tiles_n;
+
+    // Figure out whether to use aligned or unaligned kernel
+    const bool aligned = (num_tiles_n * tile_dim_n == row_length);
+    auto& kernel_args = aligned ? kernel_args_aligned : kernel_args_unaligned;
 
     // Add tensor to kernel argument struct
     const int pos = kernel_args.num_tensors;
@@ -346,13 +404,21 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
   }
 
   // Launch kernel
-  if (kernel_args.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
-        const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-        multi_unpadding_kernel<nvec, Type>
-        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
-    NVTE_CHECK_CUDA(cudaGetLastError());
+  if (kernel_args_aligned.num_tensors > 0) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+        bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+        const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+        multi_unpadding_kernel<nvec, Type, true>
+        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+  if (kernel_args_unaligned.num_tensors > 0) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
+        bits, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+        const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+        multi_unpadding_kernel<nvec, Type, false>
+        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
