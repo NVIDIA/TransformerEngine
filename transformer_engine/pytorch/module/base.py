@@ -258,6 +258,7 @@ def initialize_ub(
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+    layers_all_gather_wgrad_overlap = ["qkv_wgrad", "fc1_wgrad", "fc2_wgrad", "proj_wgrad"]
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
@@ -407,13 +408,48 @@ def initialize_ub(
         for name in dgrad_reduce_scatter_overlap:
             if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
                 wgrad_name = name.replace("dgrad", "wgrad")
-                assert wgrad_name not in ub_cfgs
+                # assert wgrad_name not in ub_cfgs
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
                 methods["bulk"].remove(name)
+                methods["bulk"].remove(wgrad_name)
                 new_method = ub_cfgs[name]["method"]
                 methods[new_method].append(name)
+
+        # Loop over user configs and disable dgrad and wgrad bulk overlaps for
+        # every layer that has a all-gather wgrad overlap.
+        for name in layers_all_gather_wgrad_overlap:
+            if not name in ub_cfgs:
+                continue
+            dgrad_name = name.replace("wgrad", "dgrad")
+            # Update the default "external" methods list.
+            if name in methods["external"]:
+                methods["external"].remove(name)
+                methods["external"].append(dgrad_name)
+                del external_gemm_to_overlap[name]
+                external_gemm_to_overlap[dgrad_name] = name
+
+            if ub_cfgs[name]["method"] != "bulk":
+                if name in {"fc1_wgrad", "qkv_wgrad"}:
+                    if name in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.remove(name)
+                    layers_reduce_scatter_overlap.append(dgrad_name)
+                    if dgrad_name in layers_all_gather_overlap:
+                        layers_all_gather_overlap.remove(dgrad_name)
+                    layers_all_gather_overlap.append(name)
+
+                    name in methods["bulk"] and methods["bulk"].remove(name)
+                    dgrad_name in methods["bulk"] and methods["bulk"].remove(dgrad_name)
+
+                    new_method = ub_cfgs[name]["method"]
+                    if name not in methods[new_method]:
+                        methods[new_method].append(name)
+                else:
+                    assert name in {"fc2_wgrad", "proj_wgrad"}
+                    # Replace default {fc2, proj}_dgrad AG overlap in configs with {fc2, proj}_wgrad.
+                    methods["ring_exchange"].remove(dgrad_name)
+                    methods["ring_exchange"].append(name)
 
     for name in (
         methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
