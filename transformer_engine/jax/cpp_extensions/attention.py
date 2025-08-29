@@ -2748,10 +2748,10 @@ def fused_attn_bwd(
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
-    if get_device_compute_capability==100:
-        assert (not(attn_bias_type != "no_bias" and dropout_probability != 0)
-        ),"For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
-
+    if get_device_compute_capability == 100:
+        assert not (
+            attn_bias_type != "no_bias" and dropout_probability != 0
+        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
