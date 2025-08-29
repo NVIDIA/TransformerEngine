@@ -158,7 +158,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
     std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, output_dtype);
-
   }
   TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
 
