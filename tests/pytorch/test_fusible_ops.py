@@ -1817,7 +1817,9 @@ class TestBasicOps:
         if is_training:
             prob_observed = 1 - torch.count_nonzero(y_test).item() / y_test.numel()
             z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y_test.numel())
-            assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
+            assert (
+                abs(z_score) < 2.5758
+            ), f"Number of zeros is outside 99% confidence interval ({prob=}, {prob_observed=})"
 
 
 class TestFusedOps:
