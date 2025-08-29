@@ -37,6 +37,7 @@ from .misc import (
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
+    get_all_device_compute_capability,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -2748,10 +2749,10 @@ def fused_attn_bwd(
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
-    if get_device_compute_capability == 100:
-        assert not (
+    if 100 in get_all_device_compute_capability():
+        assert not(
             attn_bias_type != "no_bias" and dropout_probability != 0
-        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+        ),"For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

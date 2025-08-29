@@ -192,6 +192,14 @@ def get_min_device_compute_capability():
         for local_gpu_id in range(len(jax.local_devices()))
     )
 
+def get_all_device_compute_capability():
+    """
+    Returns a list of compute capability of all local devices.
+    """
+    dev_compute_capabilities = []
+    for local_gpu_id in range(len(jax.local_devices())):
+            dev_compute_capabilities.append(transformer_engine_jax.get_device_compute_capability(local_gpu_id))
+    return tuple(dev_compute_capabilities)
 
 def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quantizer=None):
     """
