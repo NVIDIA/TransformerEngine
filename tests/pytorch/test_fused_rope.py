@@ -8,7 +8,7 @@ import pytest
 from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
-    apply_fused_qkv_rotary_pos_emb
+    apply_fused_qkv_rotary_pos_emb,
 )
 
 
@@ -245,6 +245,7 @@ def test_fused_rope_thd(
             torch.testing.assert_close(grad_fused, grad_unfused)
 
         assert output_fused.is_contiguous()
+
 
 @pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
