@@ -79,7 +79,18 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
+all_activations = [
+    "gelu",
+    "geglu",
+    "qgelu",
+    "qgeglu",
+    "relu",
+    "reglu",
+    "srelu",
+    "sreglu",
+    "silu",
+    "swiglu",
+]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -111,13 +122,18 @@ if fp8_available:
 
 
 def is_fused_attn_available(
-    config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
+    config: ModelConfig,
+    dtype: torch.dtype,
+    qkv_layout="bshd_bshd_bshd",
+    is_training=True,
+    deterministic=False,
 ):
     _, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
         is_training=is_training,
+        deterministic=deterministic,
     )
     return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
@@ -427,13 +443,16 @@ class TorchGroupedLinearWithPadding(nn.Module):
 
 
 _supported_act = {
-    "geglu": nn.GELU(approximate="tanh"),
     "gelu": nn.GELU(approximate="tanh"),
-    "reglu": nn.ReLU(),
-    "relu": nn.ReLU(),
-    "swiglu": nn.SiLU(),
+    "geglu": nn.GELU(approximate="tanh"),
     "qgelu": TorchQuickGELU(),
+    "qgeglu": TorchQuickGELU(),
+    "relu": nn.ReLU(),
+    "reglu": nn.ReLU(),
     "srelu": TorchSquaredRELU(),
+    "sreglu": TorchSquaredRELU(),
+    "silu": nn.SiLU(),
+    "swiglu": nn.SiLU(),
 }
 
 
@@ -825,7 +844,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype):
+    if not is_fused_attn_available(config, dtype, deterministic=True):
         pytest.skip("No attention backend available.")
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
@@ -873,7 +892,9 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+    if not is_fused_attn_available(
+        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
+    ):
         pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
@@ -986,7 +1007,9 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+    if not is_fused_attn_available(
+        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
+    ):
         pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(

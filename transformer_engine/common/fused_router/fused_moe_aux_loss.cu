@@ -177,9 +177,9 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
     config.stream = stream;
 
     // Update the max cluster size based on the device
-    cudaOccupancyMaxPotentialClusterSize(
+    NVTE_CHECK_CUDA(cudaOccupancyMaxPotentialClusterSize(
         &cluster_size,
-        reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config);
+        reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config));
 
     cudaLaunchAttribute attribute[1];
     attribute[0].id = cudaLaunchAttributeClusterDimension;
@@ -189,14 +189,15 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
     config.numAttrs = 1;
     config.attrs = attribute;
 
-    cudaLaunchKernelEx(&config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs,
-                       tokens_per_expert, total_num_tokens, num_experts, num_rows, num_cols, topk,
-                       coeff, aux_loss, Const_buf);
+    NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+        &config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs, tokens_per_expert,
+        total_num_tokens, num_experts, num_rows, num_cols, topk, coeff, aux_loss, Const_buf));
   } else {
     size_t smem_size = sizeof(CompType) * num_cols;
     fused_moe_aux_loss_forward_kernel<DataType, IndexType>
         <<<1, 1024, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens, num_experts,
                                          num_rows, num_cols, topk, coeff, aux_loss, Const_buf);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -247,6 +248,7 @@ void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
   int grid_size = (num_rows + block_size - 1) / block_size;
   fused_moe_aux_loss_backward_kernel<DataType, IndexType><<<grid_size, block_size, 0, stream>>>(
       Const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss, grad_probs);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_expert,
