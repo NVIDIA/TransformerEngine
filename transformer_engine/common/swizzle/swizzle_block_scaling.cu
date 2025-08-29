@@ -158,9 +158,9 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
     swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, input_rows,
                                      input_cols, stream);
   } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
-    NVTE_CHECK(output_rows == input_rows * 128 && output_cols == input_cols * 128,
+    NVTE_CHECK(output_rows == input_rows * 128 && output_cols == input_cols * 4,
                "Output MXFP8 scaling factors should have shape (", input_rows * 128, ", ",
-               input_cols * 128, "), but has shape (", output_rows, ", ", output_cols, ")");
+               input_cols * 4, "), but has shape (", output_rows, ", ", output_cols, ")");
 
     swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, input_rows,
                                      input_cols, stream);
