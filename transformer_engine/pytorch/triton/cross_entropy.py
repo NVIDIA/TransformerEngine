@@ -96,8 +96,8 @@ def cross_entropy_kernel(
     world_size,
     ignore_idx,
     n_cols,
-    n_rows,            # NEW: total rows (B * SQ), used for all-gather offset
-    n_non_ignore,      # number of non-ignored tokens, used for scaling
+    n_rows,  # NEW: total rows (B * SQ), used for all-gather offset
+    n_non_ignore,  # number of non-ignored tokens, used for scaling
     reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -273,8 +273,8 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
-        n_rows=n_rows,          # NEW: used only for all-gather offset
-        n_non_ignore=denom,     # used only for gradient scaling in mean mode
+        n_rows=n_rows,  # NEW: used only for all-gather offset
+        n_non_ignore=denom,  # used only for gradient scaling in mean mode
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
