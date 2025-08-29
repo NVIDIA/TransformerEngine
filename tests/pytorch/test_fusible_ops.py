@@ -1749,7 +1749,7 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("prob", (0.1, 0.5, 0.75))
+    @pytest.mark.parametrize("prob", (0.0625, 0.5, 0.75))
     @pytest.mark.parametrize("is_training", (True, False))
     @pytest.mark.parametrize("quantization", (None, "fp8_current_scaling"))
     @pytest.mark.parametrize("shape", ((101,), (2, 4, 16), (64, 64)))

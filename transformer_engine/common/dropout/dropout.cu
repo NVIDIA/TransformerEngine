@@ -209,8 +209,6 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
              dropout_probability, ").");
   const float scale = 1 / (1 - dropout_probability);
   const uint8_t prob_uint8 = static_cast<uint8_t>(std::floor(dropout_probability * 256));
-  NVTE_CHECK(prob_uint8 == dropout_probability * 256, "Dropout probability (", dropout_probability,
-             ") is not representable in 8 bits");
   uint32_t prob4 = prob_uint8;
   prob4 = (prob4 << 8) | prob4;
   prob4 = (prob4 << 16) | prob4;
