@@ -188,14 +188,15 @@ def _layernorm_dense_fwd_rule(
         epsilon,
         norm_type,
         quantizer=quantizer_set.x,
-        noop_scaled_tensor=True,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
     # Kernel in (hidden_in, hidden_out...)
     flatten_axis = 1 - len(kernel.shape)
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel, noop_scaled_tensor=True
+        kernel,
+        flatten_axis=flatten_axis,
+        quantizer=quantizer_set.kernel,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -278,7 +279,6 @@ def _layernorm_dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis,
         quantizer=quantizer_set.dgrad,
-        noop_scaled_tensor=True,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
