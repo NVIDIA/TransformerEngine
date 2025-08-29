@@ -226,15 +226,13 @@ log:
       end_step: 10
 """
 
+
 def test_log_stats_numerics(feature_dirs):
-    stats = [
-        "dynamic_range",
-        "max_blockwise_4_dynamic_range"
-    ]
+    stats = ["dynamic_range", "max_blockwise_4_dynamic_range"]
     log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
 
     with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
-        
+
         epsilon = 1e-10
         tensor = torch.zeros(1024, 1024).cuda() + epsilon
         tensor[0, :] = 1000
@@ -262,6 +260,7 @@ def test_log_stats_numerics(feature_dirs):
             dynamic_range = float(line.split("value=")[1])
             expected = math.log2(1000) - math.log2(epsilon)
             assert dynamic_range == pytest.approx(expected, abs=1e-4)
+
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
