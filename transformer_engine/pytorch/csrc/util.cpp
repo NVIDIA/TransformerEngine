@@ -182,35 +182,39 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   NVTE_CHECK(input.dtype() == transformer_engine::DType::kFloat8E4M3,
              "Input tensor must have FP8E4M3 dtype");
 
-  // Get input tensor properties
+  // Get tensor data
   const NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
-  const NVTEBasicTensor scale_inv =
-      rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
-  const NVTEShape data_shape = data.shape;
-  const NVTEShape scale_inv_shape = scale_inv.shape;
-
-  // Allocate memory for swizzled output.
-  auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
-  std::vector<int64_t> swizzled_scale_inv_shape_int;
-  swizzled_scale_inv_shape_int.reserve(data_shape.ndim);
-  for (size_t i = 0; i < data_shape.ndim; ++i) {
-    swizzled_scale_inv_shape_int.push_back(static_cast<int64_t>(data_shape.data[i]));
-  }
-  swizzled_scale_inv_shape_int[data_shape.ndim - 1] /= 32;
-  at::Tensor swizzled_scale_inv = at::empty(swizzled_scale_inv_shape_int, options);
-  void* const swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
-  NVTEShape swizzled_scale_inv_shape = data_shape;
-  swizzled_scale_inv_shape.data[swizzled_scale_inv_shape.ndim - 1] /= 32;
-
+  
   // Recreate input tensor with rowwise usage
   transformer_engine::TensorWrapper input_cu(scaling_mode);
-  input_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
+  input_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data.shape);
+  const NVTEBasicTensor scale_inv =
+      rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
   input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, transformer_engine::DType::kFloat32,
-                                 scale_inv_shape);
+                                 scale_inv.shape);
 
   // Create output tensor
   transformer_engine::TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);
-  output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
+  output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data.shape);
+  // Flattened data dimensions
+  size_t data_flat_first_dim = 1;
+  for (int i = 0; i < data.shape.ndim - 1; ++i) {
+    data_flat_first_dim *= data.shape[i];
+  }
+  const size_t data_flat_last_dim = data.shape[data.shape.ndim - 1];
+  // Output swizzled mxfp8 scaling factor dimensions
+  const size_t swizzled_scale_inv_first_dim = data_flat_first_dim;
+  const size_t swizzled_scale_inv_last_dim = data_flat_last_dim / 32;
+  // Allocate memory for swizzled mxfp8 scaling factors
+  const auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
+  at::Tensor swizzled_scale_inv = at::empty(
+      std::vector<int64_t>{swizzled_scale_inv_first_dim, swizzled_scale_inv_last_dim}, options);
+  // Set rowwise scaling factors on output
+  void* const swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
+  NVTEShape swizzled_scale_inv_shape{};
+  swizzled_scale_inv_shape.data[0] = swizzled_scale_inv_first_dim;
+  swizzled_scale_inv_shape.data[1] = swizzled_scale_inv_last_dim;
+  swizzled_scale_inv_shape.ndim = 2;
   output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr, transformer_engine::DType::kFloat8E8M0,
                                   swizzled_scale_inv_shape);
 
