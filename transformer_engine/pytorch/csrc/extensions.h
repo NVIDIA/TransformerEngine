@@ -266,6 +266,17 @@ std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Te
                                      py::handle quantizer);
 
 /***************************************************************************************************
+ * Dropout
+ **************************************************************************************************/
+
+std::vector<py::object> dropout_fwd(const py::handle &input, const float dropout_probability,
+                                    std::optional<at::Tensor> out = std::nullopt);
+
+py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
+                       const float dropout_probability,
+                       std::optional<at::Tensor> grad_input = std::nullopt);
+
+/***************************************************************************************************
  * Softmax
  **************************************************************************************************/
 
