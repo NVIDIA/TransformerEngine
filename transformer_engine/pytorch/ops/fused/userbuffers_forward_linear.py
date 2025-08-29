@@ -189,7 +189,7 @@ class UserbuffersForwardLinear(FusedOperation):
             output_quantizer = None
 
         # Get Userbuffers communicator
-        ub_comm = get_ub(ub_comm_name + "_fprop")
+        ub_comm = get_ub(ub_comm_name + "_fprop", with_quantized_compute)
         with_ub_all_gather = tensor_parallel_mode == "column"
         with_ub_reduce_scatter = tensor_parallel_mode == "row"
         ub_type = CommOverlapType.AG if with_ub_all_gather else CommOverlapType.RS
