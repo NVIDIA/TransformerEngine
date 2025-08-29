@@ -215,8 +215,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Store unquantized layer norm output if we need to return it
         ln_out_return = None
+        ln_out_return_is_ln_out = False
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
+            ln_out_return_is_ln_out = True
 
         # ------------------------------------------------------
         # Prepare GEMM input tensor
@@ -230,6 +232,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # norm output will be returned
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
+                ln_out_return_is_ln_out = False
                 if fp8 or debug:
                     ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -353,8 +356,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Deallocate GEMM input tensor if no longer needed
         if not weight.requires_grad and not return_layernorm_output:
-            ln_out = ln_out_total = None
             clear_tensor_data(ln_out, ln_out_total)
+            ln_out = ln_out_total = None
+        elif ln_out_total is not ln_out_return and not ub_overlap_ag_fprop:
+            clear_tensor_data(ln_out_total)
+            ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -480,6 +486,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.return_layernorm_output = return_layernorm_output
             ctx.return_layernorm_output_gathered = return_layernorm_output_gathered
+            ctx.ln_out_return_is_ln_out = ln_out_return_is_ln_out
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_overlap_ag = ub_overlap_ag_dgrad
@@ -893,6 +900,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     # Deallocate input tensor if permitted
                     if not ctx.return_layernorm_output:
+                        clear_tensor_data(ln_out_total)
+                    elif (
+                        (ln_out_total is not ln_out) or not ctx.ln_out_return_is_ln_out
+                    ) and not ctx.ub_overlap_ag:
                         clear_tensor_data(ln_out_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
