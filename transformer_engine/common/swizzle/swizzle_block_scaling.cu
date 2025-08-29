@@ -69,6 +69,14 @@ namespace swizzle_kernel_1d {
       dst[i * MXFP8_SWIZZLE_STRIDE] = sf.u32[i];
     }
   }
+
+  void launch_kernel(const void* const in, void* const out, size_t sz, cudaStream_t stream) {
+    NVTE_CHECK(sz % 128 == 0, "Input has to be divisible into 128x128 tiles");
+    const size_t blocks = DIVUP(sz, SF_PER_TB);
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(in,
+                                                                                             out,
+                                                                                             sz);
+  }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
   constexpr size_t WARPS_PER_TB = 4; // configurable
@@ -104,6 +112,13 @@ namespace swizzle_kernel_2d {
     void* const dst = warp_dst + lane * sizeof(uint4);
     *reinterpret_cast<uint4*>(dst) = sf4;
   }
+
+  void launch_kernel(const void* const in, void* const out, size_t sz, cudaStream_t stream) {
+    const size_t blocks = DIVUP(sz, SF_PER_TB);
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(in,
+                                                                                             out,
+                                                                                             sz);
+  }
 } // namespace swizzle_kernel_2d
 
 void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
@@ -129,24 +144,17 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
 
   const size_t numel = input->scale_inv.numel();
   if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-    using namespace swizzle_kernel_1d;
-    NVTE_CHECK(numel % 128 == 0, "Input has to be divisible into 128x128 tiles");
     NVTE_CHECK(output->scale_inv.numel() == numel * 4,
                "Output should have 4 scaling factors (for 4 1x32 tiles) "
                "for every input scaling factor (for a 1x128 tile)");
 
-    const size_t blocks = DIVUP(numel, SF_PER_TB);
-    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(
-        input->scale_inv.dptr, output->scale_inv.dptr, numel);
+    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, numel, stream);
   } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
-    using namespace swizzle_kernel_2d;
     NVTE_CHECK(output->scale_inv.numel() == numel * 512,
                "Output should have 512 scaling factors (for 512 1x32 tiles) "
                "for every input scaling factor (for a 128x128 tile)");
 
-    const size_t blocks = DIVUP(numel, SF_PER_TB);
-    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<blocks, TB_SIZE, 0, stream>>>(
-        input->scale_inv.dptr, output->scale_inv.dptr, numel);
+    swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, numel, stream);
   }
 }
 
