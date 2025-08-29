@@ -14,7 +14,7 @@ import contextlib
 import os
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-
+import math
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
@@ -150,7 +150,7 @@ fp8_recipes = [
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-def test_numerics(fp8_recipe, feature_dirs):
+def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if not mxfp8_available and fp8_recipe == recipe.MXFP8BlockScaling():
@@ -208,6 +208,61 @@ def test_numerics(fp8_recipe, feature_dirs):
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
 
 
+LOG_HIGH_PRECISION_CONFIG_BASE = """
+log:
+  layers:
+    layer_name_regex_pattern: .*
+  enabled:
+    True
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      stats: [
+        {stats}
+      ]
+      tensors: [activation, gradient, weight]
+      freq: 2
+      start_step: 0
+      end_step: 10
+"""
+
+def test_log_stats_numerics(feature_dirs):
+    stats = [
+        "dynamic_range",
+        "max_blockwise_4_dynamic_range"
+    ]
+    log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
+
+    with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
+        
+        epsilon = 1e-10
+        tensor = torch.zeros(1024, 1024).cuda() + epsilon
+        tensor[0, :] = 1000
+
+        debug_api.transformer_engine.inspect_tensor(
+            layer_name="layer_name",
+            tensor_name="activation",
+            iteration=0,
+            tp_group=None,
+            tensor=tensor,
+            quantizer=None,
+            rowwise_quantized_tensor=None,
+            columnwise_quantized_tensor=None,
+        )
+        debug_api.step()
+
+        output = read_log(log_dir)
+
+    for line in output.splitlines():
+        if "max_blockwise_4_dynamic_range" in line:
+            max_blockwise_4_dynamic_range = float(line.split("value=")[1])
+            expected = 0
+            assert max_blockwise_4_dynamic_range == pytest.approx(expected, abs=1e-4)
+        elif "dynamic_range" in line:
+            dynamic_range = float(line.split("value=")[1])
+            expected = math.log2(1000) - math.log2(epsilon)
+            assert dynamic_range == pytest.approx(expected, abs=1e-4)
+
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
     if not fp8_available:
@@ -254,3 +309,7 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
     debug_api.end_debug()
     TEDebugState._reset()
+
+
+def test_max_blockwise_dynamic_range(feature_dirs):
+    pass

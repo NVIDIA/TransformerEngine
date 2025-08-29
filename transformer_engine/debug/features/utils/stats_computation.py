@@ -13,7 +13,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
 
 
-@torch.compile
+#@torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
@@ -36,6 +36,21 @@ def _compute_dynamic_range_bottom(tensor):
         amin = torch.tensor(1, device=tensor.device).to(torch.float)
     return torch.log2(amin)
 
+
+@torch.compile
+def compute_max_blockwise_dynamic_range(tensor, block_size):
+    """Computes the max dynamic range of the tensor."""
+    total_numel = tensor.numel()
+    assert total_numel % block_size == 0, \
+        f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+
+    abs_vals = tensor.reshape(-1, block_size).abs().float()
+    per_block_amax = abs_vals.amax(dim=1)
+    if torch.any(per_block_amax == 0):
+        return torch.tensor(float("inf"), device=tensor.device, dtype=tensor.dtype)
+
+    per_block_amin_nz = abs_vals.masked_fill(abs_vals == 0, float("inf")).amin(dim=1)
+    return (torch.log2(per_block_amax) - torch.log2(per_block_amin_nz)).max()
 
 def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
@@ -304,6 +319,19 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
     DEPENDENCIES[stat_err] = {stat_err}
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
+
+def add_max_blockwise_dynamic_range_stats(block_size: int):
+    """Register max_blockwise_X_dynamic_range stats for the recipe."""
+    stat_name = f"max_blockwise_{block_size}_dynamic_range"
+    if stat_name in stats_to_num:
+        return # already registered
+    stats_to_num[stat_name] = len(stats_to_num)
+    DEPENDENCIES[stat_name] = {stat_name}
+
+    STATS[stat_name] = (
+        lambda x, aux_dict: compute_max_blockwise_dynamic_range(x, block_size),
+        lambda buffers: max(_get(buffers, stat_name)),
+    )
 
 
 for _columnwise in [True, False]:

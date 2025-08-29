@@ -4,9 +4,10 @@
 
 """LogTensorStats Feature support for nvidia-dlframework-inspect"""
 
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import torch
+import re
 
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
@@ -19,7 +20,9 @@ from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import next_enabled_iter, get_reduction_params
+from transformer_engine.debug.features.utils.stats_computation import add_max_blockwise_dynamic_range_stats
 
+max_blockwise_regex = r"max_blockwise_\d+_dynamic_range"
 
 @Registry.register_feature(namespace="transformer_engine")
 class LogTensorStats(BaseLogTensorStats):
@@ -45,6 +48,8 @@ class LogTensorStats(BaseLogTensorStats):
             - l2_norm
             - cur_amax – maximal absolute value of a tensor,
             - dynamic_range – equal to `torch.log2(amax) - torch.log2(amin)`
+            - max_blockwise_X_dynamic_range: Computes the maximum dynamic range (log2(max) - log2(min)) across all blocks of size X within the tensor, where X is an integer specifying the block size.
+    
     tensors/tensors_struct: List[str]
         list of tensors to log
 
@@ -87,6 +92,21 @@ class LogTensorStats(BaseLogTensorStats):
                         - tensor: weight
                           stats: [dynamic_range]
     """
+
+    def _is_supported_stat(self, stat: str):
+        """Returns True if the stat is supported by this feature."""
+
+        if re.match(max_blockwise_regex, stat):
+            return True
+        
+        return stat in BaseLogTensorStats._get_supported_stats_list(None) | {"cur_amax", "dynamic_range"}
+
+    def _add_max_blockwise_dynamic_range_stats(self, stats: List[str]):
+        """Adds max_blockwise_X_dynamic_range stats for the recipe."""
+        for stat in stats:
+            if re.match(max_blockwise_regex, stat):
+                block_size = int(stat.split("_")[2])
+                add_max_blockwise_dynamic_range_stats(block_size)
 
     def _get_supported_stats_list(self):
         """Returns stats this feature can log."""
@@ -142,8 +162,10 @@ class LogTensorStats(BaseLogTensorStats):
 
         for stat in config["stats"]:
             assert (
-                stat in self._get_supported_stats_list()
+                self._is_supported_stat(stat)
             ), f"[NVTORCH INSPECT ERROR] Statistic {stat} is not supported."
+        
+        self._add_max_blockwise_dynamic_range_stats(config["stats"])
 
         STATS_BUFFERS.try_add_buffer(
             layer_name=layer_name,
