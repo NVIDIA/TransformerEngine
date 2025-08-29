@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 from packaging.version import Version as PkgVersion
+from itertools import count
 
 import torch
 import transformer_engine_torch as tex
@@ -19,6 +20,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
 )
 from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
+from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -136,6 +138,8 @@ else:
 def _rmse(a, b):
     return torch.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
 
+global_fwd_count = count(0,1)
+global_bwd_count = count(0,1)
 
 class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
     @staticmethod
@@ -1097,21 +1101,39 @@ class FusedAttnFunc(torch.autograd.Function):
                     atol = float(os.getenv("NVTE_ATOL", "1e-2"))
                     rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
                     if layer_number == layer and procid == 0:
-                        out_tensors = [out_, out_clone]
-                        lse_tensors = [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]]
-                        out_minmax = [(x.min().item(), x.max().item()) for x in out_tensors]
-                        lse_minmax = [(x.min().item(), x.max().item()) for x in lse_tensors]
-                        out_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in out_minmax]
-                        lse_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in lse_minmax]
+                        print(f">> aux[0], {aux_ctx_tensors[0].view(-1)[:10]}")
+                        print(f">> aux[0], {aux_ctx_tensors[1].nonzero().sum()}, {aux_ctx_tensors[1].shape}")
+                        print(f">> aux[1], {aux_ctx_tensors[1].view(-1)[:10]}")
+                        print(f">> aux_clone[0], {aux_ctx_tensors_clone[0].view(-1)[:10]}")
                         out_close = torch.allclose(out_, out_clone, atol=atol, rtol=rtol)
                         lse_close = torch.allclose(aux_ctx_tensors[0], aux_ctx_tensors_clone[0], atol=atol, rtol=rtol)
-                        minmax_strs = [f"({mi:.4e}, {ma:.4e})" for mm in [out_minmax, lse_minmax] for (mi,ma) in mm]
-                        minmax_strs = " ".join(minmax_strs)
                         rmse = [_rmse(x,y) for x,y in [[out_, out_clone], [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]]]]
-                        print(f">>>> fwd p{procid} l{layer_number} out/lse {minmax_strs} {out_close=} {lse_close=} {rmse=}")
-                #out_, aux_ctx_tensors = out_clone, aux_ctx_tensors
-                #out_.copy_(out_clone)
-                #aux_ctx_tensors[0].copy_(aux_ctx_tensors_clone[0])
+                        print(f">>>> fwd p{procid} l{layer_number} {out_close=} {lse_close=}")
+                        print(f">>>> fwd p{procid} l{layer_number} {rmse=}")
+                        t_in = [q, k, v]
+                        t_f8 = [out_, aux_ctx_tensors[0], aux_ctx_tensors[1]]
+                        t_f16 = [out_clone, aux_ctx_tensors_clone[0]]
+                        tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
+                        t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
+                        t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
+                        tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
+                        t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
+                        t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
+                        names_minmax = ['qkv        ', 'f8  o/stats', 'f16 o/stats']
+                        for nm,mm in zip(names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]):
+                            mm = ", ".join(mm)
+                            print(f">>>> fwd p{procid} l{layer_number} {nm}: {mm}")
+                        torch.cuda.synchronize()
+                        global_counter = next(global_fwd_count)
+                        print(f">>> fwd {global_counter=}")
+                        if global_counter % 400 == 0:
+                            print(f">> saving fwd for {global_counter=}")
+                            tensors_fp8 = [(x._data,x._scale_inv,x._quantizer.scale,x._quantizer.amax) if isinstance(x,Float8TensorBase) else x for x in [q_fp8, k_fp8, v_fp8, out_, aux_ctx_tensors]]
+                            tensors_fp8.extend([(S_quantizer.scale, S_quantizer.amax)])
+                            tensors_f16 = [q_clone, k_clone, v_clone, out_clone, aux_ctx_tensors_clone]
+                            save_path = "/results/"
+                            torch.save(tensors_fp8, save_path+"fwd_tensors_fp8_"+str(global_counter)+'.pt')
+                            torch.save(tensors_f16, save_path+"fwd_tensors_f16_"+str(global_counter)+'.pt')
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1507,12 +1529,34 @@ class FusedAttnFunc(torch.autograd.Function):
                             atol = float(os.getenv("NVTE_ATOL", "1e-2"))
                             rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
                             if ctx.layer_number == layer and procid == 0:
-                                dqkv_minmax = [(x.min().item(), x.max().item()) for p in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone]) for x in p]
-                                dqkv_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in dqkv_minmax]
-                                minmax_strs = " ".join(dqkv_minmax_strs)
                                 dqkv_close = [torch.allclose(x, y, atol=atol, rtol=rtol) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
                                 rmse = [_rmse(x,y) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
-                                print(f">>>> bwd p{procid} l{ctx.layer_number} dqkv {minmax_strs} {dqkv_close=} {rmse=}")
+                                print(f">>>> bwd p{procid} l{ctx.layer_number} {dqkv_close=}")
+                                print(f">>>> bwd p{procid} l{ctx.layer_number} {rmse=}")
+                                t_in = [q, k, v, out, d_out]
+                                t_f8 = [dq_, dk_, dv_]
+                                t_f16 = [dq_clone, dk_clone, dv_clone]
+                                tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
+                                t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
+                                t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
+                                tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
+                                t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
+                                t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
+                                names_minmax = ['qkvodo  ', 'f8  dqkv', 'f16 dqkv']
+                                for nm,mm in zip(names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]):
+                                    mm = ", ".join(mm)
+                                    print(f">>>> bwd p{procid} l{ctx.layer_number} {nm}: {mm}")
+                                torch.cuda.synchronize()
+                                global_counter = next(global_bwd_count)
+                                print(f">>> bwd {global_counter=}")
+                                if global_counter % 400 == 0:
+                                    print(f">> saving bwd for {global_counter=}")
+                                    tensors_fp8 = [(x._data,x._scale_inv,x._quantizer.scale,x._quantizer.amax) if isinstance(x,Float8TensorBase) else x for x in [q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8, aux_ctx_tensors, dq_, dk_, dv_]]
+                                    tensors_fp8.extend([(x.scale, x.amax) for x in [ctx.S_quantizer, ctx.dP_quantizer]])
+                                    tensors_f16 = [q_clone, k_clone, v_clone, out_clone, d_out_clone, aux_ctx_tensors_clone, dq_clone, dk_clone, dv_clone]
+                                    save_path = "/results/"
+                                    torch.save(tensors_fp8, save_path+"bwd_tensors_fp8_"+str(global_counter)+'.pt')
+                                    torch.save(tensors_f16, save_path+"bwd_tensors_f16_"+str(global_counter)+'.pt')
 
                 else:
                     if isinstance(d_out, QuantizedTensor):
