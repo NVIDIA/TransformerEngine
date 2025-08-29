@@ -312,7 +312,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
         const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
         multi_padding_kernel<nvec, Type, true>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
-      NVTE_CHECK_CUDA(cudaGetLastError());
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
   if (kernel_args_unaligned.num_tensors > 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
@@ -320,7 +320,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
         const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
         multi_padding_kernel<nvec, Type, false>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
-      NVTE_CHECK_CUDA(cudaGetLastError());
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -410,7 +410,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
         const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
         multi_unpadding_kernel<nvec, Type, true>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
-      NVTE_CHECK_CUDA(cudaGetLastError());
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
   if (kernel_args_unaligned.num_tensors > 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(
@@ -418,7 +418,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
         const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
         multi_unpadding_kernel<nvec, Type, false>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
-      NVTE_CHECK_CUDA(cudaGetLastError());
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
