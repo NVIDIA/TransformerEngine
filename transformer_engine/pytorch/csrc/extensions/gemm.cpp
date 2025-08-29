@@ -93,6 +93,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              bool use_split_accumulator, CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
+  using namespace transformer_engine::pytorch::detail;
+
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
@@ -123,35 +125,42 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                "into D tensor. Beta has nothing to be applied to.");
   }
 
-  DType gemm_output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
+  DType output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
   // Output tensor
   TensorWrapper D_tensor;
   if (D.is_none()) {
-    std::tie(D_tensor, D) = createOutputTensor(D_shape, gemm_output_dtype, quantizer);
+    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
   } else {
     D_tensor = makeTransformerEngineTensor(D, quantizer);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
                "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
                std::to_string(D_tensor.shape()), ")");
-    // TODO: Rather check quantizer output data type and compare with out_dtype
-    // if (out_dtype) {
-    //   NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
-    //              static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
-    // }
+    if (out_dtype) {
+      NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
+                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
+    }
   }
 
   // maintain unquantized tensor in case we need to output fp8 quantized tensor from op consuming hp data type.
   TensorWrapper unquantized_D_tensor;
   py::object unquantized_out;
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  bool quantization_needed = !quantizer.is_none();  // TODO: Another use-case:
-  // If already output is FP8, then no need for quantization, since cublas is gonna take care of it.
-  if (quantization_needed) {
-    NoneQuantizer q{none};
-    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, gemm_output_dtype);
-  }
 
-  TensorWrapper& out_tensor = quantization_needed ? unquantized_D_tensor : D_tensor;
+  // Unfused quantization is needed in the following cases
+  // 1. Inputs: BF16, Output: FP8 (GEMM output has to be BF16, so FP8 quantization needed after that)
+  // 2. Inputs: FP8, Output: FP8 (Current Scaling Quantization used, Output needs to be in BF16 to do a current
+  //scaling quantization)
+  bool unfused_quantization_needed = !quantizer.is_none();
+  if(low_precision)
+  {
+     // Anything apart from currentscaling quantization can be handled in the fused cublas kernel
+     unfused_quantization_needed = !IsFloat8CurrentScalingQuantizers(quantizer.ptr());
+  }
+  if (unfused_quantization_needed) {
+    NoneQuantizer q{none};
+    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, output_dtype);
+  TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
+
   // Bias tensor
   TensorWrapper bias_tensor;
   MaybeTensor bias_grad = std::nullopt;
@@ -281,7 +290,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  if (quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
+  if (unfused_quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
   // Pack outputs
   std::vector<py::object> out;
   out.emplace_back(std::move(D));
