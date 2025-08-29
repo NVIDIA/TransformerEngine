@@ -26,12 +26,31 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDA_R_16F;
+    case DType::kFloat32:
+      return CUDA_R_32F;
+    case DType::kBFloat16:
+      return CUDA_R_16BF;
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {
     NVTE_CHECK(t->scale_inv.dptr != nullptr, "Tensor should have allocated scale_inv.");
     update_tensor_scale_inv_kernel<<<1, 1, 0, stream>>>(
         reinterpret_cast<const float *>(t->scale.dptr),
         reinterpret_cast<float *>(t->scale_inv.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -73,6 +92,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     dim3 grid(numBlocks, 1, 1);                                                              \
     memset_kernel<vectorizedType>                                                            \
         <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
 
@@ -83,7 +103,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
   if (size_in_bytes > 4096) {
     // Use cudaMemsetAsync for larger sizes.
-    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(ptr, value, size_in_bytes, stream));
     return;
   }
 

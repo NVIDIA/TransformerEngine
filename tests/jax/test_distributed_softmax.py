@@ -41,11 +41,11 @@ class TestDistributedSoftmax:
 
         if not bad_sharding:
             x_pspec = PartitionSpec(
-                mesh_resource.dp_resource, mesh_resource.tp_resource, None, None
+                mesh_resource.dp_resource, mesh_resource.tpsp_resource, None, None
             )
         else:
             x_pspec = PartitionSpec(
-                mesh_resource.dp_resource, None, None, mesh_resource.tp_resource
+                mesh_resource.dp_resource, None, None, mesh_resource.tpsp_resource
             )
 
         if broadcast_batch_mask:

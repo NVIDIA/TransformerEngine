@@ -45,8 +45,8 @@ class TestDistributedSelfAttn:
         _, seqlen, heads, _ = shape
         is_dp_enabled = mesh_resource.dp_resource is not None
         tp_size = 1
-        if mesh_resource.tp_resource is not None:
-            idx = mesh_axes.index(mesh_resource.tp_resource)
+        if mesh_resource.tpsp_resource is not None:
+            idx = mesh_axes.index(mesh_resource.tpsp_resource)
             tp_size = mesh_shape[idx]
 
         all_reduce_loss_bytes = 4  # 1 * FP32
