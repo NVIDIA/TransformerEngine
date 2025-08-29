@@ -5,13 +5,15 @@
 set -e
 
 PLATFORM=${1:-manylinux_2_28_x86_64}
-BUILD_METAPACKAGE=${2:-true}
-BUILD_COMMON=${3:-true}
-BUILD_PYTORCH=${4:-true}
-BUILD_JAX=${5:-true}
 
 export NVTE_RELEASE_BUILD=1
+export CUDA_VERSION_MAJOR=${CUDA_VERSION_MAJOR:-12}
+export BUILD_METAPACKAGE=${BUILD_METAPACKAGE:-true}
+export BUILD_COMMON=${BUILD_COMMON:-true}
+export BUILD_PYTORCH=${BUILD_PYTORCH:-true}
+export BUILD_JAX=${BUILD_JAX:-true}
 export TARGET_BRANCH=${TARGET_BRANCH:-}
+export NVTE_BUILD_THREADS_PER_JOB=4
 mkdir -p /wheelhouse/logs
 
 # Generate wheels for common library.
@@ -39,15 +41,15 @@ if $BUILD_COMMON ; then
         # Repack the wheel for cuda specific package, i.e. cu12.
         /opt/python/cp310-cp310/bin/wheel unpack dist/*
         # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
-        sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-        sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-        mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info"
+        sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_VERSION_MAJOR}/g" "${WHL_BASE}/${WHL_BASE}.dist-info/METADATA"
+        sed -i "s/Name: transformer_engine/Name: transformer_engine_cu${CUDA_VERSION_MAJOR}/g" "${WHL_BASE}/${WHL_BASE}.dist-info/METADATA"
+        mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu${CUDA_VERSION_MAJOR}-${VERSION}.dist-info"
         /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
 
         # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)
         IFS='-' read -ra whl_parts <<< "$whl_name"
-        whl_name_target="${whl_parts[0]}_cu12-${whl_parts[1]}-py3-none-${whl_parts[4]}"
+        whl_name_target="${whl_parts[0]}_cu${CUDA_VERSION_MAJOR}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
         rm -rf $WHL_BASE dist
         mv *.whl /wheelhouse/"$whl_name_target"
 fi
