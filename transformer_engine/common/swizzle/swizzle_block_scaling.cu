@@ -90,16 +90,16 @@ namespace swizzle_kernel_2d {
     const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     static_assert(SF_PER_WARP == 1);
-    const size_t idx = tid / WARP_SIZE;
+    const size_t warp = tid / WARP_SIZE;
     const size_t lane = tid % WARP_SIZE;
 
-    // uniform branch (idx == warp index)
-    if (idx >= sz) {
+    // uniform branch
+    if (warp >= sz) {
       return;
     }
 
     // load scaling factor for a 128x128 tile
-    uint32_t sf = reinterpret_cast<const uint32_t*>(in)[idx];
+    uint32_t sf = reinterpret_cast<const uint32_t*>(in)[warp];
 
     // convert it to four scaling factors for 1x32 tiles
     sf = convert_block_scaling_to_mxfp8_scaling_factors(sf);
@@ -108,7 +108,7 @@ namespace swizzle_kernel_2d {
     const uint4 sf4{sf, sf, sf, sf};
 
     // store it cooperatively for 512 1x32 tiles in a 128x128 tile
-    void* const warp_dst = out + 512 * idx;
+    void* const warp_dst = out + 512 * warp;
     void* const dst = warp_dst + lane * sizeof(uint4);
     *reinterpret_cast<uint4*>(dst) = sf4;
   }
