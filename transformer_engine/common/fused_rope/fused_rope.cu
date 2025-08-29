@@ -205,30 +205,54 @@ __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *f
                                              const int h, const int d, const int d2,
                                              const int row_offset, const int in_row_length,
                                              const int out_row_length) {
-#pragma unroll
-  for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-    float v_cos = 1.0, v_sin = 0.0;
-    if (freqs != nullptr) {
-      sincosf(freqs[s_id * d2 + d_id], &v_sin, &v_cos);
-    }
-#pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-      for (int i = 0; i < out_row_length; i += d) {
-        int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
-        int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
-        float v_src = src[offset_src];
-        float v_src_rotate;
-        if (!interleaved) {
-          v_src_rotate = (d_id + d2 / 2 < d2) ? -static_cast<float>(src[offset_src + (d2 / 2)])
-                                              : static_cast<float>(src[offset_src + (d2 / 2 - d2)]);
-        } else {
-          v_src_rotate = (d_id % 2 == 0) ? -static_cast<float>(src[offset_src + 1])
-                                         : static_cast<float>(src[offset_src - 1]);
-        }
-        out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+  extern __shared__ float shared_mem_cos_sin_qk[];
+  // Split the shared memory into cos and sin parts for q or k
+  float* shared_mem_cos = nullptr;
+  float* shared_mem_sin = nullptr;
+  if (row_offset == 0) { // q
+      shared_mem_cos = shared_mem_cos_sin_qk;
+      shared_mem_sin = shared_mem_cos_sin_qk + d2;
+  } else { // k
+      shared_mem_cos = shared_mem_cos_sin_qk + 2 * d2;
+      shared_mem_sin = shared_mem_cos_sin_qk + 3 * d2;
+  }
+  if (freqs != nullptr) {
+      int tid = threadIdx.x * blockDim.y + threadIdx.y;
+      for (int i = tid; i < d2; i+=blockDim.x * blockDim.y) {
+          sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
       }
-    }
+  }
+  __syncthreads();
+
+  #pragma unroll
+  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+      #pragma unroll
+      for (int i = 0; i < out_row_length; i+=d) {
+          #pragma unroll
+          for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+              int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
+              int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
+              if (freqs != nullptr) {
+                float v_cos, v_sin;
+                v_cos = shared_mem_cos[d_id];
+                v_sin = shared_mem_sin[d_id];
+                float v_src = src[offset_src];
+                float v_src_rotate;
+                if (!interleaved) {
+                    v_src_rotate = (d_id + d2 / 2 < d2)
+                                  ? -static_cast<float>(src[offset_src + (d2 / 2)])
+                                  : static_cast<float>(src[offset_src + (d2 / 2 - d2)]);
+                } else {
+                    v_src_rotate = (d_id % 2 == 0)
+                                ? -static_cast<float>(src[offset_src + 1])
+                                : static_cast<float>(src[offset_src - 1]);
+                }
+                out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+              } else {
+                  out[offset_dst] = src[offset_src];
+              }
+          }
+      }
   }
   // copy the rest
   if (d > d2) {
@@ -254,37 +278,59 @@ __device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const fl
                                               const int h, const int d, const int d2,
                                               const int row_offset, const int in_row_length,
                                               const int out_row_length) {
-#pragma unroll
-  for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-    float v_cos = 1.0, v_sin = 0.0;
-    if (freqs != nullptr) {
-      v_cos = cosf(freqs[s_id * d2 + d_id]);
-      if (!interleaved) {
-        v_sin = (d_id + d2 / 2 < d2) ? sinf(freqs[s_id * d2 + d_id + d2 / 2])
-                                     : -sinf(freqs[s_id * d2 + d_id + d2 / 2 - d2]);
-      } else {
-        v_sin = (d_id % 2 == 0) ? sinf(freqs[s_id * d2 + d_id + 1])
-                                : -sinf(freqs[s_id * d2 + d_id - 1]);
+  extern __shared__ float shared_mem_cos_sin_qk[];
+  float* shared_mem_cos = nullptr;
+  float* shared_mem_sin = nullptr;
+  // Split the shared memory into cos and sin parts for q or k
+  if (row_offset == 0) { // q
+      shared_mem_cos = shared_mem_cos_sin_qk;
+      shared_mem_sin = shared_mem_cos_sin_qk + d2;
+  } else { // k
+      shared_mem_cos = shared_mem_cos_sin_qk + 2 * d2;
+      shared_mem_sin = shared_mem_cos_sin_qk + 3 * d2;
+  }
+  if (freqs != nullptr) {
+      int tid = threadIdx.x * blockDim.y + threadIdx.y;
+      for (int i = tid; i < d2; i+=blockDim.x * blockDim.y) {
+          sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
       }
-    }
-#pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-      for (int i = 0; i < out_row_length; i += d) {
+  }
+  __syncthreads();
+  #pragma unroll
+  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+    #pragma unroll
+    for (int i = 0; i < out_row_length; i+=d) {
+      #pragma unroll
+      for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
         int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
         int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
 
         float v_src = grad_out[offset_src];
-        float v_src_rotate;
-        if (!interleaved) {
-          v_src_rotate = (d_id + d2 / 2 < d2)
-                             ? static_cast<float>(grad_out[offset_src + (d2 / 2)])
-                             : static_cast<float>(grad_out[offset_src + (d2 / 2 - d2)]);
+        if (freqs != nullptr) {
+          float v_cos, v_sin;
+          v_cos = shared_mem_cos[d_id];
+          float v_src_rotate;
+          if (!interleaved) {
+            if (d_id + d2 / 2 < d2) {
+              v_src_rotate = static_cast<float>(grad_out[offset_src + (d2 / 2)]);
+              v_sin = shared_mem_sin[d_id + d2 / 2];
+            } else {
+              v_src_rotate = static_cast<float>(grad_out[offset_src + (d2 / 2 - d2)]);
+              v_sin = -shared_mem_sin[d_id + d2 / 2 - d2];
+            }
+          } else {
+            if (d_id % 2 == 0) {
+              v_src_rotate = static_cast<float>(grad_out[offset_src + 1]);
+              v_sin = shared_mem_sin[d_id + 1];
+            } else {
+              v_src_rotate = static_cast<float>(grad_out[offset_src - 1]);
+              v_sin = -shared_mem_sin[d_id - 1];
+            }
+          }
+          out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
         } else {
-          v_src_rotate = (d_id % 2 == 0) ? static_cast<float>(grad_out[offset_src + 1])
-                                         : static_cast<float>(grad_out[offset_src - 1]);
+          out[offset_dst] = grad_out[offset_src];
         }
-        out[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
       }
     }
   }
@@ -348,7 +394,7 @@ __global__ void fused_qkv_rope_forward_kernel(
   fused_qkv_rope_block_forward(qkv_input, k_freqs, k_out, interleaved, s_id_for_freqs, offset_block,
                                offset_block_dst_k, h, d, d2, q_limit, total_d, k_split_arg);
   fused_qkv_rope_block_forward(qkv_input, nullptr, v_out, interleaved, s_id_for_freqs, offset_block,
-                               offset_block_dst_v, h, d, 0 /*d2*/, k_limit, total_d, v_split_arg);
+                               offset_block_dst_v, h, d, d2, k_limit, total_d, v_split_arg);
 }
 
 template <typename scalar_t>
@@ -394,7 +440,7 @@ __global__ void fused_qkv_rope_backward_kernel(
                                 offset_block, offset_block_dst_k, h, d, d2, q_limit, total_d,
                                 k_split_arg);
   fused_qkv_rope_block_backward(grad_out_v, nullptr, qkv_grad, interleaved, s_id_for_freqs,
-                                offset_block, offset_block_dst_v, h, d, 0 /*d2*/, k_limit, total_d,
+                                offset_block, offset_block_dst_v, h, d, d2, k_limit, total_d,
                                 v_split_arg);
 }
 
@@ -477,8 +523,9 @@ void fused_qkv_rope_forward_launcher(const scalar_t *qkv_input, const float *q_f
   int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int shared_mem_size = 4 * d2 * sizeof(float);  // cos, sin * q ,k
 
-  fused_qkv_rope_forward_kernel<<<blocks, threads, 0, stream>>>(
+  fused_qkv_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       qkv_input, q_freqs, k_freqs, start_positions, q_out, k_out, v_out, qkv_format, interleaved,
       cp_size, cp_rank, s, b, h, d, d2, qkv_split_arg_list_0, qkv_split_arg_list_1,
       qkv_split_arg_list_2);
@@ -499,8 +546,9 @@ void fused_qkv_rope_backward_launcher(const scalar_t *q_grad_out, const scalar_t
   const int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int shared_mem_size = 4 * d2 * sizeof(float);  // cos, sin * q ,k
 
-  fused_qkv_rope_backward_kernel<<<blocks, threads, 0, stream>>>(
+  fused_qkv_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       q_grad_out, k_grad_out, v_grad_out, q_freqs, k_freqs, qkv_grad_input, qkv_format, interleaved,
       cp_size, cp_rank, s, b, h, d, d2, qkv_split_arg_list_0, qkv_split_arg_list_1,
       qkv_split_arg_list_2);
