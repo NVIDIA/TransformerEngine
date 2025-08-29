@@ -185,63 +185,228 @@ __global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: Out correction in forward
+ * Support BSHD, SBHD, and THD formats for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
-template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
-__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
-                                          float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen,
-                                          int lse_per_step_seqlen) {
-  extern __shared__ int cu_seqlens_s[];
-  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
-    cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
+// Stores pointers to output and lse tensors for batch kernel launch.
+template <int n>
+struct TensorList {
+  void *out[n];
+  void *lse[n];
+  int num;
+};
+
+// Using cp=2 with bshd format and causal=true as an example to explain why this struct is needed
+// For rank 0, inside the kernel we need to compute the positions of ‘*’ and ‘&’ along the sequence dimension of out_tensor, as shown below (‘|’ marks the midpoint):
+// ------*-|------&-
+// out_per_step[0] has the same shape as out_tensor, so its index computation can be shared.
+// However, due to the causal mask, out_per_step[1] only spans up to the midpoint of the sequence (half of out_per_step[0] and out),
+// so its indices must be recomputed, as shown here:
+//          ------*-
+// Therefore, to compute out_tensor we need three indices: ‘*’ for out_first_half, ‘&’ for out_second_half, and '$' for out.
+// Since lse_tensor has a different shape than out_tensor, we need three additional indices to index it.
+struct IndexMapping {
+  int out;
+  int lse;
+  int out_first_half;
+  int lse_first_half;
+  int out_second_half;
+  int lse_second_half;
+};
+
+__device__ IndexMapping build_mapping_bshd(int index, int s_size, int h_size, int d_size) {
+  int hd_size = h_size * d_size;
+  int shd_size = s_size * hd_size;
+  int b = index / shd_size;
+  int s = index / hd_size % s_size;
+  int h = index / d_size % h_size;
+  // int d = index % d_size; // d can be algebraically eliminated in the actual computation—so it isn’t strictly needed—but we include it here to illustrate the index‐calculation
+
+  IndexMapping mapping;
+  // index = b * shd_size + s * hd_size + h * d_size + d;
+  mapping.out = index;
+  // mapping.out_first_half = b * 2 * shd_size + s * hd_size + h * d_size + d = index + b * shd_size;
+  mapping.out_first_half = index + b * shd_size;
+  // mapping.out_second_half = b * 2 * shd_size + （s+s_size) * hd_size + h * d_size + d = index + b * shd_size + s_size * hd_size;
+  mapping.out_second_half = index + b * shd_size + shd_size;
+  mapping.lse = b * (h_size * s_size) + h * s_size + s;  // lse is in BHS format
+  // mapping.lse_first_half = b * (h_size * 2 * s_size) + h * 2 * s_size + s = mapping.lse * 2 - s;
+  mapping.lse_first_half = mapping.lse * 2 - s;
+  // mapping.lse_second_half = b * (h_size * 2 * s_size) + h * 2 * s_size + (s+s_size) = mapping.lse * 2 - s+ s_size;
+  mapping.lse_second_half = mapping.lse_first_half + s_size;
+
+  return mapping;
+}
+
+__device__ IndexMapping build_mapping_sbhd(int index, int s_size, int b_size, int h_size,
+                                           int d_size) {
+  int hd_size = h_size * d_size;
+  int bhd_size = b_size * hd_size;
+  int sbhd_size = s_size * bhd_size;
+  int s = index / bhd_size;
+  int b = index / hd_size % b_size;
+  int h = index / d_size % h_size;
+  // int d = index % d_size;
+
+  IndexMapping mapping;
+  // index = s * bhd_size + b * hd_size + h * d_size + d;
+  mapping.out = index;
+  // mapping.out_first_half = s * bhd_size + b * hd_size + h * d_size + d = index + s_size * bhd_size;
+  mapping.out_first_half = index;
+  // mapping.out_second_half = (s + s_size) * bhd_size + b * hd_size + h * d_size + d = index + s_size * bhd_size;
+  mapping.out_second_half = index + sbhd_size;
+  mapping.lse = b * (h_size * s_size) + h * s_size + s;  // lse is in BHS format
+  mapping.lse_first_half = mapping.lse * 2 - s;
+  mapping.lse_second_half = mapping.lse_first_half + s_size;
+
+  return mapping;
+}
+
+__device__ IndexMapping build_mapping_thd(int index, int h_size, int d_size, int *cu_seqlens,
+                                          int batch, int lse_seqlen, bool packed_lse) {
+  int hd_size = h_size * d_size;
+  int t = index / hd_size;
+  int h = index / d_size % h_size;
+  int seq_id = binary_search(t, cu_seqlens, batch + 1);
+  // int d = index % d_size;
+
+  IndexMapping mapping;
+  // index = t * hd_size + h * d_size + d;
+  mapping.out = index;
+  // mapping.out_first_half = (t + cu_seqlens[seq_id]) * hd_size + h * d_size + d;
+  mapping.out_first_half = index + cu_seqlens[seq_id] * hd_size;
+  // mapping.out_first_half = (t + cu_seqlens[seq_id] + cu_seqlens[seq_id+1] - cu_seqlens[seq_id]) * hd_size + h * d_size + d;
+  mapping.out_second_half = index + cu_seqlens[seq_id + 1] * hd_size;
+  if (packed_lse) {
+    // lse is in HT format
+    mapping.lse = h * lse_seqlen + t;
+    mapping.lse_first_half = h * lse_seqlen * 2 + t + cu_seqlens[seq_id];
+    mapping.lse_second_half = h * lse_seqlen * 2 + t + cu_seqlens[seq_id + 1];
+  } else {
+    // lse is in BHS format
+    int s = t - cu_seqlens[seq_id];
+    mapping.lse = seq_id * (h_size * lse_seqlen) + h * lse_seqlen + s;
+    mapping.lse_first_half = mapping.lse * 2 - s;
+    mapping.lse_second_half = mapping.lse_first_half + cu_seqlens[seq_id + 1] - cu_seqlens[seq_id];
   }
-  __syncthreads();
 
-  int tile_id = (blockIdx.x * blockDim.x + threadIdx.x) / tile_size;
-  int lane_id = threadIdx.x % tile_size;
-  int num_tiles = (blockDim.x * gridDim.x) / tile_size;
-  int num_total_tokens = cu_seqlens_s[batch];
-  int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
+  return mapping;
+}
 
-  for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
-    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
-    for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
-      size_t idx, idx_per_step;
+template <typename dtype>
+__device__ __forceinline__ void out_correction(int4 *out, int4 out_per_step, float lse,
+                                               float lse_per_step) {
+  dtype *p_out = reinterpret_cast<dtype *>(out);
+  dtype *p_out_per_step = reinterpret_cast<dtype *>(&out_per_step);
+  float lse_corrected = exp(lse_per_step - lse);
+  for (int i = 0; i < sizeof(int4) / sizeof(dtype); i++) {
+    p_out[i] = static_cast<float>(p_out[i]) + static_cast<float>(p_out_per_step[i]) * lse_corrected;
+  }
+}
 
-      if constexpr (lse_packed) {
-        idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-        idx_per_step = head_id * lse_per_step_seqlen + token_id;
-      } else {
-        size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
-        int col = token_id - cu_seqlens_s[seq_id];
-        int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-        idx = row * lse_seqlen + col + seq_len * only_second_half;
-        idx_per_step = row * lse_per_step_seqlen + col;
-      }
-      float lse_corrected_exp = expf(lse_per_step[idx_per_step] - lse[idx]);
-
-      idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-      idx = (idx * num_heads + head_id) * dim_per_head;
-      idx_per_step = (static_cast<size_t>(token_id) * num_heads + head_id) * dim_per_head;
-      dtype *cur_out = out + idx;
-      dtype *cur_out_per_step = out_per_step + idx_per_step;
-
-      for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
-        float4 data_per_step = reinterpret_cast<float4 *>(cur_out_per_step)[j];
-        float4 data = reinterpret_cast<float4 *>(cur_out)[j];
-        dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
-        dtype *p = reinterpret_cast<dtype *>(&data);
-        for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] = p[k] +
-                 (p_per_step[k] == static_cast<dtype>(0.f)
-                      ? static_cast<dtype>(0.f)
-                      : static_cast<dtype>(static_cast<float>(p_per_step[k]) * lse_corrected_exp));
-        }
-        reinterpret_cast<float4 *>(cur_out)[j] = data;
-      }
+template <typename dtype, bool causal, NVTE_QKV_Format out_format,
+          bool softmax_lse_in_packed_format, int max_tensors>
+__global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> tensors, float *lse,
+                                            int *cu_seqlens, int batch, int num_heads,
+                                            int dim_per_head, int lse_seqlen, int num_total_tokens,
+                                            int cp_size, int cp_rank, int finished_steps) {
+  extern __shared__ int cu_seqlens_s[];
+  if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
+    for (int i = threadIdx.x; i < batch + 1; i += blockDim.x) {
+      cu_seqlens_s[i] = cu_seqlens[i] / 2;
     }
+    __syncthreads();
+  }
+
+  // num_valid_tokens <= num_total_tokens because there may be padded tokens.
+  int num_valid_tokens;
+  if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
+    num_valid_tokens = cu_seqlens_s[batch] * 2;
+  } else {
+    num_valid_tokens = lse_seqlen * batch;
+  }
+
+  constexpr int elems_per_thread = sizeof(int4) / sizeof(dtype);
+  int threads_per_token = num_heads * dim_per_head / elems_per_thread;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (tid / threads_per_token >= num_total_tokens / 2) {
+    return;
+  }
+  if (tid / threads_per_token >= num_valid_tokens / 2) {
+    // Padding with zeros for invalid areas of out tensor.
+    reinterpret_cast<int4 *>(out)[tid * 2] = {0, 0, 0, 0};
+    reinterpret_cast<int4 *>(out)[tid * 2 + 1] = {0, 0, 0, 0};
+    return;
+  }
+
+  int num_full_tensors;
+  if constexpr (causal) {
+    // If causal is True, some tensors have only the half size of out tensor:
+    //     Give cp_size, cp_rank, there should be cp_size correction steps in total, in which the
+    //     [0, cp_rank + 1) steps are full tensors, and the [cp_rank + 1, cp_size) steps are half
+    //     tensors.
+    //     Current kernel is responsible for the [finished_steps, finished_steps + tensors.num)
+    //     steps.
+    //     We want to compute the number of full tensors, so the left_boundary of full tensors is
+    //        max(0, finished_steps) = finished_steps (because finished_steps is alwasys >=0),
+    //     and the right_boundary of full tensors is
+    //        min(cp_rank + 1, finished_steps + tensors.num).
+    //     The number of full tensors is 0 if right boundary <= left_boundary, otherwise it's (right
+    //     boundary - left_boundary).
+    num_full_tensors = min(max(cp_rank + 1 - finished_steps, 0), tensors.num);
+  } else {
+    // If causal is False, all the tensors have the same size as the out tensor.
+    num_full_tensors = tensors.num;
+  }
+
+  IndexMapping mapping;
+  if constexpr (out_format == NVTE_QKV_Format::NVTE_BSHD) {
+    mapping = build_mapping_bshd(tid, lse_seqlen / 2, num_heads, dim_per_head / elems_per_thread);
+  } else if constexpr (out_format == NVTE_QKV_Format::NVTE_SBHD) {
+    mapping =
+        build_mapping_sbhd(tid, lse_seqlen / 2, batch, num_heads, dim_per_head / elems_per_thread);
+  } else if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
+    mapping = build_mapping_thd(tid, num_heads, dim_per_head / elems_per_thread, cu_seqlens_s,
+                                batch, lse_seqlen / 2, softmax_lse_in_packed_format);
+  }
+
+  int4 out_buffer;
+  int4 out_per_step_buffer;
+
+  // Step1: Calculate the first half, only full tensors need to be concerned.
+  {
+    float lse_full = lse[mapping.lse_first_half];
+    out_buffer = {0, 0, 0, 0};
+    for (int tensor_id = 0; tensor_id < num_full_tensors; tensor_id++) {
+      float lse_per_step =
+          reinterpret_cast<float *>(tensors.lse[tensor_id])[mapping.lse_first_half];
+      out_per_step_buffer =
+          reinterpret_cast<int4 *>(tensors.out[tensor_id])[mapping.out_first_half];
+      out_correction<dtype>(&out_buffer, out_per_step_buffer, lse_full, lse_per_step);
+    }
+    reinterpret_cast<int4 *>(out)[mapping.out_first_half] = out_buffer;
+  }
+
+  // Step2: Calculate the second half, all tensors need to be concerned.
+  {
+    float lse_full = lse[mapping.lse_second_half];
+    out_buffer = {0, 0, 0, 0};
+    // Step2.1 Calculate the second half of full tensors.
+    for (int tensor_id = 0; tensor_id < num_full_tensors; tensor_id++) {
+      float lse_per_step =
+          reinterpret_cast<float *>(tensors.lse[tensor_id])[mapping.lse_second_half];
+      out_per_step_buffer =
+          reinterpret_cast<int4 *>(tensors.out[tensor_id])[mapping.out_second_half];
+      out_correction<dtype>(&out_buffer, out_per_step_buffer, lse_full, lse_per_step);
+    }
+    // Step2.2 Calculate the second half of non-full tensors.
+    for (int tensor_id = num_full_tensors; tensor_id < tensors.num; tensor_id++) {
+      float lse_per_step = reinterpret_cast<float *>(tensors.lse[tensor_id])[mapping.lse];
+      out_per_step_buffer = reinterpret_cast<int4 *>(tensors.out[tensor_id])[mapping.out];
+      out_correction<dtype>(&out_buffer, out_per_step_buffer, lse_full, lse_per_step);
+    }
+    reinterpret_cast<int4 *>(out)[mapping.out_second_half] = out_buffer;
   }
 }
 
@@ -455,97 +620,102 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: Out correction in forward
- **************************************************************************************************/
+  * Support BSHD, SBHD, and THD formats for Context Parallel: Fused out correction in forward
+  **************************************************************************************************/
 
-template <typename dtype, int only_second_half>
-static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                                      const Tensor &lse_per_step, const Tensor &cu_seqlens,
-                                      bool lse_packed, cudaStream_t stream) {
-  using namespace transformer_engine;
-  NVTE_CHECK(out.dtype() == out_per_step.dtype());
-  NVTE_CHECK(lse.dtype() == DType::kFloat32);
-  NVTE_CHECK(lse_per_step.dtype() == DType::kFloat32);
-  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+template <typename dtype, bool causal>
+void fused_out_correction_helper(Tensor &out, const NVTETensorPack *out_per_step, const Tensor &lse,
+                                 const NVTETensorPack *lse_per_step, const Tensor &cu_seqlens,
+                                 NVTE_QKV_Format qkv_format, int cp_size, int rank,
+                                 bool softmax_lse_in_packed_format, cudaStream_t stream) {
+  int lse_seqlen;
+  int batch;
+  int num_heads;
+  int dim_per_head;
+  int total_tokens;
+  int cu_seqlens_size = 0;
+  int *cu_seqlens_ptr = nullptr;
 
   auto out_shape = out.shape();
-  auto lse_shape = lse.shape();
-  auto out_per_step_shape = out_per_step.shape();
-  auto lse_per_step_shape = lse_per_step.shape();
-  auto cu_seqlens_shape = cu_seqlens.shape();
 
-  int total_tokens = out_shape[0];
-  int num_heads = out_shape[1];
-  int dim_per_head = out_shape[2];
-
-  NVTE_CHECK(out_per_step_shape[0] == total_tokens / (only_second_half + 1));
-  NVTE_CHECK(out_per_step_shape[1] == num_heads);
-  NVTE_CHECK(out_per_step_shape[2] == dim_per_head);
-
-  int batch, lse_seqlen, lse_per_step_seqlen;
-  if (lse_packed) {
+  if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
+    lse_seqlen = out_shape[0];
+    batch = out_shape[1];
+    num_heads = out_shape[2];
+    dim_per_head = out_shape[3];
+    total_tokens = lse_seqlen * batch;
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
+    lse_seqlen = out_shape[1];
+    batch = out_shape[0];
+    num_heads = out_shape[2];
+    dim_per_head = out_shape[3];
+    total_tokens = lse_seqlen * batch;
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    total_tokens = out_shape[0];
+    num_heads = out_shape[1];
+    dim_per_head = out_shape[2];
+    auto cu_seqlens_shape = cu_seqlens.shape();
     batch = cu_seqlens_shape[0] - 1;
-    lse_seqlen = lse_shape[1];
-    lse_per_step_seqlen = lse_per_step_shape[1];
-
-    NVTE_CHECK(lse_shape[0] == num_heads);
-    NVTE_CHECK(lse_seqlen >= total_tokens);
-    NVTE_CHECK(lse_per_step_shape[0] == num_heads);
-    NVTE_CHECK(lse_per_step_seqlen >= lse_seqlen / (only_second_half + 1));
-  } else {
-    batch = lse_shape[0];
-    lse_seqlen = lse_shape[2];
-    lse_per_step_seqlen = lse_per_step_shape[2];
-
-    NVTE_CHECK(lse_shape[1] == num_heads);
-    NVTE_CHECK(lse_per_step_shape[0] == batch);
-    NVTE_CHECK(lse_per_step_shape[1] == num_heads);
-    NVTE_CHECK(lse_per_step_seqlen == lse_seqlen / (only_second_half + 1));
-    NVTE_CHECK(cu_seqlens_shape[0] == batch + 1);
+    cu_seqlens_size = sizeof(int) * (batch + 1);
+    cu_seqlens_ptr = reinterpret_cast<int *>(cu_seqlens.data.dptr);
+    if (softmax_lse_in_packed_format) {
+      lse_seqlen = total_tokens;
+    } else {
+      auto lse_shape = lse.shape();
+      lse_seqlen = lse_shape[2];
+    }
   }
+  int elems_per_thread = sizeof(int4) / sizeof(dtype);  // Using ldg128
+  NVTE_CHECK(dim_per_head % elems_per_thread == 0, "Unsupported head size.");
+  NVTE_CHECK(total_tokens % 2 == 0,
+             "total tokens must be even.");  // Need to split tokens into two halves
+  int threads_per_block = 256;
+  int total_threads = total_tokens / 2 * num_heads * dim_per_head / elems_per_thread;
+  int num_blocks = (total_threads + threads_per_block - 1) / threads_per_block;
 
-  constexpr int tile = 16;
-  constexpr int block = 512;
-  unsigned int grid_x =
-      (static_cast<size_t>(total_tokens) / (only_second_half + 1) * tile + block - 1) / block;
-  dim3 grid = {grid_x, (unsigned int)num_heads};
+  constexpr int max_tensors = 64;
+  TensorList<max_tensors> tensors;
 
-  if (lse_packed) {
-    thd_out_correction_kernel<dtype, only_second_half, tile, true>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<dtype *>(out.data.dptr),
-            reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
-            lse_seqlen, lse_per_step_seqlen);
-  } else {
-    thd_out_correction_kernel<dtype, only_second_half, tile, false>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<dtype *>(out.data.dptr),
-            reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
-            lse_seqlen, lse_per_step_seqlen);
+  for (int i = 0; i < cp_size; i += max_tensors) {
+    int num_tensors = std::min(max_tensors, cp_size - i);
+    tensors.num = num_tensors;
+    for (int j = 0; j < num_tensors; j++) {
+      Tensor *out_temp = convertNVTETensorCheck(out_per_step->tensors[i + j]);
+      tensors.out[j] = reinterpret_cast<dtype *>(out_temp->data.dptr);
+      Tensor *lse_temp = convertNVTETensorCheck(lse_per_step->tensors[i + j]);
+      tensors.lse[j] = reinterpret_cast<float *>(lse_temp->data.dptr);
+    }
+
+    NVTE_CHECK(!(softmax_lse_in_packed_format == true && qkv_format != NVTE_QKV_Format::NVTE_THD),
+               "Packed lse only supports THD format.");
+
+    TRANSFORMER_ENGINE_QKV_FORMAT_SWITCH(
+        qkv_format, qkv_format_type, "fused_out_correction",
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            softmax_lse_in_packed_format, bool_softmax_lse_in_packed_format,
+            fused_out_correction_kernel<dtype, causal, qkv_format_type,
+                                        bool_softmax_lse_in_packed_format, max_tensors>
+            <<<num_blocks, threads_per_block, cu_seqlens_size, stream>>>(
+                reinterpret_cast<dtype *>(out.data.dptr), tensors,
+                reinterpret_cast<float *>(lse.data.dptr), cu_seqlens_ptr, batch, num_heads,
+                dim_per_head, lse_seqlen, total_tokens, cp_size, rank, i););)
   }
 }
 
-void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                        const Tensor &lse_per_step, const Tensor &cu_seqlens, bool only_second_half,
-                        bool lse_packed, cudaStream_t stream) {
-  using namespace transformer_engine;
-  if (only_second_half) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-        out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
-  } else {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-        out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
-  }
+// fused out correction after qkv calculation
+void fused_out_correction(Tensor &out, const NVTETensorPack *out_per_step, const Tensor &lse,
+                          const NVTETensorPack *lse_per_step, Tensor &cu_seqlens,
+                          NVTE_QKV_Format qkv_format, int cp_size, int rank, bool causal,
+                          bool softmax_lse_in_packed_format, cudaStream_t stream) {
+  // in-place optimization: use out_per_step[0] as the final output to avoid extra allocation
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      causal, bool_causal,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          out.dtype(), dtype,
+          fused_out_correction_helper<dtype, bool_causal>(out, out_per_step, lse, lse_per_step,
+                                                          cu_seqlens, qkv_format, cp_size, rank,
+                                                          softmax_lse_in_packed_format, stream););)
 }
 
 /***************************************************************************************************
@@ -704,17 +874,18 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
       *convertNVTETensorCheck(half_lse), lse_packed, second_half_lse_seqlen, stream);
 }
 
-void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream) {
-  NVTE_API_CALL(nvte_thd_out_correction);
+void nvte_cp_fused_out_correction(NVTETensor out, const NVTETensorPack *out_per_step,
+                                  const NVTETensor &lse, const NVTETensorPack *lse_per_step,
+                                  const NVTETensor &cu_seqlens, NVTE_QKV_Format qkv_format,
+                                  int cp_size, int rank, bool causal,
+                                  bool softmax_lse_in_packed_format, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_out_correction);
   using namespace transformer_engine;
 
-  context_parallel::thd_out_correction(
-      *convertNVTETensorCheck(out), *convertNVTETensorCheck(out_per_step),
-      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(lse_per_step),
-      *convertNVTETensorCheck(cu_seqlens), only_second_half, lse_packed, stream);
+  context_parallel::fused_out_correction(*convertNVTETensorCheck(out), out_per_step,
+                                         *convertNVTETensorCheck(lse), lse_per_step,
+                                         *convertNVTETensorCheck(cu_seqlens), qkv_format, cp_size,
+                                         rank, causal, softmax_lse_in_packed_format, stream);
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,

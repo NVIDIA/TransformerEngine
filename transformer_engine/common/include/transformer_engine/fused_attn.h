@@ -706,10 +706,11 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *  \param[in]     lse_packed            Whether or the softmax LSE is in packed format.
  *  \param[in]     stream                CUDA stream used for this operation.
  */
-void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream);
+void nvte_cp_fused_out_correction(NVTETensor out, const NVTETensorPack *out_per_step,
+                                  const NVTETensor &lse, const NVTETensorPack *lse_per_step,
+                                  const NVTETensor &cu_seqlens, NVTE_QKV_Format qkv_format,
+                                  int cp_size, int rank, bool causal,
+                                  bool softmax_lse_in_packed_format, cudaStream_t stream);
 
 /*!  \brief Correct the THD format output of context parallelism in forward pass.
  *

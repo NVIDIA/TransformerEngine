@@ -348,16 +348,17 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
                                     bool lse_packed, int second_half_lse_seqlen);
 
-void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
-                        const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half, bool lse_packed);
-
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
                          const std::string &second_half);
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
+
+at::Tensor fused_out_correction(std::vector<at::Tensor> &out_per_step, const at::Tensor &lse,
+                                const std::vector<at::Tensor> &lse_per_step,
+                                const py::object &cu_seqlens, std::string qkv_format, int cp_size,
+                                int rank, bool causal, bool softmax_lse_in_packed_format);
 
 /***************************************************************************************************
  * multi_tensor_* kernels

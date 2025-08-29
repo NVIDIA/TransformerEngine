@@ -640,6 +640,27 @@ struct TypeInfo {
     { __VA_ARGS__ }                                               \
   }
 
+#define TRANSFORMER_ENGINE_QKV_FORMAT_SWITCH(QKV_TYPE, TYPE, NAME, ...)      \
+  switch (QKV_TYPE) {                                                        \
+    case NVTE_QKV_Format::NVTE_SBHD: {                                       \
+      constexpr NVTE_QKV_Format TYPE = NVTE_QKV_Format::NVTE_SBHD;           \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    case NVTE_QKV_Format::NVTE_BSHD: {                                       \
+      constexpr NVTE_QKV_Format TYPE = NVTE_QKV_Format::NVTE_BSHD;           \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    case NVTE_QKV_Format::NVTE_THD: {                                        \
+      constexpr NVTE_QKV_Format TYPE = NVTE_QKV_Format::NVTE_THD;            \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    default:                                                                 \
+      NVTE_ERROR("only implemented for NVTE_THD, NVTE_BSHD and NVTE_SBHD "); \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
