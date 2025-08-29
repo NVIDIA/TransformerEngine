@@ -17,7 +17,6 @@
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
-#include "common/util/cuda_runtime.h"
 #include "common/utils.cuh"
 
 namespace transformer_engine {
@@ -235,14 +234,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   __syncthreads();
 
-// If not return columnwise, we trigger the next kernel here so that it's load from global memory
-// can overlap with this kernel's return rowwise.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (!return_columnwise_gemm_ready && !return_columnwise_compact) {
-    cudaTriggerProgrammaticLaunchCompletion();
-  }
-#endif
-
   // Step 2: Cast and store to output_c
   if (return_rowwise) {
     constexpr int r_stride =
@@ -333,14 +324,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
     }
   }
-
-// If return columnwise, we trigger the next kernel here so that it's load from global memory
-// can overlap with this kernel's return columnwise.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (return_columnwise_gemm_ready || return_columnwise_compact) {
-    cudaTriggerProgrammaticLaunchCompletion();
-  }
-#endif
 
   // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
   if (return_columnwise_gemm_ready) {
@@ -601,10 +584,6 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
 
   const size_t num_blocks_x = DIVUP(row_length, (size_t)kTileDim);
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
-  dim3 grid(num_blocks_x, num_blocks_y, 1);
-  cudaLaunchAttribute attribute[1];
-  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attribute[0].val.programmaticStreamSerializationAllowed = 1;
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
@@ -612,38 +591,31 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output.dtype, OutputType,
 
+          dim3 grid(num_blocks_x, num_blocks_y, 1);
+
           const bool full_tile = row_length % kTileDim == 0 && num_rows % kTileDim == 0;
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               full_tile, kAligned,
 
               size_t smem_bytes = kSMemSize * sizeof(InputType);
-
-              cudaLaunchConfig_t cfg = {grid, kThreadsPerBlock, smem_bytes, stream, NULL, 0};
-              if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) >=
-                  90) {
-                cfg.attrs = attribute;
-                cfg.numAttrs = 1;
-              }
               // shared memory must be requested up
               if (smem_bytes >= 48 * 1024) {
                 cudaError_t err = cudaFuncSetAttribute(
                     &block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
                 NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
-              } cudaLaunchKernelEx(&cfg,
-                                   block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType,
-                                                                         OutputType>,
-                                   reinterpret_cast<const InputType*>(input.dptr),
-                                   reinterpret_cast<OutputType*>(output.dptr),
-                                   reinterpret_cast<OutputType*>(output_t.dptr),
-                                   reinterpret_cast<float*>(scale_inv.dptr),
-                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                   scale_t_stride_y, epsilon, rowwise_option, columnwise_option,
-                                   pow2_scale);)  // kAligned
-          )                                       // OutputType
-      )                                           // InputType
+              } block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>
+              <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
+                  reinterpret_cast<const InputType*>(input.dptr),
+                  reinterpret_cast<OutputType*>(output.dptr),
+                  reinterpret_cast<OutputType*>(output_t.dptr),
+                  reinterpret_cast<float*>(scale_inv.dptr),
+                  reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
+                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
+                  columnwise_option, pow2_scale);)  // kAligned
+          )                                         // OutputType
+      )                                             // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

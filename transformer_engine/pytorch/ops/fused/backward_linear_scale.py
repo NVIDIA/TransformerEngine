@@ -9,13 +9,10 @@ from typing import Optional
 
 import torch
 
-from ..basic import BasicLinear, ConstantScale
-from ..op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from ...module.base import get_dummy_wgrad
 from ...utils import clear_tensor_data
+from ..basic import BasicLinear, ConstantScale
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class BackwardLinearScale(FusedOperation):
@@ -54,20 +51,22 @@ class BackwardLinearScale(FusedOperation):
         # Saved tensors from forward pass
         (x_local, w) = linear_op_ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
-            if hasattr(linear_op.weight, "__fsdp_param__"):
-                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
-
-            if not hasattr(linear_op.weight, "main_grad"):
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = linear_op.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -92,11 +91,22 @@ class BackwardLinearScale(FusedOperation):
             grad_output_quantizer=linear_op_ctx.grad_output_quantizer,
             grad_input_quantizer=linear_op_ctx.grad_input_quantizer,
         )
-        if accumulate_into_main_grad:
-            grad_weight = None
 
         # Clear input tensor if possible
         clear_tensor_data(x_local)
+
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
+        if accumulate_into_main_grad:
+            grad_weight = None
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
 
         return grad_input, [(), (grad_weight,)], [(), ()]
 

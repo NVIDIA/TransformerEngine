@@ -382,7 +382,10 @@ def train_and_evaluate(args):
     ) as mesh, te.fp8_autocast(
         enabled=args.use_fp8,
         fp8_recipe=fp8_recipe,
-        mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
+        mesh_resource=te.MeshResource(
+            dp_resource=DEVICE_DP_AXIS,
+            tpsp_resource=DEVICE_TP_AXIS,
+        ),
     ):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
