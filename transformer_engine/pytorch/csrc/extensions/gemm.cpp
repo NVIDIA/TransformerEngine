@@ -161,326 +161,323 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   }
   TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
 
-    // Bias tensor
-    TensorWrapper bias_tensor;
-    MaybeTensor bias_grad = std::nullopt;
-    if (bias.has_value()) {
-      if (grad) {
-        auto opts =
-            torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
-        bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
-        bias_tensor = makeTransformerEngineTensor(*bias_grad);
-      } else {
-        if (!bias->is_contiguous()) {
-          bias = bias->contiguous();
-        }
-        bias_tensor = makeTransformerEngineTensor(*bias);
-      }
-    }
-
-    // Activation input tensor
-    MaybeTensor pre_gelu_out = std::nullopt;
-    DType gelu_type = low_precision ? bias_type : out_tensor.dtype();
-    if (gelu) {
-      if (!grad) {
-        auto dtype = GetATenDType(gelu_type);
-        auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-        std::vector<int64_t> torch_shape;
-        for (auto v : D_shape) {
-          torch_shape.push_back(v);
-        }
-        pre_gelu_out = at::empty(torch_shape, opts);
-      } else {
-        if (gelu_in.has_value()) {
-          pre_gelu_out = *gelu_in;
-        }
-      }
-    }
-    const auto gelu_shape = gelu ? D_shape : std::vector<size_t>{0};
-
-    auto te_pre_gelu_out =
-        makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
-
-    // Workspace
-    auto te_workspace = makeTransformerEngineTensor(
-        workspace.data_ptr(), std::vector<size_t>{workspaceSize}, DType::kByte);
-
-    // Set an external SM Margin to all the GEMMs.
-    // This comes in handy when DP is overlapped with GEMMs
-    const int device_id = at::cuda::current_device();
-    const int sm_count = transformer_engine::cuda::sm_count(device_id);
-    int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
-
-    // Keep the swizzled scaling factor tensors alive during the GEMM.
-    std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
-    auto main_stream = at::cuda::getCurrentCUDAStream();
-    if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
-      // Optionally swizzle the scaling factors
-      swizzled_scale_inverses_list.emplace_back(
-          std::move(swizzle_scaling_factors(A_tensor, transa)));
-      swizzled_scale_inverses_list.emplace_back(
-          std::move(swizzle_scaling_factors(B_tensor, !transb)));
-
-      if (comm_overlap) {
-        // Prepare extra output tensor
-        TensorWrapper extra_output_tensor;
-        if (extra_output.has_value()) {
-          extra_output_tensor = makeTransformerEngineTensor(*extra_output);
-        } else {
-          extra_output_tensor =
-              makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
-        }
-
-        // Direct GEMM call to the correct overlap
-        if (bulk_overlap) {
-          NVTE_SCOPED_GIL_RELEASE({
-            comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, out_tensor, bias_tensor,
-                                       te_pre_gelu_out, te_workspace, grad, accumulate,
-                                       use_split_accumulator, comm_type.value(),
-                                       extra_output_tensor, main_stream);
-          });
-        } else if (comm_type.value() == CommOverlapType::AG) {
-          if (comm_overlap->is_atomic_gemm()) {
-            NVTE_SCOPED_GIL_RELEASE({
-              comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
-                                                   bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                                   accumulate, use_split_accumulator,
-                                                   extra_output_tensor, main_stream);
-            });
-          } else {
-            NVTE_SCOPED_GIL_RELEASE({
-              comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
-                                             bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                             accumulate, use_split_accumulator, extra_output_tensor,
-                                             main_stream);
-            });
-          }
-        } else {
-          if (comm_overlap->is_atomic_gemm()) {
-            NVTE_SCOPED_GIL_RELEASE({
-              comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
-                                                   bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                                   accumulate, use_split_accumulator,
-                                                   extra_output_tensor, main_stream);
-            });
-          } else {
-            NVTE_SCOPED_GIL_RELEASE({
-              comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
-                                             bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                             accumulate, use_split_accumulator, extra_output_tensor,
-                                             main_stream);
-            });
-          }
-        }
-      } else {
-        // Launch GEMM
-        NVTE_SCOPED_GIL_RELEASE({
-          nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), out_tensor.data(),
-                                  bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
-                                  te_workspace.data(), alpha, *beta, use_split_accumulator,
-                                  num_math_sms, main_stream);
-        });
-      }
+  // Bias tensor
+  TensorWrapper bias_tensor;
+  MaybeTensor bias_grad = std::nullopt;
+  if (bias.has_value()) {
+    if (grad) {
+      auto opts =
+          torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
+      bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
+      bias_tensor = makeTransformerEngineTensor(*bias_grad);
     } else {
-      if (out_tensor.numel() != 0 && !accumulate) {
-        out_tensor.zero_(main_stream);
+      if (!bias->is_contiguous()) {
+        bias = bias->contiguous();
       }
-      if (bias.has_value()) {
-        if (bias->numel() != 0 && grad) {
-          bias_grad->zero_();
-        }
-      }
+      bias_tensor = makeTransformerEngineTensor(*bias);
     }
-    if (unfused_quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
-    // Pack outputs
-    std::vector<py::object> out;
-    out.emplace_back(std::move(D));
-    out.emplace_back(py::cast(bias_grad));
-    if (gelu && !grad) {
-      out.emplace_back(py::cast(*pre_gelu_out));
-    } else {
-      out.emplace_back(py::none());
-    }
-    if (extra_output.has_value()) {
-      out.emplace_back(py::cast(extra_output));
-    } else {
-      out.emplace_back(py::none());
-    }
-    return out;
   }
 
-  void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
-                      std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
-                      at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
-                      bool transb, at::Tensor D, at::Tensor D_scale, DType D_type,
-                      at::Tensor D_amax, at::Tensor bias, DType bias_type, at::Tensor pre_gelu_out,
-                      bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                      bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
-                      bool gemm_producer, at::Tensor counter) {
-    // TODO: Handle scaling modes
-    NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
-    NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
-
-    auto te_A = makeTransformerEngineTensor(
-        A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,
-        nullptr, nullptr, A_scale_inverse.data_ptr(), getTensorShape(A_scale_inverse),
-        nvte_scaling_modeA);
-    auto te_B = makeTransformerEngineTensor(
-        B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_type,
-        nullptr, nullptr, B_scale_inverse.data_ptr(), getTensorShape(B_scale_inverse),
-        nvte_scaling_modeB);
-    // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
-    auto te_D = makeTransformerEngineTensor(
-        D.data_ptr(),
-        std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
-        D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
-    auto te_bias = makeTransformerEngineTensor(
-        bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
-    auto te_counter = makeTransformerEngineTensor(
-        counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))},
-        DType::kInt32);
-
-    const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
-                                ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
-                                : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
-                                                      static_cast<size_t>(pre_gelu_out.size(1))};
-    auto te_pre_gelu_out = makeTransformerEngineTensor(
-        pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
-    auto te_workspace = makeTransformerEngineTensor(
-        workspace.data_ptr(), std::vector<size_t>{workspaceSize}, DType::kByte);
-
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
-                              te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                              accumulate, use_split_accumulator, math_sm_count, m_split, n_split,
-                              gemm_producer, te_counter.data(), at::cuda::getCurrentCUDAStream());
-    });
-  }
-
-  std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
-      std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
-      std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
-      std::vector<at::Tensor> bias, DType bias_type, bool single_output,
-      std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
-      size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
-    std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
-        te_pre_gelu_out_vector, te_workspace_vector;
-    std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, wrappers;
-    std::vector<at::Tensor> D_vectors;
-
-    auto none = py::none();
-
-    std::vector<size_t> single_output_begins;
-    std::vector<size_t> single_output_ends;
-    if (single_output && D == std::nullopt) {
-      NVTE_ERROR("not implemented, D should be allocated for single output case.");
-    }
-
-    void* output_data_ptr = nullptr;
-    if (single_output) {
-      output_data_ptr = (*D)[0].data_ptr();
-    }
-
-    for (size_t i = 0; i < A.size(); i++) {
-      auto te_A = makeTransformerEngineTensor(A[i], none);
-      auto te_B = makeTransformerEngineTensor(B[i], none);
-
-      // if there is single output
-      at::Tensor out_tensor;
-      auto size_t_shape =
-          pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
-      bool D_numel_is_zero = false;
-      std::vector<int64_t> D_shape;
-      for (size_t t : size_t_shape) {
-        D_shape.push_back(t);
-        if (t == 0) {
-          D_numel_is_zero = true;
-        }
-      }
-      auto dtype = GetATenDType(D_type);
+  // Activation input tensor
+  MaybeTensor pre_gelu_out = std::nullopt;
+  DType gelu_type = low_precision ? bias_type : out_tensor.dtype();
+  if (gelu) {
+    if (!grad) {
+      auto dtype = GetATenDType(gelu_type);
       auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-      if (single_output) {
-        if (output_data_ptr == nullptr) {
-          out_tensor = at::empty(D_shape, opts);
+      std::vector<int64_t> torch_shape;
+      for (auto v : D_shape) {
+        torch_shape.push_back(v);
+      }
+      pre_gelu_out = at::empty(torch_shape, opts);
+    } else {
+      if (gelu_in.has_value()) {
+        pre_gelu_out = *gelu_in;
+      }
+    }
+  }
+  const auto gelu_shape = gelu ? D_shape : std::vector<size_t>{0};
+
+  auto te_pre_gelu_out =
+      makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
+
+  // Workspace
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+
+  // Set an external SM Margin to all the GEMMs.
+  // This comes in handy when DP is overlapped with GEMMs
+  const int device_id = at::cuda::current_device();
+  const int sm_count = transformer_engine::cuda::sm_count(device_id);
+  int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
+
+  // Keep the swizzled scaling factor tensors alive during the GEMM.
+  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
+  auto main_stream = at::cuda::getCurrentCUDAStream();
+  if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
+    // Optionally swizzle the scaling factors
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
+    swizzled_scale_inverses_list.emplace_back(
+        std::move(swizzle_scaling_factors(B_tensor, !transb)));
+
+    if (comm_overlap) {
+      // Prepare extra output tensor
+      TensorWrapper extra_output_tensor;
+      if (extra_output.has_value()) {
+        extra_output_tensor = makeTransformerEngineTensor(*extra_output);
+      } else {
+        extra_output_tensor =
+            makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
+      }
+
+      // Direct GEMM call to the correct overlap
+      if (bulk_overlap) {
+        NVTE_SCOPED_GIL_RELEASE({
+          comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, out_tensor, bias_tensor,
+                                     te_pre_gelu_out, te_workspace, grad, accumulate,
+                                     use_split_accumulator, comm_type.value(), extra_output_tensor,
+                                     main_stream);
+        });
+      } else if (comm_type.value() == CommOverlapType::AG) {
+        if (comm_overlap->is_atomic_gemm()) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                 accumulate, use_split_accumulator,
+                                                 extra_output_tensor, main_stream);
+          });
         } else {
-          // We need to check !D_numel_is_zero because if the final input portion has zero elements,
-          // output_data_ptr would point beyond the allocated memory of D. This would cause
-          // at::from_blob to fail as it would reference memory not allocated by CUDA.
-          if (!D_numel_is_zero) {
-            out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
-          }
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
+                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                           accumulate, use_split_accumulator, extra_output_tensor,
+                                           main_stream);
+          });
         }
-        char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
-        char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
-        output_data_ptr = reinterpret_cast<void*>(char_ptr);
+      } else {
+        if (comm_overlap->is_atomic_gemm()) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                 accumulate, use_split_accumulator,
+                                                 extra_output_tensor, main_stream);
+          });
+        } else {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                           accumulate, use_split_accumulator, extra_output_tensor,
+                                           main_stream);
+          });
+        }
+      }
+    } else {
+      // Launch GEMM
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), out_tensor.data(),
+                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
+                                te_workspace.data(), alpha, *beta, use_split_accumulator,
+                                num_math_sms, main_stream);
+      });
+    }
+  } else {
+    if (out_tensor.numel() != 0 && !accumulate) {
+      out_tensor.zero_(main_stream);
+    }
+    if (bias.has_value()) {
+      if (bias->numel() != 0 && grad) {
+        bias_grad->zero_();
+      }
+    }
+  }
+  if (unfused_quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
+  // Pack outputs
+  std::vector<py::object> out;
+  out.emplace_back(std::move(D));
+  out.emplace_back(py::cast(bias_grad));
+  if (gelu && !grad) {
+    out.emplace_back(py::cast(*pre_gelu_out));
+  } else {
+    out.emplace_back(py::none());
+  }
+  if (extra_output.has_value()) {
+    out.emplace_back(py::cast(extra_output));
+  } else {
+    out.emplace_back(py::none());
+  }
+  return out;
+}
+
+void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
+                    std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                    at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
+                    bool transb, at::Tensor D, at::Tensor D_scale, DType D_type, at::Tensor D_amax,
+                    at::Tensor bias, DType bias_type, at::Tensor pre_gelu_out, bool grad,
+                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                    bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
+                    bool gemm_producer, at::Tensor counter) {
+  // TODO: Handle scaling modes
+  NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
+  NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
+
+  auto te_A = makeTransformerEngineTensor(
+      A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,
+      nullptr, nullptr, A_scale_inverse.data_ptr(), getTensorShape(A_scale_inverse),
+      nvte_scaling_modeA);
+  auto te_B = makeTransformerEngineTensor(
+      B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_type,
+      nullptr, nullptr, B_scale_inverse.data_ptr(), getTensorShape(B_scale_inverse),
+      nvte_scaling_modeB);
+  // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
+  auto te_D = makeTransformerEngineTensor(
+      D.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
+      D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+  auto te_bias = makeTransformerEngineTensor(
+      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
+  auto te_counter = makeTransformerEngineTensor(
+      counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))}, DType::kInt32);
+
+  const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
+                              ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
+                              : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
+                                                    static_cast<size_t>(pre_gelu_out.size(1))};
+  auto te_pre_gelu_out = makeTransformerEngineTensor(
+      pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
+                            te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
+                            accumulate, use_split_accumulator, math_sm_count, m_split, n_split,
+                            gemm_producer, te_counter.data(), at::cuda::getCurrentCUDAStream());
+  });
+}
+
+std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
+    std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
+    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
+    std::vector<at::Tensor> bias, DType bias_type, bool single_output,
+    std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
+    size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
+  std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
+      te_pre_gelu_out_vector, te_workspace_vector;
+  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, wrappers;
+  std::vector<at::Tensor> D_vectors;
+
+  auto none = py::none();
+
+  std::vector<size_t> single_output_begins;
+  std::vector<size_t> single_output_ends;
+  if (single_output && D == std::nullopt) {
+    NVTE_ERROR("not implemented, D should be allocated for single output case.");
+  }
+
+  void* output_data_ptr = nullptr;
+  if (single_output) {
+    output_data_ptr = (*D)[0].data_ptr();
+  }
+
+  for (size_t i = 0; i < A.size(); i++) {
+    auto te_A = makeTransformerEngineTensor(A[i], none);
+    auto te_B = makeTransformerEngineTensor(B[i], none);
+
+    // if there is single output
+    at::Tensor out_tensor;
+    auto size_t_shape =
+        pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
+    bool D_numel_is_zero = false;
+    std::vector<int64_t> D_shape;
+    for (size_t t : size_t_shape) {
+      D_shape.push_back(t);
+      if (t == 0) {
+        D_numel_is_zero = true;
+      }
+    }
+    auto dtype = GetATenDType(D_type);
+    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+    if (single_output) {
+      if (output_data_ptr == nullptr) {
+        out_tensor = at::empty(D_shape, opts);
+      } else {
+        // We need to check !D_numel_is_zero because if the final input portion has zero elements,
+        // output_data_ptr would point beyond the allocated memory of D. This would cause
+        // at::from_blob to fail as it would reference memory not allocated by CUDA.
+        if (!D_numel_is_zero) {
+          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        }
+      }
+      char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
+      char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
+      output_data_ptr = reinterpret_cast<void*>(char_ptr);
+      D_vectors.emplace_back(out_tensor);
+    } else {
+      if (D == std::nullopt) {
+        auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+        out_tensor = at::empty(D_shape, opts);
         D_vectors.emplace_back(out_tensor);
       } else {
-        if (D == std::nullopt) {
-          auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-          out_tensor = at::empty(D_shape, opts);
-          D_vectors.emplace_back(out_tensor);
-        } else {
-          out_tensor = (*D)[i];
-        }
+        out_tensor = (*D)[i];
       }
-
-      if (te_A.numel() == 0 || te_B.numel() == 0) {
-        if (out_tensor.numel() != 0 && !accumulate) out_tensor.zero_();
-        if (bias[i].numel() != 0 && grad) {
-          bias[i].zero_();
-        }
-        if (pre_gelu_out[i].numel() != 0) pre_gelu_out[i].zero_();
-        continue;
-      }
-
-      auto te_D = makeTransformerEngineTensor(out_tensor);
-      auto te_bias = makeTransformerEngineTensor(bias[i]);
-      auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
-
-      const auto gelu_shape =
-          pre_gelu_out[i].data_ptr() == nullptr
-              ? std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0))}
-              : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
-                                    static_cast<size_t>(te_pre_gelu_out.size(1))};
-
-      DType gelu_type = bias_type;
-      te_pre_gelu_out =
-          makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
-
-      te_A_vector.emplace_back(te_A.data());
-      te_B_vector.emplace_back(te_B.data());
-      te_D_vector.emplace_back(te_D.data());
-      te_bias_vector.emplace_back(te_bias.data());
-      te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out.data());
-
-      te_A_wrappers.emplace_back(std::move(te_A));
-      te_B_wrappers.emplace_back(std::move(te_B));
-      wrappers.emplace_back(std::move(te_D));
-      wrappers.emplace_back(std::move(te_bias));
-      wrappers.emplace_back(std::move(te_pre_gelu_out));
     }
 
-    // Optionally swizzle the scaling factors
-    // Keep the swizzled scaling factor tensors alive during the GEMMs.
-    auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
-    auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
-
-    for (size_t i = 0; i < workspace.size(); i++) {
-      auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
-                                             std::vector<size_t>{workspaceSize}, DType::kByte);
-      te_workspace_vector.emplace_back(wsp.data());
-      wrappers.emplace_back(std::move(wsp));
+    if (te_A.numel() == 0 || te_B.numel() == 0) {
+      if (out_tensor.numel() != 0 && !accumulate) out_tensor.zero_();
+      if (bias[i].numel() != 0 && grad) {
+        bias[i].zero_();
+      }
+      if (pre_gelu_out[i].numel() != 0) pre_gelu_out[i].zero_();
+      continue;
     }
 
-    // For now, we only have multi-stream cublas backend.
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
-                                    te_bias_vector.data(), te_pre_gelu_out_vector.data(),
-                                    te_A_vector.size(), transa, transb, grad,
-                                    te_workspace_vector.data(), accumulate, use_split_accumulator,
-                                    math_sm_count, at::cuda::getCurrentCUDAStream());
-    });
-    return bias;
+    auto te_D = makeTransformerEngineTensor(out_tensor);
+    auto te_bias = makeTransformerEngineTensor(bias[i]);
+    auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
+
+    const auto gelu_shape = pre_gelu_out[i].data_ptr() == nullptr
+                                ? std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0))}
+                                : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
+                                                      static_cast<size_t>(te_pre_gelu_out.size(1))};
+
+    DType gelu_type = bias_type;
+    te_pre_gelu_out =
+        makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
+
+    te_A_vector.emplace_back(te_A.data());
+    te_B_vector.emplace_back(te_B.data());
+    te_D_vector.emplace_back(te_D.data());
+    te_bias_vector.emplace_back(te_bias.data());
+    te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out.data());
+
+    te_A_wrappers.emplace_back(std::move(te_A));
+    te_B_wrappers.emplace_back(std::move(te_B));
+    wrappers.emplace_back(std::move(te_D));
+    wrappers.emplace_back(std::move(te_bias));
+    wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
+
+  // Optionally swizzle the scaling factors
+  // Keep the swizzled scaling factor tensors alive during the GEMMs.
+  auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
+  auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
+
+  for (size_t i = 0; i < workspace.size(); i++) {
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
+                                           std::vector<size_t>{workspaceSize}, DType::kByte);
+    te_workspace_vector.emplace_back(wsp.data());
+    wrappers.emplace_back(std::move(wsp));
+  }
+
+  // For now, we only have multi-stream cublas backend.
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                  te_A_vector.size(), transa, transb, grad,
+                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                  math_sm_count, at::cuda::getCurrentCUDAStream());
+  });
+  return bias;
+}
 
 }  // namespace transformer_engine::pytorch
