@@ -932,6 +932,7 @@ def test_sanity_gemm_with_fp8quantization_and_unalignment(N, datatype):
     cs_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
     ds_quantizer = Float8Quantizer(scales, amaxes, tex.DType.kFloat8E4M3)
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+
     mx_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
     scratchpad_fp8 = ds_quantizer(scratchpad_fp16)
     inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))
