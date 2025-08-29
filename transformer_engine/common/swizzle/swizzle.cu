@@ -267,7 +267,8 @@ struct MultiSwizzleArgs {
 };
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
   // Find tensor corresponding to block
   const int bid = blockIdx.x;
   int tensor_id = 0;
@@ -298,7 +299,8 @@ __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
   // Find tensor corresponding to block
   const int bid = blockIdx.x;
   int tensor_id = 0;

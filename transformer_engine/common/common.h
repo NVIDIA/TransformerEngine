@@ -433,8 +433,14 @@ struct TypeInfo {
     using type = fp4e2m1;                 \
     { __VA_ARGS__ }                       \
   } break;
+#define SWITCH_FP4_BITS_HANDLE(bits, type, ...) \
+  case 4: {                                     \
+    using type = fp4e2m1;                       \
+    { __VA_ARGS__ }                             \
+  } break;
 #else
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#define SWITCH_FP4_BITS_HANDLE(bits, type, ...)  // do nothing
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
@@ -614,6 +620,30 @@ struct TypeInfo {
     }                                                          \
     default:                                                   \
       NVTE_ERROR("Invalid type for 16 bit.");                  \
+  }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_BITS(bits, type, ...) \
+  switch (bits) {                                            \
+    using namespace transformer_engine;                      \
+    case 64: {                                               \
+      using type = int64_t;                                  \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case 32: {                                               \
+      using type = int32_t;                                  \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case 16: {                                               \
+      using type = int16_t;                                  \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case 8: {                                                \
+      using type = int8_t;                                   \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+      SWITCH_FP4_BITS_HANDLE(bits, type, __VA_ARGS__)        \
+    default:                                                 \
+      NVTE_ERROR("Invalid type.");                           \
   }
 
 #define TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(SCALE_DIM, DIM, ...) \
