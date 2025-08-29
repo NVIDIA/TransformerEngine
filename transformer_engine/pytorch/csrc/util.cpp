@@ -183,11 +183,30 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
              "Input tensor must have FP8E4M3 dtype");
 
   // Get tensor data
-  const NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
-  
+  NVTEBasicTensor data;
+  size_t data_flat_first_dim = 1;
+  size_t data_flat_last_dim = 1;
+  if (rowwise) {
+    data = input.get_rowwise_data();
+    for (int i = 0; i < data.shape.ndim - 1; ++i) {
+      data_flat_first_dim *= data.shape.data[i];
+    }
+    data_flat_last_dim = data.shape.data[data.shape.ndim - 1];
+  } else {
+    data = input.get_columnwise_data();
+    data_flat_first_dim = data.shape.data[0];
+    for (int i = 1; i < data.shape.ndim; ++i) {
+      data_flat_last_dim *= data.shape.data[i];
+    }
+  }
+  NVTEShape data_shape{};
+  data_shape.data[0] = data_flat_first_dim;
+  data_shape.data[1] = data_flat_last_dim;
+  data_shape.ndim = 2;
+
   // Recreate input tensor with rowwise usage
   transformer_engine::TensorWrapper input_cu(scaling_mode);
-  input_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data.shape);
+  input_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
   const NVTEBasicTensor scale_inv =
       rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
   input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, transformer_engine::DType::kFloat32,
@@ -195,13 +214,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
 
   // Create output tensor
   transformer_engine::TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);
-  output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data.shape);
-  // Flattened data dimensions
-  size_t data_flat_first_dim = 1;
-  for (int i = 0; i < data.shape.ndim - 1; ++i) {
-    data_flat_first_dim *= data.shape[i];
-  }
-  const size_t data_flat_last_dim = data.shape[data.shape.ndim - 1];
+  output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
   // Output swizzled mxfp8 scaling factor dimensions
   const size_t swizzled_scale_inv_first_dim = data_flat_first_dim;
   const size_t swizzled_scale_inv_last_dim = data_flat_last_dim / 32;
