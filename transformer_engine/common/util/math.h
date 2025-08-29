@@ -9,6 +9,8 @@
 
 namespace transformer_engine {
 
+__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
+
 struct Empty {};
 
 template <typename OType, typename IType>
@@ -28,7 +30,7 @@ __device__ inline OType dgelu(const IType val, const Empty&) {
 template <typename OType, typename IType>
 __device__ inline OType sigmoid(const IType val, const Empty&) {
   const float cval = val;
-  return 1.f / (1.f + expf(-cval));
+  return sigmoidf(cval);
 }
 
 template <typename OType, typename IType>
