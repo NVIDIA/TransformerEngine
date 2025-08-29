@@ -63,7 +63,10 @@ __global__ void dropout_kernel_fwd_f16(const T *input, T *output, uint16_t *mask
 
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        input_h_8[i] = (result_copy & 0x1 == 0x1) ? (T)0.f : input_h_8[i] * (T)inv_prob;
+        input_h_8[i] =
+            (result_copy & 0x1 == 0x1)
+                ? static_cast<T>(0.f)
+                : static_cast<T>(static_cast<float>(input_h_8[i]) * inv_prob);
         result_copy = result_copy >> 1;
       }
       gmem_output_ptr[tid * 2 + j].x = input8.x;
@@ -112,7 +115,7 @@ __global__ void dropout_kernel_fwd_fp8(const T *input, float *scale_inv, O *outp
         if (is_training) {
           output_h_8[i] =
               (result_copy & 0x1 == 0x1)
-                  ? (O)0.f
+                  ? static_cast<O>(0.f)
                   : static_cast<O>(static_cast<float>(input_h_8[i]) * scale_inv_val * inv_prob);
           result_copy = result_copy >> 1;
         } else {
@@ -149,7 +152,10 @@ __global__ void dropout_kernel_bwd_f16(const T *grad_out, const uint16_t *in_mas
 
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        input_h_8[i] = (result & 0x1 == 0x1) ? (T)0.f : input_h_8[i] * (T)inv_prob;
+        input_h_8[i] =
+            (result & 0x1 == 0x1)
+                ? static_cast<T>(0.f)
+                : static_cast<T>(static_cast<float>(input_h_8[i]) * inv_prob);
         result = result >> 1;
       }
       gmem_output_ptr[tid * 2 + j] = input8;
