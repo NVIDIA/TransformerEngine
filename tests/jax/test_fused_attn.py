@@ -355,8 +355,7 @@ class FusedAttnRunner:
             and self.attn_bias_type is not AttnBiasType.NO_BIAS
         ):
             pytest.skip(
-                "For Blackwell, there is no bprop kernel support for dropout + deterministic (bias)"
-                " config "
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
             )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
