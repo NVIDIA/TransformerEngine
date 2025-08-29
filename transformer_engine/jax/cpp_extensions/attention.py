@@ -17,7 +17,10 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import (
+    NVTE_Fused_Attn_Backend,
+    get_device_compute_capability,
+)
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -2744,6 +2747,11 @@ def fused_attn_bwd(
     if attn_bias_type == AttnBiasType.NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    if get_device_compute_capability==100:
+        assert (not(attn_bias_type != "no_bias" and dropout_probability != 0)
+        ),"For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
