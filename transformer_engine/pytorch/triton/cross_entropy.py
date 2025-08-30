@@ -96,7 +96,6 @@ def cross_entropy_kernel(
     world_size,
     ignore_idx,
     n_cols,
-    n_rows,
     n_non_ignore,
     reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
@@ -118,11 +117,11 @@ def cross_entropy_kernel(
     world_size (int): The size of world involved in this distributed loss calculation.
     ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
     n_cols (int): The number of columns in the input tensor.
-    n_rows (int): The number of rows in the input tensor.
     n_non_ignore (int): The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
+
     program_id = tl.program_id(0).to(tl.int64)
 
     # locate the start index
@@ -148,7 +147,7 @@ def cross_entropy_kernel(
     ori_X_y = tl.load(m_d_X_y_ptr + (2 * m_d_X_y_stride))
 
     for i in range(1, world_size):
-        offset = i * 3 * n_rows * m_d_X_y_stride
+        offset = i * 3 * n_non_ignore * m_d_X_y_stride
         access_ptr = m_d_X_y_ptr + offset
         m_new = tl.load(access_ptr)
         d_new = tl.load(access_ptr + m_d_X_y_stride)
@@ -191,6 +190,7 @@ def cross_entropy_kernel(
     tl.debug_barrier()
 
     # 5. Calculate the loss
+
     # loss = log (softmax(X_y)) = log ((e ^ (X_y - max(X)) / sum(e ^ (X - max(X))))
     #      = (X_y - max(X)) - log(sum(e ^ (X - max(X))))
     loss = -(ori_X_y - m - tl.log(d))
@@ -316,10 +316,6 @@ def cross_entropy_forward(
     else:
         m_d_X_y_gathered = m_d_X_y
 
-    # true number of non-ignored tokens
-    n_non_ignore = int((target != ignore_idx).sum().item())
-    denom = max(n_non_ignore, 1)  # avoid div-by-zero in degenerate batches
-
     cross_entropy_kernel[(n_rows,)](
         X_ptr=_input,
         X_stride=_input.stride(-2),
@@ -333,15 +329,14 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
-        n_rows=n_rows,
-        n_non_ignore=denom,
+        n_non_ignore=n_rows,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
 
-    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / denom)
+    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
 
     return loss, _input
 
