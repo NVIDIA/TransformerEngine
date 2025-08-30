@@ -104,6 +104,7 @@ def cross_entropy_kernel(
 ):
     """
     This kernel computes both cross entropy loss and the gradient of the input.
+
     Parameters:
     X_ptr: Pointer to input tensor.
     X_stride (int): The stride of the input tensor.
@@ -236,6 +237,7 @@ def element_mul_kernel(
     """
     This function multiplies each element of the tensor pointed by X_ptr with the value pointed by grad_output_ptr.
     The multiplication is performed in-place on the tensor pointed by X_ptr.
+
     Parameters:
     X_ptr: Pointer to the input tensor.
     X_stride (int): The stride of the input tensor.
@@ -271,6 +273,7 @@ def cross_entropy_forward(
     ignore_idx: int,
 ):
     """Forward implementation of Cross Entropy kernel"""
+
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
@@ -340,10 +343,7 @@ def cross_entropy_forward(
         num_warps=32,
     )
 
-    if reduce_loss:
-        loss = torch.sum(loss_1d) / denom  # average over non-ignored tokens
-    else:
-        loss = torch.reshape(loss_1d, (B, SQ))
+    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / denom)
 
     return loss, _input
 
