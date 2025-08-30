@@ -230,7 +230,6 @@ def element_mul_kernel(
     X_ptr,
     X_stride,
     grad_output_ptr,
-    grad_output_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -242,7 +241,6 @@ def element_mul_kernel(
     X_ptr: Pointer to the input tensor.
     X_stride (int): The stride of the input tensor.
     grad_output_ptr: Pointer to the gradient output value.
-    grad_output_stride (int): The stride of the output value.
     n_cols (int): The number of columns in the input tensor.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
@@ -254,7 +252,7 @@ def element_mul_kernel(
     X_ptr += program_id * X_stride
 
     # Load the gradient output value
-    grad_output_ptr += program_id * grad_output_stride
+    grad_output_ptr += program_id
     grad_output = tl.load(grad_output_ptr)
 
     # Perform the element-wise multiplication
@@ -364,14 +362,10 @@ def cross_entropy_backward(
         n_rows = B * SQ
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
-        # ensure per-row scaling; make it 1D contiguous
-        grad_output_1d = grad_output.reshape(-1).contiguous()
-
         element_mul_kernel[(n_rows,)](
             _input,
             _input.stride(-2),
-            grad_output_1d,
-            grad_output_1d.stride(-1),  # usually 1
+            grad_output,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
