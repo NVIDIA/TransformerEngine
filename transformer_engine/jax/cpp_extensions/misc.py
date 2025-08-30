@@ -193,6 +193,16 @@ def get_min_device_compute_capability():
     )
 
 
+def get_all_device_compute_capability():
+    """
+    Returns a list of compute capability of all local devices.
+    """
+    return tuple(
+        transformer_engine_jax.get_device_compute_capability(local_gpu_id)
+        for local_gpu_id in range(len(jax.local_devices()))
+    )
+
+
 def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quantizer=None):
     """
     Fused dbias is not supported for arch < 100 for 1x quantization, so we need to apply a workaround to
