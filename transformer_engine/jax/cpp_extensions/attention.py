@@ -2748,7 +2748,7 @@ def fused_attn_bwd(
 
     if 100 in get_all_device_compute_capability():
         assert not (
-            attn_bias_type != "no_bias" and dropout_probability != 0
+            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
         ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
