@@ -4,16 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
+#include "transformer_engine/dropout.h"
 
 #include <ATen/cuda/CUDAGeneratorImpl.h>
-#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <pybind.h>
 
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
+
 #include "../common.h"
+#include "../extensions.h"
 #include "../pybind.h"
 #include "transformer_engine/transformer_engine.h"
-#include "transformer_engine/dropout.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -53,12 +54,10 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
   }
   auto rng_state_pyt = allocateTorchTensor(2, DType::kInt64);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_extract_seed_and_offset(reinterpret_cast<int64_t *>(rng_state_pyt.data_ptr()),
-                                 philox_args.captured_,
-                                 philox_args.seed_.ptr, philox_args.seed_.val,
-                                 philox_args.offset_.ptr, philox_args.offset_.val,
-                                 philox_args.offset_intragraph_,
-                                 at::cuda::getCurrentCUDAStream());
+    nvte_extract_seed_and_offset(
+        reinterpret_cast<int64_t *>(rng_state_pyt.data_ptr()), philox_args.captured_,
+        philox_args.seed_.ptr, philox_args.seed_.val, philox_args.offset_.ptr,
+        philox_args.offset_.val, philox_args.offset_intragraph_, at::cuda::getCurrentCUDAStream());
   });
   auto rng_state_nvte = makeTransformerEngineTensor(rng_state_pyt);
 
