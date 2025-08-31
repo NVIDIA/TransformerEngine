@@ -25,11 +25,11 @@ constexpr size_t rng_chunk_size = 16;
 constexpr size_t block_size = 128;
 
 // Vector class to help with vectorized memory accesses
-template <typename T, size_t size>
+template <typename T, size_t kSize>
 union Vector {
-  using StorageType = typename BytesToType<sizeof(T) * size>::Type;
+  using StorageType = typename BytesToType<sizeof(T) * kSize>::Type;
   StorageType storage;
-  T entries[size];
+  T entries[kSize];
 };
 
 /* Byte-wise less-than comparison
