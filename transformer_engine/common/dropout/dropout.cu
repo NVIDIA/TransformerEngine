@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/dropout.h"
-
 #include <curand.h>
 #include <curand_kernel.h>
 #include <curand_philox4x32_x.h>
@@ -14,6 +12,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "transformer_engine/dropout.h"
 
 namespace transformer_engine {
 namespace {
@@ -57,8 +56,7 @@ __device__ __forceinline__ uint32_t bytewise_less_than(uint32_t a, uint32_t b) {
  *
  * Consumes 4 values from cuRAND Philox generator.
  */
-__device__ __forceinline__ uint16_t make_16bit_mask(uint64_t chunk_idx,
-                                                    uint64_t rng_seed,
+__device__ __forceinline__ uint16_t make_16bit_mask(uint64_t chunk_idx, uint64_t rng_seed,
                                                     uint64_t rng_offset,
                                                     uint32_t bytewise_drop_prob) {
   // Generate random bits
@@ -86,13 +84,10 @@ __device__ __forceinline__ uint16_t make_16bit_mask(uint64_t chunk_idx,
 // Dropout forward with FP16/BF16 input and output.
 template <typename T>
 __global__ void __launch_bounds__(block_size)
-  dropout_kernel_fwd_f16(const T * __restrict__ input_ptr,
-                         T * __restrict__ output_ptr,
-                         uint8_t * __restrict__ mask_ptr,
-                         const uint64_t * __restrict__ rng_state_ptr,
-                         size_t num_chunks,
-                         uint32_t bytewise_drop_prob,
-                         float scale) {
+    dropout_kernel_fwd_f16(const T *__restrict__ input_ptr, T *__restrict__ output_ptr,
+                           uint8_t *__restrict__ mask_ptr,
+                           const uint64_t *__restrict__ rng_state_ptr, size_t num_chunks,
+                           uint32_t bytewise_drop_prob, float scale) {
   static_assert(sizeof(T) == 2);
 
   // Each thread processes a chunk of 16 entries
@@ -100,10 +95,8 @@ __global__ void __launch_bounds__(block_size)
   const size_t nthreads = gridDim.x * block_size;
   for (size_t chunk_idx = gid; chunk_idx < num_chunks; chunk_idx += nthreads) {
     // Generate dropout mask
-    auto local_mask = make_16bit_mask(chunk_idx,
-                                      rng_state_ptr[0],
-                                      rng_state_ptr[1],
-                                      bytewise_drop_prob);
+    auto local_mask =
+        make_16bit_mask(chunk_idx, rng_state_ptr[0], rng_state_ptr[1], bytewise_drop_prob);
     reinterpret_cast<uint16_t *>(mask_ptr)[chunk_idx] = local_mask;
 
     // Read input data
@@ -131,14 +124,11 @@ __global__ void __launch_bounds__(block_size)
 // Dropout forward with FP8 input and FP16/BF16 output.
 template <typename InputType, typename OutputType>
 __global__ void __launch_bounds__(block_size)
-  dropout_kernel_fwd_fp8(const InputType * __restrict__ input_ptr,
-                         const float * __restrict__ input_scale_inv_ptr,
-                         OutputType * __restrict__ output_ptr,
-                         uint8_t * __restrict__ mask_ptr,
-                         const uint64_t * __restrict__ rng_state_ptr,
-                         size_t num_chunks,
-                         uint32_t bytewise_drop_prob,
-                         float scale) {
+    dropout_kernel_fwd_fp8(const InputType *__restrict__ input_ptr,
+                           const float *__restrict__ input_scale_inv_ptr,
+                           OutputType *__restrict__ output_ptr, uint8_t *__restrict__ mask_ptr,
+                           const uint64_t *__restrict__ rng_state_ptr, size_t num_chunks,
+                           uint32_t bytewise_drop_prob, float scale) {
   static_assert(sizeof(InputType) == 1);
   static_assert(sizeof(OutputType) == 2);
   const float input_scale_inv = *input_scale_inv_ptr;
@@ -148,10 +138,8 @@ __global__ void __launch_bounds__(block_size)
   const size_t nthreads = gridDim.x * block_size;
   for (size_t chunk_idx = gid; chunk_idx < num_chunks; chunk_idx += nthreads) {
     // Generate dropout mask
-    auto local_mask = make_16bit_mask(chunk_idx,
-                                      rng_state_ptr[0],
-                                      rng_state_ptr[1],
-                                      bytewise_drop_prob);
+    auto local_mask =
+        make_16bit_mask(chunk_idx, rng_state_ptr[0], rng_state_ptr[1], bytewise_drop_prob);
     reinterpret_cast<uint16_t *>(mask_ptr)[chunk_idx] = local_mask;
 
     // Read input data
@@ -182,11 +170,8 @@ __global__ void __launch_bounds__(block_size)
 // Apply dropout mask and scale.
 template <typename T>
 __global__ void __launch_bounds__(block_size)
-  apply_dropout_mask(const T * __restrict__ input_ptr,
-                     const uint8_t * __restrict__ mask_ptr,
-                     T * __restrict__ output_ptr,
-                     size_t num_chunks,
-                     float scale) {
+    apply_dropout_mask(const T *__restrict__ input_ptr, const uint8_t *__restrict__ mask_ptr,
+                       T *__restrict__ output_ptr, size_t num_chunks, float scale) {
   // Each thread processes a chunk of 8 entries.
   const size_t gid = threadIdx.x + blockIdx.x * block_size;
   const size_t nthreads = gridDim.x * block_size;
@@ -245,9 +230,8 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
              input.shape(), ".");
   NVTE_CHECK(numel == output.numel(), "Input tensor (shape=", input.shape(),
              ") and output tensor (shape=", output.shape(), ") do not match.");
-  NVTE_CHECK(typeToNumBits(mask.dtype()) * mask.numel() == numel,
-             "Mask tensor must have ", numel, " bits, but found dtype=",
-             to_string(mask.dtype()), " and shape=", mask.shape(), ".");
+  NVTE_CHECK(typeToNumBits(mask.dtype()) * mask.numel() == numel, "Mask tensor must have ", numel,
+             " bits, but found dtype=", to_string(mask.dtype()), " and shape=", mask.shape(), ".");
   NVTE_CHECK(rng_state.numel() == 2, "RNG state tensor must be INT64 tensor with two entries, ",
              "but shape is ", rng_state.shape(), ".");
   NVTE_CHECK(input.data.dptr != nullptr, "Input tensor is missing data.");
@@ -277,9 +261,8 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
             reinterpret_cast<const DType *>(input.data.dptr),
             reinterpret_cast<DType *>(output.data.dptr),
             reinterpret_cast<uint8_t *>(mask.data.dptr),
-            reinterpret_cast<const uint64_t *>(rng_state.data.dptr),
-            num_chunks, bytewise_drop_prob, scale);
-    );
+            reinterpret_cast<const uint64_t *>(rng_state.data.dptr), num_chunks, bytewise_drop_prob,
+            scale););
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else if (input.dtype() == DType::kFloat8E4M3 || input.dtype() == DType::kFloat8E5M2) {
     NVTE_CHECK(input.scale_inv.dptr != nullptr, "Input tensor scale-inverse is not allocated.");
@@ -292,8 +275,8 @@ void dropout_fwd(const Tensor &input, Tensor &output, Tensor &mask, Tensor &rng_
                 reinterpret_cast<const float *>(input.scale_inv.dptr),
                 reinterpret_cast<OutputType *>(output.data.dptr),
                 reinterpret_cast<uint8_t *>(mask.data.dptr),
-                reinterpret_cast<const uint64_t *>(rng_state.data.dptr),
-                num_chunks, bytewise_drop_prob, scale);
+                reinterpret_cast<const uint64_t *>(rng_state.data.dptr), num_chunks,
+                bytewise_drop_prob, scale);
 
         ););
     NVTE_CHECK_CUDA(cudaGetLastError());
@@ -327,9 +310,8 @@ void dropout_bwd(const Tensor &grad_output, const Tensor &mask, Tensor &grad_inp
              grad_output.shape(), ".");
   NVTE_CHECK(numel == grad_input.numel(), "Grad output tensor (shape=", grad_output.shape(),
              ") and grad input tensor (shape=", grad_input.shape(), ") do not match.");
-  NVTE_CHECK(typeToNumBits(mask.dtype()) * mask.numel() == numel,
-             "Mask tensor must have ", numel, " bits, but found dtype=",
-             to_string(mask.dtype()), " and shape=", mask.shape(), ".");
+  NVTE_CHECK(typeToNumBits(mask.dtype()) * mask.numel() == numel, "Mask tensor must have ", numel,
+             " bits, but found dtype=", to_string(mask.dtype()), " and shape=", mask.shape(), ".");
   NVTE_CHECK(grad_output.data.dptr != nullptr, "Grad output tensor is missing data.");
   NVTE_CHECK(grad_input.data.dptr != nullptr, "Grad input tensor is missing data.");
   NVTE_CHECK(mask.data.dptr != nullptr, "Mask tensor is missing data.");
@@ -349,8 +331,7 @@ void dropout_bwd(const Tensor &grad_output, const Tensor &mask, Tensor &grad_inp
       apply_dropout_mask<DType><<<num_blocks, block_size, 0, stream>>>(
           reinterpret_cast<const DType *>(grad_output.data.dptr),
           reinterpret_cast<const uint8_t *>(mask.data.dptr),
-          reinterpret_cast<DType *>(grad_input.data.dptr), num_chunks, scale);
-  );
+          reinterpret_cast<DType *>(grad_input.data.dptr), num_chunks, scale););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
