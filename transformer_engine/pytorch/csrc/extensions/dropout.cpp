@@ -4,25 +4,19 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/dropout.h"
+#include "../extensions.h"
 
 #include <ATen/cuda/CUDAGeneratorImpl.h>
-
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <pybind.h>
 
-#include "common.h"
-#include "pybind.h"
+#include "../common.h"
+#include "../pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#include "transformer_engine/dropout.h"
 
-namespace transformer_engine::pytorch {
-
-void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
-                                 arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
-                                 at::cuda::getCurrentCUDAStream());
-  });
-}
+namespace transformer_engine {
+namespace pytorch {
 
 std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_probability,
                                     std::optional<at::Tensor> out) {
@@ -58,7 +52,14 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
     philox_args = gen->philox_cuda_state(rng_elts_per_thread);
   }
   auto rng_state_pyt = allocateTorchTensor(2, DType::kInt64);
-  unpack(philox_args, static_cast<int64_t *>(rng_state_pyt.data_ptr()));
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_extract_seed_and_offset(reinterpret_cast<int64_t *>(rng_state_pyt.data_ptr()),
+                                 philox_args.captured_,
+                                 philox_args.seed_.ptr, philox_args.seed_.val,
+                                 philox_args.offset_.ptr, philox_args.offset_.val,
+                                 philox_args.offset_intragraph_,
+                                 at::cuda::getCurrentCUDAStream());
+  });
   auto rng_state_nvte = makeTransformerEngineTensor(rng_state_pyt);
 
   // Launch kernel
@@ -85,4 +86,5 @@ py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
   return py::cast(std::move(*grad_input));
 }
 
-}  // namespace transformer_engine::pytorch
+}  // namespace pytorch
+}  // namespace transformer_engine
