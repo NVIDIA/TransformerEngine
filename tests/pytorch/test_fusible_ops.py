@@ -1752,7 +1752,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("prob", (0.0625, 0.5, 0.75))
     @pytest.mark.parametrize("is_training", (True, False))
     @pytest.mark.parametrize("quantization", (None, "fp8_current_scaling"))
-    @pytest.mark.parametrize("shape", ((101,), (2, 4, 16), (64, 64)))
+    @pytest.mark.parametrize("shape", ((101,), (2, 4, 16), (128, 128)))
     @pytest.mark.parametrize("dtype", _dtypes)
     def test_dropout(
         self,
@@ -1770,6 +1770,7 @@ class TestBasicOps:
         maybe_skip_quantization(quantization, dims=shape, device=device)
 
         # Random data
+        # Note: Shift values to make sure inputs are non-zero
         x_ref, x_test = make_reference_and_test_tensors(
             shape,
             quantization=quantization,
@@ -1777,6 +1778,9 @@ class TestBasicOps:
             test_device=device,
             test_is_quantized=quantized_input,
         )
+        with torch.no_grad():
+            x_test += 1
+            x_ref.copy_(x_test)
         dy_ref, dy_test = make_reference_and_test_tensors(
             shape,
             test_dtype=dtype,

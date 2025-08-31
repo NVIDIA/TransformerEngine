@@ -45,7 +45,7 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
   TensorWrapper out_nvte = makeTransformerEngineTensor(*out);
 
   // Mask tensor
-  auto mask_pyt = allocateTorchTensor(input_nvte.numel() / 16, DType::kInt16);
+  auto mask_pyt = allocateTorchTensor(input_nvte.numel() / 8, DType::kByte);
   auto mask_nvte = makeTransformerEngineTensor(mask_pyt);
 
   // RNG state tensor
@@ -54,7 +54,7 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
   at::PhiloxCudaState philox_args;
   {
     std::lock_guard<std::mutex> lock(gen->mutex_);
-    constexpr int64_t rng_elts_per_thread = 16;  // Offset can be 1 but setting it to 16 to be safe
+    constexpr int64_t rng_elts_per_thread = 4;
     philox_args = gen->philox_cuda_state(rng_elts_per_thread);
   }
   auto rng_state_pyt = allocateTorchTensor(2, DType::kInt64);
