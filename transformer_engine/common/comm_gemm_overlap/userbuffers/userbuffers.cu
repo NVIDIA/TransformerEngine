@@ -2319,6 +2319,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   if (comm->push == 0) {
     kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
                                                reinterpret_cast<int *>(flagptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     void *srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + srcoffset;
     void *dstptr = reinterpret_cast<char *>(comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
@@ -2516,8 +2517,11 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
         &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]), reinterpret_cast<int *>(flagptr),
         reinterpret_cast<int4 *>(srcptr), reinterpret_cast<int4 *>(dstptr),
         signalonly ? 0 : bytes / 16, comm->ub_timeout);
-    if (!signalonly)
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    if (!signalonly) {
       kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    }
     if (comm->use_ce) {
       NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     }
@@ -2532,6 +2536,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
         reinterpret_cast<int *>(0 ?  // temporary disable
                                     GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 2)
                                   : nullptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -2612,24 +2617,28 @@ void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
   producer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
   consumer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
   reset_counters_kernel<<<grid, block, 0, stream>>>(atomic_ptr, num_chunks, allgather);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename fp8type, int nvec>
@@ -2683,6 +2692,7 @@ void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_in
   reduce_fp8_in_bf16_out_cuda<fp8type, nvec>
       <<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, input_size,
                                    num_aligned_elements_per_input, tot_input_size);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,
@@ -2738,4 +2748,5 @@ void reduce_bf16(void *inputs, void *output, int num_inputs, int input_size, cud
   dim3 grid(num_blocks);
   reduce_bf16_cuda<nvec><<<grid, block, 0, stream>>>(
       inputs, output, num_inputs, input_size, num_aligned_elements_per_input, tot_input_size);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
