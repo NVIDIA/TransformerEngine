@@ -43,6 +43,7 @@ namespace swizzle_kernel_1d {
 
     // A thread treats them as four uint32 for storing to memory
     uint32_t u32[4];
+    uint4 u32x4;
   };
 
   void __global__ swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* const in,
@@ -69,16 +70,21 @@ namespace swizzle_kernel_1d {
 
     // swizzle the scaling factors
     constexpr size_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
-    __shfl_sync( // WIP
+    const sf_block offered = sf;
+    for (int i = 0; i < 4; ++i) {
+        const size_t dst_comp = (lane + i) % 4;
+        const size_t src_lane = (lane / 4) + ((lane + i) % 4) * 8;
+        const size_t offered_comp = (lane / 8 + 4 - i) % 4;
+        
+        sf.u32[dst_comp] = __shfl_sync(ACTIVE_MASK, offered.u32[offered_comp], src_lane);
+    }
 
     // store them in swizzled manner for 512 1x32 tiles in a 128x128 tile
     const size_t dst_tile_row = warp % cols;
     const size_t dst_tile_col = warp / cols;
     constexpr size_t TILE_SZ = 512;
     void* const dst_tile = out + dst_tile_row * rows * TILE_SZ + dst_tile_col * TILE_SZ;
-    uint32_t* const init_dst = reinterpret_cast<uint32_t*>(dst_tile) + lane;
-
-    // WIP
+    reinterpret_cast<uint4*>(dst_tile)[lane] = sf.u32x4;
   }
 
   void launch_kernel(const void* const in, void* const out, size_t rows, size_t cols,
