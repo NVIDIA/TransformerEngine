@@ -558,8 +558,8 @@ class DebugQuantizer(Quantizer):
 
     def wrap_quantized_tensor(self, tensor: QuantizedTensor):
         """
-            Wraps the quantized tensor with the debug quantizer.
-            It is used for weight tensors when fp8 model parameters are enabled.
+        Wraps the quantized tensor with the debug quantizer.
+        It is used for weight tensors when fp8 model parameters are enabled.
         """
 
         assert (
