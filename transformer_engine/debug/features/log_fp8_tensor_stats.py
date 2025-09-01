@@ -268,7 +268,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
@@ -280,6 +280,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
         assert (
             quantizer is not None
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
+
+        assert tensor is not None, \
+            f"[NVTORCH INSPECT ERROR] LogFp8TensorStats needs tensor in high precision for tensor: {tensor_name}. \
+             This feature cannot be used for weight tensor with fp8 model parameters."
 
         quantized_tensor = rowwise_quantized_tensor
         assert isinstance(

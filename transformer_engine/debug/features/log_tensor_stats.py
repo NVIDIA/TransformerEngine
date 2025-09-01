@@ -115,12 +115,16 @@ class LogTensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
     ):  # pylint: disable=unused-argument
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
+
+        if tensor is None:
+            assert isinstance(rowwise_quantized_tensor, QuantizedTensor)
+            tensor = rowwise_quantized_tensor.dequantize()
 
         assert (
             type(tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
