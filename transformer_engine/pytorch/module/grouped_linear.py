@@ -452,7 +452,6 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-
             if not ctx.use_bias or not ctx.fp8:
                 grad_biases = [None] * ctx.num_gemms
 
