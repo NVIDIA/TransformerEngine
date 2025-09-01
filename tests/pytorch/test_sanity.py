@@ -467,6 +467,11 @@ def test_sanity_grouped_linear(
 ):
     if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
         pytest.skip("FP8 model parameters are not supported in debug mode.")
+
+    # Disable memory caching, otherwise PyTorch may allocate a larger buffer than required.
+    # This may cause the "last" empty split not being caught.
+    os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
@@ -499,6 +504,8 @@ def test_sanity_grouped_linear(
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
+
+    os.environ.pop("PYTORCH_NO_CUDA_MEMORY_CACHING")
 
 
 @pytest.mark.parametrize("dtype", param_types)
