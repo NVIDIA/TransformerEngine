@@ -78,6 +78,8 @@ for r in recipes:
 
 all_stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
 
+# remove all contai
+
 
 @contextlib.contextmanager
 def debug_session(config_str: str, feature_dirs):
@@ -117,7 +119,6 @@ def read_log(log_dir: str) -> str:
     with open(stat_path, "r") as f:
         return f.read()
 
-
 def test_sanity(feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -140,6 +141,47 @@ def test_sanity(feature_dirs):
     for stat in all_stats:
         assert stat in output, f"Stat {stat} not found in output"
 
+LOG_FP8_MODEL_PARAMETERS_CONFIG_BASE = """
+log:
+    layers:
+        layer_name_regex_pattern: .*
+    enabled: 
+        True
+    transformer_engine:
+        LogTensorStats:
+            enabled: 
+                True
+            stats: [min]
+            tensors: [weight, activation]
+            freq: 1
+        LogFp8TensorStats:
+            enabled: 
+                True
+            tensors_struct:
+                - tensor: activation
+                  stats: [scale_inv_min, scale_inv_max, underflows%]
+                - tensor: weight
+                  stats: [scale_inv_min, scale_inv_max]
+            freq: 1
+"""
+
+def test_sanity_log_fp8_model_parameters(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    
+    with debug_session(LOG_FP8_MODEL_PARAMETERS_CONFIG_BASE, feature_dirs) as log_dir:
+        with te.fp8_model_init():
+            model = te.Linear(128, 128, params_dtype=torch.bfloat16)
+        inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
+        for _ in range(10):
+            with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
+                output = model(inp)
+            loss = output.sum()
+            loss.backward()
+            debug_api.step()
+        output = read_log(log_dir)
+    assert output, "Output is empty"
+    TEDebugState._reset()
 
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
