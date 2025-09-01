@@ -28,7 +28,6 @@ from transformer_engine.debug.features.utils import get_reduction_params, next_e
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
 
 
-
 def _get_recipe_name(quantizer: Optional[Quantizer]):
     if quantizer is None:
         return ""
@@ -111,7 +110,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - scale_inv_min - minimum of the inverse of the scaling factors,
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
-            
+
             If stats are collected for weight tensora and fp8 model parameters are used, only "scale_inv_min", "scale_inv_max" are supported.
             The other stats need high precision tensor to be computed.
 
@@ -152,7 +151,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
                     end_step: 80
     """
 
-    def check_if_stat_is_supported(self, stat: str, current_recipe: str, high_precision_tensor_provided: bool):
+    def check_if_stat_is_supported(
+        self, stat: str, current_recipe: str, high_precision_tensor_provided: bool
+    ):
         """Returns True if stat is supported, raises ValueError otherwise."""
         columnwise = stat.endswith("_columnwise")
         if columnwise:
@@ -161,10 +162,13 @@ class LogFp8TensorStats(BaseLogTensorStats):
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
         need_high_precision_tensor_stats = ["underflows%", "overflows%", "mse"]
-        if stat_without_recipe in need_high_precision_tensor_stats and not high_precision_tensor_provided:
+        if (
+            stat_without_recipe in need_high_precision_tensor_stats
+            and not high_precision_tensor_provided
+        ):
             raise ValueError(
-                f"Stat {stat} needs high precision tensor to be provided. \
-                This feature cannot be used for weight tensor with fp8 model parameters."
+                f"Stat {stat} needs high precision tensor to be provided.                 This"
+                " feature cannot be used for weight tensor with fp8 model parameters."
             )
 
         if current_recipe == "" and recipe_from_stat == "":
@@ -292,7 +296,6 @@ class LogFp8TensorStats(BaseLogTensorStats):
             quantizer is not None
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
-
         quantized_tensor = rowwise_quantized_tensor
         assert isinstance(
             quantized_tensor, QuantizedTensor
@@ -300,7 +303,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
-            self.check_if_stat_is_supported(stat, recipe_name, high_precision_tensor_provided=tensor is not None)
+            self.check_if_stat_is_supported(
+                stat, recipe_name, high_precision_tensor_provided=tensor is not None
+            )
 
         options = (
             config.get("start_step", None),
