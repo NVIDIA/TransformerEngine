@@ -111,8 +111,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
 
-            If stats are collected for weight tensora and fp8 model parameters are used, only "scale_inv_min", "scale_inv_max" are supported.
-            The other stats need high precision tensor to be computed.
+            When collecting stats for the weight tensor with FP8 model parameters enabled, only "scale_inv_min" and "scale_inv_max" are available. All other statistics require access to the high precision tensor.
 
         tensors/tensors_struct: List[str]
             list of tensors to log
@@ -167,10 +166,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
             and not high_precision_tensor_provided
         ):
             raise ValueError(
-                f"Stat {stat} needs high precision tensor to be provided.                 This"
-                " feature cannot be used for weight tensor with fp8 model parameters."
+                f"Stat {stat} requires a high precision tensor to be provided. \
+                    This feature is not supported for weight tensors when using fp8 model parameters."
             )
-
+    
         if current_recipe == "" and recipe_from_stat == "":
             raise ValueError(
                 f"Stat {stat} does not contain a recipe name and the current recipe is not set."

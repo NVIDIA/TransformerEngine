@@ -559,10 +559,9 @@ class DebugQuantizer(Quantizer):
     def wrap_quantized_tensor(self, tensor: QuantizedTensor):
         """Wraps the quantized tensor with the debug quantizer."""
 
-        assert API_CALL_MODIFY not in [
-            self.rowwise_tensor_plan,
-            self.columnwise_tensor_plan,
-        ], "Modify tensor is not allowed in debug mode for weight if fp8 model parameters are used."
+        assert self.rowwise_tensor_plan == HIGH_PRECISION and self.columnwise_tensor_plan == HIGH_PRECISION, \
+            "[NVTORCH INSPECT ERROR] Weight tensor with fp8 model paramters enabled cannot be modified by any feature."
+
 
         self._call_inspect_tensor_api(None, tensor, tensor)
 
