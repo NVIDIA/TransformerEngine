@@ -452,16 +452,12 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-<<<<<<< HEAD
 
             if not ctx.use_bias or (
                 ctx.wgrad_store is not None
                 and ctx.wgrad_store.delay_wgrad_compute()
                 and not ctx.fp8
             ):
-=======
-            if not ctx.use_bias or not ctx.fp8:
->>>>>>> 0b2b057c3d729c9ec4614fd58ac06d73fead4376
                 grad_biases = [None] * ctx.num_gemms
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
