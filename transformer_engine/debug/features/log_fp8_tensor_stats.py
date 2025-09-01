@@ -281,9 +281,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
             quantizer is not None
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
-        assert tensor is not None, \
-            f"[NVTORCH INSPECT ERROR] LogFp8TensorStats needs tensor in high precision for tensor: {tensor_name}. \
-             This feature cannot be used for weight tensor with fp8 model parameters."
+        assert tensor is not None, (
+            "[NVTORCH INSPECT ERROR] LogFp8TensorStats needs tensor in high precision for tensor:"
+            f" {tensor_name}.              This feature cannot be used for weight tensor with fp8"
+            " model parameters."
+        )
 
         quantized_tensor = rowwise_quantized_tensor
         assert isinstance(

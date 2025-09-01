@@ -1370,7 +1370,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             if isinstance(quantizer, DebugQuantizer):
                 tensor = quantizer.wrap_quantized_tensor(tensor)
-            
+
             return tensor
 
         # Try getting workspace from cache

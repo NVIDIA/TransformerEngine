@@ -555,16 +555,17 @@ class DebugQuantizer(Quantizer):
         super().set_usage(rowwise=rowwise, columnwise=columnwise)
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
-    
+
     def wrap_quantized_tensor(self, tensor: QuantizedTensor):
         """Wraps the quantized tensor with the debug quantizer."""
 
-        assert API_CALL_MODIFY not in [self.rowwise_tensor_plan, self.columnwise_tensor_plan], \
-            "Modify tensor is not allowed in debug mode for weight if fp8 model parameters are used."
-
+        assert API_CALL_MODIFY not in [
+            self.rowwise_tensor_plan,
+            self.columnwise_tensor_plan,
+        ], "Modify tensor is not allowed in debug mode for weight if fp8 model parameters are used."
 
         self._call_inspect_tensor_api(None, tensor, tensor)
-        
+
         return DebugQuantizedTensor(
             rowwise_gemm_tensor=tensor,
             columnwise_gemm_tensor=tensor,
