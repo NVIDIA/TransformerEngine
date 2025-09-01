@@ -168,11 +168,11 @@ log:
 
 def test_sanity_log_fp8_model_parameters(feature_dirs):
     """
-        Tests logging stats when model parameters are in fp8.
-        It tests 3 things:
-            - LogTensorStats for weight tensor should work without change,
-            - LogTensorStats and LogFp8TensorStats for non-weight tensors should work without change,
-            - LogFp8TensorStats should support scale_inv_min, scale_inv_max for weight tensor.
+    Tests logging stats when model parameters are in fp8.
+    It tests 3 things:
+        - LogTensorStats for weight tensor should work without change,
+        - LogTensorStats and LogFp8TensorStats for non-weight tensors should work without change,
+        - LogFp8TensorStats should support scale_inv_min, scale_inv_max for weight tensor.
 
     """
     if not fp8_available:
