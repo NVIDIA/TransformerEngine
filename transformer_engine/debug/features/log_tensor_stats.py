@@ -122,6 +122,8 @@ class LogTensorStats(BaseLogTensorStats):
     ):  # pylint: disable=unused-argument
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
+        # Tensor is None only if fp8 model parameters are used and tensor name is `weight`.
+        # If one wants to collect stats for this tensor, we need to dequantize it.
         if tensor is None:
             assert isinstance(rowwise_quantized_tensor, QuantizedTensor)
             tensor = rowwise_quantized_tensor.dequantize()

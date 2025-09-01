@@ -263,7 +263,7 @@ class TEDefaultFeatures:
         tensor_name: str
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: Optional[torch.Tensor]
-            tensor in high precision, can be None only if fp8 model parameters are used and tensor name is `weight`.
+            tensor in high precision. It can be None only if fp8 model parameters are used and tensor name is `weight`.
         rowwise_quantized_tensor: Optional[torch.Tensor]
             rowwise quantized tensor,
         columnwise_quantized_tensor: Optional[torch.Tensor]
