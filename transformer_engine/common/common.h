@@ -439,7 +439,7 @@ struct TypeInfo {
     { __VA_ARGS__ }                             \
   } break;
 #else
-#define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#define SWITCH_FP4_TYPE_HANDLE(type, ...)        // do nothing
 #define SWITCH_FP4_BITS_HANDLE(bits, type, ...)  // do nothing
 #endif
 
