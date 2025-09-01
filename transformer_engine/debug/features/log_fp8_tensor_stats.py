@@ -166,10 +166,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
             and not high_precision_tensor_provided
         ):
             raise ValueError(
-                f"Stat {stat} requires a high precision tensor to be provided. \
-                    This feature is not supported for weight tensors when using fp8 model parameters."
+                f"Stat {stat} requires a high precision tensor to be provided.                    "
+                " This feature is not supported for weight tensors when using fp8 model"
+                " parameters."
             )
-    
+
         if current_recipe == "" and recipe_from_stat == "":
             raise ValueError(
                 f"Stat {stat} does not contain a recipe name and the current recipe is not set."
