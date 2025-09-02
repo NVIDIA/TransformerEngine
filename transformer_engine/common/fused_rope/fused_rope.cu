@@ -21,12 +21,21 @@ __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs
                                          const int h, const int d, const int d2, const int stride_h,
                                          const int stride_d, const int o_stride_h,
                                          const int o_stride_d) {
+  extern __shared__ float shared_mem_cos_sin[];
+  float *shared_mem_cos = shared_mem_cos_sin;
+  float *shared_mem_sin = shared_mem_cos_sin + d2;
+  int tid = threadIdx.x * blockDim.y + threadIdx.y;
+  for (int i = tid; i < d2; i += blockDim.x * blockDim.y) {
+    sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
+  }
+  __syncthreads();
+
 #pragma unroll
-  for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-    float v_cos, v_sin;
-    sincosf(freqs[s_id * d2 + d_id], &v_sin, &v_cos);
+  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
 #pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+      float v_cos = shared_mem_cos[d_id];
+      float v_sin = shared_mem_sin[d_id];
       int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
       int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
       float v_src = src[offset_src];
@@ -49,12 +58,12 @@ __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs
   // copy the rest
   if (d > d2) {
 #pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-      int offset_head = offset_block + h_id * stride_h;
-      int offset_head_dst = offset_block_dst + h_id * o_stride_h;
+    for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
 #pragma unroll
-      for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-        dst[offset_head_dst + d_id * o_stride_d] = src[offset_head + d_id * stride_d];
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+        dst[offset_dst] = src[offset_src];
       }
     }
   }
@@ -67,47 +76,54 @@ __device__ void fused_rope_block_backward(const scalar_t *src, const float *freq
                                           const int h, const int d, const int d2,
                                           const int stride_h, const int stride_d,
                                           const int o_stride_h, const int o_stride_d) {
+  extern __shared__ float shared_mem_cos_sin[];
+  float *shared_mem_cos = shared_mem_cos_sin;
+  float *shared_mem_sin = shared_mem_cos_sin + d2;
+  int tid = threadIdx.x * blockDim.y + threadIdx.y;
+  for (int i = tid; i < d2; i += blockDim.x * blockDim.y) {
+    sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
+  }
+  __syncthreads();
+
 #pragma unroll
-  for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-    float v_cos = cosf(freqs[s_id * d2 + d_id]);
-    float v_sin;
-    if (!interleaved) {
-      v_sin = (d_id + d2 / 2 < d2) ? sinf(freqs[s_id * d2 + d_id + d2 / 2])
-                                   : -sinf(freqs[s_id * d2 + d_id + d2 / 2 - d2]);
-    } else {
-      v_sin =
-          (d_id % 2 == 0) ? sinf(freqs[s_id * d2 + d_id + 1]) : -sinf(freqs[s_id * d2 + d_id - 1]);
-    }
+  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
 #pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
       int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
       int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
       float v_src = src[offset_src];
-      float v_src_rotate;
+      float v_cos = shared_mem_cos[d_id];
+      float v_src_rotate, v_sin;
       if (!interleaved) {
-        v_src_rotate = (d_id + d2 / 2 < d2)
-                           ? static_cast<float>(src[offset_src + (d2 / 2) * stride_d])
-                           : static_cast<float>(src[offset_src + (d2 / 2 - d2) * stride_d]);
+        if (d_id + d2 / 2 < d2) {
+          v_src_rotate = static_cast<float>(src[offset_src + (d2 / 2) * stride_d]);
+          v_sin = shared_mem_sin[d_id + d2 / 2];
+        } else {
+          v_src_rotate = static_cast<float>(src[offset_src + (d2 / 2 - d2) * stride_d]);
+          v_sin = -shared_mem_sin[d_id + d2 / 2 - d2];
+        }
       } else {
-        v_src_rotate = (d_id % 2 == 0)
-                           // d_id + 1
-                           ? static_cast<float>(src[offset_src + stride_d])
-                           // d_id - 1
-                           : static_cast<float>(src[offset_src - stride_d]);
+        if (d_id % 2 == 0) {
+          v_src_rotate = static_cast<float>(src[offset_src + stride_d]);
+          v_sin = shared_mem_sin[d_id + 1];
+        } else {
+          v_src_rotate = static_cast<float>(src[offset_src - stride_d]);
+          v_sin = -shared_mem_sin[d_id - 1];
+        }
       }
       dst[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
     }
   }
 
-  // handle the tail
+  // copy the rest
   if (d > d2) {
 #pragma unroll
-    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-      int offset_head = offset_block + h_id * stride_h;
-      int offset_head_dst = offset_block_dst + h_id * o_stride_h;
+    for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
 #pragma unroll
-      for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-        dst[offset_head_dst + d_id * o_stride_d] = src[offset_head + d_id * stride_d];
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+        dst[offset_dst] = src[offset_src];
       }
     }
   }
@@ -454,6 +470,7 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     NVTE_CHECK(cu_seqlens != nullptr, "cu_seqlens is required for THD format");
@@ -469,7 +486,7 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
-  fused_rope_forward_kernel<<<blocks, threads, 0, stream>>>(
+  fused_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, s, h, d, d2,
       stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
       o_stride_d);
@@ -487,6 +504,7 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     NVTE_CHECK(cu_seqlens != nullptr, "cu_seqlens is required for THD format");
@@ -502,7 +520,7 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
-  fused_rope_backward_kernel<<<blocks, threads, 0, stream>>>(
+  fused_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       output_grads, cu_seqlens, freqs, input_grads, interleaved, cp_size, cp_rank, s, h, d, d2,
       stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
       o_stride_d);
