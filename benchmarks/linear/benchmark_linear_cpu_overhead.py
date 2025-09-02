@@ -6,16 +6,26 @@ import argparse
 import transformer_engine.pytorch as te
 
 
+def run_once(module: torch.nn.Module, args: List[torch.Tensor], iters = 2000, use_te: bool = True, is_first_microbatch: bool = True):
+    if use_te:
+        for _ in range(iters):
+            module(*args, is_first_microbatch=is_first_microbatch)
+    else:
+        for _ in range(iters):
+            module(*args)
+
+
 def speedometer(
     module: torch.nn.Module,
     args: List[torch.Tensor],
-    timing_iters: int = 500,
-    warmup_iters: int = 50,
+    timing_iters: int = 2000,
+    warmup_iters: int = 100,
     num_rounds: int = 5,
+    use_te: bool = True,
 ) -> float:
     """Measure average run time for a PyTorch module"""
-    for _ in range(warmup_iters):
-        module(*args)
+    # warm up
+    run_once(module, args, iters=warmup_iters, use_te=use_te, is_first_microbatch=True)
 
     gpu_times = []
     cpu_times = []
@@ -25,8 +35,8 @@ def speedometer(
         torch.cuda.synchronize()
         start.record()
         cpu_start = time.time()
-        for _ in range(timing_iters):
-            module(*args)
+        # run timing
+        run_once(module, args, iters=timing_iters, use_te=use_te, is_first_microbatch=False)
         cpu_end = time.time()
         end.record()
         torch.cuda.synchronize()
@@ -45,24 +55,27 @@ def speedometer(
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark torch.nn.Linear performance and CPU overhead.")
-    parser.add_argument("--hidden_size", type=int, default=2048, help="Hidden size")
-    parser.add_argument("--seq_length", type=int, default=8192, help="Sequence length")
+    parser.add_argument("--hidden_size", type=int, default=3072, help="Hidden size")
+    parser.add_argument("--seq_length", type=int, default=2048, help="Sequence length")
     parser.add_argument("--warmup", type=int, default=500, help="Number of warmup iterations")
-    parser.add_argument("--timing_iters", type=int, default=500, help="Number of timing iterations per round")
-    parser.add_argument("--num_rounds", type=int, default=3, help="Number of timing rounds")
+    parser.add_argument("--timing_iters", type=int, default=2000, help="Number of timing iterations per round")
+    parser.add_argument("--num_rounds", type=int, default=5, help="Number of timing rounds")
     parser.add_argument(
         "--backend", type=str, choices=["torch", "te"], default="te", help="Linear backend: torch or te"
     )
     args = parser.parse_args()
 
     x = torch.randn((args.seq_length, args.hidden_size), dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    use_te = True
     if args.backend == "torch":
         model = torch.nn.Linear(args.hidden_size, args.hidden_size, bias=False).to(torch.bfloat16).cuda()
+        use_te = False
     else:
         model = te.Linear(args.hidden_size, args.hidden_size, bias=False, device="cuda").to(torch.bfloat16)
-    avg_gpu_time_per_round = speedometer(
-        model, [x], timing_iters=args.timing_iters, warmup_iters=args.warmup, num_rounds=args.num_rounds
-    )
+    with torch.no_grad():
+        avg_gpu_time_per_round = speedometer(
+            model, [x], timing_iters=args.timing_iters, warmup_iters=args.warmup, num_rounds=args.num_rounds, use_te=use_te
+        )
 
     total_ops = 2 * args.hidden_size * args.hidden_size * args.seq_length * args.timing_iters
 
