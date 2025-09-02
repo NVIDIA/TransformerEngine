@@ -1532,10 +1532,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(
-            inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
+        if is_first_microbatch is None or is_first_microbatch:
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(
+            inp,
+            allow_non_contiguous=False,  # removed .contiguous from inside the layer
         ) as inp:
 
             # Get concatenated weight and bias tensors
