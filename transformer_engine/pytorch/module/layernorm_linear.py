@@ -424,10 +424,28 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+            offload_activation = False
+            if hasattr(inp, 'offloading_activation'):
+                offload_activation = True
+                if inputmat.is_contiguous():
+                    inputmat = inputmat.contiguous()
+            ctx.offload_activation = offload_activation
 
-                if ctx.grad_added_to_main_grad:
+            if offload_activation and cpu_offloading:
+                raise ValueError(f"Do not use offload_activation and cpu_offloading at the same time.")
+
+            if offload_activation and weight.requires_grad and fuse_wgrad_accumulation:
+                if hasattr(weight, 'grad_added_to_main_grad'):
+                    ctx.has_grad_added_to_main_grad = True
+                    ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
+                    weight.grad_added_to_main_grad = True
+                else:
+                    ctx.has_grad_added_to_main_grad = False
+
+            if cpu_offloading:
+                ctx.has_grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.has_grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
                     # get back torch.Tensor. Torch rips off the Parameter wrapper.
                     # You need to preserve the weight object to have all the attributes user
@@ -560,9 +578,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
+            if ctx.cpu_offloading or ctx.offload_activation:
+                if ctx.has_grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
+                    if ctx.offload_activation:
+                        origin_weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
                     origin_weight.main_grad = main_grad
 

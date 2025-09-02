@@ -209,6 +209,24 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorBase):
                         weight.update_usage(columnwise_usage=True)
 
+            offload_activation = False
+            if hasattr(inp, 'offloading_activation'):
+                offload_activation = True
+                for i in range(num_gemms):
+                    inputmats[i].offloading_activation = inp.offloading_activation
+            ctx.offload_activation = offload_activation
+
+            if offload_activation and cpu_offloading:
+                raise ValueError(f"Do not use offload_activation and cpu_offloading at the same time.")
+
+            if offload_activation and weights[0].requires_grad and fuse_wgrad_accumulation:
+                grad_added_to_main_grad_list = []
+                for weight in weights:
+                    if weight.requires_grad and hasattr(weight, 'grad_added_to_main_grad'):
+                        grad_added_to_main_grad_list.append(weight.grad_added_to_main_grad)
+                        weight.grad_added_to_main_grad = True
+                ctx.grad_added_to_main_grad_list = grad_added_to_main_grad_list
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -271,11 +289,13 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+            if (ctx.cpu_offloading or ctx.offload_activation) and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
-                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
-                    w.main_grad = main_grads[i]
-                    weights[i] = w
+                    if not ctx.cpu_offloading:
+                        w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
+                        weights[i] = w
+                    weights[i].main_grad = main_grads[i]
+                    weights[i].grad_added_to_main_grad = ctx.grad_added_to_main_grad_list[i]
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
