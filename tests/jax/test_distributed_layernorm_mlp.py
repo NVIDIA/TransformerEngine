@@ -173,7 +173,9 @@ class TestDistributedLayernormMLP:
             )
 
             # Single GPU
-            with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
+            with fp8_autocast(
+                enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()
+            ):
                 single_jitter = jax.jit(
                     value_and_grad_func,
                     static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
@@ -184,7 +186,7 @@ class TestDistributedLayernormMLP:
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
             with mesh, fp8_autocast(
-                enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+                enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
             ):
                 k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tpsp"))
                 k2_sharding = NamedSharding(mesh, PartitionSpec("tpsp", "fsdp"))
@@ -252,7 +254,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("fp8_recipe", [None] + SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
         self,
@@ -281,7 +283,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("fp8_recipe", [None] + SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad_shardy(
         self,
