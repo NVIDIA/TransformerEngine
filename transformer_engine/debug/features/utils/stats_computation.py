@@ -203,7 +203,7 @@ FP8_NEGATIVE_ZERO = 128  # represnts -0.0 in fp8
 
 
 def count_nonzero_fp8(fp8_data: torch.Tensor) -> torch.Tensor:
-    """ Count the number of non-zero elements in the fp8 data. """
+    """Count the number of non-zero elements in the fp8 data."""
     fp8_data = fp8_data.view(dtype=torch.uint8)
     zero_vals = torch.tensor([0, FP8_NEGATIVE_ZERO], device=fp8_data.device, dtype=torch.uint8)
     return fp8_data.numel() - torch.isin(fp8_data, zero_vals).sum()
