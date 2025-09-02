@@ -203,7 +203,7 @@ def general_grouped_gemm(
                 bias=bias[i] if use_bias else None,
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
-            )[0]
+            )
         if single_output:
             out = torch.cat(out, dim=0)
 
