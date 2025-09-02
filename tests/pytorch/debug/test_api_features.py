@@ -316,7 +316,9 @@ def test_statistics_collection(configs_dir, feature_dirs):
         stats = log()
         stats_names = [x[3] for x in stats.keys()]
         all(s in stats_names for s in ["cur_amax", "dynamic_range", "mean", "std", "l1_norm"])
-        torch.testing.assert_close(stats[("decoder.6.mlp.fc1", "activation", "mean", 200)], tensor.mean())
+        torch.testing.assert_close(
+            stats[("decoder.6.mlp.fc1", "activation", "mean", 200)], tensor.mean()
+        )
 
         debug_api.transformer_engine.inspect_tensor(
             "decoder.7.mlp.fc1",
