@@ -251,16 +251,13 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
             pin_memory=pin_memory,
         )
 
-        torch.cuda.synchronize()
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
-        torch.cuda.synchronize()
         return state
 
     @staticmethod
     def reload(state, non_blocking=None, copy_buffer=None):
         """Reload."""
-        torch.cuda.synchronize()
         dev, cpu_backup = state
         if non_blocking is None:
             non_blocking = cpu_backup.is_pinned()
@@ -273,7 +270,6 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
 
         copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
-        torch.cuda.synchronize()
 
         return copy_buffer
 
@@ -626,23 +622,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Stream synchronization both ways
             self.h2d_stream.wait_stream(torch.cuda.current_stream())
             torch.cuda.current_stream().wait_stream(self.h2d_stream)
-
-            # Time to reload the next group
-            print("before bulk_reload_group")
-
-
-            # free memory number
-            print(f"torch.cuda.memory_allocated(): {torch.cuda.memory_allocated() / 1024 / 1024} MB")
-            #print(torch.cuda.memory_summary(device=None, abbreviated=False))
-
-            tt = torch.empty(900*128*512, device="cuda")
-            del tt
-            torch.cuda.synchronize()
-            with torch.cuda.stream(self.h2d_stream):
-                tt = torch.empty(900*128*512, device="cuda")
-                del tt
             
-            self.bulk_reload_group(self.offloaded_group_count - 1)
+            with torch.cuda.stream(self.h2d_stream):
+                self.bulk_reload_group(self.offloaded_group_count - 1)
 
             # Decrease the offloading group counter
             self.offloaded_group_count -= 1 if self.offloaded_group_count > 1 else 0

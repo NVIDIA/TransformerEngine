@@ -65,8 +65,10 @@ class Utils:
     def measure_time(func):
         import time
 
+        torch.cuda.synchronize()
         start = time.time()
         func()
+        torch.cuda.synchronize()
         end = time.time()
         return (end - start) * 1000
 
@@ -289,6 +291,58 @@ class TestsOffloadableLayerState:
         del x
 
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + x_size, 0.1)
+    
+
+    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
+    def test_overlap(self, recipe_name):
+        Utils.memory_leak_check()
+        Utils.skip_if_recipe_not_supported(recipe_name)
+        
+        offloadable_layer_state = OffloadableLayerState(
+            offload_stream=torch.cuda.Stream(),
+            min_tensor_size_to_offload=0
+        )
+
+        tensors = [Utils.create_tensor(recipe_name) for _ in range(10)]
+
+
+        def _run(run_job, run_offload):
+            torch.cuda.synchronize()
+            if run_offload: 
+                tensor_ids = [offloadable_layer_state.push_tensor(tensors[i]) for i in range(len(tensors))]
+                offloadable_layer_state.start_offload()
+                if run_job:
+                    Utils.long_job()
+                offloadable_layer_state.release_activation_forward_gpu_memory()
+                offloadable_layer_state.start_reload()
+                if run_job:
+                    Utils.long_job()
+                [offloadable_layer_state.pop_tensor(tensor_id) for tensor_id in tensor_ids]
+                offloadable_layer_state.release_all_memory()
+            else:
+                if run_job:
+                    Utils.long_job()
+                    Utils.long_job()
+            torch.cuda.synchronize()
+
+        def _measure_time(run_job, run_offload):
+            return Utils.measure_time(lambda: [_run(run_job, run_offload) for _ in range(10)])
+
+        _run(True, True)  # warm-up
+
+        time_offload_only = _measure_time(False, True)
+        time_offload_and_selected_jobs = _measure_time(True, True)
+        time_selected_jobs = _measure_time(True, False)
+
+        print(
+            f"time_offload_only: {time_offload_only:.2f} ms, "
+            f"time_offload_and_selected_jobs: {time_offload_and_selected_jobs:.2f} ms, "
+            f"time_selected_jobs: {time_selected_jobs:.2f} ms"
+        )
+
+        MARGIN_MS = 10
+
+        assert time_selected_jobs + MARGIN_MS > time_offload_and_selected_jobs
 
 
 class TestsDefaultOffloadSynchronizer:
@@ -391,59 +445,6 @@ class TestsDefaultOffloadSynchronizer:
                 init_cuda_memory + tensor_size, 0.1
             )
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
-
-    @pytest.mark.parametrize("job_forward", [True, False])
-    @pytest.mark.parametrize("job_backward", [True, False])
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_overlap(self, job_forward, job_backward, recipe_name):
-        Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
-        if not job_forward and not job_backward:
-            pytest.skip("")
-        NUM_LAYERS = 10
-
-        def _run(job_forward, job_backward, offloads):
-            offload_synchronizer = DefaultOffloadSynchronizer(
-                num_layers=NUM_LAYERS,
-                num_offloaded_layers=NUM_LAYERS - 1,
-            )
-            offloaded_tensors = []
-            layer_ids = []
-            for _ in range(NUM_LAYERS):
-                layer_id = offload_synchronizer.fwd_step()
-                layer_ids.append(layer_id)
-                if offloads:
-                    offloaded_tensors.append(
-                        offload_synchronizer.push_tensor(Utils.create_tensor(recipe_name))
-                    )
-                else:
-                    offloaded_tensors.append(Utils.create_tensor(recipe_name))
-                if job_forward:
-                    Utils.long_job()
-            for i in range(NUM_LAYERS - 1, -1, -1):
-                offload_synchronizer.bwd_step(layer_ids[i])
-                if offloads:
-                    offload_synchronizer.pop_tensor(offloaded_tensors[i])
-                if job_backward:
-                    Utils.long_job()
-            torch.cuda.synchronize()
-
-        def _measure_time(job_forward, job_backward, offloads):
-            return Utils.measure_time(lambda: _run(job_forward, job_backward, offloads))
-
-        _run(True, True, True)  # warm-up
-
-        time_offload_only = _measure_time(False, False, True)
-        time_offload_and_selected_jobs = _measure_time(job_forward, job_backward, True)
-        time_selected_jobs = _measure_time(job_forward, job_backward, False)
-
-        print(
-            f"time_offload_only: {time_offload_only:.2f} ms, "
-            f"time_offload_and_selected_jobs: {time_offload_and_selected_jobs:.2f} ms, "
-            f"time_selected_jobs: {time_selected_jobs:.2f} ms"
-        )
-
-        assert time_offload_only + time_selected_jobs > time_offload_and_selected_jobs + EPSILON
 
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     def test_multiple_tensor_offload(self, recipe_name):
