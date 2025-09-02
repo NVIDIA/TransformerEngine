@@ -483,7 +483,7 @@ def apply_fused_qkv_rotary_pos_emb(
     tensor_format: str = "sbhd",
     start_positions: Union[torch.Tensor, None] = None,
     interleaved: bool = False,
-    cu_seqlens: Union[torch.Tensor, None] = None,
+    cu_seqlens: Union[torch.Tensor, None] = None,  # pylint: disable=unused-argument
     cp_size: int = 1,
     cp_rank: int = 0,
 ) -> torch.Tensor:
