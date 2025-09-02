@@ -104,7 +104,18 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 all_boolean = [True, False]
 batch_sizes_with_zero = [0, 1, 2]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu", "qgelu", "qgeglu"]
+all_activations = [
+    "gelu",
+    "geglu",
+    "qgelu",
+    "qgeglu",
+    "relu",
+    "reglu",
+    "srelu",
+    "sreglu",
+    "silu",
+    "swiglu",
+]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 
@@ -993,6 +1004,32 @@ def test_sanity_checkpointing_on_callables():
 
     # Assert that gradients are the same
     torch.testing.assert_close(grad_checkpoint, grad_standard)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_linear_frozen_weights_memory_default_recipe():
+    """Test that memory usage is optimized when weights are frozen for MXFP8."""
+    dim = 1024
+    linear = Linear(dim, dim, bias=False)
+    x = torch.randn(dim, dim, requires_grad=True, device="cuda")
+
+    # Freeze weights
+    linear.weight.requires_grad = False
+
+    # Forward and backward pass with FP8
+    with fp8_autocast():
+        o = linear(x)
+        g_o = torch.randn_like(o)
+
+    max_memory_before_backward = torch.cuda.max_memory_allocated()
+    o.backward(g_o)
+    max_memory_after_backward = torch.cuda.max_memory_allocated()
+
+    memory_diff = (max_memory_after_backward - max_memory_before_backward) / 1e6
+    assert memory_diff < 5.5, (
+        f"Memory usage with frozen weights ({memory_diff}MB) should be less than 5.5MB as the"
+        " grad_output should be quantized only columnwise."
+    )
 
 
 @pytest.mark.parametrize(

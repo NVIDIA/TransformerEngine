@@ -12,7 +12,7 @@ test:
           freq: 3
     LogFp8TensorStats:
       enabled: True
-      tensors: weight
+      tensors: activation
       stats: [underflows%]
       start_step: 1
       freq: 5

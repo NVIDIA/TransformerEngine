@@ -4,6 +4,8 @@
 
 """Functions for CUDA Graphs support in FP8"""
 from collections.abc import Iterable
+import contextlib
+import gc
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
@@ -56,6 +58,25 @@ def graph_pool_handle():
     Returns an opaque token representing the id of a graph memory pool.
     """
     return _graph_pool_handle()
+
+
+@contextlib.contextmanager
+def _graph_context_wrapper(*args, **kwargs):
+    """Wrapper around `torch.cuda.graph`.
+
+    This wrapper is a temporary workaround for a PyTorch bug:
+    automatic garbage collection can destroy a graph while another
+    graph is being captured, resulting in a CUDA error. See
+    https://github.com/pytorch/pytorch/pull/161037.
+
+    """
+    gc_is_enabled = gc.isenabled()
+    if gc_is_enabled:
+        gc.disable()
+    with torch.cuda.graph(*args, **kwargs):
+        yield
+    if gc_is_enabled:
+        gc.enable()
 
 
 def _make_graphed_callables(
@@ -445,7 +466,7 @@ def _make_graphed_callables(
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
-                    with torch.cuda.graph(fwd_graph, pool=mempool):
+                    with _graph_context_wrapper(fwd_graph, pool=mempool):
                         outputs = func(*args, **kwargs)
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -483,7 +504,7 @@ def _make_graphed_callables(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
-                        with torch.cuda.graph(bwd_graph, pool=mempool):
+                        with _graph_context_wrapper(bwd_graph, pool=mempool):
                             grad_inputs = torch.autograd.grad(
                                 outputs=tuple(o for o in static_outputs if o.requires_grad),
                                 inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -548,7 +569,7 @@ def _make_graphed_callables(
         per_callable_output_unflatten_spec = []
         graph_id = 0
         for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):
-            with torch.cuda.graph(fwd_graph, pool=mempool):
+            with _graph_context_wrapper(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
             graph_id += 1
@@ -570,7 +591,7 @@ def _make_graphed_callables(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
             if is_training:
-                with torch.cuda.graph(bwd_graph, pool=mempool):
+                with _graph_context_wrapper(bwd_graph, pool=mempool):
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in static_outputs if o.requires_grad),
                         inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -829,7 +850,7 @@ def make_graphed_callables(
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
-    fp8_enabled: bool = False,
+    fp8_enabled: SingleOrTuple[bool] = False,
     fp8_calibrating: bool = False,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
@@ -875,8 +896,9 @@ def make_graphed_callables(
 
     FP8-related parameters
     ----------------------
-    fp8_enabled: bool, default = `True`
-                 whether or not to enable fp8
+    fp8_enabled: (tuple of) bool, default = `False`
+                 whether or not to enable fp8.
+                 If tuple, the length must match the number of modules.
     fp8_calibrating: bool, default = `False`
                      calibration mode allows collecting statistics such as amax and scale
                      data of fp8 tensors even when executing without fp8 enabled. This is
@@ -898,16 +920,24 @@ def make_graphed_callables(
     """
     set_capture_start()
 
-    if fp8_enabled and fp8_recipe is None:
-        fp8_recipe = get_default_fp8_recipe()
-    elif not fp8_enabled:
-        fp8_recipe = None
-
     # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
         just_one_callable = True
         modules = (modules,)
+
+    if not isinstance(fp8_enabled, tuple):
+        assert isinstance(fp8_enabled, bool), "fp8_enabled must be a bool or a tuple of bools"
+        fp8_enabled = (fp8_enabled,) * len(modules)
+    else:
+        assert len(fp8_enabled) == len(
+            modules
+        ), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
+    if any(fp8_enabled) and fp8_recipe is None:
+        fp8_recipe = get_default_fp8_recipe()
+    elif not any(fp8_enabled):
+        fp8_recipe = None
+    module_uses_fp8 = dict(zip((id(m) for m in modules), fp8_enabled))
 
     # Store FP8 tensors to reset later.
     saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
@@ -923,15 +953,15 @@ def make_graphed_callables(
         old_call_funcs[block_cls] = block_cls.__call__
 
         # Wrap the original call function of the module class.
-        def call_func(*args, **kwargs):
+        def call_func(self, *args, **kwargs):
             with fp8_autocast(
-                enabled=fp8_enabled,
+                enabled=module_uses_fp8.get(id(self), False),
                 calibrating=fp8_calibrating,
                 fp8_recipe=fp8_recipe,
                 fp8_group=fp8_group,
                 _graph=True,
             ):
-                outputs = old_call_funcs[block_cls](*args, **kwargs)
+                outputs = old_call_funcs[block_cls](self, *args, **kwargs)
             return outputs
 
         block_cls.__call__ = call_func

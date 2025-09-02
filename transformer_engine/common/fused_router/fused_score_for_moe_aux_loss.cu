@@ -151,6 +151,7 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
           intermediate_output);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
@@ -286,6 +287,7 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
           grad_logits);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
