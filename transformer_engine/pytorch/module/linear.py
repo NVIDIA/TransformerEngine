@@ -396,17 +396,19 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             offload_activation = False
-            if hasattr(inp, 'offload_activation'):
+            if hasattr(inp, "offload_activation"):
                 offload_activation = True
                 if saved_inputmat.is_contiguous():
                     saved_inputmat = saved_inputmat.contiguous()
             ctx.offload_activation = offload_activation
 
             if offload_activation and cpu_offloading:
-                raise ValueError(f"Do not use offload_activation and cpu_offloading at the same time.")
-            
+                raise ValueError(
+                    f"Do not use offload_activation and cpu_offloading at the same time."
+                )
+
             if offload_activation and weight.requires_grad and fuse_wgrad_accumulation:
-                if hasattr(weight, 'grad_added_to_main_grad'):
+                if hasattr(weight, "grad_added_to_main_grad"):
                     ctx.has_grad_added_to_main_grad = True
                     ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
                     weight.grad_added_to_main_grad = True

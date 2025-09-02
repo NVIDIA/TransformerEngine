@@ -210,19 +210,21 @@ class _GroupedLinear(torch.autograd.Function):
                         weight.update_usage(columnwise_usage=True)
 
             offload_activation = False
-            if hasattr(inp, 'offloading_activation'):
+            if hasattr(inp, "offloading_activation"):
                 offload_activation = True
                 for i in range(num_gemms):
                     inputmats[i].offloading_activation = inp.offloading_activation
             ctx.offload_activation = offload_activation
 
             if offload_activation and cpu_offloading:
-                raise ValueError(f"Do not use offload_activation and cpu_offloading at the same time.")
+                raise ValueError(
+                    f"Do not use offload_activation and cpu_offloading at the same time."
+                )
 
             if offload_activation and weights[0].requires_grad and fuse_wgrad_accumulation:
                 grad_added_to_main_grad_list = []
                 for weight in weights:
-                    if weight.requires_grad and hasattr(weight, 'grad_added_to_main_grad'):
+                    if weight.requires_grad and hasattr(weight, "grad_added_to_main_grad"):
                         grad_added_to_main_grad_list.append(weight.grad_added_to_main_grad)
                         weight.grad_added_to_main_grad = True
                 ctx.grad_added_to_main_grad_list = grad_added_to_main_grad_list
