@@ -5,6 +5,7 @@
 """GroupedLinear API"""
 from typing import Union, Optional, Callable, Tuple, List
 import warnings
+import contextlib
 
 import functools
 import torch
