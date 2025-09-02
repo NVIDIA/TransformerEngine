@@ -939,7 +939,7 @@ def layernorm_fwd(
         out, mu, rsigma = layernorm_fwd(
             x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
         )
-        out, _ = _quantize_dbias_impl(out.data, quantizer)
+        out, _ = _quantize_dbias_impl(out, quantizer)
         return out, mu, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -953,7 +953,7 @@ def layernorm_fwd(
             quantizer=None,
         )
         out, _ = _quantize_dbias_impl(
-            out.data, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
+            out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
         )
         return out, mu, rsigma
 

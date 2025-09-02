@@ -632,7 +632,7 @@ def _quantize_dbias_impl(
         # until the tensor is dequantized (e.g. in the GEMM).
         amax = x.amax
         if amax is None:
-            amax = jnp.amax(jnp.abs(x.data), keepdims=True).astype(jnp.float32)
+            amax = jnp.amax(jnp.abs(x.data), keepdims=True).astype(jnp.float32).reshape((1,))
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
