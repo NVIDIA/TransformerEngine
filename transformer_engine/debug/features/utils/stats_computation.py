@@ -200,6 +200,9 @@ STATS = {
 }
 
 FP8_NEGATIVE_ZERO = 128  # represnts -0.0 in fp8
+
+# To avoid initializing tensors during module initialization and to prevent unnecessary device transfers at runtime,
+# we cache the zero values per device. This approach also works well with DataParallel.
 _zero_values_cache = {}
 
 def get_zero_values(device):
