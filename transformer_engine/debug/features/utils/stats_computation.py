@@ -200,11 +200,12 @@ STATS = {
 }
 
 FP8_NEGATIVE_ZERO = 128  # represnts -0.0 in fp8
-zero_values = {
-    device: torch.tensor([0, FP8_NEGATIVE_ZERO], device=device)
-    for device in [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
-}
+_zero_values_cache = {}
 
+def get_zero_values(device):
+    if device not in _zero_values_cache:
+        _zero_values_cache[device] = torch.tensor([0, FP8_NEGATIVE_ZERO], device=device)
+    return _zero_values_cache[device]
 
 def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     """Register *both* underflow stats (num and %) for the given recipe."""
@@ -222,7 +223,7 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
             aux_dict[recipe_name].get_data_tensors(
                 rowwise_data=not columnwise, columnwise_data=columnwise
             ),
-            zero_values[x.device],
+            get_zero_values(x.device),
         ).sum()
         - (x == 0).sum(),
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
@@ -233,7 +234,7 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
                 aux_dict[recipe_name].get_data_tensors(
                     rowwise_data=not columnwise, columnwise_data=columnwise
                 ),
-                zero_values[x.device],
+                get_zero_values(x.device),
             ).sum()
             - (x == 0).sum()
         )
