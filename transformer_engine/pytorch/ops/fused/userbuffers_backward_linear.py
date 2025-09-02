@@ -241,16 +241,16 @@ class UserbuffersBackwardLinear(FusedOperation):
         with_dgrad_all_gather_x = False
         with_wgrad_reduce_scatter_dx = False
         if tensor_parallel_mode == "row":
-            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
             ub_type_dgrad = CommOverlapType.AG
             with_dgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
             if input_requires_grad and weight_requires_grad:
                 with_bulk_overlap = True
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.AG
                 with_dgrad_all_gather_x = True
-                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
                 ub_type_wgrad = CommOverlapType.RS
                 with_wgrad_reduce_scatter_dx = True
                 if ub_comm_wgrad.is_fp8_ubuf():
@@ -258,7 +258,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                         "Userbuffers reduce-scatter is not supported with FP8 buffers"
                     )
             else:
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.RS
                 with_dgrad_reduce_scatter_dx = True
                 if ub_comm_dgrad.is_fp8_ubuf():
@@ -409,7 +409,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
-                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
 
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 

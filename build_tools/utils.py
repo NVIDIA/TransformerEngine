@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from importlib.metadata import version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -269,7 +269,7 @@ def cuda_version() -> Tuple[int, ...]:
         return tuple(int(v) for v in version)
 
     try:
-        version_str = version("nvidia-cuda-runtime-cu12")
+        version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:
