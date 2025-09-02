@@ -662,6 +662,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
+        self.wgrad_store = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -1481,12 +1482,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
 
+    def need_backward_dw(self):
+        """
+        Check if this module needs to execute the delayed weight gradient computation.
+        This method should be used at the beginning of self.backward_dw() to determine if it
+        should actually be executed or just return without doing anything.
+        User can also manually call this method to check that before calling into backward_dw().
+        """
+        return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        if not self.need_backward_dw():
             return
         with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
