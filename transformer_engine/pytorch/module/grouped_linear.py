@@ -61,6 +61,7 @@ class _GroupedLinear(torch.autograd.Function):
     Calls custom cuda extensions.
     """
 
+    # pylint: disable=keyword-arg-before-vararg
     @staticmethod
     def forward(
         ctx,
