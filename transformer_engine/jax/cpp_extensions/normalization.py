@@ -952,9 +952,7 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(
-            out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
-        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
         return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()

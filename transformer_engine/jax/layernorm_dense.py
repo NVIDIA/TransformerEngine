@@ -22,6 +22,7 @@ from .quantize import (
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
+    get_quantize_config,
 )
 
 
@@ -68,6 +69,11 @@ def layernorm_dense(
         - The function supports automatic differentiation through JAX's custom VJP
         - Quantization is applied to both the normalized input and kernel
     """
+
+    if not get_quantize_config().is_fp8_enabled():
+        input_dtype = x.dtype
+        kernel = kernel.astype(input_dtype)
+
     output = _layernorm_dense(
         x,
         kernel,

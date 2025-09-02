@@ -230,6 +230,11 @@ class GemmPrimitive(BasePrimitive):
                     "require non-transposed LHS and transposed RHS operands "
                     "(`contracting_dims=((-1, ), (-1, ))`)."
                 )
+        else:
+            assert lhs.dtype == rhs.dtype, (
+                "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
+                f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
+            )
 
         # Determine output shape and dtype
         assert (

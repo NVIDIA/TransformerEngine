@@ -24,6 +24,7 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
+    get_quantize_config,
 )
 
 
@@ -80,6 +81,10 @@ def dense(
     Returns:
         Transformed output tensor
     """
+    if not get_quantize_config().is_fp8_enabled():
+        input_dtype = x.dtype
+        kernel = kernel.astype(input_dtype)
+
     output = _dense(
         x,
         kernel,
