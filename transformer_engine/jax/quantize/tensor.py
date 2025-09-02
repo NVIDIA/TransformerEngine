@@ -26,7 +26,7 @@ from ..sharding import (
 __all__ = [
     "TensorUsage",
     "AbstractBaseTensor",
-    "HighPrecisionTensor",
+    "NoScaleTensor",
     "ScaledTensor",
     "ScaledTensor1x",
     "ScaledTensor2x",
@@ -100,13 +100,11 @@ class AbstractBaseTensor1x(AbstractBaseTensor):
 
 @register_pytree_node_class
 @dataclass
-class HighPrecisionTensor(AbstractBaseTensor1x):
+class NoScaleTensor(AbstractBaseTensor1x):
     """Higher-precision tensor."""
 
     def __post_init__(self):
-        assert isinstance(
-            self.data, jnp.ndarray
-        ), "HighPrecisionTensor's data must be a jnp.ndarray."
+        assert isinstance(self.data, jnp.ndarray), "NoScaleTensor's data must be a jnp.ndarray."
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
@@ -132,7 +130,7 @@ class HighPrecisionTensor(AbstractBaseTensor1x):
         q_layout = ScalingMode.NO_SCALING.get_quantize_layout(usage)
         assert (
             q_layout == QuantizeLayout.ROWWISE
-        ), "Only ROWWISE layout is supported for HighPrecisionTensor"
+        ), "Only ROWWISE layout is supported for NoScaleTensor"
         return self
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
@@ -149,7 +147,7 @@ class HighPrecisionTensor(AbstractBaseTensor1x):
 
         data = with_sharding_constraint_by_logical_axes(self.data, logical_axis_names)
 
-        return HighPrecisionTensor(
+        return NoScaleTensor(
             data=data,
             amax=self.amax,
         )

@@ -23,7 +23,7 @@ from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 from ..quantize import (
     AbstractBaseTensor,
-    HighPrecisionTensor,
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor2x,
     GroupedScaledTensor1x,
@@ -1198,9 +1198,9 @@ def gemm(
         compute the GeLU contribution to the gradient. Only supported with TE's custom call to
         cuBLAS GEMM.
     """
-    if isinstance(lhs, HighPrecisionTensor):
+    if isinstance(lhs, NoScaleTensor):
         lhs = lhs.data
-    if isinstance(rhs, HighPrecisionTensor):
+    if isinstance(rhs, NoScaleTensor):
         rhs = rhs.data
 
     # Try to get LHS and RHS quantizers from a quantizer set for backward compatibility

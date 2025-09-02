@@ -24,7 +24,7 @@ from .tensor import (
     ScaledTensor1x,
     ScaledTensor2x,
     ScaledTensorFactory,
-    HighPrecisionTensor,
+    NoScaleTensor,
 )
 from .helper import (
     get_quantize_config,
@@ -224,7 +224,7 @@ class CurrentScaleQuantizer(Quantizer):
 
     def _quantize_func(
         self,
-        x: Union[jnp.ndarray, HighPrecisionTensor],
+        x: Union[jnp.ndarray, NoScaleTensor],
         is_colwise=False,
         dq_dtype=None,
         flatten_axis=-1,
@@ -240,7 +240,7 @@ class CurrentScaleQuantizer(Quantizer):
             A ScaledTensor1x containing the quantized data
         """
         if isinstance(x, jnp.ndarray):
-            x = HighPrecisionTensor(data=x, amax=None)
+            x = NoScaleTensor(data=x, amax=None)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
 
@@ -277,7 +277,7 @@ class CurrentScaleQuantizer(Quantizer):
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         if isinstance(x, jnp.ndarray):
-            x = HighPrecisionTensor(data=x, amax=None)
+            x = NoScaleTensor(data=x, amax=None)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
         if flatten_axis < 0:
@@ -364,7 +364,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             A ScaledTensor1x containing the quantized data
         """
         if isinstance(x, jnp.ndarray):
-            x = HighPrecisionTensor(data=x, amax=None)
+            x = NoScaleTensor(data=x, amax=None)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
 
@@ -480,8 +480,8 @@ class BlockScaleQuantizer(Quantizer):
         Returns:
             A ScaledTensor1x containing the quantized data
         """
-        if isinstance(x, HighPrecisionTensor):
-            # No need for amax in MXFP8 block scaling, so simply extract the jnp.ndarray data tensor from the HighPrecisionTensor x.
+        if isinstance(x, NoScaleTensor):
+            # No need for amax in MXFP8 block scaling, so simply extract the jnp.ndarray data tensor from the NoScaleTensor x.
             x = x.data
 
         # TODO(Phuong): use quantize_func from JAX

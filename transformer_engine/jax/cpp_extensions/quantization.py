@@ -38,7 +38,7 @@ from ..quantize import (
     QuantizeLayout,
     ScalingMode,
     compute_scale_from_amax,
-    HighPrecisionTensor,
+    NoScaleTensor,
 )
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
@@ -536,9 +536,9 @@ def _jax_quantize(
     x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, flatten_axis: int = -1
 ):
     if quantizer is None:
-        if isinstance(x, HighPrecisionTensor):
+        if isinstance(x, NoScaleTensor):
             return x
-        return HighPrecisionTensor(data=x, amax=None)
+        return NoScaleTensor(data=x, amax=None)
     return quantizer.quantize(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
 
@@ -561,9 +561,9 @@ def _jax_quantize_dbias(
     flatten_axis: int = -1,
 ):
     if quantizer is None:
-        if isinstance(x, HighPrecisionTensor):
+        if isinstance(x, NoScaleTensor):
             return x, None
-        return HighPrecisionTensor(data=x, amax=None), None
+        return NoScaleTensor(data=x, amax=None), None
     return (
         quantizer.quantize(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis),
         _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis),
@@ -571,7 +571,7 @@ def _jax_quantize_dbias(
 
 
 def _quantize_dbias_impl(
-    x: Union[jnp.ndarray, HighPrecisionTensor],
+    x: Union[jnp.ndarray, NoScaleTensor],
     quantizer: Quantizer,
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
@@ -586,7 +586,7 @@ def _quantize_dbias_impl(
     ), "quantizer must be provided if dq_dtype is provided"
 
     if isinstance(x, jnp.ndarray):
-        x = HighPrecisionTensor(data=x, amax=None)
+        x = NoScaleTensor(data=x, amax=None)
 
     # Early-exit for non-quantized call
     dq_dtype = dq_dtype or x.data.dtype
@@ -701,7 +701,7 @@ def _quantize_dbias_impl(
 
 
 def quantize(
-    x: Union[jnp.ndarray, HighPrecisionTensor],
+    x: Union[jnp.ndarray, NoScaleTensor],
     quantizer: Quantizer,
     flatten_axis: int = -1,
 ) -> Tuple[ScaledTensor]:
@@ -727,7 +727,7 @@ def quantize(
 
 
 def quantize_dbias(
-    dz: Union[jnp.ndarray, HighPrecisionTensor],
+    dz: Union[jnp.ndarray, NoScaleTensor],
     quantizer: Quantizer,
     is_dbias: bool = True,
     flatten_axis: int = -1,
@@ -956,9 +956,9 @@ def grouped_quantize(
     """
 
     if quantizer is None:
-        if isinstance(x, HighPrecisionTensor):
+        if isinstance(x, NoScaleTensor):
             return x
-        return HighPrecisionTensor(data=x, amax=None)
+        return NoScaleTensor(data=x, amax=None)
 
     # TODO(Phuong): add support for flatten_axis = -2
     assert flatten_axis in (

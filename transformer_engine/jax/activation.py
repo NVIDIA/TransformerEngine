@@ -14,7 +14,7 @@ import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 
-from .quantize.tensor import HighPrecisionTensor
+from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
 
@@ -92,8 +92,8 @@ def _activation_bwd_rule(activation_type, ctx, g):
     assert x.dtype == g.dtype
     dx = tex.dact_lu(g, x, activation_type)
     # No quantization is used in this VJP backward, so the output should
-    # always be a HighPrecisionTensor
-    assert isinstance(dx, HighPrecisionTensor)
+    # always be a NoScaleTensor
+    assert isinstance(dx, NoScaleTensor)
     dx = dx.data
     return (dx, None)
 

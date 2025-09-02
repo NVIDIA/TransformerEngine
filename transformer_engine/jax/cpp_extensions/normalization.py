@@ -30,7 +30,7 @@ from .misc import (
 )
 from .quantization import _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory, HighPrecisionTensor
+from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
     QuantizeLayout,
@@ -930,7 +930,7 @@ def layernorm_fwd(
             scale_dtype=jnp.float32,
             is_outer=True,
         )
-        return HighPrecisionTensor(data=output, amax=None), mu, rsigma
+        return NoScaleTensor(data=output, amax=None), mu, rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
@@ -1133,7 +1133,7 @@ def rmsnorm_fwd(
             scale_dtype=jnp.float32,
             is_outer=True,
         )
-        return HighPrecisionTensor(data=output, amax=None), rsigma
+        return NoScaleTensor(data=output, amax=None), rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING

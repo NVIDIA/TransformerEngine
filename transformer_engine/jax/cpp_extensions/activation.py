@@ -29,7 +29,7 @@ from .misc import (
 )
 from .quantization import _jax_dbias, _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory, HighPrecisionTensor
+from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
     QuantizeLayout,
@@ -1033,7 +1033,7 @@ def act_lu(
             is_outer=True,
         )
         out = out.reshape(output_shape)
-        out = HighPrecisionTensor(
+        out = NoScaleTensor(
             data=out,
             amax=None,
         )
@@ -1142,7 +1142,7 @@ def quantize_dact_dbias(
         if is_dbias:
             dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
 
-        output = HighPrecisionTensor(
+        output = NoScaleTensor(
             data=output,
             amax=None,
         )
