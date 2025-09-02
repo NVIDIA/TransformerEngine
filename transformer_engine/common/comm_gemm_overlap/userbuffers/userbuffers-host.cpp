@@ -511,7 +511,7 @@ void destroy_communicator_mpi(communicator *comm) {
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
-  if (comm->free_region > NVTE_MAX_REGIONS) return -1;
+  if (comm->free_region >= NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
   comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
   size_t aligned_size = bytes;

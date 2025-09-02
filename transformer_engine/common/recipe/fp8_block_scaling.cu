@@ -183,6 +183,7 @@ void fp8_block_scaling_compute_partial_amax(const Tensor inp, Tensor amax, size_
                                               reinterpret_cast<float *>(amax.data.dptr),
                                               amax_stride_h, amax_stride_w, h, w, start_offset,
                                               len);)
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fp8_block_scaling_partial_cast(const Tensor inp, Tensor out, const Tensor scale, size_t h,
@@ -215,6 +216,7 @@ void fp8_block_scaling_partial_cast(const Tensor inp, Tensor out, const Tensor s
                   reinterpret_cast<fp8_type *>(out.data.dptr),
                   reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
                   h, w, start_offset, len);)))
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace fp8_block_scaling_recipe
