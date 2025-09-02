@@ -343,10 +343,12 @@ def flash_attn_a2a_communicate_softmax_offset(
         # softmax_offset: split round-robin to CP ranks
         # [1, h, 1, 1] -> [1, cp, h//cp, 1, 1]
         shape = tensor.shape
-        tensor = tensor.view(*shape[:h_dim], cp_size, shape[h_dim] // cp_size, *shape[(h_dim+1):])
+        tensor = tensor.view(
+            *shape[:h_dim], cp_size, shape[h_dim] // cp_size, *shape[(h_dim + 1) :]
+        )
         rank = get_distributed_rank(cp_group)
         output = torch.index_select(tensor, dim=h_dim, index=chunk_ids[rank])
-        output = output.view(*shape[:h_dim], -1, *shape[(h_dim+1):])
+        output = output.view(*shape[:h_dim], -1, *shape[(h_dim + 1) :])
     else:
         # d_softmax_offset: all-gather from all ranks to all ranks
         # [1, h//cp, 1, 1] -> [1, h, 1, 1]
@@ -361,8 +363,8 @@ def flash_attn_a2a_communicate_softmax_offset(
             )
         torch.cuda.current_stream().wait_stream(cp_stream)
         output = output.view(
-            *tensor.shape[:h_dim], cp_size*tensor.shape[h_dim], *tensor.shape[h_dim+1:]
-            )
+            *tensor.shape[:h_dim], cp_size * tensor.shape[h_dim], *tensor.shape[h_dim + 1 :]
+        )
     return output
 
 
@@ -3848,7 +3850,6 @@ def attn_forward_func_with_cp(
     softmax_type="vanilla",
     softmax_offset=None,
 ) -> torch.Tensor:
-
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
     dimension, and by reducing the memory and computational pressure on each GPU, it enables long-context
@@ -3912,8 +3913,7 @@ def attn_forward_func_with_cp(
 
     if cp_comm_type == "a2a+p2p":
         assert (
-            isinstance(cp_group, list)
-            and len(cp_group) == 2
+            isinstance(cp_group, list) and len(cp_group) == 2
         ), "Hierarchical context parallelism (CP), i.e. a2a+p2p, requires a list of two CP groups!"
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
@@ -3935,7 +3935,8 @@ def attn_forward_func_with_cp(
         qkv_format != "sbhd" or use_fused_attention
     ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
-        "Context parallelism only supports attention bias with FusedAttention backend and non-padding mask types!"
+        "Context parallelism only supports attention bias with FusedAttention backend and"
+        " non-padding mask types!"
     )
     assert qkv_format != "thd" or (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
@@ -3961,16 +3962,13 @@ def attn_forward_func_with_cp(
                 softmax_type == "vanilla"
             ), "Context parallelism does not support {softmax_type=} with FP8 attention!"
     assert (
-        softmax_type == "vanilla"
-        or use_fused_attention
+        softmax_type == "vanilla" or use_fused_attention
     ), "Context parallelism only supports {softmax_type=} with FusedAttention backend!"
     assert (
-        softmax_type == "vanilla"
-        or cp_comm_type == "a2a"
+        softmax_type == "vanilla" or cp_comm_type == "a2a"
     ), "Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
     assert (
-        softmax_type == "vanilla"
-        or qkv_format != "thd"
+        softmax_type == "vanilla" or qkv_format != "thd"
     ), "Context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
 
     args = [
@@ -4012,7 +4010,17 @@ def attn_forward_func_with_cp(
         args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers, use_flash_attn_3, softmax_type, softmax_offset]
+        args += [
+            window_size,
+            fp8,
+            fp8_meta,
+            cp_group,
+            cp_stream,
+            quantizers,
+            use_flash_attn_3,
+            softmax_type,
+            softmax_offset,
+        ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")

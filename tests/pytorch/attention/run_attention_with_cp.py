@@ -22,6 +22,7 @@ from utils import ModelConfig, compare_and_assert
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
+
 def generate_input_shapes(
     qkv_format: str,
     config: ModelConfig,
@@ -122,7 +123,16 @@ def generate_input_shapes(
     else:
         assert False, f"{qkv_format=} is not supported!"
 
-    return q_input_shape, k_input_shape, v_input_shape, attn_output_shape, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
+    return (
+        q_input_shape,
+        k_input_shape,
+        v_input_shape,
+        attn_output_shape,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+    )
 
 
 def get_tols(config, dtype):
@@ -198,9 +208,10 @@ def run_dpa_with_cp(
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
     if cp_comm_type == "a2a+p2p":
-        assert (
-            world_size % 2 == 0
-        ), "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size = 2."
+        assert world_size % 2 == 0, (
+            "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size"
+            " = 2."
+        )
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
         cp_comm_sub_groups = []
@@ -442,15 +453,55 @@ def run_dpa_with_cp(
         if t is not None:
             if "softmax_offset" not in names[i]:
                 if qkv_format == "bshd":
-                    compare_and_assert(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
-                    compare_and_assert(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                    compare_and_assert(
+                        t[:, 0],
+                        tensors_cp[i][:, 0],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
+                    )
+                    compare_and_assert(
+                        t[:, 1],
+                        tensors_cp[i][:, 1],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
+                    )
                 elif qkv_format == "sbhd":
-                    compare_and_assert(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
-                    compare_and_assert(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                    compare_and_assert(
+                        t[0],
+                        tensors_cp[i][0],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
+                    )
+                    compare_and_assert(
+                        t[1],
+                        tensors_cp[i][1],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
+                    )
                 elif qkv_format == "thd":
-                    compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                    compare_and_assert(
+                        t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
+                    )
             else:
-                compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                compare_and_assert(
+                    t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
+                )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     # destroy distribution group

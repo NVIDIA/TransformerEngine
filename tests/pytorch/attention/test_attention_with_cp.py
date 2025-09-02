@@ -19,6 +19,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import Fla
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import ModelConfig, get_available_attention_backends
+
 pytest_logging_level = logging.getLevelName(logging.root.level)
 
 # Initialize RNG state
@@ -130,9 +131,15 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64),  # MLA
-    "cp_4_0": ModelConfig(2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="vanilla"),  # GQA
-    "cp_4_1": ModelConfig(2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"),  # GQA
-    "cp_4_2": ModelConfig(2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"),  # GQA
+    "cp_4_0": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="vanilla"
+    ),  # GQA
+    "cp_4_1": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"
+    ),  # GQA
+    "cp_4_2": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    ),  # GQA
 }
 
 
@@ -192,9 +199,13 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     if dtype == "fp8" and config.softmax_type != "vanilla":
         pytest.skip("CP implementation does not support non-vanilla softmax types in FP8!")
     if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
-        pytest.skip("CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!")
+        pytest.skip(
+            "CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!"
+        )
     if config.softmax_type != "vanilla" and qkv_format == "thd":
-        pytest.skip("CP implementation does not support qkv_format=thd for non-vanilla softmax types!")
+        pytest.skip(
+            "CP implementation does not support qkv_format=thd for non-vanilla softmax types!"
+        )
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
     available_backends, _, fused_attn_backends = get_available_attention_backends(

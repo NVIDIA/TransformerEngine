@@ -62,11 +62,13 @@ fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 seed = 1234
 reset_rng_states()
 
+
 # Reset FP8 global state manager
 @pytest.fixture(autouse=True)
 def reset_global_fp8_state():
     yield
     fp8.FP8GlobalStateManager.reset()
+
 
 # Define F16 data types to test
 param_types = [torch.float16]
@@ -266,18 +268,67 @@ model_configs_softmax = {
     "softmax_1_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="off-by-one"),
     "softmax_1_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="learnable"),
     "softmax_2_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal"),
-    "softmax_2_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"),
-    "softmax_2_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"),
+    "softmax_2_1": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"
+    ),
+    "softmax_2_2": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    ),
     "softmax_3_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding"),
-    "softmax_3_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="off-by-one"),
-    "softmax_3_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="learnable"),
-    "softmax_4_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal"),
-    "softmax_4_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal", softmax_type="off-by-one"),
-    "softmax_4_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal", softmax_type="learnable"),
-    "softmax_5_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal"),
-    "softmax_5_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="off-by-one"),
-    "softmax_5_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="learnable"),
+    "softmax_3_1": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="off-by-one"
+    ),
+    "softmax_3_2": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="learnable"
+    ),
+    "softmax_4_0": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, window_size=(128, 0), attn_mask_type="causal"
+    ),
+    "softmax_4_1": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="causal",
+        softmax_type="off-by-one",
+    ),
+    "softmax_4_2": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="causal",
+        softmax_type="learnable",
+    ),
+    "softmax_5_0": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, window_size=(128, 0), attn_mask_type="padding_causal"
+    ),
+    "softmax_5_1": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="padding_causal",
+        softmax_type="off-by-one",
+    ),
+    "softmax_5_2": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="padding_causal",
+        softmax_type="learnable",
+    ),
 }
+
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -285,7 +336,9 @@ model_configs_softmax = {
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False)
+    test_dot_product_attention(
+        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False
+    )
 
 
 model_configs_mla = {
@@ -379,9 +432,7 @@ model_configs_bias = {
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
     "bias_1_4": ModelConfig(4, 2048, 24, 128, attn_bias_type="alibi"),
-    "bias_1_5": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"
-    ),
+    "bias_1_5": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"),
     "bias_2_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="padding", attn_bias_type="post_scale_bias"
     ),
@@ -406,9 +457,7 @@ model_configs_bias = {
         attn_mask_type="padding",
         attn_bias_type="post_scale_bias",
     ),
-    "bias_2_4": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"
-    ),
+    "bias_2_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"),
     "bias_2_5": ModelConfig(
         2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", attn_bias_type="alibi"
     ),

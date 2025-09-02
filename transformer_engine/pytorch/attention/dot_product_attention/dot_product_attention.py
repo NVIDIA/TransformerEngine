@@ -322,7 +322,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         if self.softmax_type == "vanilla":
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
-            self.softmax_offset = torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")
+            self.softmax_offset = torch.zeros(
+                self.num_attention_heads // self.tp_size, device="cuda"
+            )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
@@ -659,7 +661,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
-            allow_different_data_param_dtypes=self.softmax_type!="vanilla",
+            allow_different_data_param_dtypes=self.softmax_type != "vanilla",
         ) as query_layer:
             # checks for RNG
             if self.rng_states_tracker is not None and is_graph_capturing():
@@ -1051,7 +1053,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
-            softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32) if self.softmax_offset is not None else None
+            softmax_offset = (
+                self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
+                if self.softmax_offset is not None
+                else None
+            )
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":

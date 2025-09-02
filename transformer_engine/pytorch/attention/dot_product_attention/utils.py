@@ -558,15 +558,26 @@ def get_attention_backend(
             logger.debug("Disabling UnfusedAttention for softmax_type = %s in FP8", softmax_type)
             use_unfused_attention = False
         if qkv_format == "thd":
-            logger.debug("Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type)
+            logger.debug(
+                "Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type
+            )
             use_fused_attention = False
-            logger.debug("Disabling UnfusedAttention for softmax_type = %s and qkv_format = thd", softmax_type)
+            logger.debug(
+                "Disabling UnfusedAttention for softmax_type = %s and qkv_format = thd",
+                softmax_type,
+            )
             use_unfused_attention = False
         if context_parallel:
-            logger.debug("Disabling UnfusedAttention for context parallelism with softmax_type = %s", softmax_type)
+            logger.debug(
+                "Disabling UnfusedAttention for context parallelism with softmax_type = %s",
+                softmax_type,
+            )
             use_unfused_attention = False
             if cp_comm_type != "a2a":
-                logger.debug("Disabling FusedAttention for context parallelism with cp_comm_type = %s", cp_comm_type)
+                logger.debug(
+                    "Disabling FusedAttention for context parallelism with cp_comm_type = %s",
+                    cp_comm_type,
+                )
                 use_fused_attention = False
 
     # Filter: Context parallelism
