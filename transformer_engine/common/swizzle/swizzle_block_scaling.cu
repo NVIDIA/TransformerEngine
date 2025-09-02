@@ -80,8 +80,8 @@ namespace swizzle_kernel_1d {
     }
 
     // store them in swizzled manner for 512 1x32 tiles in a 128x128 tile
-    const size_t dst_tile_row = warp % cols;
-    const size_t dst_tile_col = warp / cols;
+    const size_t dst_tile_col = warp % rows;
+    const size_t dst_tile_row = warp / rows;
     constexpr size_t TILE_SZ = 512;
     void* const dst_tile = out + dst_tile_row * rows * TILE_SZ + dst_tile_col * TILE_SZ;
     reinterpret_cast<uint4*>(dst_tile)[lane] = sf.u32x4;
