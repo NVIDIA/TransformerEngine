@@ -61,7 +61,7 @@ namespace swizzle_kernel_1d {
     const uint32_t warp_y = threadIdx.y;
     __builtin_assume(warp_y < WARPS_Y_PER_TB);
     const uint32_t lane = threadIdx.z;
-    __builtin_assume(warp_y < WARP_SIZE);
+    __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
     const uint32_t tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
@@ -136,7 +136,7 @@ namespace swizzle_kernel_2d {
     const uint32_t warp_y = threadIdx.y;
     __builtin_assume(warp_y < WARPS_Y_PER_TB);
     const uint32_t lane = threadIdx.z;
-    __builtin_assume(warp_y < WARP_SIZE);
+    __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
     const uint32_t tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
