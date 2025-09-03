@@ -928,9 +928,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
         MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
     ],
 )
-def test_sanity_fp8gemm_with_quantization(
-    N, datatype, input_quantizer, out_quantizer
-):
+def test_sanity_fp8gemm_with_quantization(N, datatype, input_quantizer, out_quantizer):
     # For MXFP8 and CurrentScaling, below unfused quantization should happen
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
     offset = 32
