@@ -216,8 +216,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   transformer_engine::TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);
   output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
   // Output swizzled mxfp8 scaling factor dimensions
-  const size_t swizzled_scale_inv_first_dim = data_flat_first_dim;
-  const size_t swizzled_scale_inv_last_dim = data_flat_last_dim / 32;
+  const size_t swizzled_scale_inv_first_dim = DIVUP<size_t>(data_flat_first_dim, 128) * 128;
+  const size_t swizzled_scale_inv_last_dim = DIVUP<size_t>(data_flat_last_dim, 128) * 4;
   // Allocate memory for swizzled mxfp8 scaling factors
   const auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
   at::Tensor swizzled_scale_inv = at::empty(
