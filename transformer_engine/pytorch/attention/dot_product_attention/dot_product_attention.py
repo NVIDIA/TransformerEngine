@@ -12,7 +12,7 @@ import logging
 
 import torch
 
-from transformer_engine.common.recipe import Recipe, Format, DelayedScaling, Float8CurrentScaling
+from transformer_engine.common.recipe import Recipe, Format, DelayedScaling, Float8CurrentScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import (
@@ -466,6 +466,16 @@ class DotProductAttention(TransformerEngineBaseModule):
             fp8_mha=fp8_autocast_recipe.fp8_mha,
             reduce_amax=False,
         )
+        # force to MXFP8
+        force_dpa_recipe_DS = bool(int(os.getenv("NVTE_DPA_FORCE_MXFP8", "0")))
+        if force_dpa_recipe_DS:
+            fake_secondary_recipe = MXFP8BlockScaling(
+                margin=0,
+                fp8_format=fp8_autocast_recipe.fp8_format,
+                #fp8_format=Format.E5M2,
+                fp8_dpa=fp8_autocast_recipe.fp8_dpa,
+                fp8_mha=fp8_autocast_recipe.fp8_mha,
+            )
 
         # fp8_autocast_recipe=DS:                      DS for all tensors
         # fp8_autocast_recipe=CS, NVTE_DPA_FORCE_DS=0: CS for QKV, O, dO, dQKV; DS for S, dP

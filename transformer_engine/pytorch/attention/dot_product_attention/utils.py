@@ -37,8 +37,9 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 
 
 from transformer_engine.pytorch.utils import (
@@ -1850,6 +1851,11 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    # MLPerf experiment only
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
+        return q_fp8, k_fp8, v_fp8
+
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1899,6 +1905,14 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
 def combine_and_dequantize(
     qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
+    # MLPerf experiment only
+    qkv_quantizer = q_fp8._quantizer
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        assert src_nominal_dtype is not None
+        des_nominal_dtype = src_nominal_dtype if des_nominal_dtype is None else des_nominal_dtype
+        q, k, v = [x.dequantize(dtype=des_nominal_dtype) for x in [q_fp8, k_fp8, v_fp8]]
+        return q, k, v
+
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
