@@ -15,7 +15,7 @@
 
 namespace transformer_engine {
 namespace {
-  constexpr size_t WARP_SIZE = 32;
+  constexpr uint32_t WARP_SIZE = 32;
 
   template<typename T>
   T __device__ convert_block_scaling_to_mxfp8_scaling_factors(T sf) {
@@ -25,14 +25,14 @@ namespace {
   }
 } // namespace
 namespace swizzle_kernel_1d {
-  constexpr size_t WARPS_X_PER_TB = 2;
-  constexpr size_t WARPS_Y_PER_TB = 2;
-  constexpr size_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
-  constexpr size_t SF_PER_THREAD = 4;
-  constexpr size_t SF_PER_WARP = SF_PER_THREAD * WARP_SIZE;
-  constexpr size_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
-  constexpr size_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
-  constexpr size_t MXFP8_SWIZZLE_STRIDE = 32;
+  constexpr uint32_t WARPS_X_PER_TB = 2;
+  constexpr uint32_t WARPS_Y_PER_TB = 2;
+  constexpr uint32_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
+  constexpr uint32_t SF_PER_THREAD = 4;
+  constexpr uint32_t SF_PER_WARP = SF_PER_THREAD * WARP_SIZE;
+  constexpr uint32_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
+  constexpr uint32_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
+  constexpr uint32_t MXFP8_SWIZZLE_STRIDE = 32;
   static_assert(MXFP8_SWIZZLE_STRIDE == WARP_SIZE);
   
   union sf_block {
@@ -50,14 +50,14 @@ namespace swizzle_kernel_1d {
 
   void __global__ swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* const in,
                                                                            void* const out,
-                                                                           const size_t rows,
-                                                                           const size_t cols) {
-    const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t warp = tid / WARP_SIZE;
-    const size_t lane = tid % WARP_SIZE;
+                                                                           const uint32_t rows,
+                                                                           const uint32_t cols) {
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t warp = tid / WARP_SIZE;
+    const uint32_t lane = tid % WARP_SIZE;
 
     // uniform branch
-    const size_t sz = rows * cols;
+    const uint32_t sz = rows * cols;
     if (warp * SF_PER_WARP >= sz) {
       return;
     }
@@ -71,31 +71,31 @@ namespace swizzle_kernel_1d {
     }
 
     // swizzle the scaling factors
-    constexpr size_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
+    constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
     const sf_block offered = sf;
     for (int i = 0; i < 4; ++i) {
-        const size_t dst_comp = (lane + i) % 4;
-        const size_t src_lane = (lane / 4) + ((lane + i) % 4) * 8;
-        const size_t offered_comp = (lane / 8 + 4 - i) % 4;
+        const uint32_t dst_comp = (lane + i) % 4;
+        const uint32_t src_lane = (lane / 4) + ((lane + i) % 4) * 8;
+        const uint32_t offered_comp = (lane / 8 + 4 - i) % 4;
         
         sf.u32[dst_comp] = __shfl_sync(ACTIVE_MASK, offered.u32[offered_comp], src_lane);
     }
 
     // store them in swizzled manner for 512 1x32 tiles in a 128x128 tile
-    const size_t dst_tile_col = warp % rows;
-    const size_t dst_tile_row = warp / rows;
-    constexpr size_t TILE_SZ = 512;
+    const uint32_t dst_tile_col = warp % rows;
+    const uint32_t dst_tile_row = warp / rows;
+    constexpr uint32_t TILE_SZ = 512;
     void* const dst_tile = out + dst_tile_row * rows * TILE_SZ + dst_tile_col * TILE_SZ;
     reinterpret_cast<uint4*>(dst_tile)[lane] = sf.u32x4;
   }
 
-  void launch_kernel(const void* const in, void* const out, size_t data_rows, size_t data_cols,
+  void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
     static_assert(SF_PER_WARP == 128);
     NVTE_CHECK(data_cols % SF_PER_WARP == 0, "Input data has to be divisible into 128x128 tiles");
 
-    const size_t tiles_x = DIVUP<size_t>(data_cols, 128);
-    const size_t tiles_y = DIVUP<size_t>(data_rows, 128);
+    const uint32_t tiles_x = DIVUP(data_cols, 128u);
+    const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
     const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, TB_SIZE};
 
@@ -104,21 +104,21 @@ namespace swizzle_kernel_1d {
   }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
-  constexpr size_t WARPS_X_PER_TB = 1;
-  constexpr size_t WARPS_Y_PER_TB = 1;
-  constexpr size_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
-  constexpr size_t SF_PER_WARP = 1;
-  constexpr size_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
-  constexpr size_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
+  constexpr uint32_t WARPS_X_PER_TB = 1;
+  constexpr uint32_t WARPS_Y_PER_TB = 1;
+  constexpr uint32_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
+  constexpr uint32_t SF_PER_WARP = 1;
+  constexpr uint32_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
+  constexpr uint32_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
 
   void __global__ swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(const void* const in,
                                                                            void* const out,
-                                                                           const size_t sz) {
-    const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+                                                                           const uint32_t sz) {
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     static_assert(SF_PER_WARP == 1);
-    const size_t warp = tid / WARP_SIZE;
-    const size_t lane = tid % WARP_SIZE;
+    const uint32_t warp = tid / WARP_SIZE;
+    const uint32_t lane = tid % WARP_SIZE;
 
     // uniform branch
     if (warp >= sz) {
@@ -140,13 +140,13 @@ namespace swizzle_kernel_2d {
     *reinterpret_cast<uint4*>(dst) = sf4;
   }
 
-  void launch_kernel(const void* const in, void* const out, size_t data_rows, size_t data_cols,
+  void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
-    const size_t tiles_x = DIVUP<size_t>(data_cols, 128);
-    const size_t tiles_y = DIVUP<size_t>(data_rows, 128);
+    const uint32_t tiles_x = DIVUP(data_cols, 128u);
+    const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
     const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, TB_SIZE};
-    
+
     swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
         in, out, ...);
   }
