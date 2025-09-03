@@ -48,22 +48,34 @@ namespace swizzle_kernel_1d {
     uint4 u32x4;
   };
 
-  void __global__ swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* const in,
-                                                                           void* const out,
-                                                                           const uint32_t rows,
-                                                                           const uint32_t cols) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t warp = tid / WARP_SIZE;
-    const uint32_t lane = tid % WARP_SIZE;
+  void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
+  swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
+                                                           void* __restrict__ const out,
+                                                           const uint32_t tiles_x,
+                                                           const uint32_t tiles_y,
+                                                           const uint32_t in_y_stride,
+                                                           const uint32_t out_y_stride) {
+    // load thread indices
+    const uint32_t warp_x = threadIdx.x;
+    __builtin_assume(warp_x < WARPS_X_PER_TB);
+    const uint32_t warp_y = threadIdx.y;
+    __builtin_assume(warp_y < WARPS_Y_PER_TB);
+    const uint32_t lane = threadIdx.z;
+    __builtin_assume(warp_y < WARP_SIZE);
 
-    // uniform branch
-    const uint32_t sz = rows * cols;
-    if (warp * SF_PER_WARP >= sz) {
+    // compute tile indices
+    const uint32_t tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+    const uint32_t tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+
+    // bounds check; uniform branch
+    if (tile_y >= tiles_y || tile_x >= tiles_x) {
       return;
     }
 
-    // load scaling factors for four 1x128 tiles
-    sf_block sf = reinterpret_cast<const sf_block*>(in)[tid];
+    // load scaling factor for four 128x128 tiles
+    constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(sf_block);
+    const void* const warp_src = in + tile_y * in_y_stride + tile_x * in_x_stride;
+    sf_block sf = reinterpret_cast<const sf_block*>(warp_src)[lane];
 
     // convert them to sixteen scaling factors for 1x32 tiles
     for (int i = 0; i < 2; ++i) {
@@ -81,12 +93,10 @@ namespace swizzle_kernel_1d {
         sf.u32[dst_comp] = __shfl_sync(ACTIVE_MASK, offered.u32[offered_comp], src_lane);
     }
 
-    // store them in swizzled manner for 512 1x32 tiles in a 128x128 tile
-    const uint32_t dst_tile_col = warp % rows;
-    const uint32_t dst_tile_row = warp / rows;
-    constexpr uint32_t TILE_SZ = 512;
-    void* const dst_tile = out + dst_tile_row * rows * TILE_SZ + dst_tile_col * TILE_SZ;
-    reinterpret_cast<uint4*>(dst_tile)[lane] = sf.u32x4;
+    // store them cooperatively for 512 1x32 tiles in a 128x128 tile
+    constexpr uint32_t out_x_stride = 512;
+    void* const warp_dst = out + tile_y * out_y_stride + tile_x * out_x_stride;
+    reinterpret_cast<uint4*>(warp_dst)[lane] = sf.u32x4;
   }
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
@@ -99,8 +109,14 @@ namespace swizzle_kernel_1d {
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
     const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, WARP_SIZE};
 
+    const uint32_t input_scale_inv_cols = DIVUP<size_t>(data_rows, 4) * 4;
+    const uint32_t output_scale_inv_cols = DIVUP<size_t>(data_cols, 128) * 4;
+
+    const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
+    const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
+
     swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        in, out, ...);
+        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
   }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
@@ -133,8 +149,8 @@ namespace swizzle_kernel_2d {
 
     // load scaling factor for a 128x128 tile
     constexpr uint32_t in_x_stride = sizeof(float);
-    uint32_t sf = 
-        *reinterpret_cast<const uint32_t*>(in + tile_y * in_y_stride + tile_x * in_x_stride);
+    const void* const warp_src = in + tile_y * in_y_stride + tile_x * in_x_stride;
+    uint32_t sf = reinterpret_cast<const uint32_t*>(warp_src)[0];
 
     // convert it to four scaling factors for 1x32 tiles
     sf = convert_block_scaling_to_mxfp8_scaling_factors(sf);
