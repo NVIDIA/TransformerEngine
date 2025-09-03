@@ -922,18 +922,18 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     ],
 )
 @pytest.mark.parametrize(
-    "output_quantizer",
+    "out_quantizer",
     [
         Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
         MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
     ],
 )
-def test_sanity_gemm_with_fp8quantization_and_unalignment(
+def test_sanity_fp8gemm_with_quantization(
     N, datatype, input_quantizer, out_quantizer
 ):
     # For MXFP8 and CurrentScaling, below unfused quantization should happen
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
-    offset = 16
+    offset = 32
     scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
     scratchpad_fp8 = input_quantizer(scratchpad)
     inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))

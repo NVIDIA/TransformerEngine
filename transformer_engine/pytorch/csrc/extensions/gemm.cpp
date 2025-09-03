@@ -151,8 +151,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   bool unfused_quantization_needed = !quantizer.is_none();
   if (low_precision) {
     // Anything apart from currentscaling quantization can be handled in the fused cublas kernel
-    unfused_quantization_needed =
-        !(IsFloat8CurrentScalingQuantizers(quantizer.ptr()) or IsMXFP8Quantizers(quantizer.ptr()));
+    unfused_quantization_needed = (IsFloat8CurrentScalingQuantizers(quantizer.ptr()) or IsMXFP8Quantizers(quantizer.ptr()));
   }
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
