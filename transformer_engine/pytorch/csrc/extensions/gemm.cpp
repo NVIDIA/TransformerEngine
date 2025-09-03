@@ -151,8 +151,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   bool unfused_quantization_needed;
   if (low_precision) {
     unfused_quantization_needed = !IsFloat8Quantizers(quantizer.ptr());
-  }
-  else  {
+  } else {
     unfused_quantization_needed = !quantizer.is_none();
   }
 
