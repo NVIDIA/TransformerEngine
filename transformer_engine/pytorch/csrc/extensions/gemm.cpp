@@ -144,8 +144,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // maintain unquantized tensor in case we need to output fp8 quantized tensor from op consuming hp data type.
   TensorWrapper unquantized_D_tensor;
   py::object unquantized_out;
-  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-
   // Unfused quantization is needed in the following cases
   // 1. Inputs: BF16, Output: FP8 (GEMM output has to be BF16, so FP8 quantization needed after that)
   // 2. Inputs: FP8, Output: FP8 (Current Scaling Quantization used, Output needs to be in BF16 to do a current
@@ -153,7 +151,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   bool unfused_quantization_needed = !quantizer.is_none();
   if (low_precision) {
     // Anything apart from currentscaling quantization can be handled in the fused cublas kernel
-    unfused_quantization_needed = !IsFloat8CurrentScalingQuantizers(quantizer.ptr());
+    unfused_quantization_needed = !(IsFloat8CurrentScalingQuantizers(quantizer.ptr())
+      or IsMXFP8Quantizers(quantizer.ptr()));
   }
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
@@ -290,6 +289,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
+  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   if (unfused_quantization_needed) my_quantizer->quantize(unquantized_D_tensor, D_tensor);
   // Pack outputs
   std::vector<py::object> out;
