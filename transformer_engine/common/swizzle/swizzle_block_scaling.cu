@@ -25,7 +25,9 @@ namespace {
   }
 } // namespace
 namespace swizzle_kernel_1d {
-  constexpr size_t WARPS_PER_TB = 4; // configurable
+  constexpr size_t WARPS_X_PER_TB = 2;
+  constexpr size_t WARPS_Y_PER_TB = 2;
+  constexpr size_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
   constexpr size_t SF_PER_THREAD = 4;
   constexpr size_t SF_PER_WARP = SF_PER_THREAD * WARP_SIZE;
   constexpr size_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
@@ -94,15 +96,17 @@ namespace swizzle_kernel_1d {
 
     const size_t tiles_x = DIVUP<size_t>(data_cols, 128);
     const size_t tiles_y = DIVUP<size_t>(data_rows, 128);
-    const dim3 grid_dim{tiles_x, tiles_y, 1};
-    const dim3 block_dim{TB_SIZE, 1, 1};
+    const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
+    const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, TB_SIZE};
 
     swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
         in, out, ...);
   }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
-  constexpr size_t WARPS_PER_TB = 4; // configurable
+  constexpr size_t WARPS_X_PER_TB = 1;
+  constexpr size_t WARPS_Y_PER_TB = 1;
+  constexpr size_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
   constexpr size_t SF_PER_WARP = 1;
   constexpr size_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
   constexpr size_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
@@ -140,8 +144,9 @@ namespace swizzle_kernel_2d {
                      cudaStream_t stream) {
     const size_t tiles_x = DIVUP<size_t>(data_cols, 128);
     const size_t tiles_y = DIVUP<size_t>(data_rows, 128);
-    const dim3 grid_dim{tiles_x, tiles_y, 1};
-    const dim3 block_dim{TB_SIZE, 1, 1};
+    const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
+    const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, TB_SIZE};
+    
     swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
         in, out, ...);
   }
