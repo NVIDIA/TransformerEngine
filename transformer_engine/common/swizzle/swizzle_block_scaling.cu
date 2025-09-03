@@ -64,17 +64,19 @@ namespace swizzle_kernel_1d {
     __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
-    const uint32_t tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-    const uint32_t tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+    const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+    const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+    const uint32_t in_tile_y = out_tile_x;
+    const uint32_t in_tile_x = out_tile_y;
 
     // bounds check; uniform branch
-    if (tile_y >= tiles_y || tile_x >= tiles_x) {
+    if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
       return;
     }
 
     // load scaling factor for four 128x128 tiles
     constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(sf_block);
-    const void* const warp_src = in + tile_y * in_y_stride + tile_x * in_x_stride;
+    const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
     sf_block sf = reinterpret_cast<const sf_block*>(warp_src)[lane];
 
     // convert them to sixteen scaling factors for 1x32 tiles
@@ -95,7 +97,7 @@ namespace swizzle_kernel_1d {
 
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
-    void* const warp_dst = out + tile_y * out_y_stride + tile_x * out_x_stride;
+    void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
     reinterpret_cast<uint4*>(warp_dst)[lane] = sf.u32x4;
   }
 
@@ -139,17 +141,19 @@ namespace swizzle_kernel_2d {
     __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
-    const uint32_t tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-    const uint32_t tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+    const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+    const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+    const uint32_t in_tile_y = out_tile_y;
+    const uint32_t in_tile_x = out_tile_x;
 
     // bounds check; uniform branch
-    if (tile_y >= tiles_y || tile_x >= tiles_x) {
+    if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
       return;
     }
 
     // load scaling factor for a 128x128 tile
     constexpr uint32_t in_x_stride = sizeof(float);
-    const void* const warp_src = in + tile_y * in_y_stride + tile_x * in_x_stride;
+    const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
     uint32_t sf = reinterpret_cast<const uint32_t*>(warp_src)[0];
 
     // convert it to four scaling factors for 1x32 tiles
@@ -160,7 +164,7 @@ namespace swizzle_kernel_2d {
 
     // store it cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
-    void* const warp_dst = out + tile_y * out_y_stride + tile_x * out_x_stride;
+    void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
     reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
   }
 
