@@ -264,7 +264,11 @@ def _train(opts):
             [batched_size, hidden_size],
             tp_size,
             quantization_modes=[
-                UserBufferQuantizationMode.FP8 if opts.fp8 else UserBufferQuantizationMode.NONE
+                (
+                    te.module.base.UserBufferQuantizationMode.FP8
+                    if opts.fp8
+                    else te.module.base.UserBufferQuantizationMode.NONE
+                )
             ],
             dtype=torch.bfloat16,
             bootstrap_backend=opts.bootstrap_backend,
