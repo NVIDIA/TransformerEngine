@@ -146,13 +146,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   py::object unquantized_out;
   // Unfused quantization is needed in the following cases
   // 1. Inputs: BF16, Output: FP8 (GEMM output has to be BF16, so FP8 quantization needed after that)
-  // 2. Inputs: FP8, Output: FP8 (Current Scaling/MXFP8 Quantization used, Output needs to be in BF16 to do a current
-  //scaling quantization)
+  // 2. Inputs: FP8, Output: FP8 (For any quantization apart from delayed scaling,
+  // GEMM Output needs to be in BF16, to allow for unfused quantization)
   bool unfused_quantization_needed;
   if (low_precision) {
-    unfused_quantization_needed =
-        IsFloat8CurrentScalingQuantizers(quantizer.ptr()) or IsMXFP8Quantizers(quantizer.ptr());
-  } else {
+    unfused_quantization_needed = !IsFloat8Quantizers(quantizer.ptr());
+  }
+  else  {
     unfused_quantization_needed = !quantizer.is_none();
   }
 
