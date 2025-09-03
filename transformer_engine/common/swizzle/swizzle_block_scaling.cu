@@ -48,6 +48,7 @@ namespace swizzle_kernel_1d {
     uint4 u32x4;
   };
 
+  template <bool AlignedStore>
   void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
   swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
                                                            void* __restrict__ const out,
@@ -98,11 +99,20 @@ namespace swizzle_kernel_1d {
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
     void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-    reinterpret_cast<uint4*>(warp_dst)[lane] = sf.u32x4;
+    if constexpr (AlignedStore) {
+      reinterpret_cast<uint4*>(warp_dst)[lane] = sf.u32x4;
+    } else {
+      void* const dst = warp_dst + lane * sizeof(uint4);
+      for (int i = 0; i < 4; ++i) {
+        reinterpret_cast<uint32_t*>(dst)[i] = sf.u32[i];
+      }
+    }
   }
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
+    NVTE_CHECK(is_aligned_ptr(in, 16), "Input scaling factor pointer must be 16 byte aligned");
+    NVTE_CHECK(is_aligned_ptr(out, 4), "Output scaling factor pointer must be 4 byte aligned");
     static_assert(SF_PER_WARP == 128);
     NVTE_CHECK(data_rows % SF_PER_WARP == 0,
                "Input scaling factors have to be available for full 128x128 tiles");
@@ -118,14 +128,22 @@ namespace swizzle_kernel_1d {
     const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
     const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
 
-    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+    const bool aligned_store =
+        is_aligned_ptr(out, 16) && ((out_y_stride % 16 == 0) || tiles_y == 1);
+
+    const auto kernel = aligned_store ?
+                        swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<true> :
+                        swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<false>;
+
+    kernel<<<grid_dim, block_dim, 0, stream>>>(in, out, tiles_x, tiles_y, in_y_stride,
+                                               out_y_stride);
   }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
   constexpr uint32_t WARPS_X_PER_TB = 1; // configurable
   constexpr uint32_t WARPS_Y_PER_TB = 1; // configurable
 
+  template <bool AlignedStore>
   void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
   swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
                                                            void* __restrict__ const out,
@@ -166,11 +184,20 @@ namespace swizzle_kernel_2d {
     // store it cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
     void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-    reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
+    if constexpr (AlignedStore) {
+      reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
+    } else {
+      void* const dst = warp_dst + lane * sizeof(uint4);
+      for (int i = 0; i < 4; ++i) {
+        reinterpret_cast<uint32_t*>(dst)[i] = sf;
+      }
+    }
   }
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
+    NVTE_CHECK(is_aligned_ptr(in, 4), "Input scaling factor pointer must be 4 byte aligned");
+    NVTE_CHECK(is_aligned_ptr(out, 4), "Output scaling factor pointer must be 4 byte aligned");
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
     const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
@@ -181,9 +208,16 @@ namespace swizzle_kernel_2d {
     
     const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
     const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
+
+    const bool aligned_store =
+        is_aligned_ptr(out, 16) && ((out_y_stride % 16 == 0) || tiles_y == 1);
     
-    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+    const auto kernel = aligned_store ?
+                        swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<true> :
+                        swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<false>;
+
+    kernel<<<grid_dim, block_dim, 0, stream>>>(in, out, tiles_x, tiles_y, in_y_stride,
+                                               out_y_stride);
   }
 } // namespace swizzle_kernel_2d
 
