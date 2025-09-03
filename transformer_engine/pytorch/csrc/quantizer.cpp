@@ -895,8 +895,7 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->dtype = quantizer.attr("dtype").cast<DType>();
 }
 
-void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
-}
+void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {

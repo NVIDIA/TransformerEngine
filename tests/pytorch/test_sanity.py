@@ -38,7 +38,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import (MXFP8Tensor, MXFP8Quantizer)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
 from utils import ModelConfig
@@ -914,11 +914,23 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("input_quantizer", [Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-    MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)])
-@pytest.mark.parametrize("output_quantizer", [Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-    MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)])
-def test_sanity_gemm_with_fp8quantization_and_unalignment(N, datatype, input_quantizer, out_quantizer):
+@pytest.mark.parametrize(
+    "input_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    ],
+)
+@pytest.mark.parametrize(
+    "output_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    ],
+)
+def test_sanity_gemm_with_fp8quantization_and_unalignment(
+    N, datatype, input_quantizer, out_quantizer
+):
     # For MXFP8 and CurrentScaling, below unfused quantization should happen
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
     offset = 16
@@ -946,8 +958,7 @@ def test_sanity_gemm_with_fp8quantization_and_unalignment(N, datatype, input_qua
         use_split_accumulator=False,
     )
     expected_quantized_out = out_quantizer(out)
-    torch.testing.assert_close(expected_quantized_out.dequantize(),
-        quantized_out.dequantize())
+    torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
