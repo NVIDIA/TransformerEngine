@@ -104,7 +104,8 @@ namespace swizzle_kernel_1d {
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
     static_assert(SF_PER_WARP == 128);
-    NVTE_CHECK(data_cols % SF_PER_WARP == 0, "Input data has to be divisible into 128x128 tiles");
+    NVTE_CHECK(data_rows % SF_PER_WARP == 0,
+               "Input scaling factors have to be available for full 128x128 tiles");
 
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
     const uint32_t tiles_y = DIVUP(data_rows, 128u);
