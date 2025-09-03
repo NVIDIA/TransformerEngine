@@ -445,6 +445,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
       default:
         break;
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -561,6 +562,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
       default:
         break;
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

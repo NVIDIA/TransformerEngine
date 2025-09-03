@@ -8,12 +8,11 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
+import transformer_engine_torch as tex
 from ...tensor import Quantizer
+from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from .._common import maybe_autocast_dtype, maybe_dequantize
+from ..op import BasicOperation, OperationContext
 
 
 class Dropout(BasicOperation):
@@ -27,7 +26,7 @@ class Dropout(BasicOperation):
 
     def __init__(self, p: float) -> None:
         super().__init__()
-        self.dropout_probability = p
+        self.dropout_probability: float = p
 
     def op_forward(
         self,
@@ -37,21 +36,44 @@ class Dropout(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
-        # Compute dropout if training
-        out = input_
-        is_training = self.training
-        mask = None
-        if is_training:
+        # Output dtype
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
+
+        # Choose implementation
+        impl = None
+        if not self.training:
+            impl = "evaluation"
+        elif input_.numel() % 16 == 0 and dtype in (torch.float16, torch.bfloat16):
+            impl = "fused"
+        else:
+            impl = "unfused"
+
+        # Perform dropout
+        out: torch.Tensor
+        mask: Optional[torch.Tensor] = None
+        if impl == "evaluation":
+            out = input_
+        elif impl == "fused":
+            x = input_
+            if not isinstance(x, Float8TensorBase):
+                x = maybe_dequantize(x, dtype=dtype)
+            out, mask = tex.dropout_fwd(x, self.dropout_probability)
+        elif impl == "unfused":
+            x = maybe_dequantize(input_, dtype=dtype)
             keep_prob = 1 - self.dropout_probability
-            mask = torch.empty_like(input_)
+            mask = torch.empty_like(x)
             mask.bernoulli_(keep_prob)
             mask *= 1 / keep_prob
-            out = out * mask
+            out = x * mask
+        else:
+            raise ValueError(f"Unsupported forward implementation {impl}")
 
         # Save context for backward
         if ctx.requires_grad:
             ctx.save_for_backward(mask)
-            ctx.is_training = is_training
+            ctx.impl = impl
+            ctx.dropout_probability = self.dropout_probability
+            ctx.dtype = dtype
 
         return out
 
@@ -60,8 +82,21 @@ class Dropout(BasicOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
+
+        # Saved tensors from forward pass
         (mask,) = ctx.saved_tensors
-        grad_input = grad_output
-        if ctx.is_training:
-            grad_input = grad_input * mask
+
+        # Perform dropout backward pass
+        grad_input: torch.Tensor
+        if ctx.impl == "evaluation":
+            grad_input = grad_output
+        elif ctx.impl == "fused":
+            dy = maybe_dequantize(grad_output, dtype=ctx.dtype)
+            grad_input = tex.dropout_bwd(dy, mask, ctx.dropout_probability)
+        elif ctx.impl == "unfused":
+            dy = maybe_dequantize(grad_output, dtype=ctx.dtype)
+            grad_input = dy * mask
+        else:
+            raise ValueError(f"Unsupported backward implementation {ctx.impl}")
+
         return grad_input, ()

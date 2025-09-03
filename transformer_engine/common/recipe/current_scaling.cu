@@ -65,7 +65,7 @@ template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
                         cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
-  cudaMemsetAsync(amax, 0, sizeof(float), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(amax, 0, sizeof(float), stream));
 
   // Return immediately if tensor is empty
   if (N == 0) {
