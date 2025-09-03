@@ -540,8 +540,7 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->all_gather_usage = quantizer.attr("all_gather_usage").cast<bool>();
 }
 
-void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
-}
+void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype) const {
