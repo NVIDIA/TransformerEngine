@@ -963,8 +963,8 @@ def _jax_quantize_dact_dbias(
     _, vjp_func = jax.vjp(
         partial(_jax_act_lu, activation_type=activation_type), x.astype(jnp.float32)
     )
-    if quantizer is None:
-        dz = NoScaleTensor(data=dz.astype(jnp.float32), amax=None)
+    # VJP is using non-quantized backward for dact, so the input should always be wrapped in NoScaleTensor regardless of whether the forward pass used quantization or this dact will quantize afterwards.
+    dz = NoScaleTensor(data=dz.astype(jnp.float32), amax=None)
     (dx,) = vjp_func(dz)
 
     dbias = None

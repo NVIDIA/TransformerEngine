@@ -542,7 +542,9 @@ def _jax_quantize(
     return quantizer.quantize(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
 
-def _jax_dbias(dx: jnp.ndarray, dtype=None, flatten_axis: int = -1):
+def _jax_dbias(dx: Union[jnp.ndarray, NoScaleTensor], dtype=None, flatten_axis: int = -1):
+    if isinstance(dx, NoScaleTensor):
+        dx = dx.data
     sum_axis = dx.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
     assert sum_axis < dx.ndim, "Flatten axis out of bounds!"
     dtype = dtype or dx.dtype

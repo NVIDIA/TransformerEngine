@@ -767,7 +767,8 @@ class TestFusedQuantize:
             )
         else:
             assert isinstance(te_output, NoScaleTensor)
-            assert_allclose(te_output.data, jax_output)
+            assert isinstance(jax_output, NoScaleTensor)
+            assert_allclose(te_output.data, jax_output.data)
 
         if is_dbias:
             # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
@@ -1022,8 +1023,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
         ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
     else:
         ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-    if isinstance(ln_out, ScaledTensor):
-        ln_out = ln_out.dequantize()
+    ln_out = ln_out.dequantize()
     return ln_out
 
 
@@ -1179,7 +1179,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(linear_1_out, activation_type)
+            x = _jax_act_lu(linear_1_out, activation_type).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape
