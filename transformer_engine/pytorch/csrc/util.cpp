@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transformer_engine.h>
+#include "common/common.h"
 #include "common.h"
 
 #include "util.h"
@@ -175,6 +175,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise) {
   using namespace transformer_engine::pytorch;
+  using transformer_engine::DIVUP;
 
   // Check input tensor
   const NVTEScalingMode scaling_mode = input.scaling_mode();
