@@ -4,9 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "util.h"
-
+#include <transformer_engine/transformer_engine.h>
 #include "common.h"
+
+#include "util.h"
 
 std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
                                                   bool rowwise) {
