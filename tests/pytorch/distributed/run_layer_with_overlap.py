@@ -420,10 +420,14 @@ def _train(opts):
         }
 
     quantization_modes = [
-        UserBufferQuantizationMode.FP8 if opts.fp8 else UserBufferQuantizationMode.NONE
+        (
+            te.module.base.UserBufferQuantizationMode.FP8
+            if opts.fp8
+            else te.module.base.UserBufferQuantizationMode.NONE
+        )
     ]
     if opts.first_last_layers_bf16 and opts.fp8:
-        quantization_modes.append(UserBufferQuantizationMode.NONE)
+        quantization_modes.append(te.module.base.UserBufferQuantizationMode.NONE)
 
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],

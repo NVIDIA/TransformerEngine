@@ -473,7 +473,7 @@ def initialize_ub(
                 fp8_buf = (name in layers_all_gather_overlap) or (
                     user_ub_cfg[name].get("fp8_buf", False) and name in methods["pipeline"]
                 )
-                ub_cfg.update(ub_cfgs[name])
+                ub_cfg.update(user_ub_cfg[name])
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
 
