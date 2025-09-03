@@ -141,7 +141,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     }
   }
 
-  // maintain unquantized tensor in case we need to output fp8 quantized tensor from op consuming hp data type.
+  // maintain unquantized tensor in case we need unfused quantization support.
   TensorWrapper unquantized_D_tensor;
   py::object unquantized_out;
   // Unfused quantization is needed in the following cases
