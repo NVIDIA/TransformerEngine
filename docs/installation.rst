@@ -36,7 +36,14 @@ Transformer Engine can be directly installed from `our PyPI <https://pypi.org/pr
 
     pip3 install --no-build-isolation transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
+
+By default, the wheels are built with CUDA 12. To specify the CUDA version, append `_cu12` or `_cu13` to the framework name:
+
+.. code-block:: bash
+
+    pip3 install --no-build-isolation transformer_engine[pytorch_cu13]
+
 
 pip - from GitHub
 -----------------------
