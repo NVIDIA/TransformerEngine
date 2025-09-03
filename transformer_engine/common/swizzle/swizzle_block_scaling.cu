@@ -56,12 +56,12 @@ namespace swizzle_kernel_1d {
                                                            const uint32_t in_y_stride,
                                                            const uint32_t out_y_stride) {
     // load thread indices
-    const uint32_t warp_x = threadIdx.x;
+    const uint32_t lane = threadIdx.x;
+    __builtin_assume(lane < WARP_SIZE);
+    const uint32_t warp_x = threadIdx.z;
     __builtin_assume(warp_x < WARPS_X_PER_TB);
     const uint32_t warp_y = threadIdx.y;
     __builtin_assume(warp_y < WARPS_Y_PER_TB);
-    const uint32_t lane = threadIdx.z;
-    __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
     const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
@@ -109,7 +109,7 @@ namespace swizzle_kernel_1d {
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
     const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
-    const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, WARP_SIZE};
+    const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
 
     const uint32_t input_scale_inv_cols = DIVUP<size_t>(data_rows, 4) * 4;
     const uint32_t output_scale_inv_cols = DIVUP<size_t>(data_cols, 128) * 4;
@@ -133,12 +133,12 @@ namespace swizzle_kernel_2d {
                                                            const uint32_t in_y_stride,
                                                            const uint32_t out_y_stride) {
     // load thread indices
-    const uint32_t warp_x = threadIdx.x;
+    const uint32_t lane = threadIdx.x;
+    __builtin_assume(lane < WARP_SIZE);
+    const uint32_t warp_x = threadIdx.z;
     __builtin_assume(warp_x < WARPS_X_PER_TB);
     const uint32_t warp_y = threadIdx.y;
     __builtin_assume(warp_y < WARPS_Y_PER_TB);
-    const uint32_t lane = threadIdx.z;
-    __builtin_assume(lane < WARP_SIZE);
 
     // compute tile indices
     const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
@@ -173,7 +173,7 @@ namespace swizzle_kernel_2d {
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
     const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
-    const dim3 block_dim{WARPS_X_PER_TB, WARPS_Y_PER_TB, WARP_SIZE};
+    const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
     
     const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
     const uint32_t output_scale_inv_cols = DIVUP<size_t>(data_cols, 128) * 4;
