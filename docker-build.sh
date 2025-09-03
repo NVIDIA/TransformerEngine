@@ -316,10 +316,6 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
       --provenance=false \
       $FROM_IMAGE_ARG \
       $FRAMEWORK_ARG \
-      --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
-      --build-arg "PYVER=${PYVER}" \
-      --build-arg "NVIDIA_BUILD_REF=${COMMIT_SHA}" \
-      --build-arg "NVIDIA_BUILD_ID=${JOB_ID}" \
       -f Dockerfile.base ${PUSH_ARG} .
   RV=$?
   echo "exit code from the previous command -> $RV"
@@ -377,7 +373,8 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
       $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-      --build-arg "NVIDIA_PIPELINE_ID=${CI_PIPELINE_ID:-NONE}" \
+      --build-arg "NVIDIA_PIPELINE_ID=${PIPELINE}" \
+      --build-arg "NVIDIA_BUILD_ID=${JOB_ID}" \
       $OVERRIDES -f Dockerfile.devel .
   if [[ $? -ne 0 ]]; then
     echo Failed to build devel container
@@ -421,6 +418,8 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
       --build-arg "FROM_IMAGE_DEVEL=${DEVEL_IMAGE_NAME}" \
       --build-arg "FROM_IMAGE=${BASE_IMAGE}" \
       --build-arg "FRAMEWORK=${FRAMEWORK}" \
+      --build-arg "NVIDIA_PIPELINE_ID=${PIPELINE}" \
+      --build-arg "NVIDIA_BUILD_ID=${JOB_ID}" \
       --network=host .
   if [[ $? -ne 0 ]]; then
     echo ABORT Failed to create qa image

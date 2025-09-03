@@ -27,3 +27,9 @@ RUN set -x \
  && NO_PROT="${GIT_URL#*://}" \
  && NO_USER="${NO_PROT#*@}" \
  && git remote set-url origin "https://${NO_USER}"
+
+# Export pipeline and build IDs
+ARG NVIDIA_PIPELINE_ID=unknown
+ARG NVIDIA_BUILD_ID=unknown
+ENV NVIDIA_PIPELINE_ID=${NVIDIA_PIPELINE_ID}
+ENV NVIDIA_BUILD_ID=${NVIDIA_BUILD_ID}
