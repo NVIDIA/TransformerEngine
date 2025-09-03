@@ -541,18 +541,6 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
-  // Change the rowwise and columnwise_data to the configured dtype.
-  // May be a switch between E5M2 and E4M3.
-  auto rowwise_data = tensor->get_rowwise_data();
-  rowwise_data.dtype = static_cast<NVTEDType>(dtype);
-
-  auto columnwise_data = tensor->get_columnwise_data();
-  columnwise_data.dtype = static_cast<NVTEDType>(dtype);
-
-  tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
-                           rowwise_data.shape);
-  tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
-                              columnwise_data.shape);
 }
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
