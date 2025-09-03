@@ -922,7 +922,7 @@ class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
     """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
-def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
+def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[NoScaleTensor, ScaledTensor]:
     """
     JAX native activation implementation
     """
@@ -941,11 +941,11 @@ def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, S
     x = jnp.squeeze(x, axis=-2)
     if quantizer:
         return quantizer.quantize(x, flatten_axis=-1)
-    return x
+    return NoScaleTensor(data=x, amax=None)
 
 
 def _jax_quantize_dact_dbias(
-    dz: jnp.ndarray,
+    dz: Union[jnp.ndarray, NoScaleTensor],
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     is_dbias: bool = True,
@@ -963,7 +963,9 @@ def _jax_quantize_dact_dbias(
     _, vjp_func = jax.vjp(
         partial(_jax_act_lu, activation_type=activation_type), x.astype(jnp.float32)
     )
-    (dx,) = vjp_func(dz.astype(jnp.float32))
+    if quantizer is None:
+        dz = NoScaleTensor(data=dz.astype(jnp.float32), amax=None)
+    (dx,) = vjp_func(dz)
 
     dbias = None
     if is_dbias:
@@ -973,6 +975,7 @@ def _jax_quantize_dact_dbias(
         dx = quantizer.quantize(dx, dq_dtype=x.dtype, flatten_axis=-2)
     else:
         dx = dx.astype(x.dtype)
+        dx = NoScaleTensor(data=dx, amax=None)
 
     return dx, dbias
 

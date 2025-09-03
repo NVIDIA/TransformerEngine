@@ -31,7 +31,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
-    HighPrecisionTensor,
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
@@ -183,7 +183,7 @@ ACTIVATION_TYPES = {
 
 class TestActivation:
     def ref_act(self, x, activation_type):
-        return _jax_act_lu(x, activation_type)
+        return _jax_act_lu(x, activation_type).data
 
     def value_n_grad_ref_func(self, x, activation_type):
         jitted_reference = jit(
@@ -338,8 +338,8 @@ class TestNorm:
                 ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
             else:
                 ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-            # if isinstance(ln_out, ScaledTensor):
-            #     ln_out = ln_out.dequantize()
+            # This is a no-op for non-quantized data
+            ln_out = ln_out.dequantize()
             return ln_out
 
         key = jax.random.PRNGKey(0)
@@ -766,7 +766,7 @@ class TestFusedQuantize:
                 te_output, jax_output, precise_comparison=precise_comparison
             )
         else:
-            assert isinstance(te_output, HighPrecisionTensor)
+            assert isinstance(te_output, NoScaleTensor)
             assert_allclose(te_output.data, jax_output)
 
         if is_dbias:

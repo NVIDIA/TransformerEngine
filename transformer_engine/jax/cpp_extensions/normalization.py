@@ -845,6 +845,7 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
     else:
         ln_out = jnp.asarray(output).astype(x.dtype)
+        ln_out = NoScaleTensor(data=ln_out, amax=None)
 
     return ln_out, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1)
 
@@ -869,6 +870,7 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
     else:
         ln_out = jnp.asarray(output).astype(x.dtype)
+        ln_out = NoScaleTensor(data=ln_out, amax=None)
 
     return ln_out, jnp.squeeze(rsigma, axis=-1)
 
@@ -1064,7 +1066,7 @@ def layernorm_bwd(
         )
         mu_empty = jnp.zeros(mu.shape, mu.dtype)
         rsigma_empty = jnp.zeros(rsigma.shape, rsigma.dtype)
-        return vjp_func((dz, mu_empty, rsigma_empty))
+        return vjp_func((NoScaleTensor(data=dz, amax=None), mu_empty, rsigma_empty))
     return NormBwdPrimitive.outer_primitive.bind(
         dz,
         x,
@@ -1256,7 +1258,7 @@ def rmsnorm_bwd(
             gamma,
         )
         rsigma_empty = jnp.zeros(rsigma.shape, rsigma.dtype)
-        return vjp_func((dz, rsigma_empty))
+        return vjp_func((NoScaleTensor(data=dz, amax=None), rsigma_empty))
     mu = jnp.empty(())
     dx, dgamma, _ = NormBwdPrimitive.outer_primitive.bind(
         dz,
