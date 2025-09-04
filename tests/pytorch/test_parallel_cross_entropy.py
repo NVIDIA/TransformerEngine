@@ -8,6 +8,7 @@ from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
 from utils import dtype_tols
 
+
 class TestParallelCrossEntropy:
 
     def generate_iters(self, iters: int):
