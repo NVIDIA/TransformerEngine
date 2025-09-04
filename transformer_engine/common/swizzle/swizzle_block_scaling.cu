@@ -25,20 +25,12 @@ namespace {
   }
 } // namespace
 namespace swizzle_kernel_1d {
-  constexpr uint32_t WARPS_X_PER_TB = 2;
-  constexpr uint32_t WARPS_Y_PER_TB = 2;
-  constexpr uint32_t WARPS_PER_TB = WARPS_X_PER_TB * WARPS_Y_PER_TB;
-  constexpr uint32_t SF_PER_THREAD = 4;
-  constexpr uint32_t SF_PER_WARP = SF_PER_THREAD * WARP_SIZE;
-  constexpr uint32_t TB_SIZE = WARP_SIZE * WARPS_PER_TB;
-  constexpr uint32_t SF_PER_TB = WARPS_PER_TB * SF_PER_WARP;
-  constexpr uint32_t MXFP8_SWIZZLE_STRIDE = 32;
-  static_assert(MXFP8_SWIZZLE_STRIDE == WARP_SIZE);
+  constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
+  constexpr uint32_t WARPS_Y_PER_TB = 2; // configurable
   
   union sf_block {
     // A thread loads 4 float scaling factors
     // float4 f32x4; conceptually
-    static_assert(SF_PER_THREAD == 4);
     
     // A thread treats them as two uint64 for swizzling
     uint64_t u64[2];
@@ -103,8 +95,11 @@ namespace swizzle_kernel_1d {
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
-    static_assert(SF_PER_WARP == 128);
-    NVTE_CHECK(data_rows % SF_PER_WARP == 0,
+    NVTE_CHECK(is_aligned_ptr(in, alignof(sf_block)),
+               "Input scaling factor pointer must be aligned to ", alignof(sf_block), " bytes");
+    NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
+               "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+    NVTE_CHECK(data_rows % 128 == 0,
                "Input scaling factors have to be available for full 128x128 tiles");
 
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
@@ -122,8 +117,8 @@ namespace swizzle_kernel_1d {
   }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
-  constexpr uint32_t WARPS_X_PER_TB = 1; // configurable
-  constexpr uint32_t WARPS_Y_PER_TB = 1; // configurable
+  constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
+  constexpr uint32_t WARPS_Y_PER_TB = 2; // configurable
 
   void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
   swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
@@ -170,6 +165,11 @@ namespace swizzle_kernel_2d {
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
+    NVTE_CHECK(is_aligned_ptr(in, alignof(float)),
+               "Input scaling factor pointer must be aligned to ", alignof(float), " bytes");
+    NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
+               "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+
     const uint32_t tiles_x = DIVUP(data_cols, 128u);
     const uint32_t tiles_y = DIVUP(data_rows, 128u);
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
