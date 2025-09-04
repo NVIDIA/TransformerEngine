@@ -141,6 +141,91 @@ def _rmse(a, b):
 global_fwd_count = count(0,1)
 global_bwd_count = count(0,1)
 
+import random
+
+def set_random_seed(seed: int):
+    """Set random seed for Python random and PyTorch."""
+    # Set Python random seed
+    random.seed(seed)
+    # Set PyTorch seed
+    torch.manual_seed(seed)
+    # Set CUDA seed
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Deterministic CuDNN behavior
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def generate_random_diag(n: int, seed: int | None = None) -> torch.Tensor:
+    """Generate a random diagonal matrix of size n. Values are -1 or 1."""
+    if seed is not None:
+        set_random_seed(seed)
+
+    # Generate randomized diagonal matrix
+    S = torch.zeros(n, n)
+    diag_values = 2 * torch.randint(0, 2, (n,)) - 1  # Random -1 or 1
+    S.diagonal().copy_(diag_values)
+
+    assert torch.all(torch.abs(S.diagonal()) == 1)
+
+    return S
+
+def hadamard_matrix(n: int) -> torch.Tensor:
+    """Generate NxN Hadamard matrix"""
+    if n == 1:
+        return torch.tensor([[1]])
+    else:
+        # Check that n is a power of 2
+        assert (n & (n - 1)) == 0
+
+        H_prev = hadamard_matrix(n // 2)
+        H = torch.cat(
+            [torch.cat([H_prev, H_prev], dim=1), torch.cat([H_prev, -H_prev], dim=1)],
+            dim=0,
+        )
+        H = H / torch.sqrt(torch.tensor(2))
+        return H
+
+def generate_rht(n: int, seed: int | None = None) -> torch.Tensor:
+    """Generate NxN Randomized Hadamard Transform tensor"""
+    # Check that n is a power of 2
+    assert (n & (n - 1)) == 0
+    assert n > 1
+
+    # Generate Hadamard matrix
+    H = hadamard_matrix(n)
+
+    # Generate randomized diagonal matrix
+    S = generate_random_diag(n, seed)
+
+    # Multiply Hadamard matrix by randomized diagonal matrix
+    RHT = torch.matmul(S, H)
+
+    return RHT
+
+def apply_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
+    # Check that RHT is square
+    assert rht.ndim == 2
+    assert rht.shape[0] == rht.shape[1]
+
+    orig_shape = x.shape
+    x = torch.reshape(x, (-1, rht.shape[0]))
+    x = torch.matmul(x, rht)
+    x = torch.reshape(x, orig_shape)
+    return x
+
+def undo_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
+    # Check that RHT is square
+    assert rht.ndim == 2
+    assert rht.shape[0] == rht.shape[1]
+
+    orig_shape = x.shape
+    x = torch.reshape(x, (-1, rht.shape[1]))
+    x = torch.matmul(x, rht.t())
+    x = torch.reshape(x, orig_shape)
+    return x
+
 class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
@@ -1028,6 +1113,11 @@ class FusedAttnFunc(torch.autograd.Function):
         aux_ctx_tensors_clone = []
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
+
+            rht_size = int(os.getenv("NVTE_RHT_BMM1", "0"))
+            if rht_size > 0:
+                rht = generate_rht(rht_size, seed=1234).cuda().to(torch.bfloat16)
+                q, k = [apply_rht(x, rht) for x in [q, k]]
 
             # q, k, v:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
             # q_fp8, k_fp8, v_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
