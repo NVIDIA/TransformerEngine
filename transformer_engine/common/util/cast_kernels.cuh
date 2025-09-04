@@ -1427,7 +1427,8 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       quantize_transpose_square_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data, epsilon,
-          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales,
+          /*noop_tensor=*/noop_tensor.data, stream);
       break;
     }
     case NVTE_BLOCK_SCALING_1D: {
@@ -1455,10 +1456,10 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                                 ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
-      quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
-                                          output_tensor->columnwise_scale_inv, output_tensor->data,
-                                          output_tensor->columnwise_data, epsilon, rowwise_option,
-                                          columnwise_option, force_pow_2_scales, stream);
+      quantize_transpose_vector_blockwise(
+          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+          output_tensor->data, output_tensor->columnwise_data, epsilon, rowwise_option,
+          columnwise_option, force_pow_2_scales, noop_tensor.data, stream);
       break;
     }
     default:
