@@ -150,7 +150,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // GEMM Output needs to be in BF16, to allow for unfused quantization)
   bool unfused_quantization_needed;
   if (low_precision) {
-    unfused_quantization_needed = !IsFloat8Quantizers(quantizer.ptr());
+    unfused_quantization_needed = !quantizer.is_none() and !IsFloat8Quantizers(quantizer.ptr());
   } else {
     unfused_quantization_needed = !quantizer.is_none();
   }
