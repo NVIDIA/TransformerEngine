@@ -1929,7 +1929,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
