@@ -122,11 +122,10 @@ namespace swizzle_kernel_1d {
     const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
     const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
 
-    const uint32_t input_scale_inv_cols = DIVUP<size_t>(data_rows, 4) * 4;
-    const uint32_t output_scale_inv_cols = DIVUP<size_t>(data_cols, 128) * 4;
-
+    const uint32_t input_scale_inv_cols = DIVUP(data_rows, 4u) * 4;
     const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-    const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
+    
+    const uint32_t out_y_stride = tiles_x * 512;
 
     const bool aligned_store =
         is_aligned_ptr(out, 16) && ((out_y_stride % 16 == 0) || tiles_y == 1);
@@ -204,10 +203,9 @@ namespace swizzle_kernel_2d {
     const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
     
     const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
-    const uint32_t output_scale_inv_cols = DIVUP<size_t>(data_cols, 128) * 4;
-    
     const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-    const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
+    
+    const uint32_t out_y_stride = tiles_x * 512;
 
     const bool aligned_store =
         is_aligned_ptr(out, 16) && ((out_y_stride % 16 == 0) || tiles_y == 1);
