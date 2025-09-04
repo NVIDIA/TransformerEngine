@@ -54,7 +54,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                          e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                          const float *noop, float *const dbias_workspace, float *const amax_ptr,
                          const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                         const size_t scale_stride_colwise) {
+                         const size_t scale_stride_colwise, const bool enable_pdl) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
@@ -204,7 +204,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 
     // Trigger the next kernel, so its TMA load can be overlapped with the current kernel
-    if (stage == STAGES - 1) {
+    if (enable_pdl && stage == STAGES - 1) {
       cudaTriggerProgrammaticLaunchCompletion();
     }
 
@@ -1007,7 +1007,8 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
-                    Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+                    Tensor *output, Tensor *dbias, Tensor *workspace, const bool enable_pdl,
+                    cudaStream_t stream) {
   using namespace mxfp8_kernel;
   checkCuDriverContext(stream);
 
@@ -1131,11 +1132,14 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
           cudaLaunchConfig_t cfg = {grid, block_size, dshmem_size, stream, NULL, 0};
-          // This kernel will only be called on sm100+, so no need to check sm_arch
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-          attribute[0].val.programmaticStreamSerializationAllowed = 1; cfg.attrs = attribute;
-          cfg.numAttrs = 1;
+          attribute[0].val.programmaticStreamSerializationAllowed = 1;
+          // This kernel will only be called on sm100+, so no need to check sm_arch
+          if (enable_pdl) {
+            cfg.attrs = attribute;
+            cfg.numAttrs = 1;
+          }
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
@@ -1150,7 +1154,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                   tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise));
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise,
+                  enable_pdl));
               break;
             case ScalingType::COLWISE:
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -1164,7 +1169,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                   tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise));
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise,
+                  enable_pdl));
               break;
             case ScalingType::BIDIMENSIONAL:
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -1178,7 +1184,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                   tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise));
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise,
+                  enable_pdl));
               break;
           }
 
@@ -1305,11 +1312,6 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
       }
       break;
     }
-    case NVTE_MXFP8_1D_SCALING: {
-      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
-                                                             workspace, stream);
-      break;
-    }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
@@ -1401,6 +1403,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
   // extract noop tensor from quant_config_cpp if it's not null
   const NVTETensor noop = quant_config_cpp ? quant_config_cpp->noop_tensor : nullptr;
   const auto noop_tensor = noop != nullptr ? *(convertNVTETensorCheck(noop)) : Tensor();
+  const bool enable_pdl = quant_config_cpp ? quant_config_cpp->enable_pdl : false;
 
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -1424,7 +1427,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          workspace_tensor, enable_pdl, stream);
       break;
     }
     case NVTE_BLOCK_SCALING_2D: {
@@ -1437,7 +1440,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data, epsilon,
           /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales,
-          /*noop_tensor=*/noop_tensor.data, stream);
+          /*noop_tensor=*/noop_tensor.data, enable_pdl, stream);
       break;
     }
     case NVTE_BLOCK_SCALING_1D: {
@@ -1468,7 +1471,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data, epsilon, rowwise_option,
-          columnwise_option, force_pow_2_scales, noop_tensor.data, stream);
+          columnwise_option, force_pow_2_scales, noop_tensor.data, enable_pdl, stream);
       break;
     }
     default:

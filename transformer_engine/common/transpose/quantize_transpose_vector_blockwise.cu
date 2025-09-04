@@ -173,7 +173,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
-    const bool pow_2_scaling, const float* noop_ptr) {
+    const bool pow_2_scaling, const float* noop_ptr, const bool enable_pdl) {
   // skip execution if noop
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
@@ -243,7 +243,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 // If not return columnwise, we trigger the next kernel here so that it's load from global memory
 // can overlap with this kernel's return rowwise.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (!return_columnwise_gemm_ready && !return_columnwise_compact) {
+  if (enable_pdl && !return_columnwise_gemm_ready && !return_columnwise_compact) {
     cudaTriggerProgrammaticLaunchCompletion();
   }
 #endif
@@ -342,7 +342,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 // If return columnwise, we trigger the next kernel here so that it's load from global memory
 // can overlap with this kernel's return columnwise.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (return_columnwise_gemm_ready || return_columnwise_compact) {
+  if (enable_pdl && (return_columnwise_gemm_ready || return_columnwise_compact)) {
     cudaTriggerProgrammaticLaunchCompletion();
   }
 #endif
@@ -543,7 +543,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                                          FP8BlockwiseRowwiseOption rowwise_option,
                                          FP8BlockwiseColumnwiseOption columnwise_option,
                                          const bool pow2_scale, const SimpleTensor& noop_tensor,
-                                         cudaStream_t stream) {
+                                         const bool enable_pdl, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise);
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
@@ -628,8 +628,8 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
               size_t smem_bytes = kSMemSize * sizeof(InputType);
 
               cudaLaunchConfig_t cfg = {grid, kThreadsPerBlock, smem_bytes, stream, NULL, 0};
-              if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) >=
-                  90) {
+              if (enable_pdl && transformer_engine::cuda::sm_arch(
+                                    transformer_engine::cuda::current_device()) >= 90) {
                 cfg.attrs = attribute;
                 cfg.numAttrs = 1;
               }
@@ -639,19 +639,20 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                     &block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
                 NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
-              } cudaLaunchKernelEx(&cfg,
-                                   block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType,
-                                                                         OutputType>,
-                                   reinterpret_cast<const InputType*>(input.dptr),
-                                   reinterpret_cast<OutputType*>(output.dptr),
-                                   reinterpret_cast<OutputType*>(output_t.dptr),
-                                   reinterpret_cast<float*>(scale_inv.dptr),
-                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                   scale_t_stride_y, epsilon, rowwise_option, columnwise_option,
-                                   pow2_scalenoop_ptr, noop_ptr);)  // kAligned
-          )                                       // OutputType
-      )                                           // InputType
+              }
+              // launch kernel
+              NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                  &cfg,
+                  block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
+                  reinterpret_cast<const InputType*>(input.dptr),
+                  reinterpret_cast<OutputType*>(output.dptr),
+                  reinterpret_cast<OutputType*>(output_t.dptr),
+                  reinterpret_cast<float*>(scale_inv.dptr),
+                  reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
+                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
+                  columnwise_option, pow2_scale, noop_ptr, enable_pdl));)  // kAligned
+          )                                                                // OutputType
+      )                                                                    // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
