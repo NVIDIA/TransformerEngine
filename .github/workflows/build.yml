@@ -3,95 +3,98 @@
 # See LICENSE for license information.
 
 # A workflow to trigger TE build on GitHub
-name: 'Build'
+name: "Build"
 on:
   pull_request:
   workflow_dispatch:
 jobs:
   core:
-    name: 'Core'
+    name: "Core"
     runs-on: ubuntu-latest
     container:
       image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
     steps:
-      - name: 'Dependencies'
+      - name: "Dependencies"
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: 'Build'
+      - name: "Build"
         run: pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
-      - name: 'Sanity check'
+      - name: "Sanity check"
         run: python3 -c "import transformer_engine"
         working-directory: /
   pytorch:
-    name: 'PyTorch'
-    runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
-      options: --user root
+    name: "PyTorch"
+    runs-on: ubuntu-22.04
     steps:
-      - name: 'Dependencies'
-        run: |
-          apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
+
+      - name: "Build PyTorch Wheel"
+        uses: ./.github/actions/build-pytorch-wheel
+        id: build-pytorch-wheel
         with:
-          submodules: recursive
-      - name: 'Build'
-        run: pip install --no-build-isolation . -v --no-deps
+          release-version: ${{ inputs.release-version || github.sha }}
+          python-version: ${{ inputs.python-version || '3.13' }}
+          cuda-version: ${{ inputs.cuda-version || '12.9.1' }}
+          cudnn-version: ${{ inputs.cudnn-version || '9' }}
+          torch-version: ${{ inputs.torch-version || '2.8.0' }}
+          cxx11_abi: ${{ inputs.cxx11_abi || 'TRUE' }}
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
-      - name: 'Sanity check'
+
+      - name: "Build"
+        run: pip install --no-build-isolation dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }} -v --no-deps
+
+      - name: "Sanity check"
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
-    name: 'JAX'
+    name: "JAX"
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
     steps:
-      - name: 'Dependencies'
+      - name: "Dependencies"
         run: pip install pybind11[global]
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: 'Build'
+      - name: "Build"
         run: pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
-      - name: 'Sanity check'
+      - name: "Sanity check"
         run: python3 tests/jax/test_sanity_import.py
   all:
-    name: 'All'
+    name: "All"
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
     steps:
-      - name: 'Dependencies'
+      - name: "Dependencies"
         run: pip install torch pybind11[global] einops onnxscript
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: 'Build'
+      - name: "Build"
         run: pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
-      - name: 'Sanity check'
+      - name: "Sanity check"
         run: python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py
