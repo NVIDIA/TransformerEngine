@@ -1045,7 +1045,7 @@ def act_lu(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = act_lu(
-            x=x.astype(jnp.float32),
+            x=x,
             activation_type=activation_type,
             quantizer=None,
         )
@@ -1178,8 +1178,8 @@ def quantize_dact_dbias(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = dact_lu(
-            dz=dz.astype(jnp.float32),
-            x=x.astype(jnp.float32),
+            dz=dz,
+            x=x,
             activation_type=activation_type,
             quantizer=None,
         )
