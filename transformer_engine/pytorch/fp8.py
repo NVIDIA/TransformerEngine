@@ -55,13 +55,11 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
-    if (
-        get_device_compute_capability() >= (9, 0)
-        and float(torch.version.cuda) >= 12.9
-    ):
+    if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
-        False, "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9."
+        False,
+        "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
 
 

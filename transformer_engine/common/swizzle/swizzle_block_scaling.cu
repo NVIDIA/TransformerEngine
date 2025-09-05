@@ -15,190 +15,180 @@
 
 namespace transformer_engine {
 namespace {
-  constexpr uint32_t WARP_SIZE = 32;
-} // namespace
+constexpr uint32_t WARP_SIZE = 32;
+}  // namespace
 namespace swizzle_kernel_1d {
-  constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
-  constexpr uint32_t WARPS_Y_PER_TB = 2; // configurable
+constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
+constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 
-  // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids where
-  // each thread stores a single row (of four bytes).
-  uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row,
-                                                                const uint32_t lane,
-                                                                const uint32_t active_mask) {
-    using cu = const uint32_t;
-    constexpr cu QUAD = 4;
+// Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids where
+// each thread stores a single row (of four bytes).
+uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row,
+                                                              const uint32_t lane,
+                                                              const uint32_t active_mask) {
+  using cu = const uint32_t;
+  constexpr cu QUAD = 4;
 
-    cu lane_in_quad = lane % QUAD;
+  cu lane_in_quad = lane % QUAD;
 
-    cu m_0123_4567_89ab_cdef = row;
-    cu m_4567_0123_cdef_89ab = __shfl_xor_sync(active_mask, m_0123_4567_89ab_cdef, 1, QUAD);
-    cu m_0426_4062_8cae_c8ea = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x6240);
-    cu m_5173_1537_d9fb_9dbf = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x3715);
-    cu m_0426_1537_8cae_9dbf = (lane_in_quad & 1) ? m_5173_1537_d9fb_9dbf : m_0426_4062_8cae_c8ea;
-    cu m_8cae_9dbf_0426_1537 = __shfl_xor_sync(active_mask, m_0426_1537_8cae_9dbf, 2, QUAD);
-    cu m_048c_159d_8c04_9d15 = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x5410);
-    cu m_ae26_bf37_26ae_37bf = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x3276);
-    cu m_048c_159d_26ae_37bf = (lane_in_quad & 2) ? m_ae26_bf37_26ae_37bf : m_048c_159d_8c04_9d15;
+  cu m_0123_4567_89ab_cdef = row;
+  cu m_4567_0123_cdef_89ab = __shfl_xor_sync(active_mask, m_0123_4567_89ab_cdef, 1, QUAD);
+  cu m_0426_4062_8cae_c8ea = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x6240);
+  cu m_5173_1537_d9fb_9dbf = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x3715);
+  cu m_0426_1537_8cae_9dbf = (lane_in_quad & 1) ? m_5173_1537_d9fb_9dbf : m_0426_4062_8cae_c8ea;
+  cu m_8cae_9dbf_0426_1537 = __shfl_xor_sync(active_mask, m_0426_1537_8cae_9dbf, 2, QUAD);
+  cu m_048c_159d_8c04_9d15 = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x5410);
+  cu m_ae26_bf37_26ae_37bf = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x3276);
+  cu m_048c_159d_26ae_37bf = (lane_in_quad & 2) ? m_ae26_bf37_26ae_37bf : m_048c_159d_8c04_9d15;
 
-    return m_048c_159d_26ae_37bf;
+  return m_048c_159d_26ae_37bf;
+}
+
+// Expands a uint32_t to a uint4 by duplicating each byte four times.
+// Example: 0x01020304u becomes uint4{0x01010101, 0x02020202, 0x03030303, 0x04040404}
+uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
+  return {__byte_perm(x, 0, 0x0000), __byte_perm(x, 0, 0x1111), __byte_perm(x, 0, 0x2222),
+          __byte_perm(x, 0, 0x3333)};
+}
+
+void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(
+        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
+        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {
+  // load thread indices
+  const uint32_t lane = threadIdx.x;
+  __builtin_assume(lane < WARP_SIZE);
+  const uint32_t warp_x = threadIdx.z;
+  __builtin_assume(warp_x < WARPS_X_PER_TB);
+  const uint32_t warp_y = threadIdx.y;
+  __builtin_assume(warp_y < WARPS_Y_PER_TB);
+
+  // compute tile indices
+  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+  const uint32_t in_tile_y = out_tile_x;
+  const uint32_t in_tile_x = out_tile_y;
+
+  // bounds check; uniform branch
+  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
+    return;
   }
 
-  // Expands a uint32_t to a uint4 by duplicating each byte four times.
-  // Example: 0x01020304u becomes uint4{0x01010101, 0x02020202, 0x03030303, 0x04040404}
-  uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
-    return {
-      __byte_perm(x, 0, 0x0000),
-      __byte_perm(x, 0, 0x1111),
-      __byte_perm(x, 0, 0x2222),
-      __byte_perm(x, 0, 0x3333)
-    };
-  }
+  // calculate this warp's input base pointer
+  constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
+  const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
-  void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
-  swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
-                                                           void* __restrict__ const out,
-                                                           const uint32_t tiles_x,
-                                                           const uint32_t tiles_y,
-                                                           const uint32_t in_y_stride,
-                                                           const uint32_t out_y_stride) {
-    // load thread indices
-    const uint32_t lane = threadIdx.x;
-    __builtin_assume(lane < WARP_SIZE);
-    const uint32_t warp_x = threadIdx.z;
-    __builtin_assume(warp_x < WARPS_X_PER_TB);
-    const uint32_t warp_y = threadIdx.y;
-    __builtin_assume(warp_y < WARPS_Y_PER_TB);
+  // load scaling factors for this lane's initial four 1x128 tiles
+  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
+  uint4 sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
 
-    // compute tile indices
-    const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-    const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
-    const uint32_t in_tile_y = out_tile_x;
-    const uint32_t in_tile_x = out_tile_y;
+  // pack the exponent bits of the scaling factors
+  uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
 
-    // bounds check; uniform branch
-    if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
-      return;
-    }
+  // transpose 4x4 matrices of scaling factors
+  constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
+  packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
-    // calculate this warp's input base pointer
-    constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
-    const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
+  // broadcast the scaling factors for sixteen 1x32 tiles
+  sf = broadcast_uint32_t_to_uint4(packed_exponents);
 
-    // load scaling factors for this lane's initial four 1x128 tiles
-    const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
-    uint4 sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+  // store them cooperatively for 512 1x32 tiles in a 128x128 tile
+  constexpr uint32_t out_x_stride = 512;
+  void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
+  reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
+}
 
-    // pack the exponent bits of the scaling factors
-    uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
-    
-    // transpose 4x4 matrices of scaling factors
-    constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
-    packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
+void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
+                   cudaStream_t stream) {
+  NVTE_CHECK(is_aligned_ptr(in, alignof(uint4)), "Input scaling factor pointer must be aligned to ",
+             alignof(uint4), " bytes");
+  NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
+             "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+  NVTE_CHECK(data_rows % 128 == 0,
+             "Input scaling factors have to be available for full 128x128 tiles");
 
-    // broadcast the scaling factors for sixteen 1x32 tiles
-    sf = broadcast_uint32_t_to_uint4(packed_exponents);
+  const uint32_t tiles_x = DIVUP(data_cols, 128u);
+  const uint32_t tiles_y = DIVUP(data_rows, 128u);
+  const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
+  const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
 
-    // store them cooperatively for 512 1x32 tiles in a 128x128 tile
-    constexpr uint32_t out_x_stride = 512;
-    void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-    reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
-  }
+  const uint32_t input_scale_inv_cols = DIVUP(data_rows, 4u) * 4;
+  const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
 
-  void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
-                     cudaStream_t stream) {
-    NVTE_CHECK(is_aligned_ptr(in, alignof(uint4)),
-               "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-    NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
-               "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-    NVTE_CHECK(data_rows % 128 == 0,
-               "Input scaling factors have to be available for full 128x128 tiles");
+  const uint32_t out_y_stride = tiles_x * 512;
 
-    const uint32_t tiles_x = DIVUP(data_cols, 128u);
-    const uint32_t tiles_y = DIVUP(data_rows, 128u);
-    const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
-    const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
-
-    const uint32_t input_scale_inv_cols = DIVUP(data_rows, 4u) * 4;
-    const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-    
-    const uint32_t out_y_stride = tiles_x * 512;
-
-    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
-  }
+  swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
+      in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+}
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
-  constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
-  constexpr uint32_t WARPS_Y_PER_TB = 2; // configurable
+constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
+constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 
-  void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
-  swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
-                                                           void* __restrict__ const out,
-                                                           const uint32_t tiles_x,
-                                                           const uint32_t tiles_y,
-                                                           const uint32_t in_y_stride,
-                                                           const uint32_t out_y_stride) {
-    // load thread indices
-    const uint32_t lane = threadIdx.x;
-    __builtin_assume(lane < WARP_SIZE);
-    const uint32_t warp_x = threadIdx.z;
-    __builtin_assume(warp_x < WARPS_X_PER_TB);
-    const uint32_t warp_y = threadIdx.y;
-    __builtin_assume(warp_y < WARPS_Y_PER_TB);
+void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(
+        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
+        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {
+  // load thread indices
+  const uint32_t lane = threadIdx.x;
+  __builtin_assume(lane < WARP_SIZE);
+  const uint32_t warp_x = threadIdx.z;
+  __builtin_assume(warp_x < WARPS_X_PER_TB);
+  const uint32_t warp_y = threadIdx.y;
+  __builtin_assume(warp_y < WARPS_Y_PER_TB);
 
-    // compute tile indices
-    const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-    const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
-    const uint32_t in_tile_y = out_tile_y;
-    const uint32_t in_tile_x = out_tile_x;
+  // compute tile indices
+  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+  const uint32_t in_tile_y = out_tile_y;
+  const uint32_t in_tile_x = out_tile_x;
 
-    // bounds check; uniform branch
-    if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
-      return;
-    }
-
-    // calculate this warp's input base pointer
-    constexpr uint32_t in_x_stride = sizeof(float);
-    const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
-    
-    // load scaling factor for this warp's 128x128 tile
-    uint32_t sf = *reinterpret_cast<const uint32_t*>(warp_src);
-
-    // broadcast it to four scaling factors for 1x32 tiles
-    sf = (sf << 1) | (sf >> 7);
-    sf = sf | (sf >> 16);
-
-    // broadcast it to sixteen scaling factors for 1x32 tiles
-    const uint4 sf4{sf, sf, sf, sf};
-
-    // store it cooperatively for 512 1x32 tiles in a 128x128 tile
-    constexpr uint32_t out_x_stride = 512;
-    void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-    reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
+  // bounds check; uniform branch
+  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
+    return;
   }
 
-  void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
-                     cudaStream_t stream) {
-    NVTE_CHECK(is_aligned_ptr(in, alignof(float)),
-               "Input scaling factor pointer must be aligned to ", alignof(float), " bytes");
-    NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
-               "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+  // calculate this warp's input base pointer
+  constexpr uint32_t in_x_stride = sizeof(float);
+  const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
-    const uint32_t tiles_x = DIVUP(data_cols, 128u);
-    const uint32_t tiles_y = DIVUP(data_rows, 128u);
-    const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
-    const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
-    
-    const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
-    const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-    
-    const uint32_t out_y_stride = tiles_x * 512;
-    
-    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
-  }
-} // namespace swizzle_kernel_2d
+  // load scaling factor for this warp's 128x128 tile
+  uint32_t sf = *reinterpret_cast<const uint32_t*>(warp_src);
+
+  // broadcast it to four scaling factors for 1x32 tiles
+  sf = (sf << 1) | (sf >> 7);
+  sf = sf | (sf >> 16);
+
+  // broadcast it to sixteen scaling factors for 1x32 tiles
+  const uint4 sf4{sf, sf, sf, sf};
+
+  // store it cooperatively for 512 1x32 tiles in a 128x128 tile
+  constexpr uint32_t out_x_stride = 512;
+  void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
+  reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
+}
+
+void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
+                   cudaStream_t stream) {
+  NVTE_CHECK(is_aligned_ptr(in, alignof(float)), "Input scaling factor pointer must be aligned to ",
+             alignof(float), " bytes");
+  NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
+             "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+
+  const uint32_t tiles_x = DIVUP(data_cols, 128u);
+  const uint32_t tiles_y = DIVUP(data_rows, 128u);
+  const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
+  const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
+
+  const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
+  const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
+
+  const uint32_t out_y_stride = tiles_x * 512;
+
+  swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
+      in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+}
+}  // namespace swizzle_kernel_2d
 
 void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
                                                     cudaStream_t stream) {
@@ -243,24 +233,21 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
              "Expected the output scaling factor matrix to have ",
              DIVUP<size_t>(data_cols, 128) * 4, " columns, but it has ", output_scale_inv_cols,
              " columns instead.");
-             
+
   if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
     NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_cols, 128),
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_cols, 128), " rows, but it has ", input_scale_inv_rows,
-               " rows instead.");
+               "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_cols, 128),
+               " rows, but it has ", input_scale_inv_rows, " rows instead.");
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_rows, 4) * 4, "columns, but it has ", input_scale_inv_cols,
-               " columns instead.");
+               "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 4) * 4,
+               "columns, but it has ", input_scale_inv_cols, " columns instead.");
 
     swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
                                      data_cols, stream);
-  } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
+  } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D
     NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_rows, 128),
-               "Expected the output scaling factor matrix to have ",
-               DIVUP<size_t>(data_rows, 128), " rows, but it has ", input_scale_inv_rows,
-               " rows instead.");
+               "Expected the output scaling factor matrix to have ", DIVUP<size_t>(data_rows, 128),
+               " rows, but it has ", input_scale_inv_rows, " rows instead.");
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_cols, 512) * 4,
                "Expected the input scaling factor matrix to have ",
                DIVUP<size_t>(data_cols, 512) * 4, "columns, but it has ", input_scale_inv_cols,
@@ -278,6 +265,5 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
   NVTE_API_CALL(nvte_swizzle_block_scaling_to_mxfp8_scaling_factors);
   using namespace transformer_engine;
   swizzle_block_scaling_to_mxfp8_scaling_factors(convertNVTETensorCheck(input),
-                                                 convertNVTETensorCheck(output),
-                                                 stream);
+                                                 convertNVTETensorCheck(output), stream);
 }

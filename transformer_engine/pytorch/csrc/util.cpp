@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "common/common.h"
-#include "common.h"
-
 #include "util.h"
+
+#include "common.h"
+#include "common/common.h"
 
 std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
                                                   bool rowwise) {
@@ -172,7 +172,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
   return buffer;
 }
 
-at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
+at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper& input,
                                                  bool rowwise) {
   using namespace transformer_engine::pytorch;
   using transformer_engine::DIVUP;

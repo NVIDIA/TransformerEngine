@@ -102,11 +102,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   const bool low_precision =
       detail::is_low_precision(A_tensor.dtype()) || detail::is_low_precision(B_tensor.dtype());
-  const bool fp8_block_scaling =
-      A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
-      A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D ||
-      B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
-      B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D;
+  const bool fp8_block_scaling = A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
+                                 A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D ||
+                                 B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
+                                 B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D;
 
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
