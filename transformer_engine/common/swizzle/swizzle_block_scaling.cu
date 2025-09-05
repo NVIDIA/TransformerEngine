@@ -16,13 +16,6 @@
 namespace transformer_engine {
 namespace {
   constexpr uint32_t WARP_SIZE = 32;
-
-  template<typename T>
-  T __device__ convert_block_scaling_to_mxfp8_scaling_factors(T sf) {
-    sf = (sf << 1) | (sf >> 7);
-    sf = sf | (sf >> 16);
-    return sf;
-  }
 } // namespace
 namespace swizzle_kernel_1d {
   constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
@@ -172,8 +165,9 @@ namespace swizzle_kernel_2d {
     // load scaling factor for this warp's 128x128 tile
     uint32_t sf = *reinterpret_cast<const uint32_t*>(warp_src);
 
-    // convert it to four scaling factors for 1x32 tiles
-    sf = convert_block_scaling_to_mxfp8_scaling_factors(sf);
+    // broadcast it to four scaling factors for 1x32 tiles
+    sf = (sf << 1) | (sf >> 7);
+    sf = sf | (sf >> 16);
 
     // broadcast it to sixteen scaling factors for 1x32 tiles
     const uint4 sf4{sf, sf, sf, sf};
