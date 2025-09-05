@@ -24,6 +24,7 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
+    get_quantize_config,
 )
 
 
@@ -80,23 +81,19 @@ def dense(
     Returns:
         Transformed output tensor
     """
-    # Remove when tex.quantize() can handle quantizer=None
-    if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
-        x = with_sharding_constraint_by_logical_axes(x, input_axes)
-        output = tex.gemm(x, kernel, contracting_dims=contracting_dims)
-        if bias is not None:
-            bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
-            output += jnp.reshape(bias, bias_new_shape)
-    else:
-        output = _dense(
-            x,
-            kernel,
-            bias,
-            contracting_dims,
-            input_axes,
-            kernel_axes,
-            quantizer_set,
-        )
+    if not get_quantize_config().is_fp8_enabled():
+        input_dtype = x.dtype
+        kernel = kernel.astype(input_dtype)
+
+    output = _dense(
+        x,
+        kernel,
+        bias,
+        contracting_dims,
+        input_axes,
+        kernel_axes,
+        quantizer_set,
+    )
     return output
 
 
@@ -175,7 +172,9 @@ def _dense_fwd_rule(
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
 
     casted_x = tex.quantize(
-        x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x, noop_scaled_tensor=True
+        x,
+        flatten_axis=flatten_axis_x,
+        quantizer=quantizer_set.x,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -183,7 +182,6 @@ def _dense_fwd_rule(
         kernel,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.kernel,
-        noop_scaled_tensor=True,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -240,7 +238,6 @@ def _dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
-        noop_scaled_tensor=True,
     )
 
     # GEMM NT
