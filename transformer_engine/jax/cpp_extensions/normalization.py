@@ -840,6 +840,7 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma + beta
+    output = output.astype(x.dtype)
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
@@ -864,6 +865,7 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma
+    output = output.astype(x.dtype)
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
