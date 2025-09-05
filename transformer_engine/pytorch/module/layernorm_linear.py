@@ -899,22 +899,13 @@ class _LayerNormLinear(torch.autograd.Function):
                     del grad_bias_
 
                     # Deallocate input tensor if permitted
-                    if (
-                        not ctx.return_layernorm_output
-                        and not ctx.return_layernorm_output_gathered
-                    ):
+                    if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                         # Do not need to return layernorm output
                         clear_tensor_data(ln_out)
-                    elif (
-                        ctx.return_layernorm_output_gathered
-                        and ctx.ln_out_needs_gather
-                    ):
+                    elif ctx.return_layernorm_output_gathered and ctx.ln_out_needs_gather:
                         # ln_out is not the returned tensor
                         clear_tensor_data(ln_out)
-                    if (
-                        ctx.ln_out_needs_gather
-                        and not ctx.ub_bulk_dgrad
-                    ):
+                    if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                         clear_tensor_data(ln_out_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM

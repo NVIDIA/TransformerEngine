@@ -890,7 +890,8 @@ class _Linear(torch.autograd.Function):
                         clear_tensor_data(inputmat_total)
 
                     if (
-                        ctx.parallel_mode == "row" and ctx.sequence_parallel
+                        ctx.parallel_mode == "row"
+                        and ctx.sequence_parallel
                         and not ctx.ub_overlap_ag
                     ):
                         clear_tensor_data(grad_output)
