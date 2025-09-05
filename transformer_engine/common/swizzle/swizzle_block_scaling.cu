@@ -40,62 +40,38 @@ namespace swizzle_kernel_1d {
     uint4 u32x4;
   };
 
-  // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids with
-  // each thread storing a single row (of four bytes).
-  //
-  // Initially, the threads have following layout of the matrix:
-  // lane_in_quad \ row bytes
-  //            0 | 0 1 2 3
-  //            1 | 4 5 6 7
-  //            2 | 8 9 A B
-  //            3 | C D E F
+  // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids where
+  // each thread stores a single row (of four bytes).
   uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row,
                                                                 const uint32_t lane,
                                                                 const uint32_t active_mask) {
-    // Get lane of thread within four thread group
-    const uint32_t lane_in_quad = lane % 4;
-  
-    // row_adjacent is the row adjacent to the current one in the 4x4 matrix
-    // lane_in_quad \ row_adjacent bytes
-    //            0 | 4 5 6 7 
-    //            1 | 0 1 2 3
-    //            2 | C D E F
-    //            3 | 8 9 A B
-    const uint32_t row_adjacent = __shfl_xor_sync(active_mask, row, 1, 4);
+    using cu = const uint32_t;
+    constexpr cu QUAD = 4;
 
-    // perm_adj_even is a permutation of bytes from the current row and the adjacent row
-    // lane_in_quad \ __byte_perm input concatenated bytes
-    //            0 | 0 1 2 3 4 5 6 7 
-    //            1 | 4 5 6 7 0 1 2 3
-    //            2 | 8 9 A B C D E F
-    //            3 | C D E F 8 9 A B
-    //
-    //                ^   ^   ^   ^
-    //                |   |   |   |
-    // byte order:    0 x 2 x 1 x 3 x
-    //
-    // lane_in_quad \ perm_adj_even bytes
-    //            0 | 0 2 4 6
-    //            1 | 4 6 0 2
-    //            2 | 8 A C E
-    //            3 | C E 8 A
-    const uint32_t perm_adj_even = __byte_perm(row, row_adjacent, 0x7531);
+    cu lane_in_quad = lane % QUAD;
 
-    row = (lane_in_quad & 1) ? __byte_perm(row, u, 0x7531)  // [b,f,d,h]
-                        : __byte_perm(row, u, 0x6240); // [a,e,c,g]
-    u = __shfl_xor_sync(active_mask, row, 2, 4);
-    row = (lane_in_quad & 2) ? __byte_perm(row, u, 0x7632)  // [x2,x3,y2,y3]
-                        : __byte_perm(row, u, 0x5410); // [x0,x1,y0,y1]
-    return row;
+    cu m_0123_4567_89ab_cdef = row;
+    cu m_4567_0123_cdef_89ab = __shfl_xor_sync(active_mask, m_0123_4567_89ab_cdef, 1, QUAD);
+    cu m_0426_4062_8cae_c8ea = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x6240);
+    cu m_5173_1537_d9fb_9dbf = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x3715);
+    cu m_0426_1537_8cae_9dbf = (lane_in_quad & 1) ? m_5173_1537_d9fb_9dbf : m_0426_4062_8cae_c8ea;
+    cu m_8cae_9dbf_0426_1537 = __shfl_xor_sync(active_mask, m_0426_1537_8cae_9dbf, 2, QUAD);
+    cu m_048c_159d_8c04_9d15 = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x5410);
+    cu m_ae26_bf37_26ae_37bf = __byte_perm(m_0426_1537_8cae_9dbf, m_8cae_9dbf_0426_1537, 0x3276);
+    cu m_048c_159d_26ae_37bf = (lane_in_quad & 2) ? m_ae26_bf37_26ae_37bf : m_048c_159d_8c04_9d15;
+
+    return m_048c_159d_26ae_37bf;
   }
 
-  uint4 __device__ __forceinline__ expand_bytes1(uint32_t x) {
-    uint4 r;
-    r.x = __byte_perm(x, 0, 0x0000);  // [a a a a]
-    r.y = __byte_perm(x, 0, 0x1111);  // [b b b b]
-    r.z = __byte_perm(x, 0, 0x2222);  // [c c c c]
-    r.w = __byte_perm(x, 0, 0x3333);  // [d d d d]
-    return r;
+  // Expands a uint32_t to a uint4 by duplicating each byte four times.
+  // Example: 0x01020304u becomes uint4{0x01010101, 0x02020202, 0x03030303, 0x04040404}
+  uint4 __device__ __forceinline__ expand_uint32_t_to_uint4(uint32_t x) {
+    return {
+      __byte_perm(x, 0, 0x0000),
+      __byte_perm(x, 0, 0x1111),
+      __byte_perm(x, 0, 0x2222),
+      __byte_perm(x, 0, 0x3333)
+    };
   }
 
   void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
@@ -129,15 +105,15 @@ namespace swizzle_kernel_1d {
     const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
     const sf_block* const tile = reinterpret_cast<const sf_block*>(warp_src);
-    sf_block sf = tile[(lane % 4) * 8];
+    sf_block sf = tile[(lane % 4) * 8 + (lane / 4)];
 
-    uint32_t packed_exponents = (sf.u32[0] << 1) | (sf.u32[1] >> 7) | (sf.u32[2] >> 15) | (sf.u32[3] >> 23);
+    uint32_t packed_exponents = (sf.u32[0] >> 23) | (sf.u32[1] >> 15) | (sf.u32[2] >> 7) | (sf.u32[3] << 1);
     
     constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
 
     packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
-    sf.u32x4 = expand_bytes1(packed_exponents);
+    sf.u32x4 = expand_uint32_t_to_uint4(packed_exponents);
 
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
