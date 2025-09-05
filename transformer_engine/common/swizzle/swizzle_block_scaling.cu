@@ -40,18 +40,56 @@ namespace swizzle_kernel_1d {
     uint4 u32x4;
   };
 
-  __device__ __forceinline__ uint32_t transpose4x4_bytes(uint32_t v, unsigned lane_in_quad, unsigned mask) {
-    uint32_t u;
-    u = __shfl_xor_sync(mask, v, 1, 4);
-    v = (lane_in_quad & 1) ? __byte_perm(v, u, 0x7531)  // [b,f,d,h]
-                        : __byte_perm(v, u, 0x6240); // [a,e,c,g]
-    u = __shfl_xor_sync(mask, v, 2, 4);
-    v = (lane_in_quad & 2) ? __byte_perm(v, u, 0x7632)  // [x2,x3,y2,y3]
-                        : __byte_perm(v, u, 0x5410); // [x0,x1,y0,y1]
-    return v;
+  // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids with
+  // each thread storing a single row (of four bytes).
+  //
+  // Initially, the threads have following layout of the matrix:
+  // lane_in_quad \ row bytes
+  //            0 | 0 1 2 3
+  //            1 | 4 5 6 7
+  //            2 | 8 9 A B
+  //            3 | C D E F
+  uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row,
+                                                                const uint32_t lane,
+                                                                const uint32_t active_mask) {
+    // Get lane of thread within four thread group
+    const uint32_t lane_in_quad = lane % 4;
+  
+    // row_adjacent is the row adjacent to the current one in the 4x4 matrix
+    // lane_in_quad \ row_adjacent bytes
+    //            0 | 4 5 6 7 
+    //            1 | 0 1 2 3
+    //            2 | C D E F
+    //            3 | 8 9 A B
+    const uint32_t row_adjacent = __shfl_xor_sync(active_mask, row, 1, 4);
+
+    // perm_adj_even is a permutation of bytes from the current row and the adjacent row
+    // lane_in_quad \ __byte_perm input concatenated bytes
+    //            0 | 0 1 2 3 4 5 6 7 
+    //            1 | 4 5 6 7 0 1 2 3
+    //            2 | 8 9 A B C D E F
+    //            3 | C D E F 8 9 A B
+    //
+    //                ^   ^   ^   ^
+    //                |   |   |   |
+    // byte order:    0 x 2 x 1 x 3 x
+    //
+    // lane_in_quad \ perm_adj_even bytes
+    //            0 | 0 2 4 6
+    //            1 | 4 6 0 2
+    //            2 | 8 A C E
+    //            3 | C E 8 A
+    const uint32_t perm_adj_even = __byte_perm(row, row_adjacent, 0x7531);
+
+    row = (lane_in_quad & 1) ? __byte_perm(row, u, 0x7531)  // [b,f,d,h]
+                        : __byte_perm(row, u, 0x6240); // [a,e,c,g]
+    u = __shfl_xor_sync(active_mask, row, 2, 4);
+    row = (lane_in_quad & 2) ? __byte_perm(row, u, 0x7632)  // [x2,x3,y2,y3]
+                        : __byte_perm(row, u, 0x5410); // [x0,x1,y0,y1]
+    return row;
   }
 
-  __device__ __forceinline__ uint4 expand_bytes1(uint32_t x) {
+  uint4 __device__ __forceinline__ expand_bytes1(uint32_t x) {
     uint4 r;
     r.x = __byte_perm(x, 0, 0x0000);  // [a a a a]
     r.y = __byte_perm(x, 0, 0x1111);  // [b b b b]
@@ -97,7 +135,7 @@ namespace swizzle_kernel_1d {
     
     constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
 
-    packed_exponents = transpose4x4_bytes(packed_exponents, lane % 4, ACTIVE_MASK);
+    packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
     sf.u32x4 = expand_bytes1(packed_exponents);
 
