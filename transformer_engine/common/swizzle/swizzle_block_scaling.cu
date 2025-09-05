@@ -199,6 +199,77 @@ namespace swizzle_kernel_2d {
   }
 } // namespace swizzle_kernel_2d
 
+void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
+                                                    cudaStream_t stream) {
+  // Do nothing if tensor is empty
+  if (input->data.numel() == 0) {
+    return;
+  }
+
+  CheckInputTensor(*input, "block_scaling_scaling_factor_input");
+  CheckInputTensor(*output, "mxfp8_scaling_factor_output");
+
+  const NVTEScalingMode scaling_mode = input->scaling_mode;
+  NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
+             "Input tensor must be a block scaling tensor");
+  NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "Output tensor must be an mxfp8 tensor");
+
+  NVTE_CHECK(input->scale_inv.dptr != nullptr, "Input must have rowwise scaling factors");
+  NVTE_CHECK(input->scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Output must have rowwise scaling factors");
+  NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
+             "Output must have E8M0 scaling factors");
+
+  NVTE_CHECK(input->data.shape.size() == 2, "Input data must be a matrix");
+  NVTE_CHECK(output->data.shape == input->data.shape,
+             "Output data must have the same shape as input data");
+  NVTE_CHECK(input->scale_inv.shape.size() == 2, "Input scaling factors must be a matrix");
+  NVTE_CHECK(output->scale_inv.shape.size() == 2, "Output scaling factors must be a matrix");
+
+  const size_t data_rows = input->data.shape[0];
+  const size_t data_cols = input->data.shape[1];
+  const size_t input_scale_inv_rows = input->scale_inv.shape[0];
+  const size_t input_scale_inv_cols = input->scale_inv.shape[1];
+  const size_t output_scale_inv_rows = output->scale_inv.shape[0];
+  const size_t output_scale_inv_cols = output->scale_inv.shape[1];
+
+  NVTE_CHECK(output_scale_inv_rows == DIVUP<size_t>(data_rows, 128) * 128,
+             "Expected the output scaling factor matrix to have ",
+             DIVUP<size_t>(data_rows, 128) * 128, " rows, but it has ", output_scale_inv_rows,
+             " rows instead.");
+  NVTE_CHECK(output_scale_inv_cols == DIVUP<size_t>(data_cols, 128) * 4,
+             "Expected the output scaling factor matrix to have ",
+             DIVUP<size_t>(data_cols, 128) * 4, " columns, but it has ", output_scale_inv_cols,
+             " columns instead.");
+             
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
+    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_cols, 128),
+               "Expected the input scaling factor matrix to have ",
+               DIVUP<size_t>(data_cols, 128), " rows, but it has ", input_scale_inv_rows,
+               " rows instead.");
+    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
+               "Expected the input scaling factor matrix to have ",
+               DIVUP<size_t>(data_rows, 4) * 4, "columns, but it has ", input_scale_inv_cols,
+               " columns instead.");
+
+    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
+                                     data_cols, stream);
+  } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
+    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_rows, 128),
+               "Expected the output scaling factor matrix to have ",
+               DIVUP<size_t>(data_rows, 128), " rows, but it has ", input_scale_inv_rows,
+               " rows instead.");
+    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_cols, 512) * 4,
+               "Expected the input scaling factor matrix to have ",
+               DIVUP<size_t>(data_cols, 512) * 4, "columns, but it has ", input_scale_inv_cols,
+               " columns instead.");
+
+    swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
+                                     data_cols, stream);
+  }
+}
+
 }  // namespace transformer_engine
 
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
