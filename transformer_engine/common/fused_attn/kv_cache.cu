@@ -157,6 +157,7 @@ void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache, Tenso
           reinterpret_cast<int *>(page_table.data.dptr),
           reinterpret_cast<int *>(cu_new_lens.data.dptr),
           reinterpret_cast<int *>(cu_cached_lens.data.dptr), h_kv, d_k, d_v, b, max_seq_len);
+      NVTE_CHECK_CUDA(cudaGetLastError());
     }
     dim3 grid_size(b, max_ctx_len);
     copy_to_kv_cache_kernel<<<grid_size, block_size, 0, stream>>>(
@@ -166,6 +167,7 @@ void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache, Tenso
         reinterpret_cast<int *>(cu_new_lens.data.dptr),
         reinterpret_cast<int *>(cu_cached_lens.data.dptr), qkv_format, h_kv, d_k, d_v, b,
         max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -215,6 +217,7 @@ void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<scalar_t *>(tensor.data.dptr),
       reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
@@ -254,6 +257,7 @@ void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<scalar_t *>(tensor.data.dptr),
       reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,

@@ -41,6 +41,7 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
+    get_device_compute_capability,
 )
 
 from distributed_test_base import assert_equal_collectives
@@ -348,6 +349,14 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+            )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():

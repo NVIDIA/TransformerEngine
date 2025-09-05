@@ -600,13 +600,14 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cud
   // workspace size requires 4 bytes
   uint32_t *dout = static_cast<uint32_t *>(workspace);
   uint32_t hout{};
-  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream));
   constexpr int threads = 128;
   const int blocks = (len - 1) / threads + 1;
   get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
                                                                   len, dout);
-  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
   return hout;
 }
 
@@ -633,4 +634,5 @@ void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t 
 
   fused_attn::extract_seed_and_offset<<<1, 1, 0, stream>>>(
       rng_state_ptr, captured, seed_ptr, seed_val, offset_ptr, offset_val, offset_intragraph);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }

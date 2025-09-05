@@ -27,7 +27,7 @@
 using ExtAllgatherOp = std::function<void(void *, size_t, void *, size_t, ExtComm)>;
 using ExtBarrierOp = std::function<void(ExtComm)>;
 
-#define NVTE_MAX_REGIONS 16
+#define NVTE_MAX_REGIONS 32
 #define NVTE_MAX_SMS 32
 #define NVTE_MAX_OPS 32
 #define NVTE_MAX_PEERS 8192
