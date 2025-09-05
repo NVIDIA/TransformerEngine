@@ -65,7 +65,7 @@ namespace swizzle_kernel_1d {
 
   // Expands a uint32_t to a uint4 by duplicating each byte four times.
   // Example: 0x01020304u becomes uint4{0x01010101, 0x02020202, 0x03030303, 0x04040404}
-  uint4 __device__ __forceinline__ expand_uint32_t_to_uint4(uint32_t x) {
+  uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
     return {
       __byte_perm(x, 0, 0x0000),
       __byte_perm(x, 0, 0x1111),
@@ -100,20 +100,23 @@ namespace swizzle_kernel_1d {
       return;
     }
 
-    // calculate warp input base pointer
+    // calculate this warp's input base pointer
     constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(sf_block);
     const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
-    const sf_block* const tile = reinterpret_cast<const sf_block*>(warp_src);
-    sf_block sf = tile[(lane % 4) * 8 + (lane / 4)];
+    // load scaling factors for this lane's initial four 1x128 tiles
+    const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
+    sf_block sf = reinterpret_cast<const sf_block*>(warp_src)[lane_load_idx];
 
+    // pack the exponent bits of the scaling factors
     uint32_t packed_exponents = (sf.u32[0] >> 23) | (sf.u32[1] >> 15) | (sf.u32[2] >> 7) | (sf.u32[3] << 1);
     
+    // transpose 4x4 matrices of scaling factors
     constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
-
     packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
-    sf.u32x4 = expand_uint32_t_to_uint4(packed_exponents);
+    // broadcast the scaling factors for sixteen 1x32 tiles
+    sf.u32x4 = broadcast_uint32_t_to_uint4(packed_exponents);
 
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
@@ -174,10 +177,12 @@ namespace swizzle_kernel_2d {
       return;
     }
 
-    // load scaling factor for a 128x128 tile
+    // calculate this warp's input base pointer
     constexpr uint32_t in_x_stride = sizeof(float);
     const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
-    uint32_t sf = reinterpret_cast<const uint32_t*>(warp_src)[0];
+    
+    // load scaling factor for this warp's 128x128 tile
+    uint32_t sf = *reinterpret_cast<const uint32_t*>(warp_src);
 
     // convert it to four scaling factors for 1x32 tiles
     sf = convert_block_scaling_to_mxfp8_scaling_factors(sf);
