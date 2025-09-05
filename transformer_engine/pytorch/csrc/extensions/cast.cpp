@@ -128,7 +128,9 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
+      // Enable PDL for all but the first tensor
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i], std::nullopt,
+                                      /*enable_pdl=*/i > 0);
     }
   }
 }

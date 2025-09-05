@@ -330,6 +330,8 @@ enum NVTEQuantizationConfigAttribute {
    *  likely be refactored away in the future.
    */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
+  /*! Whether to enable PDL */
+  kNVTEQuantizationConfigEnablePDL = 4,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -836,6 +838,12 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_,
                                            kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
                                            &format, sizeof(Float8BlockScaleTensorFormat));
+  }
+
+  /*! \brief Set whether to enable PDL */
+  void set_enable_pdl(bool enable_pdl) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigEnablePDL, &enable_pdl,
+                                           sizeof(bool));
   }
 
  private:

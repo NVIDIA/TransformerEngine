@@ -594,6 +594,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
       std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
       break;
+    case kNVTEQuantizationConfigEnablePDL:
+      std::memcpy(buf, &config_.enable_pdl, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -628,6 +631,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
       std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigEnablePDL:
+      std::memcpy(&config_.enable_pdl, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
