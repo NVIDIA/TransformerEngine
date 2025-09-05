@@ -170,4 +170,3 @@ if __name__ == "__main__":
         for data_shape in data_shapes:
             for kernel_fsdp_axis in [1, 2]:
                 test_grouped_gemm_fp8_allgather(data_shape, kernel_fsdp_axis)
-
