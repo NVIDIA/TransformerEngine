@@ -27,18 +27,6 @@ namespace {
 namespace swizzle_kernel_1d {
   constexpr uint32_t WARPS_X_PER_TB = 2; // configurable
   constexpr uint32_t WARPS_Y_PER_TB = 2; // configurable
-  
-  union sf_block {
-    // A thread loads 4 float scaling factors
-    // float4 f32x4; conceptually
-    
-    // A thread treats them as two uint64 for swizzling
-    uint64_t u64[2];
-
-    // A thread treats them as four uint32 for storing to memory
-    uint32_t u32[4];
-    uint4 u32x4;
-  };
 
   // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids where
   // each thread stores a single row (of four bytes).
@@ -101,33 +89,33 @@ namespace swizzle_kernel_1d {
     }
 
     // calculate this warp's input base pointer
-    constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(sf_block);
+    constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
     const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
     // load scaling factors for this lane's initial four 1x128 tiles
     const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
-    sf_block sf = reinterpret_cast<const sf_block*>(warp_src)[lane_load_idx];
+    uint4 sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
 
     // pack the exponent bits of the scaling factors
-    uint32_t packed_exponents = (sf.u32[0] >> 23) | (sf.u32[1] >> 15) | (sf.u32[2] >> 7) | (sf.u32[3] << 1);
+    uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
     
     // transpose 4x4 matrices of scaling factors
     constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
     packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
     // broadcast the scaling factors for sixteen 1x32 tiles
-    sf.u32x4 = broadcast_uint32_t_to_uint4(packed_exponents);
+    sf = broadcast_uint32_t_to_uint4(packed_exponents);
 
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
     void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-    reinterpret_cast<uint4*>(warp_dst)[lane] = sf.u32x4;
+    reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
   }
 
   void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                      cudaStream_t stream) {
-    NVTE_CHECK(is_aligned_ptr(in, alignof(sf_block)),
-               "Input scaling factor pointer must be aligned to ", alignof(sf_block), " bytes");
+    NVTE_CHECK(is_aligned_ptr(in, alignof(uint4)),
+               "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
     NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
                "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
     NVTE_CHECK(data_rows % 128 == 0,
