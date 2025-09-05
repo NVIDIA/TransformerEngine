@@ -703,11 +703,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if mla_exchange_latent:
                 # For MLA CP exchanging latent, we exchange the latent
                 # and k position embedding directly.
-                k_shape, k_numel, v_shape = None, None, None # to be filled later
+                k_shape, k_numel, v_shape = None, None, None  # to be filled later
                 kv_compressed_shape = kv_compressed.shape
                 kv_compressed_numel = kv_compressed.numel()
                 k_pos_emb_shape = k_pos_emb.shape
-                p2p_comm_buffers[0] = torch.cat((kv_compressed.view(-1), k_pos_emb.view(-1)), dim=-1)
+                p2p_comm_buffers[0] = torch.cat(
+                    (kv_compressed.view(-1), k_pos_emb.view(-1)), dim=-1
+                )
             else:
                 # For regular MLA, the shape of k and v does not match, so we flatten them
                 # and split them after receiving them.
@@ -750,8 +752,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if mla_exchange_latent:
                             # For MLA CP exchanging latent, we exchange the latent
                             # and k position embedding directly.
-                            kv_compressed_part = kv_inputs[i % 2][:kv_compressed_numel].view(*kv_compressed_shape)
-                            k_pos_emb_part = kv_inputs[i % 2][kv_compressed_numel:].view(*k_pos_emb_shape)
+                            kv_compressed_part = kv_inputs[i % 2][:kv_compressed_numel].view(
+                                *kv_compressed_shape
+                            )
+                            k_pos_emb_part = kv_inputs[i % 2][kv_compressed_numel:].view(
+                                *k_pos_emb_shape
+                            )
                             with torch.no_grad():
                                 k_part, v_part = kv_up_proj_fn(kv_compressed_part, k_pos_emb_part)
                                 k_part = k_part.contiguous()
@@ -766,7 +772,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     k_part = k_part.dequantize(dtype=ctx.qkv_dtype)
                                     v_part = v_part.dequantize(dtype=ctx.qkv_dtype)
                             if i == 0:
-                                k_shape, k_numel, v_shape = k_part.shape, k_part.numel(), v_part.shape
+                                k_shape, k_numel, v_shape = (
+                                    k_part.shape,
+                                    k_part.numel(),
+                                    v_part.shape,
+                                )
                         else:
                             # For regular MLA, k and v are flattened, so split them after receiving.
                             k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
@@ -1377,7 +1387,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if qkv_format == "thd":
                             if mla_exchange_latent:
                                 out = torch.zeros(
-                                    v_shape, dtype=k_part.dtype, layout=k_part.layout, device=k_part.device
+                                    v_shape,
+                                    dtype=k_part.dtype,
+                                    layout=k_part.layout,
+                                    device=k_part.device,
                                 )
                             elif enable_mla:
                                 out = torch.zeros_like(v if not fp8 else out_per_step[0]).view(
@@ -1831,8 +1844,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_, kv_, out_, dout_ = None, None, None, None
             dq_, dk_, dv_ = None, None, None
             if ctx.mla_exchange_latent:
-                kv_compressed_part = kv_cache[: ctx.kv_compressed_numel].view(*ctx.kv_compressed_shape)
+                kv_compressed_part = kv_cache[: ctx.kv_compressed_numel].view(
+                    *ctx.kv_compressed_shape
+                )
                 k_pos_emb_part = kv_cache[ctx.kv_compressed_numel :].view(*ctx.k_pos_emb_shape)
+
                 def recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part):
                     kv_compressed_part.requires_grad_(True)
                     if kv_compressed_part.grad is not None:
@@ -1855,6 +1871,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             k_part = k_part.dequantize(dtype=ctx.qkv_dtype)
                             v_part = v_part.dequantize(dtype=ctx.qkv_dtype)
                     return k_part, v_part
+
             elif ctx.enable_mla:
                 k_part = kv_cache[: ctx.k_numel].view(*ctx.k_shape)
                 v_part = kv_cache[ctx.k_numel :].view(*ctx.v_shape)
@@ -1875,7 +1892,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             k_pos_emb_part = k_pos_emb_part.view(
                                 k_pos_emb_part.shape[0], -1, *k_pos_emb_part.shape[-1:]
                             )
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
+                            )
                         elif ctx.enable_mla:
                             # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
                             k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
@@ -1890,10 +1909,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             kv_compressed_part = kv_compressed_part.view(
                                 -1, *kv_compressed_part.shape[-2:]
                             )
-                            k_pos_emb_part = k_pos_emb_part.view(
-                                -1, *k_pos_emb_part.shape[-2:]
+                            k_pos_emb_part = k_pos_emb_part.view(-1, *k_pos_emb_part.shape[-2:])
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
                             )
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
                         elif ctx.enable_mla:
                             # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
                             k_part = k_part.view(-1, *k_part.shape[-3:])
@@ -1904,7 +1923,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     elif ctx.qkv_format == "thd":
                         q_, out_, dout_ = q, out, dout
                         if ctx.mla_exchange_latent:
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
+                            )
                         elif not ctx.enable_mla:
                             kv_ = kv
                     if ctx.use_fused_attention:
@@ -2053,8 +2074,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if ctx.mla_exchange_latent:
                             kv_compressed_part = kv_compressed_part.unsqueeze(-2)
                             k_pos_emb_part = k_pos_emb_part.unsqueeze(-2)
-                            kv_compressed_part = tex.thd_read_half_tensor(kv_compressed_part, cu_seqlens_kv_padded, 0)
-                            k_pos_emb_part = tex.thd_read_half_tensor(k_pos_emb_part, cu_seqlens_kv_padded, 0)
+                            kv_compressed_part = tex.thd_read_half_tensor(
+                                kv_compressed_part, cu_seqlens_kv_padded, 0
+                            )
+                            k_pos_emb_part = tex.thd_read_half_tensor(
+                                k_pos_emb_part, cu_seqlens_kv_padded, 0
+                            )
                             kv_compressed_part = kv_compressed_part.squeeze(-2)
                             k_pos_emb_part = k_pos_emb_part.squeeze(-2)
                         elif ctx.enable_mla:
@@ -2068,7 +2093,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if ctx.mla_exchange_latent:
                             kv_compressed_part = kv_compressed_part.contiguous()
                             k_pos_emb_part = k_pos_emb_part.contiguous()
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
+                            )
                         elif ctx.enable_mla:
                             k_part = k_part.contiguous()
                             v_part = v_part.contiguous()
@@ -2198,7 +2225,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             k_pos_emb_part = k_pos_emb_part.view(
                                 k_pos_emb_part.shape[0], -1, *k_pos_emb_part.shape[-1:]
                             )
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
+                            )
                         elif ctx.enable_mla:
                             # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
                             k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
@@ -2213,10 +2242,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             kv_compressed_part = kv_compressed_part.view(
                                 -1, *kv_compressed_part.shape[-2:]
                             )
-                            k_pos_emb_part = k_pos_emb_part.view(
-                                -1, *k_pos_emb_part.shape[-2:]
+                            k_pos_emb_part = k_pos_emb_part.view(-1, *k_pos_emb_part.shape[-2:])
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
                             )
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
                         elif ctx.enable_mla:
                             # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
                             k_part = k_part.view(-1, *k_part.shape[-3:])
@@ -2231,7 +2260,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             for x in [q, out, dout]
                         ]
                         if ctx.mla_exchange_latent:
-                            k_part, v_part = recompute_kv_from_cache(kv_compressed_part, k_pos_emb_part)
+                            k_part, v_part = recompute_kv_from_cache(
+                                kv_compressed_part, k_pos_emb_part
+                            )
                         elif not ctx.enable_mla:
                             kv_ = kv
                     if ctx.use_fused_attention:
@@ -2563,7 +2594,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 grad_accum_list = []
                 if ctx.mla_exchange_latent:
                     # [b, 2, sk//2, kv_lora_rank] or [2, sk//2, b, kv_lora_rank]
-                    dkv_compressed = dkv_cache[: ctx.kv_compressed_numel].view(*ctx.kv_compressed_shape)
+                    dkv_compressed = dkv_cache[: ctx.kv_compressed_numel].view(
+                        *ctx.kv_compressed_shape
+                    )
                     # [b, 2, sk//2, qk_pos_emb_dim] or [2, sk//2, b, qk_pos_emb_dim]
                     dk_pos_emb = dkv_cache[ctx.kv_compressed_numel :].view(*ctx.k_pos_emb_shape)
                     if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
@@ -2758,7 +2791,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
                 if ctx.mla_exchange_latent:
                     # [b, 2, sk//2, kv_lora_rank] -> [b, sk, kv_lora_rank]
-                    dkv_compressed = dkv_compressed.view(dkv_compressed.shape[0], -1, dkv_compressed.shape[-1])
+                    dkv_compressed = dkv_compressed.view(
+                        dkv_compressed.shape[0], -1, dkv_compressed.shape[-1]
+                    )
                     # [b, 2, sk//2, qk_pos_emb_dim] -> [b, sk, qk_pos_emb_dim]
                     dk_pos_emb = dk_pos_emb.view(dk_pos_emb.shape[0], -1, dk_pos_emb.shape[-1])
                 elif ctx.enable_mla:

@@ -159,8 +159,7 @@ class _LayerNormLinear(torch.autograd.Function):
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather = (
-            parallel_mode == "column" and sequence_parallel
-            and not input_pre_gathered_for_column_sp
+            parallel_mode == "column" and sequence_parallel and not input_pre_gathered_for_column_sp
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -399,7 +398,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if is_grad_enabled:
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight.requires_grad
+                and parallel_mode == "column"
+                and sequence_parallel
                 and not input_pre_gathered_for_column_sp
             )
 
@@ -906,22 +907,13 @@ class _LayerNormLinear(torch.autograd.Function):
                     del grad_bias_
 
                     # Deallocate input tensor if permitted
-                    if (
-                        not ctx.return_layernorm_output
-                        and not ctx.return_layernorm_output_gathered
-                    ):
+                    if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                         # Do not need to return layernorm output
                         clear_tensor_data(ln_out)
-                    elif (
-                        ctx.return_layernorm_output_gathered
-                        and ctx.ln_out_needs_gather
-                    ):
+                    elif ctx.return_layernorm_output_gathered and ctx.ln_out_needs_gather:
                         # ln_out is not the returned tensor
                         clear_tensor_data(ln_out)
-                    if (
-                        ctx.ln_out_needs_gather
-                        and not ctx.ub_bulk_dgrad
-                    ):
+                    if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                         clear_tensor_data(ln_out_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1809,7 +1801,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if (
-                self.sequence_parallel and self.parallel_mode == "column"
+                self.sequence_parallel
+                and self.parallel_mode == "column"
                 and not self.input_pre_gathered_for_column_sp
             ):
                 self.quantizers["scaling_fwd"][
