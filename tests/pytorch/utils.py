@@ -137,6 +137,31 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
+def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
+    if not is_fp8:
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+        return
+
+    try:
+        if a.dtype != b.dtype:
+            a = a.to(b.dtype)
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+    except Exception as e:
+        logging.debug(e)
+
+    rmse = torch.sqrt((a - b).square().mean()).item()
+    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
+    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+    assert rmse < rmse_tol * rmse_range, (
+        name_a
+        + " vs "
+        + name_b
+        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+        )
+    )
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -147,6 +172,7 @@ class ModelConfig:
         max_seqlen_kv: int = None,
         num_gqa_groups: int = None,
         head_dim_v: int = None,
+        softmax_type: str = "vanilla",
         dropout_p: float = 0.0,
         attn_mask_type: str = "no_mask",
         attn_bias_type: str = "no_bias",
@@ -171,6 +197,7 @@ class ModelConfig:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = self.num_heads * self.head_dim_qk
         self.hidden_size_kv = self.num_gqa_groups * self.head_dim_v
+        self.softmax_type = softmax_type
         self.dropout_p = dropout_p
         self.attn_mask_type = attn_mask_type
         self.attn_bias_type = attn_bias_type
@@ -201,6 +228,7 @@ def get_available_attention_backends(
     window_size: Tuple[int, int] = (-1, -1),
     pad_between_seqs: bool = False,
     context_parallel: bool = False,
+    cp_comm_type: str = "p2p",
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
@@ -258,11 +286,13 @@ def get_available_attention_backends(
             pad_between_seqs=pad_between_seqs,
             attention_dropout=config.dropout_p,
             context_parallel=context_parallel,
+            cp_comm_type=cp_comm_type,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
             is_training=is_training,
             inference_params=inference_params,
+            softmax_type=config.softmax_type,
         )
         (
             use_flash_attention,
