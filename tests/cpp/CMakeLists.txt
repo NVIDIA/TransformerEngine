@@ -34,6 +34,20 @@ endif()
 
 find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
 
+execute_process(
+  COMMAND nm -g ${TE_LIB}
+  COMMAND grep -- nvte_comm_gemm_ctx_create
+  RESULT_VARIABLE _rc
+  OUTPUT_QUIET
+)
+if(_rc EQUAL 0)
+  set(HAVE_COMM_GEMM ON)
+  message("Found COMM_GEMM")
+else()
+  set(HAVE_COMM_GEMM OFF)
+  message("Not found COMM_GEMM")
+endif()
+
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
@@ -43,6 +57,9 @@ include_directories(${CMAKE_SOURCE_DIR})
 find_package(CUDAToolkit REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+if(HAVE_COMM_GEMM)
 add_subdirectory(comm_gemm)
+endif()
+
 add_subdirectory(operator)
 add_subdirectory(util)
