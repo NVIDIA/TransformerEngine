@@ -8,6 +8,7 @@
 #include "common.h"
 #include "pybind.h"
 
+
 namespace transformer_engine::pytorch {
 
 template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>
@@ -183,4 +184,13 @@ py::object swiglu(const at::Tensor& input, py::handle quantizer) {
 py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
   return dactivation_helper<nvte_dswiglu>(grad, input, quantizer);
 }
+
+py::object gpt_oss_swiglu(const at::Tensor &input, py::handle quantizer, float alpha, float min_limit, float max_limit){
+
+}
+
+py::object gpt_oss_dswiglu(const at::Tensor &input, py::handle quantizer, float alpha, float min_limit, float max_limit){
+  
+}
+
 }  // namespace transformer_engine::pytorch

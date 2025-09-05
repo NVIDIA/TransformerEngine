@@ -23,12 +23,28 @@ void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output
 void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_swiglu);
   using namespace transformer_engine;
-  gated_act_fn<fp32, Empty, silu<fp32, fp32>>(input, output, stream);
+  gated_act_fn<fp32, Empty, silu<fp32, fp32>>(input, output, {}, stream);
 }
 
 void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_dswiglu);
   using namespace transformer_engine;
-  dgated_act_fn<fp32, Empty, silu<fp32, fp32>, dsilu<fp32, fp32>>(grad, input, output, stream);
+  dgated_act_fn<fp32, Empty, silu<fp32, fp32>, dsilu<fp32, fp32>>(grad, input, output, {}, stream);
+}
+
+void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float alpha,
+  float min_limit, float max_limit, cudaStream_t stream){
+  NVTE_API_CALL(nvte_gptoss_swiglu);
+  using namespace transformer_engine;
+  GptOssParam param = {alpha, min_limit, max_limit};
+  gated_act_fn<fp32, GptOssParam, oss_silu<fp32, fp32>>(input, output, param, stream);
+}
+
+void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output, float alpha,
+  float min_limit, float max_limit, cudaStream_t stream){
+  NVTE_API_CALL(nvte_gptoss_dswiglu);
+  using namespace transformer_engine;
+  GptOssParam param = {alpha, min_limit, max_limit};
+  dgated_act_fn<fp32, GptOssParam, oss_silu<fp32, fp32>, oss_dsilu<fp32, fp32>>(grad, input, output, param, stream);
 }

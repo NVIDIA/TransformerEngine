@@ -182,6 +182,14 @@ void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream)
  *                           It computes Act(input[N, :H]) x input[N, H:]
  *  \param[in]     stream    CUDA stream used for the operation.
  */
+
+/*
+TODO: Add documentation once the API finalizes.
+*/
+void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float alpha,
+  float min_limit, float max_limit, cudaStream_t stream);
+
+
 void nvte_reglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
 /*! \brief Computes the gated Quick GeLU activation of the input.
@@ -239,6 +247,13 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
  *  \param[in,out] output    Outgoing gradient of shape [N, H * 2].
  *  \param[in]     stream    CUDA stream used for the operation.
  */
+
+/*
+TODO: Add documentation once the API finalizes.
+*/
+void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output, float alpha,
+  float min_limit, float max_limit, cudaStream_t stream);
+
 void nvte_dreglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                  cudaStream_t stream);
 

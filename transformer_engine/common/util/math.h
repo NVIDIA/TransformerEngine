@@ -11,6 +11,12 @@ namespace transformer_engine {
 
 struct Empty {};
 
+struct GptOssParam{
+  float alpha;
+  float min_limit;
+  float max_limit;
+};
+
 template <typename OType, typename IType>
 __device__ inline OType gelu(const IType val, const Empty&) {
   const float cval = val;
@@ -58,9 +64,26 @@ __device__ inline OType silu(const IType val, const Empty& e) {
 }
 
 template <typename OType, typename IType>
+__device__ inline OType oss_silu(const IType val, const GptOssParam& p) {
+  const Empty e = {};
+  const float cval = max(min(val, p.min_limit), p.max_limit); // Clamping
+  return cval * sigmoid<float, float>(p.alpha * cval, e);
+}
+
+template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
   return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType oss_dsilu(const IType val, const GptOssParam& p) {
+  const Empty e = {};
+  const bool dclamp_val = (val <= p.max_limit) && (val >= p.min_limit);
+  const float clamp_val = max(min(val, p.min_limit), p.max_limit); 
+  const float dsilu_val = (p.alpha * clamp_val) * dsigmoid<float, float>(p.alpha * clamp_val, e)
+    + sigmoid<float, float>(p.alpha * clamp_val, e);
+  return dclamp_val ? dsilu_val: 0.0f;
 }
 
 template <typename OType, typename IType>
