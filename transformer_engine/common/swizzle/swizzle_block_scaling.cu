@@ -40,6 +40,26 @@ namespace swizzle_kernel_1d {
     uint4 u32x4;
   };
 
+  __device__ __forceinline__ uint32_t transpose4x4_bytes(uint32_t v, unsigned lane_in_quad, unsigned mask) {
+    uint32_t u;
+    u = __shfl_xor_sync(mask, v, 1, 4);
+    v = (lane_in_quad & 1) ? __byte_perm(v, u, 0x7531)  // [b,f,d,h]
+                        : __byte_perm(v, u, 0x6240); // [a,e,c,g]
+    u = __shfl_xor_sync(mask, v, 2, 4);
+    v = (lane_in_quad & 2) ? __byte_perm(v, u, 0x7632)  // [x2,x3,y2,y3]
+                        : __byte_perm(v, u, 0x5410); // [x0,x1,y0,y1]
+    return v;
+  }
+
+  __device__ __forceinline__ uint4 expand_bytes1(uint32_t x) {
+    uint4 r;
+    r.x = __byte_perm(x, 0, 0x0000);  // [a a a a]
+    r.y = __byte_perm(x, 0, 0x1111);  // [b b b b]
+    r.z = __byte_perm(x, 0, 0x2222);  // [c c c c]
+    r.w = __byte_perm(x, 0, 0x3333);  // [d d d d]
+    return r;
+  }
+
   void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
   swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(const void* __restrict__ const in,
                                                            void* __restrict__ const out,
@@ -66,26 +86,20 @@ namespace swizzle_kernel_1d {
       return;
     }
 
-    // load scaling factor for four 128x128 tiles
+    // calculate warp input base pointer
     constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(sf_block);
     const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
-    sf_block sf = reinterpret_cast<const sf_block*>(warp_src)[lane];
 
-    // convert them to sixteen scaling factors for 1x32 tiles
-    for (int i = 0; i < 2; ++i) {
-      sf.u64[i] = convert_block_scaling_to_mxfp8_scaling_factors(sf.u64[i]);
-    }
+    const sf_block* const tile = reinterpret_cast<const sf_block*>(warp_src);
+    sf_block sf = tile[(lane % 4) * 8];
 
-    // swizzle the scaling factors
+    uint32_t packed_exponents = (sf.u32[0] << 1) | (sf.u32[1] >> 7) | (sf.u32[2] >> 15) | (sf.u32[3] >> 23);
+    
     constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF; // no divergent branches
-    const sf_block offered = sf;
-    for (int i = 0; i < 4; ++i) {
-        const uint32_t dst_comp = (lane + i) % 4;
-        const uint32_t src_lane = (lane / 4) + ((lane + i) % 4) * 8;
-        const uint32_t offered_comp = (lane / 8 + 4 - i) % 4;
-        
-        sf.u32[dst_comp] = __shfl_sync(ACTIVE_MASK, offered.u32[offered_comp], src_lane);
-    }
+
+    packed_exponents = transpose4x4_bytes(packed_exponents, lane % 4, ACTIVE_MASK);
+
+    sf.u32x4 = expand_bytes1(packed_exponents);
 
     // store them cooperatively for 512 1x32 tiles in a 128x128 tile
     constexpr uint32_t out_x_stride = 512;
@@ -184,77 +198,6 @@ namespace swizzle_kernel_2d {
         in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
   }
 } // namespace swizzle_kernel_2d
-
-void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
-                                                    cudaStream_t stream) {
-  // Do nothing if tensor is empty
-  if (input->data.numel() == 0) {
-    return;
-  }
-
-  CheckInputTensor(*input, "block_scaling_scaling_factor_input");
-  CheckInputTensor(*output, "mxfp8_scaling_factor_output");
-
-  const NVTEScalingMode scaling_mode = input->scaling_mode;
-  NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
-             "Input tensor must be a block scaling tensor");
-  NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
-             "Output tensor must be an mxfp8 tensor");
-
-  NVTE_CHECK(input->scale_inv.dptr != nullptr, "Input must have rowwise scaling factors");
-  NVTE_CHECK(input->scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Output must have rowwise scaling factors");
-  NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
-             "Output must have E8M0 scaling factors");
-
-  NVTE_CHECK(input->data.shape.size() == 2, "Input data must be a matrix");
-  NVTE_CHECK(output->data.shape == input->data.shape,
-             "Output data must have the same shape as input data");
-  NVTE_CHECK(input->scale_inv.shape.size() == 2, "Input scaling factors must be a matrix");
-  NVTE_CHECK(output->scale_inv.shape.size() == 2, "Output scaling factors must be a matrix");
-
-  const size_t data_rows = input->data.shape[0];
-  const size_t data_cols = input->data.shape[1];
-  const size_t input_scale_inv_rows = input->scale_inv.shape[0];
-  const size_t input_scale_inv_cols = input->scale_inv.shape[1];
-  const size_t output_scale_inv_rows = output->scale_inv.shape[0];
-  const size_t output_scale_inv_cols = output->scale_inv.shape[1];
-
-  NVTE_CHECK(output_scale_inv_rows == DIVUP<size_t>(data_rows, 128) * 128,
-             "Expected the output scaling factor matrix to have ",
-             DIVUP<size_t>(data_rows, 128) * 128, " rows, but it has ", output_scale_inv_rows,
-             " rows instead.");
-  NVTE_CHECK(output_scale_inv_cols == DIVUP<size_t>(data_cols, 128) * 4,
-             "Expected the output scaling factor matrix to have ",
-             DIVUP<size_t>(data_cols, 128) * 4, " columns, but it has ", output_scale_inv_cols,
-             " columns instead.");
-             
-  if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_cols, 128),
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_cols, 128), " rows, but it has ", input_scale_inv_rows,
-               " rows instead.");
-    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_rows, 4) * 4, "columns, but it has ", input_scale_inv_cols,
-               " columns instead.");
-
-    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
-                                     data_cols, stream);
-  } else { // scaling_mode == NVTE_BLOCK_SCALING_2D
-    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_rows, 128),
-               "Expected the output scaling factor matrix to have ",
-               DIVUP<size_t>(data_rows, 128), " rows, but it has ", input_scale_inv_rows,
-               " rows instead.");
-    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_cols, 512) * 4,
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_cols, 512) * 4, "columns, but it has ", input_scale_inv_cols,
-               " columns instead.");
-
-    swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
-                                     data_cols, stream);
-  }
-}
 
 }  // namespace transformer_engine
 
