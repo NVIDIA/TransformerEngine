@@ -38,8 +38,8 @@ Usage:
                  remote registry and repository. Default is to NOT push.
   --virtual      Do not push non-versioned image tags and overwrite CUDA libs
                  by versions specified in the environment variables
-                 CUDA_VERSION, NCCL_VERSION, CUBLAS_VERSION, CUDNN_VERSION, and
-                 TRT_VERSION.
+                 CUDA_VERSION, NCCL_VERSION, CUBLAS_VERSION, CUBLASMP_VERSION,
+                 CUDNN_VERSION, and TRT_VERSION.
   --mode         Can be combination of 'b' to build base image, 'd' to build
                  devel image, 's' to build qa and stage images, and c to contamer
                  scan base image. Default is 'bd'. Either 'c', 'd' or 's' assume
@@ -282,7 +282,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   REGISTRY="${CI_REGISTRY:-gitlab-master.nvidia.com:5005}"
   ########
   ## TEMPORARY WAR https://jirasw.nvidia.com/browse/DLR-316 - do not merge to master
-  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
+  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:main}"
   ########
   PULL_FLAG=""
   CACHE_FROM="--cache-from type=local,src=/tmp/docker-cache"
@@ -330,7 +330,7 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   REGISTRY="${CI_REGISTRY:-gitlab-master.nvidia.com:5005}"
   ########
   ## TEMPORARY WAR https://jirasw.nvidia.com/browse/DLR-316 - do not merge to master
-  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
+  FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:main}"
   ########
   BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base-${ARCH}"
 
@@ -358,6 +358,9 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
       fi
       if [[ -n "${CUBLAS_VERSION}" ]]; then
         OVERRIDES="$OVERRIDES --build-arg CUBLAS_VERSION_OVERRIDE=$CUBLAS_VERSION"
+      fi
+      if [[ -n "${CUBLASMP_VERSION}" ]]; then
+        OVERRIDES="$OVERRIDES --build-arg CUBLASMP_VERSION_OVERRIDE=$CUBLASMP_VERSION"
       fi
       if [[ -n "${CUDNN_VERSION}" ]]; then
         OVERRIDES="$OVERRIDES --build-arg CUDNN_VERSION_OVERRIDE=$CUDNN_VERSION"

@@ -1,6 +1,8 @@
 ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel
+ARG FROM_SCRIPTS_IMAGE=gitlab-master.nvidia.com:5005/dl/devops/build-scripts:main
 ARG FRAMEWORK=pytorch
 
+FROM ${FROM_SCRIPTS_IMAGE} AS build-scripts
 FROM scratch as transformerengine
 COPY 3rdparty/ 3rdparty/
 COPY docs/ docs/
@@ -38,6 +40,17 @@ RUN pip3 install ninja pybind11
 # TODO (ksivamai): fix in TE build
 RUN apt-get update && apt-get install -y libgoogle-glog-dev
 
+RUN pip install nvidia-nvshmem-cu${CUDA_VERSION%%.*} \
+    && echo "/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem/lib" >> /etc/ld.so.conf.d/nvidia-nvshmem.conf \
+    && ldconfig
+RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
+  [[ "${FRAMEWORK}" == "jax" ]] \
+  && export CUBLASMP_VERSION=0.5.1.65 \
+  || [[ ! "${FRAMEWORK}" == "jax" ]]
+
+  /nvidia/build-scripts/installCUBLASMP.sh
+EOF
+
 # Install Transformer Engine
 RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" =~ pytorch|all ]] \
@@ -51,6 +64,8 @@ RUN <<"EOF" bash -e
   || export NVTE_FRAMEWORK=${FRAMEWORK}
 
   NVTE_BUILD_THREADS_PER_JOB=4 \
+  NVTE_WITH_CUBLASMP=1 \
+  CUBLASMP_HOME=/usr \
   pip3 install --verbose --verbose --no-build-isolation .[test]
 
   rm -rf transformer_engine.egg-info dist build
