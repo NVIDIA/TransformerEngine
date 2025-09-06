@@ -209,7 +209,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   input_cu.set_rowwise_data(data.data_ptr, input.dtype(), data_shape);
   const NVTEBasicTensor scale_inv =
       rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
-  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, scale_inv.dtype,
+  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, static_cast<NVTEDType>(scale_inv.dtype),
                                  scale_inv.shape);
 
   // Create output tensor
