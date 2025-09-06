@@ -107,7 +107,7 @@ def _estimate_cached_weight_size(
     # MXFP8 caches one data byte per element and one scale byte per 32
     # elements
     if recipe.mxfp8():
-        return param_elements * (1 + 1/32) / 1024**2
+        return param_elements * (1 + 1 / 32) / 1024**2
 
     raise NotImplementedError(f"Unrecognized recipe ({fp8_recipe})")
 
