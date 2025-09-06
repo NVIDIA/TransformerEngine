@@ -8,6 +8,7 @@
 #include <transformer_engine/swizzle.h>
 
 #include <cstdint>
+#include <type_traits>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -58,10 +59,21 @@ uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
           __byte_perm(x, 0, 0x3333)};
 }
 
+// Tag struct denoting whether the number of rows of the input fp8 block scaling tensor's data
+// matrix is divisible by 128. If it is not, some threads could read out of bounds scaling factors.
+struct no_oob_tag_t {};
+constexpr no_oob_tag_t NO_OOB_TAG;
+
+template <typename OOBT>
 void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
     swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(
         const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
-        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {
+        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride,
+        OOBT first_oob) {
+  // resolve kernel variant
+  constexpr bool no_oob = std::is_same_v<OOBT, no_oob_tag_t>;
+  static_assert(no_oob || std::is_same_v<OOBT, uint32_t>);
+
   // load thread indices
   const uint32_t lane = threadIdx.x;
   __builtin_assume(lane < WARP_SIZE);
@@ -87,7 +99,16 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
 
   // load scaling factors for this lane's initial four 1x128 tiles
   const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
-  uint4 sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+  uint4 sf;
+  if constexpr (no_oob) {
+    sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+  } else {
+    if ((out_tile_y < tiles_y - 1) || lane_load_idx < first_oob) {
+      sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+    } else {
+      sf = uint4{0, 0, 0, 0};
+    }
+  }
 
   // pack the exponent bits of the scaling factors
   uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
@@ -111,8 +132,7 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
              alignof(uint4), " bytes");
   NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
              "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-  NVTE_CHECK(data_rows % 128 == 0,
-             "Input scaling factors have to be available for full 128x128 tiles");
+  NVTE_CHECK(data_rows % 4 == 0, "Input tensor must not have any padding scaling factors");
 
   const uint32_t tiles_x = DIVUP(data_cols, 128u);
   const uint32_t tiles_y = DIVUP(data_rows, 128u);
@@ -124,8 +144,15 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
 
   const uint32_t out_y_stride = tiles_x * 512;
 
-  swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-      in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+  const uint32_t first_oob = (input_scale_inv_cols % 128) / 4;
+
+  if (first_oob == 0) {
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride, NO_OOB_TAG);
+  } else {
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        in, out, tiles_x, tiles_y, in_y_stride, out_y_stride, first_oob);
+  }
 }
 }  // namespace swizzle_kernel_1d
 namespace swizzle_kernel_2d {
