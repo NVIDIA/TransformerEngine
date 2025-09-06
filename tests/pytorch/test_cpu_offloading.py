@@ -52,6 +52,12 @@ model_types = {
         SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
     ),
     "linear_op": lambda: te.ops.Linear(SIZE, SIZE, dtype=torch.bfloat16),
+    "layernorm_mlp_ops": lambda: te.ops.Sequential(
+        te.ops.LayerNorm(SIZE, dtype=torch.bfloat16),
+        te.ops.Linear(SIZE, SIZE, dtype=torch.bfloat16),
+        te.ops.GELU(),
+        te.ops.Linear(SIZE, SIZE, dtype=torch.bfloat16),
+    ),
 }
 
 
