@@ -6,6 +6,7 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Union
 import warnings
+import os
 
 import torch
 import transformer_engine_torch as tex
@@ -64,6 +65,14 @@ class Float8Quantizer(Quantizer):
         self.scale = scale
         self.amax = amax
         self.dtype = fp8_dtype
+
+    def __repr__(self) -> str:
+        return (
+            f"quantizer_type={self.__class__.__name__}, "
+            f"fp8_dtype={self.dtype}, "
+            f"rowwise_usage={self.rowwise_usage}, "
+            f"columnwise_usage={self.columnwise_usage}"
+        )
 
     def update_quantized(
         self,
@@ -242,6 +251,16 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+
+    def __repr__(self) -> str:
+        return (
+            f"quantizer_type={self.__class__.__name__}, "
+            f"fp8_dtype={self.dtype}, "
+            f"with_amax_reduction={self.with_amax_reduction}, "
+            f"force_pow_2_scales={self.force_pow_2_scales}, "
+            f"rowwise_usage={self.rowwise_usage}, "
+            f"columnwise_usage={self.columnwise_usage}"
+        )
 
     def update_quantized(
         self,

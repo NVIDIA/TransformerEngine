@@ -201,10 +201,12 @@ class Float8CurrentScaling(Recipe):
                 pass.
     """
 
+    use_power_2_scales: bool = os.getenv("NVTE_FP8_CS_POWER_OF_2", "0") == "1"
+
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_fwd_inp = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
@@ -328,9 +330,9 @@ class Float8BlockScaling(Recipe):
         assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
         assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
         assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
-        assert (
-            not self.fp8_dpa and not self.fp8_mha
-        ), "FP8 attention is not supported for Float8BlockScaling."
+        #assert (
+        #    not self.fp8_dpa and not self.fp8_mha
+        #), "FP8 attention is not supported for Float8BlockScaling."
 
     def __repr__(self) -> str:
         return (

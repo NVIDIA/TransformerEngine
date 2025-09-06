@@ -1128,7 +1128,10 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
 
             if bool(int(os.getenv("NVTE_Emulate_in_F16", "0"))):
-                q_deq16, k_deq16, v_deq16 = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=out_nominal_dtype)
+                if bool(int(os.getenv("NVTE_Emulate_QDQ_QKV", "0"))):
+                    q_deq16, k_deq16, v_deq16 = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=out_nominal_dtype)
+                else:
+                    q_deq16, k_deq16, v_deq16 = q, k, v
                 out_, aux_ctx_tensors = fused_attn_fwd(
                     is_training,
                     max_seqlen_q,
@@ -1160,7 +1163,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     layer = int(os.getenv("NVTE_LAYER_NUMBER", str(layer_number)))
                     procid = int(os.getenv("SLURM_PROCID", "0"))
                     if layer_number == layer and procid == 0:
-                        print(f">> fwd emulate16")
+                        print(f">>>>>>>>>>>>>>>>>> fwd emulate16")
                         torch.cuda.synchronize()
                         t_in = [q, k, v]
                         t_f8 = [out_, aux_ctx_tensors[0], aux_ctx_tensors[1]]
@@ -1321,17 +1324,19 @@ class FusedAttnFunc(torch.autograd.Function):
                 and bool(int(os.getenv("NVTE_PRINT", "0")))
                 and layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
             ):
-                torch.cuda.synchronize()
-                #for i, x in enumerate(quantizers):
-                #    if x is None:
-                #        print(f">>>>{layer_number} {names[i]}: None")
-                #    else:
-                #        print(
-                #            f">>>>{layer_number} {names[i]}:"
-                #            f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
-                #            f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x"
-                #            f" amax)={(x.scale * x.amax).item():.4e}"
-                #        )
+                #torch.cuda.synchronize()
+                print(f">>>>{layer_number}: {fp8_meta["recipe"]}")
+                for i, x in enumerate(quantizers):
+                    if x is None:
+                        print(f">>>>{layer_number} {names[i]}: None")
+                    else:
+                        print(
+                            f">>>>{layer_number} {names[i]}:"
+                            f" {x}"
+                            #f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
+                            #f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x"
+                            #f" amax)={(x.scale * x.amax).item():.4e}"
+                        )
                 #        if x.amax.isnan():
                 #            print(
                 #                f">>>>{layer_number} dqkv.isnan:"
@@ -1549,8 +1554,18 @@ class FusedAttnFunc(torch.autograd.Function):
                     #                    f" {[x.isnan().sum() for x in [dq_, dk_, dv_]]}"
                     #                )
                     if bool(int(os.getenv("NVTE_Emulate_in_F16", "0"))):
-                        q_deq16, k_deq16, v_deq16 = combine_and_dequantize(ctx.qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=dqkv_nominal_dtype)
-                        out_deq16, d_out_deq16 = [x.dequantize(dtype=dqkv_nominal_dtype) for x in [out_fp8, d_out_fp8]]
+                        if bool(int(os.getenv("NVTE_Emulate_QDQ_QKV", "0"))):
+                            q_deq16, k_deq16, v_deq16 = combine_and_dequantize(ctx.qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=dqkv_nominal_dtype)
+                        else:
+                            q_deq16, k_deq16, v_deq16 = q, k, v
+                        if bool(int(os.getenv("NVTE_Emulate_QDQ_O", "0"))):
+                            out_deq16 = out_fp8.dequantize(dtype=dqkv_nominal_dtype)
+                        else:
+                            out_deq16 = out
+                        if bool(int(os.getenv("NVTE_Emulate_QDQ_dO", "0"))):
+                            d_out_deq16 = d_out_fp8.dequantize(dtype=dqkv_nominal_dtype)
+                        else:
+                            d_out_deq16 = d_out
 
                         dq_, dk_, dv_, *rest = fused_attn_bwd(
                             ctx.max_seqlen_q,
@@ -1584,7 +1599,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             layer = int(os.getenv("NVTE_LAYER_NUMBER", str(ctx.layer_number)))
                             procid = int(os.getenv("SLURM_PROCID", "0"))
                             if ctx.layer_number == layer and procid == 0:
-                                print(f">> bwd emulate16")
+                                print(f">>>>>>>>>>>>>>>>>> bwd emulate16")
                                 torch.cuda.synchronize()
                                 t_in = [q, k, v, out, d_out]
                                 t_f8 = [dq_, dk_, dv_]
@@ -1670,17 +1685,17 @@ class FusedAttnFunc(torch.autograd.Function):
                         and bool(int(os.getenv("NVTE_PRINT", "0")))
                         and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
                     ):
-                        torch.cuda.synchronize()
-                        #for i, x in enumerate(quantizers):
-                        #    if x is None:
-                        #        print(f">>>>{ctx.layer_number} {names[i]}: None")
-                        #    else:
-                        #        print(
-                        #            f">>>>{ctx.layer_number} {names[i]}:"
-                        #            f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
-                        #            f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale"
-                        #            f" x amax)={(x.scale * x.amax).item():.4e}"
-                        #        )
+                        #torch.cuda.synchronize()
+                        for i, x in enumerate(quantizers):
+                            if x is None:
+                                print(f">>>>{ctx.layer_number} {names[i]}: None")
+                            else:
+                                print(
+                                    f">>>>{ctx.layer_number} {names[i]}:"
+                                    f" {x}"
+                                    #f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale"
+                                    #f" x amax)={(x.scale * x.amax).item():.4e}"
+                                )
                         #        if x.amax.isnan():
                         #            print(
                         #                f">>>>{ctx.layer_number} dqkv.isnan:"
