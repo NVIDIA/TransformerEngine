@@ -234,7 +234,7 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
              "Output tensor must be an mxfp8 tensor");
 
   NVTE_CHECK(input->data.dtype == transformer_engine::DType::kFloat8E4M3 ||
-             input->data.dtype == transformer_engine::DType::kFloat8E5M2,
+                 input->data.dtype == transformer_engine::DType::kFloat8E5M2,
              "Input data must have FP8E4M3 or FP8E5M2 dtype to be compatible with MXFP8");
   NVTE_CHECK(output->data.dtype == input->data.dtype,
              "Output data must have the same dtype as input data");
