@@ -2,8 +2,11 @@
 #
 # See LICENSE for license information.
 
+import contextlib
+import gc
 import os
-from contextlib import nullcontext
+from typing import Iterable, Optional
+
 import pytest
 import torch
 
@@ -48,84 +51,120 @@ model_types = {
     "transformer_layer": lambda: te.TransformerLayer(
         SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
     ),
+    "linear_op": lambda: te.ops.Linear(SIZE, SIZE, dtype=torch.bfloat16),
 }
 
 
-def _get_input():
-    return torch.empty((128, SIZE, SIZE), dtype=torch.bfloat16).cuda()
+def _make_input() -> torch.Tensor:
+    """Generate random input tensor."""
+    return torch.randn(
+        (128, SIZE, SIZE),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
 
 
-def _get_fp8_weight_cache_size(models, fp8_recipe):
-    """
-    Calculate the total FP8 weight cache size (in MB) for a list of models.
-    """
-    if fp8_recipe is None:
+def _warmup_model(
+    modules: Iterable[torch.nn.Module],
+    recipe: Optional[recipe.Recipe],
+) -> None:
+    """Perform forward and backward pass"""
+    tensor = _make_input()
+    for module in modules:
+        with te.fp8_autocast(enabled=recipe is not None, fp8_recipe=recipe):
+            tensor = module(tensor)
+    tensor.sum().backward()
+
+
+def _estimate_cached_weight_size(
+    modules: Iterable[torch.nn.Module],
+    recipe: Optional[recipe.Recipe],
+) -> float:
+    """Calculate the memory (in MiB) needed for weight caching."""
+
+    # The weight params are cached directly for unquantized compute
+    if recipe is None:
         return 0
 
-    params_bytes = 0
-    for model in models:
-        for name, param in model.named_parameters():
-            if "weight" in name:
-                params_bytes += param.numel()
+    # Count number of weight param elements
+    param_elements = 0
+    for module in modules:
+        for param in module.parameters():
+            if param.dim() == 2:
+                param_elements += param.numel()
 
-    # One byte for columnwise and one byte for rowwise,
-    # hence multiply by 2 and convert to MB
-    # there is 1 byte of scale per 32 elements in mxFP8
-    factor_for_scale_inv_tensor = (1 + 1 / 32) if fp8_recipe.mxfp8() else 1
-    return (2 * params_bytes * factor_for_scale_inv_tensor) / (1024**2)
+    # FP8 tensor-scaling caches one byte per element
+    if recipe.delayed() or recipe.float8_current_scaling():
+        return param_elements / 1024**2
+
+    # MXFP8 caches one data byte per element and one scale byte per 32
+    # elements
+    if recipe.mxfp8():
+        return param_elements * (1 + 1/32) / 1024**2
+
+    raise NotImplementedError(f"Unrecognized recipe ({fp8_recipe})")
 
 
-def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload):
-    tensor = _get_input()
+def _measure_cached_memory(
+    modules: Iterable[torch.nn.Module],
+    fp8_recipe: Optional[recipe.Recipe],
+    cpu_offload: bool,
+) -> float:
+    """Measure the growth in allocated GPU memory in MiB after a model forward pass.
+
+    Memory measurement excludes the input and output tensors.
+
+    """
+
+    # Reset memory
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Context and sync function for CPU offloading
     if cpu_offload:
         offload_context, sync_function = te.get_cpu_offload_context(
             enabled=True,
-            num_layers=len(models) - 1,
-            model_layers=len(models),
+            num_layers=len(modules),
+            model_layers=len(modules) + 1,
             offload_activations=True,
             offload_weights=False,
         )
     else:
-        offload_context = nullcontext()
+        offload_context = contextlib.nullcontext()
         sync_function = lambda x: x
 
-    for model in models:
+    # Forward pass, with dummy step to trigger offload for last module
+    inp = _make_input()
+    tensor = inp
+    memory_before_forward = torch.cuda.memory_allocated() / (1024**2)
+    for module in modules:
         with te.fp8_autocast(
             enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
         ), offload_context:
-            tensor = model(tensor)
+            tensor = module(tensor)
         tensor = sync_function(tensor)
+    with offload_context:
+        tensor = tensor.clone()
+    tensor = sync_function(tensor)
+    memory_after_forward = (torch.cuda.memory_allocated() - tensor.nbytes) / (1024**2)
 
-    max_mem_used = torch.cuda.memory_allocated() / (1024**2)
+    # Backward pass
+    tensor.sum().backward()
     torch.cuda.synchronize()
 
-    tensor.sum().backward()
-
-    return max_mem_used
+    # Memory usage in MiB
+    return memory_after_forward - memory_before_forward
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model_key", model_types.keys())
-def test_cpu_offload(fp8_recipe, model_key) -> None:
-    """
-    We run three configurations:
-    (1) No offloading: All activations remain on the GPU between forward and backward passes.
-    (2) No offloading (one layer): Only the first layer's activations remain on the GPU between
-        forward and backward passes.
-    (3) With offloading (all layers): Only the last layer's activations remain on the GPU
-        between forward and backward passes, while all other layers are offloaded to the CPU.
+def test_cpu_offload(fp8_recipe: Optional[recipe.Recipe], model_key: str) -> None:
+    """Check that CPU offloading runs and has expected memory usage."""
 
-    We expect the memory consumption of configurations (2) and (3) to be similar, with
-    the difference being the size of the FP8 cache that is not offloaded to the CPU.
-    We also expect this memory consumption to be smaller than in scenario (1).
-    """
-    import gc
-
-    gc.collect()
-
-    model_cls = model_types[model_key]
-    models_list = [model_cls() for _ in range(NUM_LAYERS)]
-
+    # Construct model
+    module_cls = model_types[model_key]
+    modules_list = [module_cls() for _ in range(NUM_LAYERS)]
     if model_key in ["multihead_attention", "transformer_layer"]:
         available_backends, *_ = get_available_attention_backends(
             model_config["small"],
@@ -138,20 +177,14 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
         os.environ["NVTE_FLASH_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
 
-    without_offloading = _measure_memory_between_forward_and_backward(
-        models_list, fp8_recipe, False
-    )
-    without_offloading_one_layer = _measure_memory_between_forward_and_backward(
-        models_list[:1], fp8_recipe, False
-    )
-    with_offloading = _measure_memory_between_forward_and_backward(models_list, fp8_recipe, True)
+    # Warmup
+    _warmup_model(modules_list, fp8_recipe)
 
-    assert with_offloading < without_offloading
+    # Measure cached memory after forward pass
+    memory_without_offload = _measure_cached_memory(modules_list, fp8_recipe, False)
+    memory_with_offload = _measure_cached_memory(modules_list, fp8_recipe, True)
 
-    # The only difference between the memory consumption of with_offloading
-    # and without_offloading_one_layer should be the size of the FP8 weights cache,
-    # which is not offloaded to the CPU.
-    memory_consumption_diff = abs(with_offloading - without_offloading_one_layer)
-    assert (
-        memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8_recipe) + EPSILON
-    )
+    # Check for expected memory usage
+    assert memory_with_offload < memory_without_offload
+    memory_from_cached_weights = _estimate_cached_weight_size(modules_list, fp8_recipe)
+    assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
