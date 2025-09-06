@@ -126,6 +126,7 @@ class _LayerNormLinear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
+        input_pre_gathered_for_column_sp: bool = False,
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -157,7 +158,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
-        with_input_all_gather = parallel_mode == "column" and sequence_parallel
+        with_input_all_gather = (
+            parallel_mode == "column" and sequence_parallel and not input_pre_gathered_for_column_sp
+        )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         if debug:  # turn off userbuffers in debug mode
@@ -353,8 +356,15 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Deallocate GEMM input tensor if no longer needed
         if not weight.requires_grad and not return_layernorm_output:
-            ln_out = ln_out_total = None
             clear_tensor_data(ln_out, ln_out_total)
+            ln_out = ln_out_total = None
+        elif (
+            ln_out_total is not ln_out_return
+            and ln_out_total is not ln_out
+            and not ub_overlap_ag_fprop
+        ):
+            clear_tensor_data(ln_out_total)
+            ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -388,7 +398,10 @@ class _LayerNormLinear(torch.autograd.Function):
         if is_grad_enabled:
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight.requires_grad
+                and parallel_mode == "column"
+                and sequence_parallel
+                and not input_pre_gathered_for_column_sp
             )
 
             # Input with column-wise usage is needed for wgrad GEMM.
@@ -473,6 +486,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
+            ctx.input_pre_gathered_for_column_sp = input_pre_gathered_for_column_sp
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
@@ -733,11 +747,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
                 dgrad = gemm_out
                 if ctx.sequence_parallel:
-                    dgrad, dgrad_work = reduce_scatter_along_first_dim(
-                        dgrad,
-                        ctx.tp_group,
-                        async_op=True,
-                    )
+                    if not ctx.input_pre_gathered_for_column_sp:
+                        dgrad, dgrad_work = reduce_scatter_along_first_dim(
+                            dgrad,
+                            ctx.tp_group,
+                            async_op=True,
+                        )
                 else:
                     dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
                 nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
@@ -892,7 +907,13 @@ class _LayerNormLinear(torch.autograd.Function):
                     del grad_bias_
 
                     # Deallocate input tensor if permitted
-                    if not ctx.return_layernorm_output:
+                    if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
+                        # Do not need to return layernorm output
+                        clear_tensor_data(ln_out)
+                    elif ctx.return_layernorm_output_gathered and ctx.ln_out_needs_gather:
+                        # ln_out is not the returned tensor
+                        clear_tensor_data(ln_out)
+                    if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                         clear_tensor_data(ln_out_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1025,6 +1046,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # debug
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # input_pre_gathered_for_column_sp
             None,  # symmetric_ar_type
         )
 
@@ -1132,6 +1154,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         out_features: int,
         eps: float = 1e-5,
         sequence_parallel: bool = False,
+        input_pre_gathered_for_column_sp: bool = False,
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
@@ -1199,6 +1222,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             init_method = get_default_init_method()
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
+        self.input_pre_gathered_for_column_sp = input_pre_gathered_for_column_sp
 
         # Column-parallel overlaps
         self.ub_overlap_ag_fprop = (
@@ -1579,6 +1603,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.input_pre_gathered_for_column_sp,
                 debug,
             )
             out = fwd_fn(*args)
@@ -1779,7 +1804,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             recipe.float8_block_scaling()
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
-            if self.sequence_parallel and self.parallel_mode == "column":
+            if (
+                self.sequence_parallel
+                and self.parallel_mode == "column"
+                and not self.input_pre_gathered_for_column_sp
+            ):
                 self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM1_INPUT
                 ].all_gather_usage = True

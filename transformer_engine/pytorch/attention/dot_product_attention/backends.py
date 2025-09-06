@@ -1453,17 +1453,22 @@ class FusedAttention(torch.nn.Module):
         quantizers=None,
         pad_between_seqs: bool = False,
         inference_params: Optional[InferenceParams] = None,
+        mla_cp_exchange_latent: bool = False,
+        kv_compressed: Optional[torch.Tensor] = None,
+        k_pos_emb: Optional[torch.Tensor] = None,
+        kv_up_proj_fn: Optional[Callable] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
             fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
         ), "No fused attention backend supports this input combination!"
         assert all(
-            x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
-            for x in [query_layer, key_layer, value_layer]
+            x is None or x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
+            for x in [query_layer, key_layer, value_layer, kv_compressed, k_pos_emb]
         ), "FusedAttention only supports FP16 and BF16 data types, or Float8Tensors."
         assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            x is None or x.is_cuda
+            for x in [query_layer, key_layer, value_layer, kv_compressed, k_pos_emb]
         ), "FusedAttention only supports CUDA tensors."
         assert (
             qkv_layout in QKVLayouts
@@ -1496,11 +1501,17 @@ class FusedAttention(torch.nn.Module):
                 if qkv_format == "sbhd":
                     batch_size = query_layer.shape[1]
                     max_seqlen_q = query_layer.shape[0]
-                    max_seqlen_kv = key_layer.shape[0]
+                    if mla_cp_exchange_latent:
+                        max_seqlen_kv = kv_compressed.shape[0]
+                    else:
+                        max_seqlen_kv = key_layer.shape[0]
                 if qkv_format == "bshd":
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1]
-                    max_seqlen_kv = key_layer.shape[1]
+                    if mla_cp_exchange_latent:
+                        max_seqlen_kv = kv_compressed.shape[1]
+                    else:
+                        max_seqlen_kv = key_layer.shape[1]
                 max_seqlen_q *= cp_size
                 max_seqlen_kv *= cp_size
                 if "padding" in attn_mask_type:
@@ -1526,10 +1537,11 @@ class FusedAttention(torch.nn.Module):
                             query_layer.device,
                         )
                     if cu_seqlens_kv is None:
+                        kv_device = (kv_compressed if mla_cp_exchange_latent else key_layer).device
                         cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
-                            key_layer.device,
+                            kv_device,
                         )
             if qkv_format == "thd":
                 assert (
@@ -1571,8 +1583,9 @@ class FusedAttention(torch.nn.Module):
             assert core_attention_bias_type not in [
                 "alibi"
             ], f"{core_attention_bias_type} is not supported with context parallelism!"
-            query_layer, key_layer, value_layer = [
-                x.contiguous() for x in (query_layer, key_layer, value_layer)
+            query_layer, key_layer, value_layer, kv_compressed, k_pos_emb = [
+                x.contiguous() if x is not None else x
+                for x in (query_layer, key_layer, value_layer, kv_compressed, k_pos_emb)
             ]
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
@@ -1603,6 +1616,10 @@ class FusedAttention(torch.nn.Module):
                     fp8_meta=fp8_meta,
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
+                    mla_exchange_latent=mla_cp_exchange_latent,
+                    kv_compressed=kv_compressed,
+                    k_pos_emb=k_pos_emb,
+                    kv_up_proj_fn=kv_up_proj_fn,
                 )
         else:
             with self.attention_dropout_ctx():
