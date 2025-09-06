@@ -181,8 +181,6 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   const NVTEScalingMode scaling_mode = input.scaling_mode();
   NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
              "Input tensor must be a block scaling tensor");
-  NVTE_CHECK(input.dtype() == transformer_engine::DType::kFloat8E4M3,
-             "Input tensor must have FP8E4M3 dtype");
 
   // Get tensor data
   NVTEBasicTensor data;
@@ -208,15 +206,15 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
 
   // Recreate input tensor with rowwise usage
   transformer_engine::TensorWrapper input_cu(scaling_mode);
-  input_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
+  input_cu.set_rowwise_data(data.data_ptr, input.dtype(), data_shape);
   const NVTEBasicTensor scale_inv =
       rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
-  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, transformer_engine::DType::kFloat32,
+  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, scale_inv.dtype,
                                  scale_inv.shape);
 
   // Create output tensor
   transformer_engine::TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);
-  output_cu.set_rowwise_data(data.data_ptr, transformer_engine::DType::kFloat8E4M3, data_shape);
+  output_cu.set_rowwise_data(data.data_ptr, input.dtype(), data_shape);
   // Output swizzled mxfp8 scaling factor dimensions
   const size_t swizzled_scale_inv_first_dim = DIVUP<size_t>(data_flat_first_dim, 128) * 128;
   const size_t swizzled_scale_inv_last_dim = DIVUP<size_t>(data_flat_last_dim, 128) * 4;
