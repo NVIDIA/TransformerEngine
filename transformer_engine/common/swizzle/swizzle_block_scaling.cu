@@ -54,7 +54,7 @@ uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
 
 // Tag struct denoting whether the number of rows of the input fp8 block scaling tensor's data
 // matrix is divisible by 128. If it is not, some threads could read out of bounds scaling factors.
-struct no_oob_tag_t{};
+struct no_oob_tag_t {};
 constexpr no_oob_tag_t NO_OOB_TAG;
 
 template <typename OOBT>
@@ -93,7 +93,7 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   // load scaling factors for this lane's initial four 1x128 tiles
   const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
   uint4 sf;
-  if constexpr(no_oob) {
+  if constexpr (no_oob) {
     sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
   } else {
     if ((out_tile_y < tiles_y - 1) || lane_load_idx < first_oob) {
@@ -102,7 +102,6 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
       sf = uint4{0, 0, 0, 0};
     }
   }
-  
 
   // pack the exponent bits of the scaling factors
   uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
@@ -126,8 +125,7 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
              alignof(uint4), " bytes");
   NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
              "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-  NVTE_CHECK(data_rows % 4 == 0,
-             "Input tensor must not have any padding scaling factors");
+  NVTE_CHECK(data_rows % 4 == 0, "Input tensor must not have any padding scaling factors");
 
   const uint32_t tiles_x = DIVUP(data_cols, 128u);
   const uint32_t tiles_y = DIVUP(data_rows, 128u);
