@@ -176,10 +176,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float grad_elt = static_cast<float>(in_grad_sh_curr[shmem_idx]);
 
         const float x = act_elt;
-        //TODO: Fix this code for GPT OSS
-        float act_x=0.0f;
-        float dact_x=0.0f;
-        if constexpr(std::is_same<ParamOP, Empty>::value){
+        float act_x;
+        float dact_x;
+        if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+          //TODO: Fix this code for GPT OSS
+          act_x = 0.0f;
+          dact_x = 0.0f;
+        }
+        else{
           if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
             const float s = sigmoidf(x);
             act_x = x * s;
@@ -485,10 +489,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if constexpr (IS_DGATED) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
           const float x = act_elt;
-          //TODO: Fix this code for GPT OSS
-          float act_x=0.0f;
-          float dact_x=0.0f;
-          if constexpr(std::is_same<ParamOP, Empty>::value){
+          float act_x;
+          float dact_x;
+          if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+            //TODO: Fix this code for GPT OSS
+            act_x=0.0f;
+            dact_x=0.0f;
+          }
+          else{
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
               act_x = x * s;
@@ -732,10 +740,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             if constexpr (IS_DGATED) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);
               const float x = act_elt;
-              // TODO: Fix this code for GPT OSS
-              float act_x=0.0f;
-              float dact_x=0.0f;
-              if constexpr(std::is_same<ParamOP, Empty>::value){
+              float act_x;
+              float dact_x;
+              if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+                // TODO: Fix this code for GPT OSS
+                act_x = 0.0f;
+                dact_x = 0.0f;
+              }
+              else{
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);
                   act_x = x * s;
