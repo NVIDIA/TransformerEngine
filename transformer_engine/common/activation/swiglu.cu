@@ -38,7 +38,7 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
 void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, const float* const args,
                         int args_size, cudaStream_t stream) {
   NVTE_API_CALL(nvte_gptoss_swiglu);
-  NVTE_CHECK(args_size==1);
+  NVTE_CHECK(args_size == 1);
   const float limit = *args;
   using namespace transformer_engine;
   GptOssParam param = {limit};
@@ -48,7 +48,7 @@ void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, const float* 
 void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                          const float* const args, int args_size, cudaStream_t stream) {
   NVTE_API_CALL(nvte_gptoss_dswiglu);
-  NVTE_CHECK(args_size==1);
+  NVTE_CHECK(args_size == 1);
   const float limit = *args;
   using namespace transformer_engine;
   GptOssParam param = {limit};

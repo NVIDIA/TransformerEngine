@@ -8,7 +8,8 @@ using FuncType = void (*)(const NVTETensor, NVTETensor, cudaStream_t);
 using FuncWithArgsType = void (*)(const NVTETensor, NVTETensor, const float*, int, cudaStream_t);
 
 using DFuncType = void (*)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t);
-using DFuncWithArgsType = void (*)(const NVTETensor, const NVTETensor, NVTETensor, const float*, int, cudaStream_t);
+using DFuncWithArgsType = void (*)(const NVTETensor, const NVTETensor, NVTETensor, const float*,
+                                   int, cudaStream_t);
 
 template <FuncType act_func, FuncWithArgsType act_func_with_args>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1,
@@ -33,7 +34,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        act_func_with_args(input_cpp.data(), out_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        act_func_with_args(input_cpp.data(), out_cpp.data(), args.data(), args.size(),
+                           at::cuda::getCurrentCUDAStream());
       } else {
         act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
       }
@@ -44,7 +46,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(),
+                           at::cuda::getCurrentCUDAStream());
       } else {
         act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
       }
@@ -55,7 +58,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(),
+                           at::cuda::getCurrentCUDAStream());
       } else {
         act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
       }
@@ -80,7 +84,8 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   // Construct grad input tensor
   auto quantizer_cpp = convert_quantizer(quantizer);
   const auto input_shape_te = input_cpp.shape();
-  const std::vector<size_t> input_shape(input_shape_te.data, input_shape_te.data + input_shape_te.ndim);
+  const std::vector<size_t> input_shape(input_shape_te.data,
+                                        input_shape_te.data + input_shape_te.ndim);
   auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
   auto [grad_input_cpp, grad_input_py] = quantizer_cpp->create_tensor(input_shape, fake_dtype);
 
@@ -90,9 +95,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     // Compute activation backward directly
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                            args.data(), args.size(), at::cuda::getCurrentCUDAStream());
       } else {
-        dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(), at::cuda::getCurrentCUDAStream());
+        dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
       }
     });
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
@@ -101,9 +108,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(),
+                            args.size(), at::cuda::getCurrentCUDAStream());
       } else {
-        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
+        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
       }
     });
     quantizer_cpp_cs->quantize_with_amax(temp_cpp, grad_input_cpp);
@@ -112,9 +121,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       if (!args.empty()) {
-        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(), args.size(), at::cuda::getCurrentCUDAStream());
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(),
+                            args.size(), at::cuda::getCurrentCUDAStream());
       } else {
-        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
+        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
       }
     });
     quantizer_cpp->quantize(temp_cpp, grad_input_cpp);
@@ -163,7 +174,8 @@ py::object gpt_oss_swiglu(const at::Tensor& input, py::handle quantizer, float l
   return activation_helper<nullptr, nvte_gptoss_swiglu>(input, quantizer, 2, args);
 }
 
-py::object gpt_oss_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer, float limit) {
+py::object gpt_oss_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                           float limit) {
   std::vector<float> args = {limit};
   return dactivation_helper<nullptr, nvte_gptoss_dswiglu>(grad, input, quantizer, args);
 }

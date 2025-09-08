@@ -60,6 +60,5 @@ void nvte_dsreglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
   NVTE_API_CALL(nvte_dsreglu);
   using namespace transformer_engine;
   Empty e = {};
-  dgated_act_fn<fp32, Empty, srelu<fp32, fp32>, dsrelu<fp32, fp32>>(grad, input, output, e,
-                                                                    stream);
+  dgated_act_fn<fp32, Empty, srelu<fp32, fp32>, dsrelu<fp32, fp32>>(grad, input, output, e, stream);
 }

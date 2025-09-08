@@ -60,6 +60,5 @@ void nvte_dqgeglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
   NVTE_API_CALL(nvte_dqgeglu);
   using namespace transformer_engine;
   Empty e = {};
-  dgated_act_fn<fp32, Empty, qgelu<fp32, fp32>, dqgelu<fp32, fp32>>(grad, input, output, e,
-                                                                    stream);
+  dgated_act_fn<fp32, Empty, qgelu<fp32, fp32>, dqgelu<fp32, fp32>>(grad, input, output, e, stream);
 }

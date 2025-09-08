@@ -51,7 +51,7 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>
-void gated_act_fn(const NVTETensor input, NVTETensor output, Param& p, cudaStream_t stream) {
+void gated_act_fn(const NVTETensor input, NVTETensor output, Param &p, cudaStream_t stream) {
   using namespace detail;
   constexpr bool IS_DGATED = false;
   constexpr NVTETensor grad = nullptr;
@@ -60,7 +60,7 @@ void gated_act_fn(const NVTETensor input, NVTETensor output, Param& p, cudaStrea
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &),
           ComputeType (*DActOP)(ComputeType, const Param &)>
-void dgated_act_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output, Param& p,
+void dgated_act_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output, Param &p,
                    cudaStream_t stream) {
   using namespace detail;
   constexpr bool IS_DGATED = true;
