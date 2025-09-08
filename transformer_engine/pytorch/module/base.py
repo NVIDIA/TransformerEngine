@@ -1482,8 +1482,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
-                if weight_tensor.grad is None:
-                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+                weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:

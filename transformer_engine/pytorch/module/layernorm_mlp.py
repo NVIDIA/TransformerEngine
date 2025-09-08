@@ -1197,7 +1197,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             "with Userbuffers (tensor-parallel communication overlapping)"
                         )
                     ctx.wgrad_store.put([ln_out_total, dact], fc1_wgrad_gemm)
-                    fc1_wgrad = None
                     if fuse_gemm_and_bias_fc1_wgrad:
                         fc1_bias_grad = None
                 else:
@@ -2168,10 +2167,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 if self.fc1_bias.grad is None:
                     self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
             if not self.fuse_wgrad_accumulation:
-                if self.fc2_weight.grad is None:
-                    self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
-                if self.fc1_weight.grad is None:
-                    self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
+                self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
+                self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
             del fc2_bias_grad_
             del fc2_wgrad
             del fc1_wgrad

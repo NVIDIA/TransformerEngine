@@ -19,7 +19,13 @@ from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
-from .tensor import ScaledTensor, ScaledTensor1x, ScaledTensor2x, ScaledTensorFactory
+from .tensor import (
+    ScaledTensor,
+    ScaledTensor1x,
+    ScaledTensor2x,
+    ScaledTensorFactory,
+    NoScaleTensor,
+)
 from .helper import (
     get_quantize_config,
     get_quantize_config_class,
@@ -217,7 +223,11 @@ class CurrentScaleQuantizer(Quantizer):
     data_layout: str = "NT"
 
     def _quantize_func(
-        self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, flatten_axis=-1
+        self,
+        x: Union[jnp.ndarray, NoScaleTensor],
+        is_colwise=False,
+        dq_dtype=None,
+        flatten_axis=-1,
     ) -> ScaledTensor1x:
         """Quantize function helper for delayed scaling FP8.
 
@@ -229,14 +239,17 @@ class CurrentScaleQuantizer(Quantizer):
         Returns:
             A ScaledTensor1x containing the quantized data
         """
-        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        if isinstance(x, jnp.ndarray):
+            x = NoScaleTensor(data=x, amax=None)
+
+        dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
 
         compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
-        amax = jnp.max(jnp.abs(x)).reshape((1,))
+        amax = x.amax or jnp.max(jnp.abs(x.data)).reshape((1,))
         fp8_max = jnp.astype(jnp.finfo(self.q_dtype).max, jnp.float32)
         scale = (fp8_max / amax) / (2 ** get_quantize_config().MARGIN)
-        scaled_x = x.astype(compute_dtype) * scale
+        scaled_x = x.data.astype(compute_dtype) * scale
 
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
         scale_inv = 1.0 / scale
@@ -263,7 +276,10 @@ class CurrentScaleQuantizer(Quantizer):
         Returns:
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
-        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        if isinstance(x, jnp.ndarray):
+            x = NoScaleTensor(data=x, amax=None)
+
+        dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
         if flatten_axis < 0:
             flatten_axis += x.ndim
         assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
@@ -347,11 +363,14 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         Returns:
             A ScaledTensor1x containing the quantized data
         """
-        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        if isinstance(x, jnp.ndarray):
+            x = NoScaleTensor(data=x, amax=None)
+
+        dq_dtype = dq_dtype if dq_dtype is not None else x.data.dtype
 
         compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
-        scaled_x = x.astype(compute_dtype) * self.scale
+        scaled_x = x.data.astype(compute_dtype) * self.scale
 
         # quantize() in the old dot.py do this way, leave this code block here for future debugging
         # compute_dtype = x.dtype
@@ -360,7 +379,8 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
 
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
         scale_inv = 1.0 / self.scale
-        self.update(jnp.max(jnp.abs(x)).reshape((1,)))
+        amax = x.amax or jnp.max(jnp.abs(x.data)).reshape((1,))
+        self.update(amax)
         return ScaledTensorFactory.create_1x(
             data=clipped_scaled_x,
             scale_inv=scale_inv,
@@ -460,6 +480,10 @@ class BlockScaleQuantizer(Quantizer):
         Returns:
             A ScaledTensor1x containing the quantized data
         """
+        if isinstance(x, NoScaleTensor):
+            # No need for amax in MXFP8 block scaling, so simply extract the jnp.ndarray data tensor from the NoScaleTensor x.
+            x = x.data
+
         # TODO(Phuong): use quantize_func from JAX
         if flatten_axis < 0:
             flatten_axis = x.ndim + flatten_axis

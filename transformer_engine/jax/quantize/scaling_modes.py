@@ -166,6 +166,90 @@ class ScalingModeMetadataImpl(ABC):
         """
 
 
+class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
+    """Implementation for no scaling mode.
+
+    This implementation provides metadata for no scaling mode, for using non-quantized higher-precision datatypes such as bf16.
+    """
+
+    def get_scale_dtype(self) -> jnp.dtype:
+        """Get the data type for scale tensors. This is a placeholder and won't be used for higher-precision values that don't have scaling.
+
+        Returns:
+            The data type used for scale tensors (float32)
+        """
+        return jnp.float32
+
+    def get_scale_shape(
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
+        flatten_axis: int = -1,
+    ) -> Tuple[int, ...]:
+        """Get the shape for scale tensors. This always returns an empty shape because this mode applies no scaling.
+
+        Args:
+            data_shape: The shape of the tensor being scaled
+            is_colwise: Whether the scaling is column-wise
+            is_padded: Whether to return padded shape
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors - (1,)
+        """
+        del data_shape, is_colwise, is_padded, flatten_axis
+        return (0,)
+
+    @lru_cache(maxsize=4)
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+        return QuantizeLayout.ROWWISE
+
+    def get_grouped_scale_shape(
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for scale tensors in this mode.
+
+        Args:
+            data_shape: Original shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+        del data_shape, group_axis, is_colwise
+        assert isinstance(n_groups, int)
+        return (n_groups,)
+
+    def get_shardy_sharding_rules(
+        self, input_rank, unique_var, flatten_axis
+    ) -> QuantizeShardyRules:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+
+        Args:
+            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization.
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
+        del flatten_axis
+        input_spec = tuple(f"{unique_var}{i}" for i in range(input_rank))
+        scale_var = BATCHING + unique_var + "_scale_inv"
+        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
+
+
 class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
     """Implementation for current scaling mode.
 
@@ -740,5 +824,5 @@ SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
     ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
     ScalingMode.CURRENT_TENSOR_SCALING: CurrentScalingModeMetadataImpl(),
-    ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.NO_SCALING: NoScalingModeMetadataImpl(),
 }
