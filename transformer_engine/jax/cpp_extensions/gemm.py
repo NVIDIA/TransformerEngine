@@ -173,7 +173,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13)
+    impl_static_args = (6, 7, 8, 9, 10, 11, 12)
     inner_primitive = None
     outer_primitive = None
 
@@ -192,9 +192,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
     ):
-        del use_split_accumulator, is_outer
+        del use_split_accumulator
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -340,9 +339,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
     ):
-        del out_dtype, is_outer
+        del out_dtype
 
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -389,37 +387,35 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
     ):
-        if not is_outer:
-            lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-            lhs_transposed, rhs_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim),
-                                                              (lhs_cdims, rhs_cdims))
+        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
+        lhs_transposed, rhs_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim),
+                                                          (lhs_cdims, rhs_cdims))
 
-            lhs_scale_inv = apply_padding_to_scale_inv(
-                lhs_scale_inv,
-                scaling_mode,
-                lhs.shape,
-                is_colwise=lhs_transposed,
-                flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-            )
-            rhs_scale_inv = apply_padding_to_scale_inv(
-                rhs_scale_inv,
-                scaling_mode,
-                rhs.shape,
-                is_colwise=not rhs_transposed,
-                flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-            )
-            lhs_scale_inv = swizzled_scale(
-                lhs_scale_inv,
-                max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-                is_colwise=lhs_transposed,
-            )
-            rhs_scale_inv = swizzled_scale(
-                rhs_scale_inv,
-                min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-                is_colwise=not rhs_transposed,
-            )
+        lhs_scale_inv = apply_padding_to_scale_inv(
+            lhs_scale_inv,
+            scaling_mode,
+            lhs.shape,
+            is_colwise=lhs_transposed,
+            flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+        )
+        rhs_scale_inv = apply_padding_to_scale_inv(
+            rhs_scale_inv,
+            scaling_mode,
+            rhs.shape,
+            is_colwise=not rhs_transposed,
+            flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+        )
+        lhs_scale_inv = swizzled_scale(
+            lhs_scale_inv,
+            max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+            is_colwise=lhs_transposed,
+        )
+        rhs_scale_inv = swizzled_scale(
+            rhs_scale_inv,
+            min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+            is_colwise=not rhs_transposed,
+        )
 
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -435,7 +431,6 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
-            is_outer=False,
         )
         return outputs[:-3]  # discard workspace arrays
 
@@ -454,7 +449,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
     ):
         return GemmPrimitive.impl(
             lhs,
@@ -470,7 +464,6 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu,
             grad,
             use_split_accumulator,
-            is_outer=is_outer,
         )
 
     @staticmethod
@@ -484,7 +477,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
     ):
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
@@ -513,7 +505,6 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                is_outer=is_outer,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -617,7 +608,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
         mesh,
         arg_infos,
         result_infos,
@@ -626,7 +616,6 @@ class GemmPrimitive(BasePrimitive):
             out_dtype,
             scaling_mode,
             grad,
-            is_outer,
         )
         del use_split_accumulator, result_infos
 
@@ -656,12 +645,11 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del result_infos, is_outer
+        del result_infos
 
         (
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
@@ -719,7 +707,6 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                is_outer=False,
             )
 
             # All-Reduce GEMM output
@@ -739,12 +726,11 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        is_outer,
         mesh,
         operand_types,
         result_types,
     ):
-        del out_dtype, grad, use_split_accumulator, is_outer
+        del out_dtype, grad, use_split_accumulator
         del mesh, result_types
 
         prefix = "GemmPrimitive_"
@@ -899,7 +885,6 @@ def _te_gemm(
         fuse_gelu=fuse_gelu,
         grad=grad,
         use_split_accumulator=use_split_accumulator,
-        is_outer=False,
     )
 
 
