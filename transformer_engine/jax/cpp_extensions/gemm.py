@@ -379,35 +379,22 @@ class GemmPrimitive(BasePrimitive):
         grad,
         use_split_accumulator,
     ):
-        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-        lhs_transposed, rhs_transposed = _get_gemm_layout(
-            (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
-        )
+        if scaling_mode.is_1d_block_scaling():
+            lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
+            lhs_transposed, rhs_transposed = _get_gemm_layout(
+                (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
+            )
+            lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
+            rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
 
-        lhs_scale_inv = apply_padding_to_scale_inv(
-            lhs_scale_inv,
-            scaling_mode,
-            lhs.shape,
-            is_colwise=lhs_transposed,
-            flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-        )
-        rhs_scale_inv = apply_padding_to_scale_inv(
-            rhs_scale_inv,
-            scaling_mode,
-            rhs.shape,
-            is_colwise=not rhs_transposed,
-            flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-        )
-        lhs_scale_inv = swizzled_scale(
-            lhs_scale_inv,
-            max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-            is_colwise=lhs_transposed,
-        )
-        rhs_scale_inv = swizzled_scale(
-            rhs_scale_inv,
-            min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-            is_colwise=not rhs_transposed,
-        )
+            lhs_scale_inv = apply_padding_to_scale_inv(
+                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
+            )
+            rhs_scale_inv = apply_padding_to_scale_inv(
+                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+            )
+            lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
+            rhs_scale_inv = swizzled_scale(rhs_scale_inv, not rhs_transposed, rhs_transposed)
 
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
