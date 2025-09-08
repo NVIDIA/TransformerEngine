@@ -22,6 +22,8 @@ from transformer_engine_jax import get_num_compute_streams
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 from ..quantize import (
+    AbstractBaseTensor,
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor2x,
     GroupedScaledTensor1x,
@@ -228,6 +230,11 @@ class GemmPrimitive(BasePrimitive):
                     "require non-transposed LHS and transposed RHS operands "
                     "(`contracting_dims=((-1, ), (-1, ))`)."
                 )
+        else:
+            assert lhs.dtype == rhs.dtype, (
+                "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
+                f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
+            )
 
         # Determine output shape and dtype
         assert (
@@ -1134,8 +1141,8 @@ def _jax_gemm(
 
 
 def gemm(
-    lhs: Union[jnp.ndarray, ScaledTensor],
-    rhs: Union[jnp.ndarray, ScaledTensor],
+    lhs: Union[jnp.ndarray, AbstractBaseTensor],
+    rhs: Union[jnp.ndarray, AbstractBaseTensor],
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
@@ -1191,6 +1198,11 @@ def gemm(
         compute the GeLU contribution to the gradient. Only supported with TE's custom call to
         cuBLAS GEMM.
     """
+    if isinstance(lhs, NoScaleTensor):
+        lhs = lhs.data
+    if isinstance(rhs, NoScaleTensor):
+        rhs = rhs.data
+
     # Try to get LHS and RHS quantizers from a quantizer set for backward compatibility
     if lhs_quantizer is None or rhs_quantizer is None:
         quantizer_set = kwargs.get("quantizer_set", None)

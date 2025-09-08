@@ -171,11 +171,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
-      float dgate_elt = 1.0f;  // gating is ideally an identity function
+      bool dgate_elt = true;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
         const float limit = p.limit;
-        dgate_elt = gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f;  // Derivative of clamp
+        dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
         gate_elt = min(max(-limit, gate_elt), limit) + 1;
       }
 
@@ -190,7 +190,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           const float x = min(act_elt, limit);
           const float s = sigmoidf(1.702 * x);
           act_x = x * s;
-          if (x <= limit) {
+          if (x < limit) {
             dact_x = s + s * (1 - s) * 1.702 * x;
           } else {
             dact_x = 0.0f;
@@ -207,7 +207,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = act_x * grad_elt * dgate_elt;
+        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);
@@ -494,11 +494,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
         float after_act_elt;
         float after_gate_elt;
-        float dgate_elt = 1.0f;  // gating is ideally an identity function
+        bool dgate_elt = true;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
           // In case of GPT OSS, clamp the activation and gate values
           const float limit = p.limit;
-          dgate_elt = gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f;  // Derivative of clamp
+          dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
           gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
         }
         if constexpr (IS_DGATED) {
@@ -511,7 +511,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const float x = min(act_elt, limit);
             const float s = sigmoidf(1.702 * x);
             act_x = x * s;
-            if (x <= limit) {
+            if (x < limit) {
               dact_x = s + s * (1 - s) * 1.702 * x;
             } else {
               dact_x = 0.0f;
@@ -528,7 +528,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           after_act_elt = dact_x * grad_elt * gate_elt;
-          after_gate_elt = act_x * grad_elt * dgate_elt;
+          after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
         } else {
           after_act_elt = ActOP(act_elt, p) * gate_elt;
         }
@@ -755,12 +755,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float gate_elt = static_cast<float>(in_gate.data.elt[e]);
             float after_act_elt;
             float after_gate_elt;
-            float dgate_elt = 1.0f;
+            float dgate_elt = true;
             if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
               // In case of GPT OSS, clamp the activation and gate values
               const float limit = p.limit;
-              dgate_elt =
-                  gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f;  // Derivative of clamp
+              dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
               gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
             }
             if constexpr (IS_DGATED) {
@@ -773,7 +772,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 const float x = min(act_elt, limit);
                 const float s = sigmoidf(1.702 * x);
                 act_x = x * s;
-                if (x <= limit) {
+                if (x < limit) {
                   dact_x = s + s * (1 - s) * 1.702 * x;
                 } else {
                   dact_x = 0.0f;
@@ -790,7 +789,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               }
 
               after_act_elt = dact_x * grad_elt * gate_elt;
-              after_gate_elt = act_x * grad_elt * dgate_elt;
+              after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
               after_act_rowwise[j] = after_act_elt;
               after_gate_rowwise[j] = after_gate_elt;
             } else {

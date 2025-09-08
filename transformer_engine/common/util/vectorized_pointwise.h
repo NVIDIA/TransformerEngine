@@ -540,17 +540,17 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
       ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
-      ComputeType dgate_in = 1.0f;
+      bool dgate_in = true;
 
       if constexpr (std::is_same<Param, GptOssParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
         const ComputeType limit = p.limit;
-        dgate_in = gate_in <= limit && gate_in >= -limit ? 1.0f : 0.0f;  // Derivative of clamp
+        dgate_in = gate_in < limit && gate_in > -limit;  // Derivative of clamp
         gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
       }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = grad_val * Activation(gelu_in, p) * dgate_in;
+      ComputeType after_dgate = dgate_in ? grad_val * Activation(gelu_in, p) : 0.0f;
 
       if (requires_amax) {
         __builtin_assume(max >= 0);

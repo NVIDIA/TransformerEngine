@@ -1721,7 +1721,6 @@ class TestBasicOps:
         quantize_forward: bool,
         quantize_backward: bool,
     ):
-        print(_quantization_list)
         # Tensor dimensions
         in_shape = list(out_shape)
         in_shape[-1] *= 2
@@ -1747,8 +1746,8 @@ class TestBasicOps:
 
         # Plain PyTorch implementation
         x_glu, x_linear = x_ref.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=7.0)
-        x_linear = x_linear.clamp(min=-7.0, max=7.0)
+        x_glu = x_glu.clamp(min=None, max=0.1)
+        x_linear = x_linear.clamp(min=-0.1, max=0.1)
         out_glu = x_glu * torch.sigmoid(1.702 * x_glu)
         y_ref = out_glu * (x_linear + 1)
         y_ref.backward(dy_ref)
@@ -1758,7 +1757,7 @@ class TestBasicOps:
 
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.GptOssSwiglu(limit=7.0),
+            te_ops.GptOssSwiglu(limit=0.1),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
