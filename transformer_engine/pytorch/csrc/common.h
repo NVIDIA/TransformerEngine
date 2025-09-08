@@ -113,7 +113,7 @@ class Quantizer {
   /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
                         const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                        const bool enable_pdl = false) = 0;
+                        const bool pdl_sync = false, const bool pdl_trigger = false) = 0;
 
   virtual ~Quantizer() = default;
 
@@ -145,7 +145,7 @@ class NoneQuantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                const bool enable_pdl = false) override;
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -174,7 +174,7 @@ class Float8Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                const bool enable_pdl = false) override;
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -209,7 +209,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                const bool enable_pdl = false) override;
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   /*! @brief Convert to a quantized data format avoiding amax computation */
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
@@ -256,7 +256,7 @@ class Float8BlockQuantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                const bool enable_pdl = false) override;
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -278,7 +278,7 @@ class MXFP8Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                const bool enable_pdl = false) override;
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
