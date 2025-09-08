@@ -154,6 +154,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 @partial(jax.jit, static_argnums=(1, 2))
 def swizzled_scale(scale_inv, flatten_axis, is_colwise):
+    "Swizzle scale_inv via JAX transpose ops"
     original_shape = scale_inv.shape
     shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
     if is_colwise:
