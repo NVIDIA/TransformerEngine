@@ -452,9 +452,6 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-            if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                wgrad_list = [None] * ctx.num_gemms
-
             if not ctx.use_bias or (
                 ctx.wgrad_store is not None
                 and ctx.wgrad_store.delay_wgrad_compute()
@@ -829,8 +826,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
-                    if weight_params[i].grad is None:
-                        weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
+                    weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
             if self.use_bias:
                 for i in range(self.num_gemms):
                     if bias_params[i].grad is None:
