@@ -152,6 +152,18 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     return lhs_q, rhs_q
 
 
+@partial(jax.jit, static_argnums=(1,2))
+def swizzled_scale(scale_inv, flatten_axis, is_colwise):
+    original_shape = scale_inv.shape
+    shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
+    rows, cols = shape_2d
+    if is_colwise:
+        scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
+    reshape = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
+    swizzled = jnp.transpose(reshape, (0, 3, 2, 1, 4))
+    return swizzled.reshape(original_shape)
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM

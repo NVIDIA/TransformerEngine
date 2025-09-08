@@ -85,14 +85,16 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       }
 
       // Launch swizzle kernel
-      nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
+      // nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
 
       // Set swizzled scales into the input tensor
       if (rowwise) {
-        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
+        // input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
+        input.set_rowwise_scale_inv(scale_inv->untyped_data(), scale_dtype, scale_shape);
       } else {
-        input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-                                       scale_shape);
+        // input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
+        //                                scale_shape);
+        input.set_columnwise_scale_inv(scale_inv->untyped_data(), scale_dtype, scale_shape);
       }
     }
   }
