@@ -511,11 +511,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const float x = min(act_elt, limit);
             const float s = sigmoidf(1.702 * x);
             act_x = x * s;
-            if (x < limit) {
-              dact_x = s + s * (1 - s) * 1.702 * x;
-            } else {
-              dact_x = 0.0f;
-            }
+            dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
           } else {
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
@@ -772,11 +768,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 const float x = min(act_elt, limit);
                 const float s = sigmoidf(1.702 * x);
                 act_x = x * s;
-                if (x < limit) {
-                  dact_x = s + s * (1 - s) * 1.702 * x;
-                } else {
-                  dact_x = 0.0f;
-                }
+                dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
               } else {
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);
