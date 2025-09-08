@@ -235,7 +235,14 @@ def _dense_fwd_rule(
 
 
 def _dense_bwd_rule(
-    contracting_dims, batch_sequence_transpose, input_axes, kernel_axes, output_axes, cgemm_config_set, ctx, grad
+    contracting_dims,
+    batch_sequence_transpose,
+    input_axes,
+    kernel_axes,
+    output_axes,
+    cgemm_config_set,
+    ctx,
+    grad,
 ):
     """Backward pass rule for dense layer transformation.
 

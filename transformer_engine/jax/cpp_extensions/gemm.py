@@ -174,14 +174,17 @@ class CollectiveOp(Enum):
 
     @property
     def is_all_gather(self) -> bool:
+        """Check if AllGather"""
         return self == CollectiveOp.ALL_GATHER
 
     @property
     def is_reduce_scatter(self) -> bool:
+        """Check if ReduceScatter"""
         return self == CollectiveOp.REDUCE_SCATTER
 
     @property
     def is_none(self) -> bool:
+        """Check if None"""
         return self == CollectiveOp.NONE
 
 
@@ -201,12 +204,12 @@ class CollectiveGemmConfig:
     @staticmethod
     def create(
         collective_op: CollectiveOp,
-        num_max_streams: int = 3,  # Why 3?
+        num_max_streams: int = 3,
         gemm_priority: int = 0,
         comm_priority: int = 0,
         num_comm_sm: int = None,
         use_ce: bool = True,
-        aggregate_ag: bool = False,  # TODO: do we need this?
+        aggregate_ag: bool = False,
     ):
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
@@ -265,6 +268,7 @@ class CollectiveGemmConfigSet:
         use_ce: bool = True,
         aggregate_ag: bool = False,
     ):
+        """Create a set of CollectiveGemmConfig"""
         if forward_collective_op.is_all_gather:
             backward_collective_op = CollectiveOp.REDUCE_SCATTER
         elif forward_collective_op.is_reduce_scatter:

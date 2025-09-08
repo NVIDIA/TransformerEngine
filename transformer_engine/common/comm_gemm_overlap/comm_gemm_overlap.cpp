@@ -324,7 +324,9 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
-  if (_ub_comm->myrank == 0) {printf("!!! [UB] Register UBuf %d\n", _ub_reg);}
+  if (_ub_comm->myrank == 0) {
+    printf("!!! [UB] Register UBuf %d\n", _ub_reg);
+  }
   _ubuf = TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype);
 
   NVTE_CHECK_CUDA(

@@ -150,10 +150,22 @@ def run_dense_grad_tests(args, mesh=None):
 
             input_axes, weight_axes, _, output_axes = _get_logical_axes(collective_op)
             ref_output, ref_grads = _value_and_grad_dense(
-                x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, output_axes, noop_cgemm_config_set,
+                x_sharded,
+                weight_sharded,
+                bias_sharded,
+                input_axes,
+                weight_axes,
+                output_axes,
+                noop_cgemm_config_set,
             )
             output, sharded_grads = _value_and_grad_dense(
-                x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, output_axes, cgemm_config_set
+                x_sharded,
+                weight_sharded,
+                bias_sharded,
+                input_axes,
+                weight_axes,
+                output_axes,
+                cgemm_config_set,
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)

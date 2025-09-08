@@ -141,7 +141,7 @@ class CollectiveGemmPlanRegistry {
   }
 
  private:
-  CollectiveGemmPlanRegistry() {};
+  CollectiveGemmPlanRegistry() {}
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 

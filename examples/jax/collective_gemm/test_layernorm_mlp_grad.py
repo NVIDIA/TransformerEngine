@@ -58,7 +58,9 @@ def _get_logical_axes():
 
 
 def _get_operand_sharding(mesh):
-    input_1_axes, weight_1_axes, bias_axes_1, input_2_axes, weight_2_axes, bias_axes_2 = _get_logical_axes()
+    input_1_axes, weight_1_axes, bias_axes_1, input_2_axes, weight_2_axes, bias_axes_2 = (
+        _get_logical_axes()
+    )
     x_sharding = NamedSharding(mesh, PartitionSpec(*input_1_axes))
     weight_1_sharding = NamedSharding(mesh, PartitionSpec(*weight_1_axes))
     bias_1_sharding = NamedSharding(mesh, PartitionSpec(*bias_axes_1))
@@ -87,7 +89,19 @@ def _create_mesh(args):
     return mesh
 
 
-def _mean_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, cgemm_config_sets):
+def _mean_layernorm_mlp(
+    x,
+    weight_1,
+    bias_1,
+    weight_2,
+    bias_2,
+    gamma,
+    input_1_axes,
+    input_2_axes,
+    weight_1_axes,
+    weight_2_axes,
+    cgemm_config_sets,
+):
     output = layernorm_mlp(
         x,
         gamma,
@@ -105,9 +119,33 @@ def _mean_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_ax
     return jnp.mean(output)
 
 
-def _value_and_grad_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, cgemm_config_sets):
-    return jax.jit(jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10))(
-        x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, cgemm_config_sets
+def _value_and_grad_layernorm_mlp(
+    x,
+    weight_1,
+    bias_1,
+    weight_2,
+    bias_2,
+    gamma,
+    input_1_axes,
+    input_2_axes,
+    weight_1_axes,
+    weight_2_axes,
+    cgemm_config_sets,
+):
+    return jax.jit(
+        jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10)
+    )(
+        x,
+        weight_1,
+        bias_1,
+        weight_2,
+        bias_2,
+        gamma,
+        input_1_axes,
+        input_2_axes,
+        weight_1_axes,
+        weight_2_axes,
+        cgemm_config_sets,
     )
 
 
@@ -120,15 +158,23 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
     # Create test data
     rng = jax.random.PRNGKey(0)
-    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng = jax.random.split(rng, 7)
+    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng = jax.random.split(
+        rng, 7
+    )
     x = jax.random.normal(
         x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight_1 = jax.random.normal(weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16) /jnp.sqrt(args.hidden_in)
+    weight_1 = jax.random.normal(
+        weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16
+    ) / jnp.sqrt(args.hidden_in)
     bias_1 = jax.random.normal(bias_1_rng, (1, args.hidden_out), dtype=jnp.bfloat16)
-    weight_2 = jax.random.normal(weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16) /jnp.sqrt(args.hidden_out)
+    weight_2 = jax.random.normal(
+        weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16
+    ) / jnp.sqrt(args.hidden_out)
     bias_2 = jax.random.normal(bias_2_rng, (args.hidden_in,), dtype=jnp.bfloat16)
-    gamma = jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16)/ jnp.sqrt(args.hidden_in)
+    gamma = jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16) / jnp.sqrt(
+        args.hidden_in
+    )
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -141,12 +187,18 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
         with flax.linen.logical_axis_rules(te_extended_axis_rules):
             # Collective GEMM configs need to be created under the mesh_resource context
-            cgemm_config_set_1 = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.ALL_GATHER)
-            cgemm_config_set_2 = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.REDUCE_SCATTER)
+            cgemm_config_set_1 = CollectiveGemmConfigSet.create(
+                forward_collective_op=CollectiveOp.ALL_GATHER
+            )
+            cgemm_config_set_2 = CollectiveGemmConfigSet.create(
+                forward_collective_op=CollectiveOp.REDUCE_SCATTER
+            )
             cgemm_config_sets = (cgemm_config_set_1, cgemm_config_set_2)
             noop_cgemm_config_sets = (noop_cgemm_config_set, noop_cgemm_config_set)
 
-            x_sharding, weight_1_sharding, bias_1_sharding, weight_2_sharding, bias_2_sharding = _get_operand_sharding(mesh)
+            x_sharding, weight_1_sharding, bias_1_sharding, weight_2_sharding, bias_2_sharding = (
+                _get_operand_sharding(mesh)
+            )
             x_sharded = jax.device_put(x, x_sharding)
             weight_1_sharded = jax.device_put(weight_1, weight_1_sharding)
             bias_1_sharded = jax.device_put(bias_1, bias_1_sharding)
@@ -155,10 +207,30 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
             input_1_axes, weight_1_axes, _, input_2_axes, weight_2_axes, _ = _get_logical_axes()
             ref_output, ref_grads = _value_and_grad_layernorm_mlp(
-                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, noop_cgemm_config_sets,
+                x_sharded,
+                weight_1_sharded,
+                bias_1_sharded,
+                weight_2_sharded,
+                bias_2_sharded,
+                gamma,
+                input_1_axes,
+                input_2_axes,
+                weight_1_axes,
+                weight_2_axes,
+                noop_cgemm_config_sets,
             )
             output, sharded_grads = _value_and_grad_layernorm_mlp(
-                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, cgemm_config_sets
+                x_sharded,
+                weight_1_sharded,
+                bias_1_sharded,
+                weight_2_sharded,
+                bias_2_sharded,
+                gamma,
+                input_1_axes,
+                input_2_axes,
+                weight_1_axes,
+                weight_2_axes,
+                cgemm_config_sets,
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)

@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 import warnings
-from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
