@@ -61,42 +61,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     } else {
       input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
     }
-
-    // // Swizzle scaling factors for MXFP8
-    // if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
-    //   // Get the swizzle buffer
-    //   NVTE_CHECK(swizzled_scale_inv->element_count() > 0,
-    //              "Missing swizzled inverse scale buffer in the JAX primitive.");
-    //   auto scale_inv_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
-    //   auto swizzled_scale_inv_dtype =
-    //       convert_ffi_datatype_to_te_dtype(swizzled_scale_inv->element_type());
-    //   NVTE_CHECK(typeToSize(scale_inv_dtype) == 1 && typeToSize(swizzled_scale_inv_dtype) == 1,
-    //              "Inverse scale factors need to have an 8-bit data type.");
-    //
-    //   // Create tensor to hold swizzled scale factor
-    //   TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
-    //   if (rowwise) {
-    //     output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
-    //     output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
-    //   } else {
-    //     output.set_columnwise_data(buffer.untyped_data(), input_dtype, input_shape);
-    //     output.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-    //                                     scale_shape);
-    //   }
-    //
-    //   // Launch swizzle kernel
-    //   // nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
-    //
-    //   // Set swizzled scales into the input tensor
-    //   if (rowwise) {
-    //     // input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
-    //     input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
-    //   } else {
-    //     // input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-    //     //                                scale_shape);
-    //     input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
-    //   }
-    // }
   }
 
   return std::make_tuple(std::move(input), input_shape);
