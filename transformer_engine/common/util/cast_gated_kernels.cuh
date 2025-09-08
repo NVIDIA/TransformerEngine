@@ -1150,11 +1150,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise, p);
-              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
-            case ScalingType::COLWISE:
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, false, true,
                                                         THREADS_PER_CHUNK_COLWISE>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
@@ -1171,11 +1167,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
               break;
             case ScalingType::BIDIMENSIONAL:
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, true, true,
-                                                        THREADS_PER_CHUNK_NON_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
-
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     true, true, THREADS_PER_CHUNK_NON_COLWISE>
                   <<<grid, block_size, shmem_size, stream>>>(
@@ -1192,11 +1184,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated(const Tensor &input, Tensor *output, ParamOP p, cudaStream_t stream) {
-  CheckInputTensor(input, "gated_act_input");
   CheckOutputTensor(*output, "gated_act_output");
-  NVTE_CHECK(output->flat_first_dim() == input.flat_first_dim(),
-             "Wrong output shape. Expected (after flattening) [", input.flat_first_dim(),
-             ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(input.flat_last_dim() % 2 == 0,
              "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
              input.flat_first_dim(), ", ", input.flat_last_dim(), "].");
