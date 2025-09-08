@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 import transformer_engine_torch as tex
 from ...tensor import Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.base.float8_tensor_base import Float8TensorBase
 from .._common import maybe_autocast_dtype, maybe_dequantize
 from ..op import BasicOperation, OperationContext
 
