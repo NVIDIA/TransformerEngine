@@ -11,7 +11,7 @@ namespace transformer_engine {
 
 struct Empty {};
 
-struct GptOssParam{
+struct GptOssParam {
   float limit;
 };
 
@@ -70,8 +70,8 @@ __device__ inline OType clamp(const IType val, const float min_limit, const floa
 template <typename OType, typename IType>
 __device__ inline OType oss_silu(const IType val, const GptOssParam& p) {
   const Empty e = {};
-  const float cval = clamp<float, IType>(val,
-    -std::numeric_limits<float>::infinity(), p.limit); // Clamping
+  const float cval =
+      clamp<float, IType>(val, -std::numeric_limits<float>::infinity(), p.limit);  // Clamping
   return qgelu<OType, float>(cval, e);
 }
 
@@ -90,12 +90,12 @@ __device__ inline OType dclamp(const IType val, const float min_limit, const flo
 template <typename OType, typename IType>
 __device__ inline OType oss_dsilu(const IType val, const GptOssParam& p) {
   const Empty e = {};
-  const bool dclamp_val = dclamp<bool, IType>(val,
-    -std::numeric_limits<float>::infinity(), p.limit);
-  const float clamp_val = clamp<float, IType>(val,
-    -std::numeric_limits<float>::infinity(), p.limit); 
+  const bool dclamp_val =
+      dclamp<bool, IType>(val, -std::numeric_limits<float>::infinity(), p.limit);
+  const float clamp_val =
+      clamp<float, IType>(val, -std::numeric_limits<float>::infinity(), p.limit);
   const float dsilu_val = dqgelu<OType, float>(clamp_val, e);
-  return dclamp_val ? dsilu_val: 0.0f;
+  return dclamp_val ? dsilu_val : 0.0f;
 }
 
 template <typename OType, typename IType>

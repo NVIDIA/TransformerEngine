@@ -27,7 +27,7 @@ __all__ = [
     "SReGLU",
     "SiLU",
     "SwiGLU",
-    "GptOssSwiglu"
+    "GptOssSwiglu",
 ]
 
 

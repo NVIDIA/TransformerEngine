@@ -8,7 +8,6 @@
 #include "common.h"
 #include "pybind.h"
 
-
 namespace transformer_engine::pytorch {
 
 template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>
@@ -185,7 +184,7 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
   return dactivation_helper<nvte_dswiglu>(grad, input, quantizer);
 }
 
-py::object gpt_oss_swiglu(const at::Tensor &input, py::handle quantizer, float limit){
+py::object gpt_oss_swiglu(const at::Tensor& input, py::handle quantizer, float limit) {
   init_extension();
   // Input tensor
   auto input_tensor = input.contiguous();
@@ -203,28 +202,34 @@ py::object gpt_oss_swiglu(const at::Tensor &input, py::handle quantizer, float l
   if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation directly
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_gptoss_swiglu(input_cpp.data(), out_cpp.data(),limit, at::cuda::getCurrentCUDAStream()); });
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_gptoss_swiglu(input_cpp.data(), out_cpp.data(), limit, at::cuda::getCurrentCUDAStream());
+    });
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // Compute activation in high-precision fused together with amax, then quantize.
 
     auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_gptoss_swiglu(input_cpp.data(), temp_cpp.data(), limit, at::cuda::getCurrentCUDAStream()); });
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_gptoss_swiglu(input_cpp.data(), temp_cpp.data(), limit,
+                         at::cuda::getCurrentCUDAStream());
+    });
     quantizer_cpp_cs->quantize_with_amax(temp_cpp, out_cpp);
   } else {
     // Compute activation in high-precision, then quantize
 
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_gptoss_swiglu(input_cpp.data(), temp_cpp.data(), limit, at::cuda::getCurrentCUDAStream()); });
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_gptoss_swiglu(input_cpp.data(), temp_cpp.data(), limit,
+                         at::cuda::getCurrentCUDAStream());
+    });
     quantizer_cpp->quantize(temp_cpp, out_cpp);
   }
   return out_py;
 }
 
-py::object gpt_oss_dswiglu(const at::Tensor &grad_output, const at::Tensor &input, py::handle quantizer, float limit){
+py::object gpt_oss_dswiglu(const at::Tensor& grad_output, const at::Tensor& input,
+                           py::handle quantizer, float limit) {
   init_extension();
   // Grad output and input tensors
   auto grad_output_tensor = grad_output.contiguous();
@@ -246,7 +251,7 @@ py::object gpt_oss_dswiglu(const at::Tensor &grad_output, const at::Tensor &inpu
     // Compute activation backward directly
     NVTE_SCOPED_GIL_RELEASE({
       nvte_gptoss_dswiglu(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(), limit,
-                at::cuda::getCurrentCUDAStream());
+                          at::cuda::getCurrentCUDAStream());
     });
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // Compute activation backward in high-precision fused together with amax, then quantize.
@@ -254,7 +259,7 @@ py::object gpt_oss_dswiglu(const at::Tensor &grad_output, const at::Tensor &inpu
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       nvte_gptoss_dswiglu(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), limit,
-                at::cuda::getCurrentCUDAStream());
+                          at::cuda::getCurrentCUDAStream());
     });
     quantizer_cpp_cs->quantize_with_amax(temp_cpp, grad_input_cpp);
   } else {
@@ -262,13 +267,12 @@ py::object gpt_oss_dswiglu(const at::Tensor &grad_output, const at::Tensor &inpu
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
       nvte_gptoss_dswiglu(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), limit,
-                at::cuda::getCurrentCUDAStream());
+                          at::cuda::getCurrentCUDAStream());
     });
     quantizer_cpp->quantize(temp_cpp, grad_input_cpp);
   }
 
   return grad_input_py;
-
 }
 
 }  // namespace transformer_engine::pytorch

@@ -1759,10 +1759,11 @@ class TestBasicOps:
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
             te_ops.GptOssSwiglu(limit=7.0),
-            te_ops.Quantize(forward=quantize_forward, backward=False))
+            te_ops.Quantize(forward=quantize_forward, backward=False),
+        )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
             y_test = forward(x_test)
-        
+
         y_test.backward(dy_test)
 
         # Expected numerical error
@@ -1775,7 +1776,6 @@ class TestBasicOps:
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
-
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
     @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))

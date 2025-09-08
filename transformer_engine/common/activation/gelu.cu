@@ -56,5 +56,6 @@ void nvte_dqgeglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_dqgeglu);
   using namespace transformer_engine;
-  dgated_act_fn<fp32, Empty, qgelu<fp32, fp32>, dqgelu<fp32, fp32>>(grad, input, output, {}, stream);
+  dgated_act_fn<fp32, Empty, qgelu<fp32, fp32>, dqgelu<fp32, fp32>>(grad, input, output, {},
+                                                                    stream);
 }

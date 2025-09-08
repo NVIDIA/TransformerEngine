@@ -56,5 +56,6 @@ void nvte_dsreglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_dsreglu);
   using namespace transformer_engine;
-  dgated_act_fn<fp32, Empty, srelu<fp32, fp32>, dsrelu<fp32, fp32>>(grad, input, output, {}, stream);
+  dgated_act_fn<fp32, Empty, srelu<fp32, fp32>, dsrelu<fp32, fp32>>(grad, input, output, {},
+                                                                    stream);
 }

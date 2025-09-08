@@ -433,7 +433,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
       ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
 
-      if constexpr(std::is_same<Param, GptOssParam>::value){
+      if constexpr (std::is_same<Param, GptOssParam>::value) {
         // Clamp the gated value and add 1 at the end
         // https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250
         ComputeType limit = p.limit;
@@ -542,11 +542,11 @@ __launch_bounds__(unary_kernel_threads) __global__
       ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
       ComputeType dgate_in = 1.0f;
 
-      if constexpr(std::is_same<Param, GptOssParam>::value){
+      if constexpr (std::is_same<Param, GptOssParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
-          const ComputeType limit = p.limit;
-          dgate_in = gate_in <= limit && gate_in >= -limit ? 1.0f : 0.0f; // Derivative of clamp
-          gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+        const ComputeType limit = p.limit;
+        dgate_in = gate_in <= limit && gate_in >= -limit ? 1.0f : 0.0f;  // Derivative of clamp
+        gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
       }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
