@@ -300,28 +300,18 @@ class GemmPrimitive(BasePrimitive):
                 )
         pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
 
-        # Need extra workspace for swizzled scale factors
-        lhs_swizzle_size = 0
-        rhs_swizzle_size = 0
-        swizzle_dtype = jnp.uint8
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            lhs_swizzle_size = lhs_scale_inv.size
-            rhs_swizzle_size = rhs_scale_inv.size
-        lhs_swizzle = jax.core.ShapedArray(shape=(lhs_swizzle_size,), dtype=swizzle_dtype)
-        rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size,), dtype=swizzle_dtype)
-
         # Declare cuBLAS workspace
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size = get_cublas_workspace_size_bytes() + 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
+        return output, bias_grad, pre_gelu_out, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         outputs = GemmPrimitive.abstract(*args, **kwargs)
-        return outputs[:-3]  # discard workspace arrays
+        return outputs[:-1]  # discard workspace array
 
     @staticmethod
     def lowering(
@@ -432,7 +422,7 @@ class GemmPrimitive(BasePrimitive):
             grad=grad,
             use_split_accumulator=use_split_accumulator,
         )
-        return outputs[:-3]  # discard workspace arrays
+        return outputs[:-1]  # discard workspace array
 
     @staticmethod
     def outer_impl(

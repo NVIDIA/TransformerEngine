@@ -28,7 +28,7 @@ static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
 }
 
 std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
-    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, Result_Type swizzled_scale_inv,
+    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv,
     JAXX_Scaling_Mode scaling_mode, size_t axis_boundary, bool rowwise) {
   // Set tensor data with collapsed 2D shape
   auto buffer_dims = buffer.dimensions();
@@ -69,11 +69,10 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
-                   Result_Type lhs_swizzle, Result_Type rhs_swizzle, Result_Type workspace,
+                   Result_Type workspace,
                    JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator) {
-  // Operands (this includes swizzling MXFP8 scaling factors)
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
@@ -81,9 +80,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   bool make_lhs_rowwise = (always_rowwise) ? true : !lhs_transposed;
   bool make_rhs_rowwise = (always_rowwise) ? true : rhs_transposed;
   auto [lhs_, lhs_shape] = xla_buffer_to_nvte_gemm_operand(
-      stream, lhs, lhs_scale_inv, lhs_swizzle, scaling_mode, lhs_axis_boundary, make_lhs_rowwise);
+      stream, lhs, lhs_scale_inv, scaling_mode, lhs_axis_boundary, make_lhs_rowwise);
   auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(
-      stream, rhs, rhs_scale_inv, rhs_swizzle, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
+      stream, rhs, rhs_scale_inv, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
 
   // Output tensor
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
@@ -154,8 +153,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // bias_grad
                                   .Ret<Buffer_Type>()      // pre_gelu_out
-                                  .Ret<Buffer_Type>()      // lhs_swizzled
-                                  .Ret<Buffer_Type>()      // rhs_swizzled
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("lhs_axis_boundary")
