@@ -1827,8 +1827,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = result_infos[2].shape
-            rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
+            rng_state = jnp.zeros(result_infos[2].shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
                 kv, output, softmax_aux = carry
