@@ -391,9 +391,9 @@ class GemmPrimitive(BasePrimitive):
     ):
         if not is_outer:
             lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-            lhs_transposed, rhs_transposed = _get_gemm_layout(
-                (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
-        
+            lhs_transposed, rhs_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim),
+                                                              (lhs_cdims, rhs_cdims))
+
             lhs_scale_inv = apply_padding_to_scale_inv(
                 lhs_scale_inv,
                 scaling_mode,
@@ -408,8 +408,16 @@ class GemmPrimitive(BasePrimitive):
                 is_colwise=not rhs_transposed,
                 flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
             )
-            lhs_scale_inv = swizzled_scale(lhs_scale_inv, max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims), is_colwise=lhs_transposed)
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv, min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1, is_colwise=not rhs_transposed)
+            lhs_scale_inv = swizzled_scale(
+                lhs_scale_inv,
+                max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+                is_colwise=lhs_transposed,
+            )
+            rhs_scale_inv = swizzled_scale(
+                rhs_scale_inv,
+                min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+                is_colwise=not rhs_transposed,
+            )
 
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -425,6 +433,7 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
+            is_outer=False,
         )
         return outputs[:-3]  # discard workspace arrays
 
@@ -618,7 +627,7 @@ class GemmPrimitive(BasePrimitive):
             grad,
             is_outer,
         )
-        del use_split_accumulator, result_infos, is_outer
+        del use_split_accumulator, result_infos
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), _) = (
             GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims)

@@ -206,7 +206,7 @@ def register_primitive(cls):
     outer_p.def_impl(cls.outer_impl)
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
-    outer_p_lower = custom_partitioning(cls.outer_impl, static_argnums=cls.impl_static_args)
+    outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
     outer_p_lower.def_partition(
         infer_sharding_from_operands=cls.infer_sharding_from_operands,
         partition=cls.partition,
