@@ -5,11 +5,12 @@
 namespace transformer_engine::pytorch {
 
 using FuncType = void (*)(const NVTETensor, NVTETensor, cudaStream_t);
-using FuncWithArgsType = void (*)(const NVTETensor, NVTETensor, const float* const, int, cudaStream_t);
+using FuncWithArgsType = void (*)(const NVTETensor, NVTETensor, const float* const, int,
+                                  cudaStream_t);
 
 using DFuncType = void (*)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t);
-using DFuncWithArgsType = void (*)(const NVTETensor, const NVTETensor, NVTETensor, const float* const,
-                                   int, cudaStream_t);
+using DFuncWithArgsType = void (*)(const NVTETensor, const NVTETensor, NVTETensor,
+                                   const float* const, int, cudaStream_t);
 
 template <FuncType act_func, FuncWithArgsType act_func_with_args>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1,
@@ -33,11 +34,10 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE({
-      if(act_func == nullptr){
+      if (act_func == nullptr) {
         act_func_with_args(input_cpp.data(), out_cpp.data(), args.data(), args.size(),
                            at::cuda::getCurrentCUDAStream());
-      } 
-      else {
+      } else {
         act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
       }
     });
@@ -46,7 +46,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-      if(act_func == nullptr){
+      if (act_func == nullptr) {
         act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(),
                            at::cuda::getCurrentCUDAStream());
       } else {
@@ -58,7 +58,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     // Compute activation in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-      if(act_func == nullptr){
+      if (act_func == nullptr) {
         act_func_with_args(input_cpp.data(), temp_cpp.data(), args.data(), args.size(),
                            at::cuda::getCurrentCUDAStream());
       } else {
@@ -95,7 +95,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation backward directly
     NVTE_SCOPED_GIL_RELEASE({
-      if(dact_func == nullptr){
+      if (dact_func == nullptr) {
         dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
                             args.data(), args.size(), at::cuda::getCurrentCUDAStream());
       } else {
@@ -108,7 +108,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-      if(dact_func == nullptr){
+      if (dact_func == nullptr) {
         dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(),
                             args.size(), at::cuda::getCurrentCUDAStream());
       } else {
@@ -121,7 +121,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     // Compute activation backward in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-      if(dact_func == nullptr){
+      if (dact_func == nullptr) {
         dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), args.data(),
                             args.size(), at::cuda::getCurrentCUDAStream());
       } else {
