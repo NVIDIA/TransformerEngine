@@ -156,9 +156,11 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     original_shape = scale_inv.shape
     shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
-    rows, cols = shape_2d
     if is_colwise:
         scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
+        cols, rows = shape_2d
+    else:
+        rows, cols = shape_2d
     reshape = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
     swizzled = jnp.transpose(reshape, (0, 3, 2, 1, 4))
     return swizzled.reshape(original_shape)
@@ -454,7 +456,6 @@ class GemmPrimitive(BasePrimitive):
         use_split_accumulator,
         is_outer,
     ):
-        del is_outer
         return GemmPrimitive.impl(
             lhs,
             lhs_scale_inv,
@@ -469,7 +470,7 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu,
             grad,
             use_split_accumulator,
-            is_outer=False,
+            is_outer=is_outer,
         )
 
     @staticmethod
@@ -655,10 +656,10 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        is_outer,
         mesh,
         arg_infos,
         result_infos,
-        is_outer,
     ):
         del result_infos, is_outer
 
@@ -898,7 +899,7 @@ def _te_gemm(
         fuse_gelu=fuse_gelu,
         grad=grad,
         use_split_accumulator=use_split_accumulator,
-        is_outer=True,
+        is_outer=False,
     )
 
 
