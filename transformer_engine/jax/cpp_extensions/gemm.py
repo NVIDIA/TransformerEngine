@@ -394,7 +394,7 @@ class GemmPrimitive(BasePrimitive):
                 rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
             )
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv, not rhs_transposed, rhs_transposed)
+            rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
