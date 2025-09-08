@@ -152,7 +152,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     return lhs_q, rhs_q
 
 
-@partial(jax.jit, static_argnums=(1,2))
+@partial(jax.jit, static_argnums=(1, 2))
 def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     original_shape = scale_inv.shape
     shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
@@ -379,8 +379,9 @@ class GemmPrimitive(BasePrimitive):
         use_split_accumulator,
     ):
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-        lhs_transposed, rhs_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim),
-                                                          (lhs_cdims, rhs_cdims))
+        lhs_transposed, rhs_transposed = _get_gemm_layout(
+            (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
+        )
 
         lhs_scale_inv = apply_padding_to_scale_inv(
             lhs_scale_inv,
