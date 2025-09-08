@@ -402,12 +402,6 @@ class GptOssSwiglu(_ActivationOperation):
 
        \text{GPT-OSS-SwiGLU}(a, b) = \text{clamp}(a, -\infty, \text{limit}) \cdot \sigma(1.702 \cdot \text{clamp}(a, -\infty, \text{limit})) \cdot (\text{clamp}(b, -\text{limit}, \text{limit}) + 1)
 
-    where
-
-    .. math::
-
-       a = x[..., ::2], \quad b = x[..., 1::2]
-
     and :math:`\sigma(x)` is the sigmoid function, and :math:`\text{limit}` is a hyperparameter.
 
     Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
