@@ -27,6 +27,7 @@ __all__ = [
     "SReGLU",
     "SiLU",
     "SwiGLU",
+    "GptOssSwiglu"
 ]
 
 
@@ -389,3 +390,40 @@ class SwiGLU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dswiglu(*args, **kwargs)
+
+
+class GptOssSwiglu(_ActivationOperation):
+    r"""GPT-OSS SwiGLU with clamped SiLU
+
+    The input tensor is split into chunks :math:`a` and :math:`b`
+    along the last dimension and the following is computed:
+
+    .. math::
+
+       \text{GPT-OSS-SwiGLU}(a, b) = \text{clamp}(a, -\infty, \text{limit}) \cdot \sigma(1.702 \cdot \text{clamp}(a, -\infty, \text{limit})) \cdot (\text{clamp}(b, -\text{limit}, \text{limit}) + 1)
+
+    where
+
+    .. math::
+
+       a = x[..., ::2], \quad b = x[..., 1::2]
+
+    and :math:`\sigma(x)` is the sigmoid function, and :math:`\text{limit}` is a hyperparameter.
+
+    Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
+    Parameters
+    ----------
+    limit: float
+        The clamp limit.
+
+    """
+
+    def __init__(self, *, limit: float, cache_quantized_input: bool = False):
+        super().__init__(cache_quantized_input=cache_quantized_input)
+        self.limit = limit
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.gpt_oss_swiglu(*args, limit=self.limit, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.gpt_oss_dswiglu(*args, limit=self.limit, **kwargs)

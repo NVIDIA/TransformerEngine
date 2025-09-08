@@ -161,7 +161,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     IType *in_gate_sh_curr = in_gate_sh + buff * buff_elems;
     OType *out_act_sh_curr = out_act_sh + buff * buff_elems;
     OType *out_gate_sh_curr = out_gate_sh + buff * buff_elems;
-
 #pragma unroll
     for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
       const size_t stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
@@ -171,6 +170,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
+      float dgate_elt = 1.0f; // gating is ideally an identity function
+      if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+        // In case of GPT OSS, clamp the activation and gate values
+          const float limit = p.limit;
+          dgate_elt = gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f; // Derivative of clamp
+          gate_elt = min(max(-limit, gate_elt), limit) + 1;
+      }
 
       if constexpr (IS_DGATED) {
         float grad_elt = static_cast<float>(in_grad_sh_curr[shmem_idx]);
@@ -179,9 +185,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float act_x;
         float dact_x;
         if constexpr(std::is_same<ParamOP, GptOssParam>::value){
-          //TODO: Fix this code for GPT OSS
-          act_x = 0.0f;
-          dact_x = 0.0f;
+          const float limit = p.limit;
+          const float x = min(act_elt, limit);
+          const float s = sigmoidf(1.702 * x);
+          act_x = x * s;
+          if(x <= limit){
+            dact_x = s + s * (1 - s) * 1.702 * x;
+          }
+          else{
+            dact_x = 0.0f;  
+          }
         }
         else{
           if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
@@ -197,7 +210,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = act_x * grad_elt;
+        float after_dgate = act_x * grad_elt * dgate_elt;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);
@@ -485,16 +498,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
         float after_act_elt;
         float after_gate_elt;
-
+        float dgate_elt = 1.0f; // gating is ideally an identity function
+        if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+          // In case of GPT OSS, clamp the activation and gate values
+            const float limit = p.limit;
+            dgate_elt = gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f; // Derivative of clamp
+            gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
+        }
         if constexpr (IS_DGATED) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
           const float x = act_elt;
           float act_x;
           float dact_x;
           if constexpr(std::is_same<ParamOP, GptOssParam>::value){
-            //TODO: Fix this code for GPT OSS
-            act_x=0.0f;
-            dact_x=0.0f;
+            const float limit = p.limit;
+            const float x = min(act_elt, limit);
+            const float s = sigmoidf(1.702 * x);
+            act_x = x * s;
+            if(x <= limit){
+              dact_x = s + s * (1 - s) * 1.702 * x;
+            }
+            else{
+              dact_x = 0.0f;  
+            }
           }
           else{
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
@@ -509,7 +535,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           after_act_elt = dact_x * grad_elt * gate_elt;
-          after_gate_elt = act_x * grad_elt;
+          after_gate_elt = act_x * grad_elt * dgate_elt;
         } else {
           after_act_elt = ActOP(act_elt, p) * gate_elt;
         }
@@ -736,16 +762,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float gate_elt = static_cast<float>(in_gate.data.elt[e]);
             float after_act_elt;
             float after_gate_elt;
-
+            float dgate_elt = 1.0f;
+            if constexpr(std::is_same<ParamOP, GptOssParam>::value){
+              // In case of GPT OSS, clamp the activation and gate values
+                const float limit = p.limit;
+                dgate_elt = gate_elt <= limit && gate_elt >= -limit ? 1.0f : 0.0f; // Derivative of clamp
+                gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
+            }
             if constexpr (IS_DGATED) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);
               const float x = act_elt;
               float act_x;
               float dact_x;
               if constexpr(std::is_same<ParamOP, GptOssParam>::value){
-                // TODO: Fix this code for GPT OSS
-                act_x = 0.0f;
-                dact_x = 0.0f;
+                const float limit = p.limit;
+                const float x = min(act_elt, limit);
+                const float s = sigmoidf(1.702 * x);
+                act_x = x * s;
+                if(x <= limit){
+                  dact_x = s + s * (1 - s) * 1.702 * x;
+                }
+                else{
+                  dact_x = 0.0f;  
+                }
               }
               else{
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
@@ -760,7 +799,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               }
 
               after_act_elt = dact_x * grad_elt * gate_elt;
-              after_gate_elt = act_x * grad_elt;
+              after_gate_elt = act_x * grad_elt * dgate_elt;
               after_act_rowwise[j] = after_act_elt;
               after_gate_rowwise[j] = after_gate_elt;
             } else {

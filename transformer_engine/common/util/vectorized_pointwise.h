@@ -11,7 +11,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
-
+#include "math.h"
 namespace transformer_engine {
 
 /* \brief Helper class that enables storing multiple values of type DType
@@ -431,7 +431,14 @@ __launch_bounds__(unary_kernel_threads) __global__
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
-      const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+      ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+
+      if constexpr(std::is_same<Param, GptOssParam>::value){
+        // Clamp the gated value and add 1 at the end
+        // https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250
+        ComputeType limit = p.limit;
+        val2 = std::min(std::max(-limit, val2), limit) + 1;
+      }
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
       if (requires_amax) {
         __builtin_assume(max >= 0);
@@ -532,10 +539,18 @@ __launch_bounds__(unary_kernel_threads) __global__
     for (int i = 0; i < nvec; ++i) {
       const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
-      const ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      ComputeType dgate_in = 1.0f;
+
+      if constexpr(std::is_same<Param, GptOssParam>::value){
+        // In case of GPT OSS, clamp the activation and gate values
+          const ComputeType limit = p.limit;
+          dgate_in = gate_in <= limit && gate_in >= -limit ? 1.0f : 0.0f; // Derivative of clamp
+          gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+      }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = grad_val * Activation(gelu_in, p);
+      ComputeType after_dgate = grad_val * Activation(gelu_in, p) * dgate_in;
 
       if (requires_amax) {
         __builtin_assume(max >= 0);
