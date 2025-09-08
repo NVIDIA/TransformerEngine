@@ -98,13 +98,12 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
   // load scaling factors for this lane's initial four 1x128 tiles
-  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
   uint4 sf;
   if constexpr (no_oob) {
-    sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+    sf = reinterpret_cast<const uint4*>(warp_src)[lane];
   } else {
-    if ((out_tile_y < tiles_y - 1) || lane_load_idx < first_oob) {
-      sf = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+    if ((out_tile_y < tiles_y - 1) || lane < first_oob) {
+      sf = reinterpret_cast<const uint4*>(warp_src)[lane];
     } else {
       sf = uint4{0, 0, 0, 0};
     }
@@ -113,8 +112,12 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   // pack the exponent bits of the scaling factors
   uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
 
-  // transpose 4x4 matrices of scaling factors
+  // partially swizzle the scaling factors
   constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
+  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
+  packed_exponents = __shfl_sync(ACTIVE_MASK, packed_exponents, lane_load_idx);
+
+  // transpose 4x4 matrices of scaling factors
   packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
 
   // broadcast the scaling factors for sixteen 1x32 tiles
