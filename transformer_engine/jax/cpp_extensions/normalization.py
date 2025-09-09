@@ -824,7 +824,9 @@ class NormBwdPrimitive(BasePrimitive):
 register_primitive(NormBwdPrimitive)
 
 
-def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None):
+def _jax_layernorm(
+    x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, high_precision_norm_out=False
+):
     """
     JAX native layernorm implementation
     """
@@ -840,7 +842,8 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma + beta
-    output = output.astype(x.dtype)
+    if not high_precision_norm_out:
+        output = output.astype(x.dtype)
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
@@ -850,7 +853,9 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     return ln_out, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1)
 
 
-def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
+def _jax_rmsnorm(
+    x, gamma, zero_centered_gamma, epsilon, quantizer=None, high_precision_norm_out=False
+):
     """
     JAX native rmsnorm implementation
     """
@@ -865,7 +870,8 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma
-    output = output.astype(x.dtype)
+    if not high_precision_norm_out:
+        output = output.astype(x.dtype)
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)

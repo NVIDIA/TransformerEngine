@@ -464,14 +464,25 @@ class TestNorm:
                 x, gamma, beta, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_mu, ref_rsigma = _jax_layernorm(
-                x, gamma, beta, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                beta,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
+                high_precision_norm_out=True,
             )
         else:
             output, rsigma = tex.rmsnorm_fwd(
                 x, gamma, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_rsigma = _jax_rmsnorm(
-                x, gamma, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
+                high_precision_norm_out=True,
             )
             ref_mu = None
 
