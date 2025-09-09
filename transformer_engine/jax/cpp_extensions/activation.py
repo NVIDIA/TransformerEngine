@@ -29,7 +29,7 @@ from .misc import (
 )
 from .quantization import _jax_dbias, _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory
+from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
     QuantizeLayout,
@@ -922,7 +922,7 @@ class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
     """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
-def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
+def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[NoScaleTensor, ScaledTensor]:
     """
     JAX native activation implementation
     """
@@ -941,11 +941,11 @@ def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, S
     x = jnp.squeeze(x, axis=-2)
     if quantizer:
         return quantizer.quantize(x, flatten_axis=-1)
-    return x
+    return NoScaleTensor(data=x, amax=None)
 
 
 def _jax_quantize_dact_dbias(
-    dz: jnp.ndarray,
+    dz: Union[jnp.ndarray, NoScaleTensor],
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     is_dbias: bool = True,
@@ -963,7 +963,9 @@ def _jax_quantize_dact_dbias(
     _, vjp_func = jax.vjp(
         partial(_jax_act_lu, activation_type=activation_type), x.astype(jnp.float32)
     )
-    (dx,) = vjp_func(dz.astype(jnp.float32))
+    # VJP is using non-quantized backward for dact, so the input should always be wrapped in NoScaleTensor regardless of whether the forward pass used quantization or this dact will quantize afterwards.
+    dz = NoScaleTensor(data=dz.astype(jnp.float32), amax=None)
+    (dx,) = vjp_func(dz)
 
     dbias = None
     if is_dbias:
@@ -973,6 +975,7 @@ def _jax_quantize_dact_dbias(
         dx = quantizer.quantize(dx, dq_dtype=x.dtype, flatten_axis=-2)
     else:
         dx = dx.astype(x.dtype)
+        dx = NoScaleTensor(data=dx, amax=None)
 
     return dx, dbias
 
@@ -981,7 +984,6 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    noop_scaled_tensor: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -990,7 +992,6 @@ def act_lu(
             Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
-        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         If quantizer is None:
@@ -1035,10 +1036,10 @@ def act_lu(
             is_outer=True,
         )
         out = out.reshape(output_shape)
-        if noop_scaled_tensor:
-            return ScaledTensorFactory.create_2x(
-                out, None, out, None, scaling_mode=ScalingMode.NO_SCALING, dq_dtype=out.dtype
-            )
+        out = NoScaleTensor(
+            data=out,
+            amax=None,
+        )
         return out
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1092,7 +1093,6 @@ def quantize_dact_dbias(
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
-    noop_scaled_tensor: bool = False,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Compute gradients of activation and bias with optional quantization.
 
@@ -1103,7 +1103,6 @@ def quantize_dact_dbias(
         activation_type: Type of activation function used in the forward pass. Defaults to ("gelu",).
         is_dbias: If True, compute bias gradient. Defaults to True.
         quantizer: Optional quantizer for FP8 quantization of the output.
-        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         Tuple[ScaledTensor, jnp.ndarray]: A tuple containing:
@@ -1146,19 +1145,10 @@ def quantize_dact_dbias(
         if is_dbias:
             dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
 
-        if noop_scaled_tensor:
-            return (
-                ScaledTensorFactory.create_2x(
-                    output,
-                    None,
-                    output,
-                    None,
-                    ScalingMode.NO_SCALING,
-                    dq_dtype=output.dtype,
-                ),
-                dbias,
-            )
-
+        output = NoScaleTensor(
+            data=output,
+            amax=None,
+        )
         return output, dbias
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
@@ -1167,7 +1157,7 @@ def quantize_dact_dbias(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type, quantizer=None
         )
         return _quantize_dbias_impl(
-            out, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+            out.data, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
         )
 
     is_gated = act_len == 2
@@ -1194,7 +1184,7 @@ def quantize_dact_dbias(
             quantizer=None,
         )
         out, dbias = _quantize_dbias_impl(
-            out, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
+            out.data, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
         )
         return out, dbias
 
@@ -1258,7 +1248,6 @@ def dact_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    noop_scale_tensor: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1268,7 +1257,6 @@ def dact_lu(
         x: Input tensor that was used in forward pass.
         activation_type: Type of activation function that was applied.
         quantizer: Optional quantizer for FP8 quantization of the output gradient.
-        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         The gradient of the activation with respect to the input.
@@ -1279,6 +1267,5 @@ def dact_lu(
         activation_type=activation_type,
         is_dbias=False,
         quantizer=quantizer,
-        noop_scaled_tensor=noop_scale_tensor,
     )
     return output

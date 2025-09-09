@@ -43,5 +43,6 @@ include_directories(${CMAKE_SOURCE_DIR})
 find_package(CUDAToolkit REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+add_subdirectory(comm_gemm)
 add_subdirectory(operator)
 add_subdirectory(util)
