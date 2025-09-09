@@ -109,9 +109,9 @@ def _estimate_cached_weight_size(
 
     # FP8 tensor-scaling caches one byte per element
     if quantization_recipe.delayed() or quantization_recipe.float8_current_scaling():
-        if (
-            not is_non_tn_fp8_gemm_supported()
-            and model_name not in ("linear_op", "layernorm_mlp_ops")
+        if not is_non_tn_fp8_gemm_supported() and model_name not in (
+            "linear_op",
+            "layernorm_mlp_ops",
         ):
             # Modules do not deallocate FP8 transpose for weights
             return 2 * param_elements / 1024**2
@@ -162,8 +162,7 @@ def _measure_cached_memory(
     memory_before_forward = torch.cuda.memory_allocated() / (1024**2)
     for module in modules:
         with te.fp8_autocast(
-            enabled=quantization_recipe is not None,
-            fp8_recipe=quantization_recipe
+            enabled=quantization_recipe is not None, fp8_recipe=quantization_recipe
         ), offload_context:
             tensor = module(tensor)
         tensor = sync_function(tensor)
