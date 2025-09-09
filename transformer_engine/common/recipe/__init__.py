@@ -392,10 +392,7 @@ class CustomRecipe(Recipe):
     fp8_mha: bool = False
 
     def __repr__(self) -> str:
-        return (
-            f"recipe_type={self.__class__.__name__}, "
-            f"qfactory={self.qfactory}"
-        )
+        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
 
     def resolve_role(self, operation: str, mode: str, index: int) -> Optional[str]:
         """
