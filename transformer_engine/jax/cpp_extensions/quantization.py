@@ -518,6 +518,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         return SdyShardingRule(
             (x_axes, ("…1",), amax),
             (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            **scale_rules.factor_sizes,
         )
 
 
