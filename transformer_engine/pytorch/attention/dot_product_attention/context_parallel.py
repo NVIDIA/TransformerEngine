@@ -4096,6 +4096,6 @@ def get_batch_on_this_cp_rank(
             labels_padded = process_tensor(labels_padded)
             position_ids_padded = process_tensor(position_ids_padded)
     else:
-        raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
+        raise ValueError(f"Support not implemented yet for qvk_format: {qvk_format}!")
 
     return input_ids_padded, labels_padded, position_ids_padded
