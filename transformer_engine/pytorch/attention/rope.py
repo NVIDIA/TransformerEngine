@@ -5,14 +5,14 @@
 """
 Rotary Position Embedding implementation of different types along with helper functions
 """
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
-__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb"]
+__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -168,6 +168,86 @@ class FusedRoPEFunc(torch.autograd.Function):
         )
 
         return grad_input, None, None, None, None, None, None, None
+
+
+class FusedQKVRoPEFunc(torch.autograd.Function):
+    """
+    Function for FusedQKVRoPE
+
+    This implementation accepts combined QKV tensor in `bshd` or `sbhd` format. Q and K RoPE tensors are the additional required inputs.
+    The RoPE tensors should be of shape (s, 1, 1, d). It produces 3 outputs: Q, K after RoPE, V is the same as input.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        qkv: torch.Tensor,
+        q_freqs: torch.Tensor,
+        k_freqs: torch.Tensor,
+        qkv_split_arg_list: List[int],
+        start_positions: Union[torch.Tensor, None] = None,
+        tensor_format: str = "sbhd",
+        interleaved: bool = False,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+    ) -> torch.Tensor:
+        """Fused RoPE forward."""
+
+        if q_freqs.dtype != torch.float32:
+            q_freqs = q_freqs.float()
+        if k_freqs.dtype != torch.float32:
+            k_freqs = k_freqs.float()
+        assert tensor_format in (
+            "sbhd",
+            "bshd",
+        ), f"Unsupported tensor_format: {tensor_format}."
+        assert qkv.is_contiguous(), "QKV Tensor should be contiguous."
+        assert q_freqs.is_contiguous(), "q_freqs Tensor should be contiguous."
+        assert k_freqs.is_contiguous(), "k_freqs Tensor should be contiguous."
+        output = tex.fused_qkv_rope_forward(
+            qkv,
+            q_freqs,
+            k_freqs,
+            start_positions,
+            qkv_split_arg_list,
+            QKVFormat[tensor_format],
+            interleaved,
+            cp_size,
+            cp_rank,
+        )
+        ctx.save_for_backward(q_freqs, k_freqs)
+        ctx.tensor_format = tensor_format
+        ctx.qkv_split_arg_list = qkv_split_arg_list
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        ctx.interleaved = interleaved
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output_q: torch.Tensor, grad_output_k: torch.Tensor, grad_output_v: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """Fused RoPE backward."""
+        q_freqs, k_freqs = ctx.saved_tensors
+
+        grad_output_q = grad_output_q.contiguous()
+        grad_output_k = grad_output_k.contiguous()
+        grad_output_v = grad_output_v.contiguous()
+
+        grad_input = tex.fused_qkv_rope_backward(
+            grad_output_q,
+            grad_output_k,
+            grad_output_v,
+            q_freqs,
+            k_freqs,
+            ctx.qkv_split_arg_list,
+            QKVFormat[ctx.tensor_format],
+            ctx.interleaved,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+
+        return grad_input, None, None, None, None, None, None, None, None
 
 
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
@@ -392,4 +472,83 @@ def apply_rotary_pos_emb(
         start_positions,
         tensor_format,
         interleaved=interleaved,
+    )
+
+
+def apply_fused_qkv_rotary_pos_emb(
+    qkv: torch.Tensor,
+    q_freqs: torch.Tensor,
+    k_freqs: torch.Tensor,
+    qkv_split_arg_list: List[int],
+    tensor_format: str = "sbhd",
+    start_positions: Union[torch.Tensor, None] = None,
+    interleaved: bool = False,
+    cu_seqlens: Union[torch.Tensor, None] = None,  # pylint: disable=unused-argument
+    cp_size: int = 1,
+    cp_rank: int = 0,
+) -> torch.Tensor:
+    """
+    Apply rotary positional embedding tensor to the input qkv tensor.
+
+    Support matrix:
+    Fused:
+        Training:
+            qkv_formats:            "bshd", "sbhd"
+            context parallel:       yes
+            start_positions:        no
+            interleaving:           yes
+        Inference:
+            qkv_formats:            "bshd", "sbhd"
+            context parallelism:    no
+            start_positions:        yes
+            interleaving:            yes
+
+    Parameters
+    ----------
+    qkv: torch.Tensor
+        Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which
+        rotary positional embedding will be applied. This tensor has q, k, v concatenated
+        along the last dimension.
+    q_freqs: torch.Tensor
+        Rotary positional embedding Q tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
+    k_freqs: torch.Tensor
+        Rotary positional embedding K tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+        with `s2 >= s` and `d2 <= d`.
+    qkv_split_arg_list: List[int]
+        List of integers that specify the split of the qkv tensor. The list should have 3 elements,
+        the first element is the number of elements in the q tensor, the second element is the number
+        of elements in the k tensor, and the third element is the number of elements in the v tensor.
+        The sum of the elements in the list should be equal to the last dimension of the qkv tensor.
+    start_positions: torch.Tensor, default = None.
+        Tokens in a sequence `i` should be applied with position encoding offset by
+        `start_positions[i]`. If `start_positions=None`, there's no offset.
+    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+        is `bshd` if `qkv` is of shape `[bs, seq, ...]`, or `sbhd` if `qkv` is
+        of shape `[seq, bs, ...]`.
+    interleaved: bool, default = False
+        Whether to use interleaved rotary position embedding.
+    cp_size: int, default = 1.
+        Context parallel world size.
+    cp_rank: int, default = 0.
+        Context parallel rank.
+    """
+
+    # `start_positions` is only supported for `cp_size=1` and inference.
+    assert not (
+        cp_size > 1 and start_positions is not None
+    ), """start_positions != None with CP SIZE > 1 is not supported!"""
+
+    assert tensor_format != "thd", "'thd' tensor_format not supported currently."
+
+    return FusedQKVRoPEFunc.apply(
+        qkv,
+        q_freqs,
+        k_freqs,
+        qkv_split_arg_list,
+        start_positions,
+        tensor_format,
+        interleaved,
+        cp_size,
+        cp_rank,
     )
