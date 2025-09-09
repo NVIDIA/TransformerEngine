@@ -14,15 +14,18 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from utils import ModelConfig, get_available_attention_backends
 
-# Check if FP8 is supported
+# Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 
-fp8_recipes = [None]
+quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
-    fp8_recipes.append(recipe.Float8CurrentScaling())
-    fp8_recipes.append(recipe.DelayedScaling())
+    quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
+if mxfp8_available:
+    quantization_recipes.append(recipe.MXFP8BlockScaling())
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
@@ -73,24 +76,28 @@ def _make_input() -> torch.Tensor:
 
 def _warmup_model(
     modules: Iterable[torch.nn.Module],
-    recipe: Optional[recipe.Recipe],
+    quantization_recipe: Optional[recipe.Recipe],
 ) -> None:
     """Perform forward and backward pass"""
     tensor = _make_input()
     for module in modules:
-        with te.fp8_autocast(enabled=recipe is not None, fp8_recipe=recipe):
+        with te.fp8_autocast(
+            enabled=quantization_recipe is not None,
+            fp8_recipe=quantization_recipe,
+        ):
             tensor = module(tensor)
     tensor.sum().backward()
 
 
 def _estimate_cached_weight_size(
+    model_name: str,
     modules: Iterable[torch.nn.Module],
-    recipe: Optional[recipe.Recipe],
+    quantization_recipe: Optional[recipe.Recipe],
 ) -> float:
     """Calculate the memory (in MiB) needed for weight caching."""
 
     # The weight params are cached directly for unquantized compute
-    if recipe is None:
+    if quantization_recipe is None:
         return 0
 
     # Count number of weight param elements
@@ -101,20 +108,29 @@ def _estimate_cached_weight_size(
                 param_elements += param.numel()
 
     # FP8 tensor-scaling caches one byte per element
-    if recipe.delayed() or recipe.float8_current_scaling():
+    if quantization_recipe.delayed() or quantization_recipe.float8_current_scaling():
+        if (
+            not is_non_tn_fp8_gemm_supported()
+            and model_name not in ("linear_op", "layernorm_mlp_ops")
+        ):
+            # Modules do not deallocate FP8 transpose for weights
+            return 2 * param_elements / 1024**2
         return param_elements / 1024**2
 
     # MXFP8 caches one data byte per element and one scale byte per 32
     # elements
-    if recipe.mxfp8():
+    if quantization_recipe.mxfp8():
+        if model_name not in ("linear_op", "layernorm_mlp_ops"):
+            # Modules do not deallocate column-wise MXFP8 data for weights
+            return 2 * param_elements * (1 + 1 / 32) / 1024**2
         return param_elements * (1 + 1 / 32) / 1024**2
 
-    raise NotImplementedError(f"Unrecognized recipe ({fp8_recipe})")
+    raise NotImplementedError(f"Unrecognized recipe ({quantization_recipe})")
 
 
 def _measure_cached_memory(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: Optional[recipe.Recipe],
+    quantization_recipe: Optional[recipe.Recipe],
     cpu_offload: bool,
 ) -> float:
     """Measure the growth in allocated GPU memory in MiB after a model forward pass.
@@ -146,7 +162,8 @@ def _measure_cached_memory(
     memory_before_forward = torch.cuda.memory_allocated() / (1024**2)
     for module in modules:
         with te.fp8_autocast(
-            enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
+            enabled=quantization_recipe is not None,
+            fp8_recipe=quantization_recipe
         ), offload_context:
             tensor = module(tensor)
         tensor = sync_function(tensor)
@@ -163,15 +180,14 @@ def _measure_cached_memory(
     return memory_after_forward - memory_before_forward
 
 
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model_key", model_types.keys())
-def test_cpu_offload(fp8_recipe: Optional[recipe.Recipe], model_key: str) -> None:
+@pytest.mark.parametrize("quantization_recipe", quantization_recipes)
+@pytest.mark.parametrize("model_name", model_types.keys())
+def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: str) -> None:
     """Check that CPU offloading runs and has expected memory usage."""
 
     # Construct model
-    module_cls = model_types[model_key]
-    modules_list = [module_cls() for _ in range(NUM_LAYERS)]
-    if model_key in ["multihead_attention", "transformer_layer"]:
+    modules_list = [model_types[model_name]() for _ in range(NUM_LAYERS)]
+    if model_name in ["multihead_attention", "transformer_layer"]:
         available_backends, *_ = get_available_attention_backends(
             model_config["small"],
             qkv_dtype=torch.bfloat16,
@@ -184,13 +200,17 @@ def test_cpu_offload(fp8_recipe: Optional[recipe.Recipe], model_key: str) -> Non
         _attention_backends["backend_selection_requires_update"] = True
 
     # Warmup
-    _warmup_model(modules_list, fp8_recipe)
+    _warmup_model(modules_list, quantization_recipe)
 
     # Measure cached memory after forward pass
-    memory_without_offload = _measure_cached_memory(modules_list, fp8_recipe, False)
-    memory_with_offload = _measure_cached_memory(modules_list, fp8_recipe, True)
+    memory_without_offload = _measure_cached_memory(modules_list, quantization_recipe, False)
+    memory_with_offload = _measure_cached_memory(modules_list, quantization_recipe, True)
 
     # Check for expected memory usage
     assert memory_with_offload < memory_without_offload
-    memory_from_cached_weights = _estimate_cached_weight_size(modules_list, fp8_recipe)
+    memory_from_cached_weights = _estimate_cached_weight_size(
+        model_name,
+        modules_list,
+        quantization_recipe,
+    )
     assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
