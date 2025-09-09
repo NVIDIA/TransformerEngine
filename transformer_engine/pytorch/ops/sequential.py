@@ -10,6 +10,7 @@ from typing import Optional
 
 import torch
 
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
@@ -36,6 +37,9 @@ class Sequential(torch.nn.Module):
         # List of modules, with fusible operations grouped together
         self._module_groups: Optional[list[OperationFuser | torch.nn.Module]]
         self._module_groups = None
+
+        # Global state of last iteration
+        self._last_global_state = None
 
         # Add modules
         if len(args) == 1 and isinstance(args[0], dict):
@@ -143,6 +147,7 @@ class Sequential(torch.nn.Module):
     def _make_module_groups(
         cls,
         modules: Iterable[torch.nn.Module],
+        recipe: Optional[Recipe],
     ) -> list[OperationFuser | torch.nn.Module]:
         """Make list of modules, with fusible operations grouped together"""
 
@@ -157,7 +162,7 @@ class Sequential(torch.nn.Module):
                 groups.append(module)
         for idx, group in enumerate(groups):
             if isinstance(group, list):
-                groups[idx] = OperationFuser(group, fuse_ops=True)
+                groups[idx] = OperationFuser(group, fuse_ops=True, recipe=recipe)
 
         # Check if operations expect extra input or output tensors
         # Note: If any op has extra inputs or outputs, then the entire
@@ -185,9 +190,19 @@ class Sequential(torch.nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass"""
 
+        # Get current global state
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        global_state = (with_quantized_compute, type(recipe))
+
+        # Reset module groups is global state changed
+        if self._last_global_state != global_state:
+            self._module_groups = None
+            self._last_global_state = global_state
+
         # Create module groups if needed
         if self._module_groups is None:
-            self._module_groups = self._make_module_groups(self._modules.values())
+            self._module_groups = self._make_module_groups(self._modules.values(), recipe)
 
         # Forward pass for each module group
         x = input

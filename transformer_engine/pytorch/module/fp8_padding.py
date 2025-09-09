@@ -74,11 +74,12 @@ class Fp8Padding(torch.nn.Module):
 
     Parameters
     ----------
-    num_gemms: int
-               number of GEMMs to be performed simutaneously.
-    align_size: int, optional
-                the alignment size for the input tensor. If not provided, the alignment size  will
-                be determined by the FP8 recipe, 32 for MXFP8 and 16 for others.
+    num_gemms : int
+                number of GEMMs to be performed simultaneously.
+    align_size : int, optional
+                 the alignment size for the input tensor. If not provided, the alignment size will
+                 be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
+                 forward pass.
     """
 
     def __init__(
@@ -89,10 +90,7 @@ class Fp8Padding(torch.nn.Module):
         super().__init__()
 
         self.num_gemms = num_gemms
-        if align_size is None:
-            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
-        else:
-            self.align_size = align_size
+        self.align_size = align_size
 
     @no_torch_dynamo()
     def forward(
@@ -112,6 +110,8 @@ class Fp8Padding(torch.nn.Module):
         """
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
+        if self.align_size is None:
+            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
 
         # FP8 padding calculate
         padded_m_splits = [

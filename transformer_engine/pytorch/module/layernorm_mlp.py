@@ -77,6 +77,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.utils import any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
 
@@ -85,16 +86,16 @@ __all__ = ["LayerNormMLP"]
 
 def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
     if recipe is None:
-        # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+        # bf16 (recipe is None):
         return {
-            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "gelu": (tex.gelu, tex.dgelu, None),
+            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
             "reglu": (tex.reglu, tex.dreglu, None),
             "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+            "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+            "srelu": (tex.srelu, tex.dsrelu, None),
         }
     if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
@@ -552,8 +553,20 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if fuse_wgrad_accumulation:
-                ctx.fc1_main_grad = fc1_weight.main_grad if fc1_weight.requires_grad else None
-                ctx.fc2_main_grad = fc2_weight.main_grad if fc2_weight.requires_grad else None
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(fc1_weight, "__fsdp_param__") and hasattr(fc2_weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.fc1_main_grad_func = (
+                        fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
+                    )
+                    ctx.fc2_main_grad_func = (
+                        fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
+                    )
+                else:
+                    ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
+                    ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
 
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -653,14 +666,14 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
-                ctx.fc1_main_grad
+                ctx.fc1_main_grad_func()
                 if fc1_weight is not None
                 and ctx.fuse_wgrad_accumulation
                 and ctx.fc1_weight_requires_grad
                 else None
             )
             fc2_weight_main_grad = (
-                ctx.fc2_main_grad
+                ctx.fc2_main_grad_func()
                 if origin_fc2_weight is not None
                 and ctx.fuse_wgrad_accumulation
                 and ctx.fc2_weight_requires_grad
@@ -1709,6 +1722,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp)
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
@@ -1725,7 +1740,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop").is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        with torch.cuda.device(
+            getattr(self, list(self.named_parameters())[0][0]).device
+        ), self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
                 self._get_quantizers(fp8_output)
@@ -1897,6 +1914,89 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_weight_quantizer,
             fc2_grad_output_quantizer,
         )
+
+    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        from ..export import onnx_layernorm, onnx_gemm
+
+        assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
+        assert_warmed_up(self)
+        (
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers(False)
+        inp_dtype = inp.dtype
+
+        fc1_weight, fc2_weight = self._get_weight_tensors()
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        fc2_bias = self.fc2_bias if self.use_bias else None
+
+        # layernorm + fp8 cast
+        ln_out, ln_out_return = onnx_layernorm(
+            inp,
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            self.eps,
+            self.normalization,
+            self.zero_centered_gamma,
+            inp_dtype,
+            self.return_layernorm_output,
+            fc1_input_quantizer,
+        )
+
+        if fc1_weight_quantizer is not None:
+            fc1_weight_q = fc1_weight_quantizer.onnx_quantize(fc1_weight)
+            fc1_weight = fc1_weight_quantizer.onnx_dequantize(fc1_weight_q)
+        fc1_weight = fc1_weight.to(inp_dtype)
+
+        fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
+
+        fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
+
+        activation_map = {
+            "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "relu": torch.nn.functional.relu,
+            "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
+            * x.chunk(2, -1)[1],
+            "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "srelu": torch.nn.functional.softplus,
+        }
+        if self.activation not in activation_map:
+            raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
+        act_out = activation_map[self.activation](fc1_out)
+        if fc2_weight_quantizer is not None:
+            fc2_weight_q = fc2_weight_quantizer.onnx_quantize(fc2_weight)
+            fc2_weight = fc2_weight_quantizer.onnx_dequantize(fc2_weight_q)
+        fc2_weight = fc2_weight.to(inp_dtype)
+
+        if fc2_input_quantizer is not None:
+            act_out_q = fc2_input_quantizer.onnx_quantize(act_out)
+            act_out = fc2_input_quantizer.onnx_dequantize(act_out_q)
+        act_out = act_out.to(inp_dtype)
+
+        fc2_out = onnx_gemm(fc2_weight, act_out, fc2_bias)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+
+        if self.return_layernorm_output:
+            if self.return_bias:
+                return fc2_out, fc2_bias.to(inp_dtype), ln_out_return
+            return fc2_out, ln_out_return
+        if self.return_bias:
+            return fc2_out, fc2_bias.to(inp_dtype)
+        return fc2_out
 
     def _get_debug_quantizers(self, fp8_output):
         from ...debug.pytorch.debug_quantization import DebugQuantizer

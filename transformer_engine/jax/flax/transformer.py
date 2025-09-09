@@ -180,8 +180,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
+        # (b, h, q, k): Last two axes are always replicated
         attn_weights = with_sharding_constraint_by_logical_axes(
-            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES)
+            attn_weights, (BATCH_AXES, HEAD_AXES, None, None)
         )
 
         # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
@@ -1424,6 +1425,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             dtype=self.dtype,
             name="out",
+            sequence_parallel_output=self.enable_sequence_parallel,
         )(x)
         out = checkpoint_name(out, "out_proj")
 

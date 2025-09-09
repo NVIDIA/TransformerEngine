@@ -57,6 +57,9 @@ class BackwardLinearAdd(FusedOperation):
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
+            if hasattr(linear_op.weight, "__fsdp_param__"):
+                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
+
             if not hasattr(linear_op.weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
@@ -93,8 +96,7 @@ class BackwardLinearAdd(FusedOperation):
             grad_weight = None
 
         # Clear input tensor if possible
-        if linear_op_ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         return grad_input, [(grad_weight,), ()], [(), ()]
 
@@ -107,13 +109,13 @@ def fuse_backward_linear_add(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of the corresponding
+        Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
     ops: list of tuples
-        Updated forward pass operations
+        Updated backward pass operations
 
     """
 
