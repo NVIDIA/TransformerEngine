@@ -290,7 +290,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  if (unfused_quantization_needed){
+  if (unfused_quantization_needed) {
     // Quantize the output
     std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
     my_quantizer->quantize(unquantized_D_tensor, D_tensor);
