@@ -24,8 +24,6 @@ mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
-if mxfp8_available:
-    quantization_recipes.append(recipe.MXFP8BlockScaling())
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
