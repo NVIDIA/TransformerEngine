@@ -911,7 +911,6 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     torch.cuda.synchronize()
 
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
@@ -931,6 +930,13 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 def test_sanity_fp8gemm_with_quantization(N, datatype, input_quantizer, out_quantizer):
     # For MXFP8 and CurrentScaling, below unfused quantization should happen
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
+    # Skip invalid configurations
+    is_mxfp8_needed = isinstance(input_quantizer, MXFP8Quantizer) or isinstance(
+        out_quantizer, MXFP8Quantizer)
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if is_mxfp8_needed and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     offset = 32
     scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
     scratchpad_fp8 = input_quantizer(scratchpad)
@@ -956,6 +962,7 @@ def test_sanity_fp8gemm_with_quantization(N, datatype, input_quantizer, out_quan
         use_split_accumulator=False,
     )
     expected_quantized_out = out_quantizer(out)
+    print(quantized_out.dequantize())
     torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
