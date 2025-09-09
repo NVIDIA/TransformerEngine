@@ -59,9 +59,6 @@ def general_gemm(
     transb = layout[1] == "T"
     # assert quantization_params is None, "FP8 output not supported yet"
 
-    if layout == "NT":
-        assert gelu == False, "When layout='NT', gelu should be false."
-
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
 
