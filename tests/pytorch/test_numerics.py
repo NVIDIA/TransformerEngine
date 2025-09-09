@@ -39,16 +39,18 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
+
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
@@ -2606,6 +2608,60 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+@pytest.mark.parametrize("N", [32])
+@pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "input_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    ],
+)
+@pytest.mark.parametrize(
+    "out_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    ],
+)
+def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_quantizer):
+    # For MXFP8 and CurrentScaling, below unfused quantization should happen
+    # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
+    # Skip invalid configurations
+    is_mxfp8_needed = isinstance(input_quantizer, MXFP8Quantizer) or isinstance(
+        out_quantizer, MXFP8Quantizer)
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if is_mxfp8_needed and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    offset = 32
+    scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
+    scratchpad_fp8 = input_quantizer(scratchpad)
+    inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))
+    weight_fp8 = torch.reshape(scratchpad_fp8[0][offset:], (N, N))
+    outp_type = torch.float32
+    quantized_out, *_ = general_gemm(
+        weight_fp8,
+        inp_fp8,
+        get_workspace(),
+        outp_type,
+        quantization_params=out_quantizer,
+        bias=None,
+        use_split_accumulator=False,
+    )
+    out, *_ = general_gemm(
+        weight_fp8,
+        inp_fp8,
+        get_workspace(),
+        outp_type,
+        quantization_params=None,
+        bias=None,
+        use_split_accumulator=False,
+    )
+    expected_quantized_out = out_quantizer(out)
+    print(quantized_out.dequantize())
+    torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
+    
 
 @pytest.mark.parametrize(
     "shape",
