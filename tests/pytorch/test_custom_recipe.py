@@ -46,23 +46,15 @@ def test_custom_recipe_sanity(module_type):
         model = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    # Provide factories for input, weight, and grad_output quantizers
-    def make_inp():
+    # Single factory: map roles to quantizers
+    def quantizer_factory(role):
+        if role in ("input", "weight", "output"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        if role in ("grad_output", "grad_input"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
-    def make_w():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-    def make_gout():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
-
-    qf = recipe.CustomQuantizerFactories(
-        input_factory=make_inp,
-        weight_factory=make_w,
-        grad_output_factory=make_gout,
-    )
-
-    custom_recipe = recipe.CustomRecipe(qfactories=qf)
+    custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     # Execute with custom recipe
     with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
@@ -92,21 +84,14 @@ def test_custom_recipe_grouped_linear_sanity():
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def make_inp():
+    def quantizer_factory(role):
+        if role in ("input", "weight", "output"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        if role in ("grad_output", "grad_input"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
-    def make_w():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-    def make_gout():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
-
-    qf = recipe.CustomQuantizerFactories(
-        input_factory=make_inp,
-        weight_factory=make_w,
-        grad_output_factory=make_gout,
-    )
-    custom_recipe = recipe.CustomRecipe(qfactories=qf)
+    custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
         out = model(inp, m_splits)
@@ -144,15 +129,15 @@ def test_custom_recipe_matches_current_scaling():
     loss_ref = out_ref.float().sum()
     loss_ref.backward()
 
-    # Custom: use factories for Float8CurrentScalingQuantizers (only input, weight, grad_output)
-    qf = recipe.CustomQuantizerFactories(
-        input_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        weight_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        grad_output_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E5M2, device="cuda"
-        ),
-    )
-    custom_recipe = recipe.CustomRecipe(qfactories=qf)
+    # Custom: single factory returning quantizers per role to match Float8CurrentScaling
+    def quantizer_factory(role):
+        if role in ("input", "weight", "output"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        if role in ("grad_output", "grad_input"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+    custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
         out_custom = model_custom(inp_custom)
@@ -193,14 +178,14 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    qf = recipe.CustomQuantizerFactories(
-        input_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        weight_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        grad_output_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E5M2, device="cuda"
-        ),
-    )
-    custom = recipe.CustomRecipe(qfactories=qf)
+    def quantizer_factory(role):
+        if role in ("input", "weight", "output"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        if role in ("grad_output", "grad_input"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+    custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     with fp8_autocast(enabled=True, fp8_recipe=custom):
         out = op(inp)
@@ -224,26 +209,19 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     op = Linear(in_features, out_features, params_dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    # Counters
-    counts = {"input": 0, "grad_output": 0}
+    # Counters per role
+    counts = {"input": 0, "weight": 0, "output": 0, "grad_output": 0, "grad_input": 0}
 
-    def make_inp():
-        counts["input"] += 1
+    def quantizer_factory(role):
+        if role in counts:
+            counts[role] += 1
+        if role in ("input", "weight", "output"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+        if role in ("grad_output", "grad_input"):
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
 
-    def make_gout():
-        counts["grad_output"] += 1
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
-
-    # Only input (forward) and grad_output (backward) factories provided; weight/output/grad_input are None
-    qf = recipe.CustomQuantizerFactories(
-        input_factory=make_inp,
-        weight_factory=None,  # deliberately missing to exercise reuse
-        output_factory=None,
-        grad_output_factory=make_gout,
-        grad_input_factory=None,
-    )
-    custom = recipe.CustomRecipe(qfactories=qf)
+    custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     # Run fwd+bwd once; for a single GEMM, expect forward to build 3 quantizers (cycled from 1 factory),
     # and backward to build 2 quantizers (cycled from 1 factory).
@@ -252,10 +230,12 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     loss = out.float().sum()
     loss.backward()
 
-    assert counts["input"] == 3  # input factory used for input, weight, output via cycling
-    assert (
-        counts["grad_output"] == 2
-    )  # grad_output factory used for grad_output and grad_input via cycling
+    # Single GEMM: forward should request input, weight, output; backward grad_output, grad_input
+    assert counts["input"] == 1
+    assert counts["weight"] == 1
+    assert counts["output"] == 1
+    assert counts["grad_output"] == 1
+    assert counts["grad_input"] == 1
 
 
 def test_factories_return_distinct_instances_and_buffers():

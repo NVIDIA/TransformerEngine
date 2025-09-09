@@ -1112,34 +1112,15 @@ class CustomRecipeState(RecipeState):
             device = torch.device("cuda")
         self.device = device
 
-        if getattr(recipe, "qfactories", None) is None:
-            raise ValueError("CustomRecipe requires `qfactories` with factories.")
+        if getattr(recipe, "qfactory", None) is None:
+            raise ValueError("CustomRecipe requires `qfactory`.")
 
     def make_quantizers(self) -> list:
-        qfactories = self.recipe.qfactories
-        # Build a canonical, per-mode pool of factories and cycle it to match num_quantizers.
-        if self.mode == "forward":
-            pool = [
-                qfactories.input_factory,
-                qfactories.weight_factory,
-                qfactories.output_factory,
-            ]
-        else:
-            pool = [
-                qfactories.grad_output_factory,
-                qfactories.grad_input_factory,
-            ]
-
-        # Filter out None entries; allow partial factories and reuse as needed.
-        pool = [factory for factory in pool if factory is not None]
-        if len(pool) == 0:
-            raise ValueError(
-                "CustomRecipe requires at least one factory for the requested mode; "
-                f"got none for mode={self.mode}."
-            )
-
+        qfactory = self.recipe.qfactory
         out = []
         for i in range(self.num_quantizers):
-            factory = pool[i % len(pool)]
-            out.append(factory())
+            # TODO(negvet): Support other operations.
+            role = self.recipe.resolve_role("linear", self.mode, i)
+            quantizer = qfactory(role)
+            out.append(quantizer)
         return out

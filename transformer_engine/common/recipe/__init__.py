@@ -359,22 +359,6 @@ class Float8BlockScaling(Recipe):
 
 
 @dataclass()
-class CustomQuantizerFactories:
-    """Quantizer factories used by CustomRecipe.
-
-    Each field is a callable that returns a fresh quantizer instance when invoked.
-    If a factory is None, that tensor is left unquantized.
-    Keep factories simple: no required args; use closures to share state (e.g., RNG).
-    """
-
-    input_factory: Optional[Callable[[], Any]] = None
-    weight_factory: Optional[Callable[[], Any]] = None
-    output_factory: Optional[Callable[[], Any]] = None
-    grad_input_factory: Optional[Callable[[], Any]] = None
-    grad_output_factory: Optional[Callable[[], Any]] = None
-
-
-@dataclass()
 class CustomRecipe(Recipe):
     """
     Custom recipe that allows users to provide quantizer factories.
@@ -385,13 +369,54 @@ class CustomRecipe(Recipe):
 
     Parameters
     ----------
-    qfactories : CustomQuantizerFactories
-                 Quantization factories.
+    qfactory : Callable
+               Single factory callable that returns a quantizer instance for a
+               given semantic tensor role. The callable is typically invoked as
+               `qfactory(role)` where `role` is one of the following strings
+               e.g. for linear layers:
+               forward:  "input", "weight", "output"
+               backward: "grad_output", "grad_input"
+
+               The default role mapping is provided by `resolve_role()` and is
+               based on the quantizer index and mode. Users can subclass
+               `CustomRecipe` and override `resolve_role()` to customize the
+               mapping or to support other operations such as attention.
     """
 
-    qfactories: CustomQuantizerFactories = field(default_factory=CustomQuantizerFactories)
+    # Single factory callable provided by user. Accept a flexible signature to
+    # support evolution of the API. Typical signature:
+    #   (role: Optional[str])
+    qfactory: Callable[..., Any]
+
     fp8_dpa: bool = False
     fp8_mha: bool = False
 
     def __repr__(self) -> str:
-        return f"recipe_type={self.__class__.__name__}, qfactories={self.qfactories}"
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"qfactory={self.qfactory}"
+        )
+
+    def resolve_role(self, operation: str, mode: str, index: int) -> Optional[str]:
+        """
+        Resolve the tensor semantic role for the given operation, mode, and index.
+        To be redefined in subclass if required.
+        """
+        assert operation in ["linear"], "Only linear is supported for now."
+
+        if operation == "linear":
+            if mode == "forward":
+                if index % 3 == 0:
+                    return "input"
+                elif index % 3 == 1:
+                    return "weight"
+                elif index % 3 == 2:
+                    return "output"
+            elif mode == "backward":
+                if index % 2 == 0:
+                    return "grad_output"
+                elif index % 2 == 1:
+                    return "grad_input"
+        if operation == "attention":
+            raise NotImplementedError("Attention is not supported for now.")
+        return None
