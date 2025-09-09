@@ -932,7 +932,8 @@ def test_sanity_fp8gemm_with_quantization(N, datatype, input_quantizer, out_quan
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
     # Skip invalid configurations
     is_mxfp8_needed = isinstance(input_quantizer, MXFP8Quantizer) or isinstance(
-        out_quantizer, MXFP8Quantizer)
+        out_quantizer, MXFP8Quantizer
+    )
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
