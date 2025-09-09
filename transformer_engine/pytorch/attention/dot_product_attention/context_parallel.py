@@ -3963,15 +3963,41 @@ def pad_thd_sequences_for_cp(
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
 
     # List: amount of padding needed for each sequence (make length a multiple of divisibility_factor)
-    padding_amounts = [((l.item() + divisibility_factor - 1) // divisibility_factor) * divisibility_factor - l.item() for l in seqlens]
+    padding_amounts = [
+        ((l.item() + divisibility_factor - 1) // divisibility_factor) * divisibility_factor
+        - l.item()
+        for l in seqlens
+    ]
 
     # Extract sequences and labels for each batch item
-    batch_sequences = [input_ids[start.item():end.item()] for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])]
-    batch_labels = [labels[start.item():end.item()] for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])]
+    batch_sequences = [
+        input_ids[start.item() : end.item()] for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+    ]
+    batch_labels = [
+        labels[start.item() : end.item()] for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+    ]
 
     # Pad sequences and labels to required length
-    input_ids_padded = torch.cat([torch.cat([seq, torch.full((pad,), padding_token_id, dtype=seq.dtype)]) if pad > 0 else seq for seq, pad in zip(batch_sequences, padding_amounts)])
-    labels_padded = torch.cat([torch.cat([seq, torch.full((pad,), padding_label_id, dtype=seq.dtype)]) if pad > 0 else seq for seq, pad in zip(batch_labels, padding_amounts)])
+    input_ids_padded = torch.cat(
+        [
+            (
+                torch.cat([seq, torch.full((pad,), padding_token_id, dtype=seq.dtype)])
+                if pad > 0
+                else seq
+            )
+            for seq, pad in zip(batch_sequences, padding_amounts)
+        ]
+    )
+    labels_padded = torch.cat(
+        [
+            (
+                torch.cat([seq, torch.full((pad,), padding_label_id, dtype=seq.dtype)])
+                if pad > 0
+                else seq
+            )
+            for seq, pad in zip(batch_labels, padding_amounts)
+        ]
+    )
 
     # Compute cumulative padded sequence lengths, starting from 0
     padded_lengths = seqlens + torch.tensor(padding_amounts, dtype=seqlens.dtype)
@@ -3988,27 +4014,31 @@ def generate_positional_ids_for_cp(
     dtype: torch.dtype = torch.long,
 ) -> torch.Tensor:
     """Generate positional IDs for sequences padded to be divisible by divisibility_factor.
-    
+
     Args:
         cu_seqlens: Tensor of shape (M,) containing cumulative sequence lengths
         divisibility_factor: Each sequence length must be divisible by this factor
         dtype: Data type for the generated positional IDs (default: torch.long)
-        
+
     Returns:
         Generated positional_ids tensor where each sequence starts from 0 and continues through padding
     """
     # Compute the sequence lengths from cu_seqlens
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    
+
     # List: amount of padding needed for each sequence
-    padding_amounts = [((l.item() + divisibility_factor - 1) // divisibility_factor) * divisibility_factor - l.item() for l in seqlens]
-    
+    padding_amounts = [
+        ((l.item() + divisibility_factor - 1) // divisibility_factor) * divisibility_factor
+        - l.item()
+        for l in seqlens
+    ]
+
     # Generate positional IDs for each padded sequence (each starts from 0)
     padded_lengths = seqlens + torch.tensor(padding_amounts, dtype=seqlens.dtype)
-    positional_ids = torch.cat([
-        torch.arange(0, int(length), dtype=dtype) for length in padded_lengths
-    ])
-    
+    positional_ids = torch.cat(
+        [torch.arange(0, int(length), dtype=dtype) for length in padded_lengths]
+    )
+
     return positional_ids
 
 
@@ -4022,7 +4052,7 @@ def get_batch_on_this_cp_rank(
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
 
-    This function is inteded for use in self attention. It will not work for cross attention because 
+    This function is inteded for use in self attention. It will not work for cross attention because
     it does not handle the case where the sequence length of the query and key are different.
 
     Which are parallelized across GPUs in a context parallel group.
@@ -4038,7 +4068,9 @@ def get_batch_on_this_cp_rank(
 
             # Calculate the chunk sizes for each sequence
             total_slices_of_any_sequence = 2 * cp_size
-            slice_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices_of_any_sequence
+            slice_sizes = (
+                cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+            ) // total_slices_of_any_sequence
 
             # Process each tensor directly instead of using keys_to_change loop
             def process_tensor(val):
@@ -4050,20 +4082,25 @@ def get_batch_on_this_cp_rank(
                     seq_len_val = cu_seqlens_padded[-1].item()
                 else:
                     seq_len_val = cu_seqlens_padded[-1]
-                
+
                 # Handle 1D tensors (like position_ids that don't have batch dimension)
                 if val.ndim == 1:
                     if val.shape[0] == seq_len_val:
                         current_seq_dim = 0
                     else:
-                        raise ValueError("1D tensor shape doesn't match expected sequence length. Make sure the inputs are in THD format and padded correctly.")
+                        raise ValueError(
+                            "1D tensor shape doesn't match expected sequence length. Make sure the"
+                            " inputs are in THD format and padded correctly."
+                        )
                 elif val.ndim >= 2:
                     if val.shape[1] == seq_len_val:
                         current_seq_dim = 1
                     elif val.shape[0] == seq_len_val:
                         current_seq_dim = 0
                     else:
-                        raise ValueError("Make sure the inputs are in THD format and padded correctly.")
+                        raise ValueError(
+                            "Make sure the inputs are in THD format and padded correctly."
+                        )
                 else:
                     raise ValueError("Tensor must be at least 1D")
 
