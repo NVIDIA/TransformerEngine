@@ -6,7 +6,6 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-
 import jax.experimental.multihost_utils as jem
 
 from transformer_engine.jax.dense import grouped_dense as te_grouped_dense
@@ -16,7 +15,6 @@ from transformer_engine.jax.quantize import (
 )
 
 from utils import assert_allclose, dtype_tols
-
 
 
 N_GROUP = 8
