@@ -267,7 +267,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  
+
   // Pack outputs
   std::vector<py::object> out;
   out.emplace_back(std::move(D));
