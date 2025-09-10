@@ -579,10 +579,10 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
             "Input and output_t must have the same shape for columnwise non-transpose case.");
       }
     }
-    if(rowwise_option != FP8BlockwiseRowwiseOption::NONE)
-    {
+    if (rowwise_option != FP8BlockwiseRowwiseOption::NONE) {
       // output may not be defined if rowwise quantization is not needed.
-      NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
+      NVTE_CHECK(output.dtype == output_t.dtype,
+                 "output and output_t need to have the same dtype.");
     }
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "Scale_t dimension must be 2.");
     bool columnwise_compact = columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
