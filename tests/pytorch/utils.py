@@ -147,6 +147,8 @@ class ModelConfig:
         max_seqlen_kv: int = None,
         num_gqa_groups: int = None,
         head_dim_v: int = None,
+        kv_lora_rank: int = None,
+        qk_pos_emb_head_dim: int = None,
         dropout_p: float = 0.0,
         attn_mask_type: str = "no_mask",
         attn_bias_type: str = "no_bias",
@@ -169,6 +171,8 @@ class ModelConfig:
             self.kv_channels = self.head_dim_qk
         else:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_pos_emb_head_dim = qk_pos_emb_head_dim
         self.hidden_size = self.num_heads * self.head_dim_qk
         self.hidden_size_kv = self.num_gqa_groups * self.head_dim_v
         self.dropout_p = dropout_p
