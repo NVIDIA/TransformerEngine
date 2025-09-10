@@ -72,6 +72,7 @@ from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..cpp_extensions import (
     general_gemm,
 )
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import get_columnwise_fp8_tensor
 
 __all__ = ["LayerNormLinear"]
 
@@ -134,6 +135,8 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_label = "transformer_engine._LayerNormLinear.forward"
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
+
+        fp8_weight_on_demand_transpose = FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
 
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
@@ -275,7 +278,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             if weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and not fp8_weight_on_demand_transpose
+                )
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -404,7 +410,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(weightmat, QuantizedTensorBase):
+            if isinstance(weightmat, QuantizedTensorBase) and not fp8_weight_on_demand_transpose:
                 weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
@@ -678,7 +684,10 @@ class _LayerNormLinear(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorBase):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensorBase):
-                weight.update_usage(columnwise_usage=True)
+                if FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose():
+                    weight = get_columnwise_fp8_tensor(weight)
+                else:
+                    weight.update_usage(columnwise_usage=True)
 
             # Choose whether to use GEMM kernel with split accumulator
             use_split_accumulator = _2X_ACC_DGRAD

@@ -113,6 +113,12 @@ def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
         return Format.E4M3.value.max_fwd
     return Format.E5M2.value.max_fwd
 
+def _get_fp8_blockwise_weight_on_demand_transpose():
+    # fp8 blockwise is not supported when sm >= 10.0
+    return (
+        int(os.getenv("NVTE_ON_DEMAND_FP8_WEIGHT_TRANSPOSE", "0")) > 0
+        and get_device_compute_capability() < (10, 0)
+    )
 
 class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
@@ -128,6 +134,7 @@ class FP8GlobalStateManager:
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
     FP8_AUTOCAST_DEPTH = 0
+    FP8_BLOCKWISE_WEIGHT_ON_DEMAND_TRANSPOSE = _get_fp8_blockwise_weight_on_demand_transpose()
     global_amax_buffer = {}
     global_amax_history_buffer = {}
     global_scale_buffer = {}
@@ -312,6 +319,15 @@ class FP8GlobalStateManager:
     def with_fp8_parameters(cls) -> bool:
         """Should the parameters be stored as FP8"""
         return cls.FP8_PARAMETERS
+
+    @classmethod
+    def is_blockwise_fp8_weight_on_demand_transpose(cls) -> bool:
+        """Should the blockwwise fp8 weight on-demand transpose"""
+        return (
+            cls.FP8_BLOCKWISE_WEIGHT_ON_DEMAND_TRANSPOSE
+            and cls.FP8_RECIPE is not None
+            and cls.FP8_RECIPE.float8_block_scaling()
+        )
 
     @classmethod
     def with_high_precision_init_val(cls) -> bool:
