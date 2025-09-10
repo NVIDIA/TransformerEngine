@@ -2622,6 +2622,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
     [
         Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
         MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8Quantizer(torch.ones(1).cuda().squeeze(),
+                        torch.ones(1).cuda().squeeze(),
+                        tex.DType.kFloat8E4M3)
     ],
 )
 def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_quantizer):
@@ -2634,11 +2637,8 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    offset = 32
-    scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
-    scratchpad_fp8 = input_quantizer(scratchpad)
-    inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))
-    weight_fp8 = torch.reshape(scratchpad_fp8[0][offset:], (N, N))
+    inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
+    weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     outp_type = torch.float32
     quantized_out, *_ = general_gemm(
         weight_fp8,
@@ -2649,6 +2649,7 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         bias=None,
         use_split_accumulator=False,
     )
+
     out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
@@ -2659,8 +2660,19 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         use_split_accumulator=False,
     )
     expected_quantized_out = out_quantizer(out)
-    print(quantized_out.dequantize())
-    torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
+
+    # Match results again Pytorch GEMM and allow for quantization tolerance
+    pytorch_out = torch.matmul(inp_fp8.dequantize().to(torch.float64), torch.transpose(weight_fp8.dequantize().to(torch.float64), 0, 1))
+    fp8_tols = dict(rtol=0.125, atol=0.0675)
+    torch.testing.assert_close(pytorch_out.to(outp_type), expected_quantized_out.dequantize(), **fp8_tols)
+
+    # For anything other than delayed scaling quantizer, quantization happens in unfused manner in general_gemm
+    # And so the results should exactly match
+    if not isinstance(out_quantizer, Float8Quantizer):
+        torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
+    else:
+        # For delayed scaling quantizer, allow for quantization tolerance
+        torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize(), **fp8_tols)
     
 
 @pytest.mark.parametrize(

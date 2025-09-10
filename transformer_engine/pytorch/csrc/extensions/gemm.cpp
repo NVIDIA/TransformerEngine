@@ -148,11 +148,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // 1. Inputs: BF16, Output: FP8 (GEMM output has to be BF16, so FP8 quantization needed after that)
   // 2. Inputs: FP8, Output: FP8 (For any quantization apart from delayed scaling,
   // GEMM Output needs to be in BF16, to allow for unfused quantization)
-  bool unfused_quantization_needed;
+  bool unfused_quantization_needed = !quantizer.is_none();
   if (low_precision) {
-    unfused_quantization_needed = !quantizer.is_none() && !IsFloat8Quantizers(quantizer.ptr());
-  } else {
-    unfused_quantization_needed = !quantizer.is_none();
+    // At the moment, only use-case for fused GEMM:
+    // Delayed scaling quantizer with per-tensor scaling inputs
+    bool is_per_tensor_scaling_input = IsFloat8Tensor(A.ptr()) || IsFloat8Tensor(B.ptr());
+    if(IsFloat8Quantizers(quantizer.ptr()) && is_per_tensor_scaling_input)
+      unfused_quantization_needed = false;
   }
 
   if (unfused_quantization_needed) {
