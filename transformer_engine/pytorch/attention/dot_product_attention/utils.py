@@ -434,8 +434,8 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        if device_compute_capability == (8, 9) and cudnn_version <= (9, 12, 0):
-            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN <= 9.12")
+        if device_compute_capability == (8, 9) and cudnn_version <= (9, 13, 0):
+            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN <= 9.13")
             use_fused_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
@@ -822,7 +822,7 @@ def get_attention_backend(
     #     flash-attn >=2.4.1       | yes
     # FusedAttention               |
     #     sub-backend 0            | yes
-    #     sub-backend 1            | workspace optimization path and sm90+: yes;
+    #     sub-backend 1            | workspace optimization path and sm90: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
@@ -838,8 +838,9 @@ def get_attention_backend(
             use_flash_attention_2 = False
     if use_fused_attention and deterministic:
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
-            logger.debug("Disabling FusedAttention for determinism reasons")
+            logger.debug("Disabling FusedAttention for determinism reasons with FP8")
             use_fused_attention = False
+            fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
@@ -849,8 +850,13 @@ def get_attention_backend(
                 or cudnn_version < (8, 9, 5)
             )
         ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
+            logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
+            fused_attention_backend = None
+        if is_training and device_compute_capability >= (10, 0) and cudnn_version <= (9, 14, 0):
+            logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
+            use_fused_attention = False
+            fused_attention_backend = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
