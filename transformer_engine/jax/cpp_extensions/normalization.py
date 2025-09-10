@@ -840,10 +840,10 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma + beta
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        output = output.astype(x.dtype)
 
     if quantizer:
+        if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+            output = output.astype(x.dtype)
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
     else:
         ln_out = jnp.asarray(output).astype(x.dtype)
@@ -866,10 +866,10 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        output = output.astype(x.dtype)
 
     if quantizer:
+        if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+            output = output.astype(x.dtype)
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
     else:
         ln_out = jnp.asarray(output).astype(x.dtype)
