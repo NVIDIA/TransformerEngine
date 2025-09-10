@@ -579,14 +579,18 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
             "Input and output_t must have the same shape for columnwise non-transpose case.");
       }
     }
-
-    NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
+    if(rowwise_option != FP8BlockwiseRowwiseOption::NONE)
+    {
+      // output may not be defined if rowwise quantization is not required
+      NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
+    }
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "Scale_t dimension must be 2.");
     bool columnwise_compact = columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
     size_t scale_t_k = scale_inv_t.shape[1];
     scale_t_stride_x = columnwise_compact ? 1 : scale_t_k;
     scale_t_stride_y = columnwise_compact ? scale_t_k : 1;
   }
+  auto output_dtype = rowwise_option != FP8BlockwiseRowwiseOption::NONE ? output.dtype : output_t.dtype;
 
   const size_t num_blocks_x = DIVUP(row_length, (size_t)kTileDim);
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
@@ -597,7 +601,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
       input.dtype, InputType,
 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output.dtype, OutputType,
+          output_dtype, OutputType,
 
           dim3 grid(num_blocks_x, num_blocks_y, 1);
 
