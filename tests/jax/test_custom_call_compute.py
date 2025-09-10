@@ -470,7 +470,6 @@ class TestNorm:
                 zero_centered_gamma,
                 epsilon,
                 quantizer=ref_quantizer,
-                high_precision_norm_out=True,
             )
         else:
             output, rsigma = tex.rmsnorm_fwd(
@@ -482,7 +481,6 @@ class TestNorm:
                 zero_centered_gamma,
                 epsilon,
                 quantizer=ref_quantizer,
-                high_precision_norm_out=True,
             )
             ref_mu = None
 

@@ -824,9 +824,7 @@ class NormBwdPrimitive(BasePrimitive):
 register_primitive(NormBwdPrimitive)
 
 
-def _jax_layernorm(
-    x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, high_precision_norm_out=False
-):
+def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None):
     """
     JAX native layernorm implementation
     """
@@ -842,7 +840,7 @@ def _jax_layernorm(
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma + beta
-    if not high_precision_norm_out:
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         output = output.astype(x.dtype)
 
     if quantizer:
@@ -853,9 +851,7 @@ def _jax_layernorm(
     return ln_out, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1)
 
 
-def _jax_rmsnorm(
-    x, gamma, zero_centered_gamma, epsilon, quantizer=None, high_precision_norm_out=False
-):
+def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     """
     JAX native rmsnorm implementation
     """
@@ -870,7 +866,7 @@ def _jax_rmsnorm(
     if zero_centered_gamma:
         gamma += 1.0
     output = normed_input * gamma
-    if not high_precision_norm_out:
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         output = output.astype(x.dtype)
 
     if quantizer:
