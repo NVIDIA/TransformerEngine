@@ -221,8 +221,10 @@ def check_quantization_block_tiling_versus_reference(
     tile_size: Tuple[int, int],
 ) -> None:
     if recipe_emulated and not pow_2_scales:
-        pytest.skip("On Blackwell and newer, the FP8 block scaling recipe is emulated "
-                    "with MXFP8, which requires using power of two scaling factors.")
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
 
     te_dtype = TE_DType[quant_dtype]
     if tile_size == (1, 128):
@@ -416,8 +418,10 @@ def test_quantization_block_tiling_extrema_versus_reference(
     extrema_high: bool,
 ) -> None:
     if recipe_emulated and not pow_2_scales:
-        pytest.skip("On Blackwell and newer, the FP8 block scaling recipe is emulated "
-                    "with MXFP8, which requires using power of two scaling factors.")
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
 
     # This test runs a single tile through a quantizer as a way to test
     # branch coverage of scale computation.
