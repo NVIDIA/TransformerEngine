@@ -183,7 +183,6 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
                    CollectiveGemmConfig cgemm_config) {
-
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
