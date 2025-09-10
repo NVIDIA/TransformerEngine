@@ -39,7 +39,10 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.pytorch.utils import get_device_compute_capability
@@ -2608,6 +2611,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
@@ -2632,7 +2636,8 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
     # Skip invalid configurations
     is_mxfp8_needed = isinstance(input_quantizer, MXFP8Quantizer) or isinstance(
-        out_quantizer, MXFP8Quantizer)
+        out_quantizer, MXFP8Quantizer
+    )
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
