@@ -90,7 +90,9 @@ class _GroupedLinear(torch.autograd.Function):
         biases = weights_and_biases[num_gemms:]
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
-        fp8_weight_on_demand_transpose = FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+        fp8_weight_on_demand_transpose = (
+            FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+        )
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -113,7 +115,7 @@ class _GroupedLinear(torch.autograd.Function):
                 for weight_quantizer in weight_quantizers:
                     weight_quantizer.set_usage(
                         rowwise=True,
-                        columnwise=columnwise_usage and not fp8_weight_on_demand_transpose
+                        columnwise=columnwise_usage and not fp8_weight_on_demand_transpose,
                     )
         if output_quantizers[0] is not None:
             for output_quantizer in output_quantizers:
@@ -212,7 +214,10 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmats = [None] * num_gemms
             if inp.requires_grad:
                 for weight in weights_fp8:
-                    if isinstance(weight, QuantizedTensorBase) and not fp8_weight_on_demand_transpose:
+                    if (
+                        isinstance(weight, QuantizedTensorBase)
+                        and not fp8_weight_on_demand_transpose
+                    ):
                         weight.update_usage(columnwise_usage=True)
 
             tensors_to_save, tensor_objects = prepare_for_saving(

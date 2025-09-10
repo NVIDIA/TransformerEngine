@@ -2733,7 +2733,7 @@ def test_noncontiguous():
 
 def test_fp8_weight_on_demand_transpose():
     if not fp8_block_scaling_available:
-      pytest.skip("blockwise fp8 not available.")
+        pytest.skip("blockwise fp8 not available.")
 
     dtype = torch.bfloat16
     num_gemms = 4
@@ -2758,7 +2758,9 @@ def test_fp8_weight_on_demand_transpose():
 
     # Share params
     with torch.no_grad():
-        weights_cache = [Parameter(getattr(grouped_linear, f"weight{i}").clone()) for i in range(num_gemms)]
+        weights_cache = [
+            Parameter(getattr(grouped_linear, f"weight{i}").clone()) for i in range(num_gemms)
+        ]
 
     for i in range(num_gemms):
         assert getattr(grouped_linear, f"weight{i}")._columnwise_data is not None
@@ -2811,7 +2813,6 @@ def test_fp8_weight_on_demand_transpose():
     for i, (o, o_ref) in enumerate(zip(outputs1, outputs2)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
-
     # 2. layernorm linear module test
     FP8GlobalStateManager.FP8_BLOCKWISE_WEIGHT_ON_DEMAND_TRANSPOSE = False
     with fp8_model_init(enabled=True, recipe=fp8_recipe):
@@ -2831,9 +2832,7 @@ def test_fp8_weight_on_demand_transpose():
     # Share params
     weights_cache = []
     with torch.no_grad():
-        weights_cache.append(
-            te_ln_linear.te_module.layer_norm_weight.clone()
-        )
+        weights_cache.append(te_ln_linear.te_module.layer_norm_weight.clone())
         weights_cache.append(te_ln_linear.te_module.weight.clone())
     outputs1 = _test_granular_accuracy(te_ln_linear, bs, dtype, config, recipe=fp8_recipe)
 
@@ -2861,7 +2860,6 @@ def test_fp8_weight_on_demand_transpose():
     for i, (o, o_ref) in enumerate(zip(outputs1, outputs2)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
-
     # 3. linear module test
     FP8GlobalStateManager.FP8_BLOCKWISE_WEIGHT_ON_DEMAND_TRANSPOSE = False
     with fp8_model_init(enabled=True, recipe=fp8_recipe):
@@ -2880,7 +2878,9 @@ def test_fp8_weight_on_demand_transpose():
     with torch.no_grad():
         weights_cache = te_linear.weight.clone()
 
-    te_outputs1 = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True, recipe=fp8_recipe)
+    te_outputs1 = _test_granular_accuracy(
+        te_linear, bs, dtype, config, delay_wgrad_compute=True, recipe=fp8_recipe
+    )
 
     FP8GlobalStateManager.FP8_BLOCKWISE_WEIGHT_ON_DEMAND_TRANSPOSE = True
     with fp8_model_init(enabled=True, recipe=fp8_recipe):
@@ -2896,7 +2896,9 @@ def test_fp8_weight_on_demand_transpose():
     assert te_linear.weight._columnwise_data is None
 
     te_linear.weight = Parameter(weights_cache)
-    te_outputs2 = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True, recipe=fp8_recipe)
+    te_outputs2 = _test_granular_accuracy(
+        te_linear, bs, dtype, config, delay_wgrad_compute=True, recipe=fp8_recipe
+    )
 
     # should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs1, outputs2)):

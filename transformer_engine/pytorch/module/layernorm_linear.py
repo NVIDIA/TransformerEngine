@@ -136,7 +136,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
 
-        fp8_weight_on_demand_transpose = FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+        fp8_weight_on_demand_transpose = (
+            FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+        )
 
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
@@ -279,8 +281,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Configure quantizer
             if weight_quantizer is not None:
                 weight_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=is_grad_enabled and not fp8_weight_on_demand_transpose
+                    rowwise=True, columnwise=is_grad_enabled and not fp8_weight_on_demand_transpose
                 )
 
             # Get quantized weight
