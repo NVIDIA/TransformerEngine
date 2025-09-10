@@ -228,14 +228,21 @@ def run_dpa_with_cp(
         kv_up_proj = None
         kv_compressed, k_pos_emb = None, None
     else:
-        kv_compressed = torch.randn(kv_compressed_shape, dtype=dtypes[dtype]).cuda().requires_grad_(True)
+        kv_compressed = (
+            torch.randn(kv_compressed_shape, dtype=dtypes[dtype]).cuda().requires_grad_(True)
+        )
         k_pos_emb = torch.randn(k_pos_emb_shape, dtype=dtypes[dtype]).cuda().requires_grad_(True)
         head_dim_k_no_pe = config.head_dim_qk - config.qk_pos_emb_head_dim
-        linear = torch.nn.Linear(
-            config.kv_lora_rank,
-            config.num_heads * (head_dim_k_no_pe + config.head_dim_v),
-            bias=False
-        ).cuda().to(dtypes[dtype])
+        linear = (
+            torch.nn.Linear(
+                config.kv_lora_rank,
+                config.num_heads * (head_dim_k_no_pe + config.head_dim_v),
+                bias=False,
+            )
+            .cuda()
+            .to(dtypes[dtype])
+        )
+
         def kv_up_proj(kv_compressed, k_pos_emb):
             kv = linear(kv_compressed).view(*kv_compressed.shape[:-1], config.num_heads, -1)
             k_no_pe, v = torch.split(kv, [head_dim_k_no_pe, config.head_dim_v], dim=-1)
@@ -249,6 +256,7 @@ def run_dpa_with_cp(
                 k_pos_emb = k_pos_emb.expand(-1, config.num_heads, -1)
             k = torch.cat([k_no_pe, k_pos_emb], dim=-1)
             return k, v
+
         k, v = kv_up_proj(kv_compressed, k_pos_emb)
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
     dout_quantizer = Float8Quantizer(
@@ -289,9 +297,7 @@ def run_dpa_with_cp(
             out.backward(dout)
 
     # run core_attn wit CP
-    q_, dout_, *rest = [
-        x.clone().detach() for x in [q, dout] + ([] if bias is None else [bias])
-    ]
+    q_, dout_, *rest = [x.clone().detach() for x in [q, dout] + ([] if bias is None else [bias])]
     if config.kv_lora_rank is None:
         k_ = k.clone().detach()
         v_ = v.clone().detach()
@@ -306,12 +312,16 @@ def run_dpa_with_cp(
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
         q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            ) if x is not None else None
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                if x is not None
+                else None
+            )
             for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
@@ -392,8 +402,8 @@ def run_dpa_with_cp(
 
     for x in [out_, q_.grad] + (
         [k_.grad, v_.grad]
-        if config.kv_lora_rank is None else
-        [kv_compressed_.grad, k_pos_emb_.grad]
+        if config.kv_lora_rank is None
+        else [kv_compressed_.grad, k_pos_emb_.grad]
     ):
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
@@ -401,26 +411,30 @@ def run_dpa_with_cp(
     # compare results with and without CP
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, dkv_compressed, dk_pos_emb = [
-            x.grad if x is not None else None
-            for x in [q, k, v, kv_compressed, k_pos_emb]
+            x.grad if x is not None else None for x in [q, k, v, kv_compressed, k_pos_emb]
         ]
         dq, dk, dv, dkv_compressed, dk_pos_emb, out = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            ).index_select(seq_dim, seq_idx)
-            if x is not None else None
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                ).index_select(seq_dim, seq_idx)
+                if x is not None
+                else None
+            )
             for x in [dq, dk, dv, dkv_compressed, dk_pos_emb, out]
         ]
         dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_ = [
-            x.grad if x is not None else None
-            for x in [q_, k_, v_, kv_compressed_, k_pos_emb_]
+            x.grad if x is not None else None for x in [q_, k_, v_, kv_compressed_, k_pos_emb_]
         ]
         dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            if x is not None else None
+            (
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                if x is not None
+                else None
+            )
             for x in [dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_]
         ]
     elif qkv_format == "thd":
@@ -431,11 +445,11 @@ def run_dpa_with_cp(
         else:
             dk, dv = None, None
             dkv_compressed, dk_pos_emb = [
-                x.index_select(0, seq_idx_kv).contiguous() for x in [kv_compressed.grad, k_pos_emb.grad]
+                x.index_select(0, seq_idx_kv).contiguous()
+                for x in [kv_compressed.grad, k_pos_emb.grad]
             ]
         dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_ = [
-            x.grad if x is not None else None
-            for x in [q_, k_, v_, kv_compressed_, k_pos_emb_]
+            x.grad if x is not None else None for x in [q_, k_, v_, kv_compressed_, k_pos_emb_]
         ]
         cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
@@ -519,12 +533,14 @@ def run_dpa_with_cp(
         for tensor_name, a, b in zip(
             ["out", "dq", "dk", "dv", "dkv_compressed", "dk_pos_emb"],
             [out_, dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_],
-            [out, dq, dk, dv, dkv_compressed, dk_pos_emb]
+            [out, dq, dk, dv, dkv_compressed, dk_pos_emb],
         ):
             if a is None or b is None:
                 a_is_None = "is" if a is None else "is not"
                 b_is_None = "is" if b is None else "is not"
-                assert a is None and b is None, f"{tensor_name}_ {a_is_None} None and {tensor_name} {b_is_None} None!"
+                assert (
+                    a is None and b is None
+                ), f"{tensor_name}_ {a_is_None} None and {tensor_name} {b_is_None} None!"
                 continue
             _error(a[:, 0], b[:, 0], tensor_name)
             _error(a[:, 1], b[:, 1], tensor_name)
@@ -532,10 +548,12 @@ def run_dpa_with_cp(
         for tensor_name, a, b in zip(
             ["out", "dq", "dk", "dv", "dkv_compressed", "dk_pos_emb"],
             [out_, dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_],
-            [out, dq, dk, dv, dkv_compressed, dk_pos_emb]
+            [out, dq, dk, dv, dkv_compressed, dk_pos_emb],
         ):
             if a is None or b is None:
-                assert a is None and b is None, f"{tensor_name} and {tensor_name}_ are not both None!"
+                assert (
+                    a is None and b is None
+                ), f"{tensor_name} and {tensor_name}_ are not both None!"
                 continue
             _error(a[0], b[0], tensor_name)
             _error(a[1], b[1], tensor_name)
@@ -543,10 +561,12 @@ def run_dpa_with_cp(
         for tensor_name, a, b in zip(
             ["out", "dq", "dk", "dv", "dkv_compressed", "dk_pos_emb"],
             [out_, dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_],
-            [out, dq, dk, dv, dkv_compressed, dk_pos_emb]
+            [out, dq, dk, dv, dkv_compressed, dk_pos_emb],
         ):
             if a is None or b is None:
-                assert a is None and b is None, f"{tensor_name} and {tensor_name}_ are not both None!"
+                assert (
+                    a is None and b is None
+                ), f"{tensor_name} and {tensor_name}_ are not both None!"
                 continue
             _error(a, b, tensor_name)
     else:

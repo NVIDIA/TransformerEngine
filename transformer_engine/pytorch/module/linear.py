@@ -133,7 +133,9 @@ class _Linear(torch.autograd.Function):
         tp_world_size = get_distributed_world_size(tp_group)
         backward_needs_input = is_grad_enabled and weight.requires_grad
         with_input_all_gather_nccl = (
-            parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
+            parallel_mode == "column"
+            and sequence_parallel
+            and not ub_overlap_ag_fprop
             and not input_pre_gathered_for_column_sp
         )
 
@@ -359,7 +361,9 @@ class _Linear(torch.autograd.Function):
             ctx.weight_quantizer = weight_quantizer
 
             ctx.backward_input_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight.requires_grad
+                and parallel_mode == "column"
+                and sequence_parallel
                 and not input_pre_gathered_for_column_sp
             )
 
@@ -894,10 +898,7 @@ class _Linear(torch.autograd.Function):
                     elif ctx.backward_input_needs_gather:
                         clear_tensor_data(inputmat_total)
 
-                    if (
-                        ctx.parallel_mode == "row"
-                        and ctx.sequence_parallel
-                    ):
+                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
                         clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1675,7 +1676,8 @@ class Linear(TransformerEngineBaseModule):
 
         if fwd:
             if (
-                self.sequence_parallel and self.parallel_mode == "column"
+                self.sequence_parallel
+                and self.parallel_mode == "column"
                 and not self.input_pre_gathered_for_column_sp
             ):
                 # set compact for inp tensor X
