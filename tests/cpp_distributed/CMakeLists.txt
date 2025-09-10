@@ -17,11 +17,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-project(transformer_engine_tests LANGUAGES CUDA CXX)
+project(transformer_engine_distributed_tests LANGUAGES CUDA CXX)
 
 add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
-
-enable_testing()
 
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
@@ -41,7 +39,19 @@ include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 find_package(CUDAToolkit REQUIRED)
-include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
-add_subdirectory(operator)
-add_subdirectory(util)
+add_executable(test_comm_gemm
+               test_comm_gemm.cu
+               ../cpp/test_common.cu)
+
+find_package(OpenMP REQUIRED)
+find_package(MPI REQUIRED)
+find_library(NCCL_LIB
+             NAMES nccl libnccl
+             PATH_SUFFIXES lib
+             REQUIRED)
+target_include_directories(test_comm_gemm PRIVATE ${MPI_CXX_INCLUDE_PATH} $ENV{CUBLASMP_HOME}/include)
+target_link_libraries(test_comm_gemm PUBLIC CUDA::cuda_driver CUDA::cudart GTest::gtest ${TE_LIB} CUDA::nvrtc MPI::MPI_CXX ${NCCL_LIB} OpenMP::OpenMP_CXX)
+
+include(GoogleTest)
+gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)

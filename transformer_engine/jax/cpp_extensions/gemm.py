@@ -303,19 +303,19 @@ noop_cgemm_config = CollectiveGemmConfig.create(collective_op=CollectiveOp.NONE)
 noop_cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.NONE)
 
 
-@partial(jax.jit, static_argnums=(1,))
-def _cgemm_output_reorder(output, sequence_dim):
-    assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-    original_shape = output.shape
-    reshaped = output.reshape(
-        -1,
-        tpsp_axis_size(),
-        int(original_shape[sequence_dim] / tpsp_axis_size()),
-        *original_shape[sequence_dim + 1 :],
-    )
-    reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
-    output = reordered.reshape(original_shape)
-    return output
+@partial(jax.jit, static_argnums=(1, 2))
+def swizzled_scale(scale_inv, flatten_axis, is_colwise):
+    "Swizzle scale_inv via JAX transpose ops"
+    original_shape = scale_inv.shape
+    shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
+    if is_colwise:
+        scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
+        cols, rows = shape_2d
+    else:
+        rows, cols = shape_2d
+    reshape = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
+    swizzled = jnp.transpose(reshape, (0, 3, 2, 1, 4))
+    return swizzled.reshape(original_shape)
 
 
 class GemmPrimitive(BasePrimitive):
@@ -471,32 +471,21 @@ class GemmPrimitive(BasePrimitive):
                 )
         pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
 
-        # Need extra workspace for swizzled scale factors
-        lhs_swizzle_size = 0
-        rhs_swizzle_size = 0
-        swizzle_dtype = jnp.uint8
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            lhs_swizzle_size = lhs_scale_inv.size
-            rhs_swizzle_size = rhs_scale_inv.size
-        lhs_swizzle = jax.core.ShapedArray(shape=(lhs_swizzle_size,), dtype=swizzle_dtype)
-        rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size,), dtype=swizzle_dtype)
-
-        # Size cuBLAS workspace -- multiplied by number of comm+GEMM overlap compute streams
+        # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
-        if cgemm_config is not None:
+        if not cgemm_config.collective_op.is_none:
             workspace_size *= cgemm_config.num_max_streams
-
-        # cuBLAS requires workspace pointers aligned to 256 bytes but XLA does not guarantee that
-        # so we add to the size here and align the pointer in the C++ custom call.
+        # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
+        # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
+        return output, bias_grad, pre_gelu_out, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         outputs = GemmPrimitive.abstract(*args, **kwargs)
-        return outputs[:-3]  # discard workspace arrays
+        return outputs[:-1]  # discard workspace array
 
     @staticmethod
     def lowering(
@@ -571,24 +560,23 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
         cgemm_config,
     ):
-        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-        lhs_transposed, rhs_transposed = _get_gemm_layout(
-            (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
-        )
-        lhs_scale_inv = apply_padding_to_scale_inv(
-            lhs_scale_inv,
-            scaling_mode,
-            lhs.shape,
-            is_colwise=lhs_transposed,
-            flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-        )
-        rhs_scale_inv = apply_padding_to_scale_inv(
-            rhs_scale_inv,
-            scaling_mode,
-            rhs.shape,
-            is_colwise=not rhs_transposed,
-            flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-        )
+        if scaling_mode.is_1d_block_scaling():
+            lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
+            lhs_transposed, rhs_transposed = _get_gemm_layout(
+                (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
+            )
+            lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
+            rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
+
+            lhs_scale_inv = apply_padding_to_scale_inv(
+                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
+            )
+            rhs_scale_inv = apply_padding_to_scale_inv(
+                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+            )
+            lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
+            rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
+
         # Alter lhs blocks so that CGEMM RS outputs correctly
         if (
             cgemm_config.collective_op.is_reduce_scatter
@@ -607,7 +595,7 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
-        (output, bias_grad, pre_gelu_out, _, _, _) = GemmPrimitive.inner_primitive.bind(
+        (output, bias_grad, pre_gelu_out, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
@@ -645,6 +633,38 @@ class GemmPrimitive(BasePrimitive):
             output = reordered.reshape(original_shape)
 
         return [output, bias_grad, pre_gelu_out]
+
+    @staticmethod
+    def outer_impl(
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+        use_split_accumulator,
+    ):
+        return GemmPrimitive.impl(
+            lhs,
+            lhs_scale_inv,
+            rhs,
+            rhs_scale_inv,
+            bias,
+            gelu_input,
+            out_dtype,
+            contracting_dims,
+            scaling_mode,
+            fuse_bias,
+            fuse_gelu,
+            grad,
+            use_split_accumulator,
+        )
 
     @staticmethod
     def batcher(
