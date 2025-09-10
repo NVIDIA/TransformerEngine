@@ -581,7 +581,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
     }
     if(rowwise_option != FP8BlockwiseRowwiseOption::NONE)
     {
-      // output may not be defined if rowwise quantization is not required
+      // output may not be defined if rowwise quantization is not needed.
       NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
     }
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "Scale_t dimension must be 2.");
