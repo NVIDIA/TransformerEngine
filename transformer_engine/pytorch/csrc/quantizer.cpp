@@ -574,7 +574,7 @@ void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const 
   tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
-                              columnwise_data.shape);  
+                              columnwise_data.shape);
 }
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
@@ -927,7 +927,7 @@ void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
-                              columnwise_data.shape);  
+                              columnwise_data.shape);
 }
 
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
