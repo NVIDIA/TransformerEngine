@@ -28,8 +28,8 @@ static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
 }
 
 std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
-    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, Result_Type swizzled_scale_inv,
-    JAXX_Scaling_Mode scaling_mode, size_t axis_boundary, bool rowwise) {
+    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, JAXX_Scaling_Mode scaling_mode,
+    size_t axis_boundary, bool rowwise) {
   // Set tensor data with collapsed 2D shape
   auto buffer_dims = buffer.dimensions();
   std::vector<size_t> input_shape = {product(buffer_dims, 0, axis_boundary),
@@ -61,40 +61,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     } else {
       input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
     }
-
-    // Swizzle scaling factors for MXFP8
-    if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
-      // Get the swizzle buffer
-      NVTE_CHECK(swizzled_scale_inv->element_count() > 0,
-                 "Missing swizzled inverse scale buffer in the JAX primitive.");
-      auto scale_inv_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
-      auto swizzled_scale_inv_dtype =
-          convert_ffi_datatype_to_te_dtype(swizzled_scale_inv->element_type());
-      NVTE_CHECK(typeToSize(scale_inv_dtype) == 1 && typeToSize(swizzled_scale_inv_dtype) == 1,
-                 "Inverse scale factors need to have an 8-bit data type.");
-
-      // Create tensor to hold swizzled scale factor
-      TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
-      if (rowwise) {
-        output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
-        output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
-      } else {
-        output.set_columnwise_data(buffer.untyped_data(), input_dtype, input_shape);
-        output.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-                                        scale_shape);
-      }
-
-      // Launch swizzle kernel
-      nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
-
-      // Set swizzled scales into the input tensor
-      if (rowwise) {
-        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
-      } else {
-        input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-                                       scale_shape);
-      }
-    }
   }
 
   return std::make_tuple(std::move(input), input_shape);
@@ -103,21 +69,19 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
-                   Result_Type lhs_swizzle, Result_Type rhs_swizzle, Result_Type workspace,
-                   JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
+                   Result_Type workspace, JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator) {
-  // Operands (this includes swizzling MXFP8 scaling factors)
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
                          (is_tensor_scaling(scaling_mode) && nvte_is_non_tn_fp8_gemm_supported()));
   bool make_lhs_rowwise = (always_rowwise) ? true : !lhs_transposed;
   bool make_rhs_rowwise = (always_rowwise) ? true : rhs_transposed;
-  auto [lhs_, lhs_shape] = xla_buffer_to_nvte_gemm_operand(
-      stream, lhs, lhs_scale_inv, lhs_swizzle, scaling_mode, lhs_axis_boundary, make_lhs_rowwise);
-  auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(
-      stream, rhs, rhs_scale_inv, rhs_swizzle, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
+  auto [lhs_, lhs_shape] = xla_buffer_to_nvte_gemm_operand(stream, lhs, lhs_scale_inv, scaling_mode,
+                                                           lhs_axis_boundary, make_lhs_rowwise);
+  auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(stream, rhs, rhs_scale_inv, scaling_mode,
+                                                           rhs_axis_boundary, make_rhs_rowwise);
 
   // Output tensor
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
@@ -188,8 +152,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // bias_grad
                                   .Ret<Buffer_Type>()      // pre_gelu_out
-                                  .Ret<Buffer_Type>()      // lhs_swizzled
-                                  .Ret<Buffer_Type>()      // rhs_swizzled
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("lhs_axis_boundary")
