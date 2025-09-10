@@ -55,7 +55,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           const __grid_constant__ CUtensorMap tensor_map_output_act,
                           const __grid_constant__ CUtensorMap tensor_map_output_gate,
                           float *const amax_ptr, float *const scale_inv_ptr,
-                          const float *const scale_ptr, const size_t rows, const size_t cols) {
+                          const float *const scale_ptr, const size_t rows, const size_t cols,
+                          const ParamOP p) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
@@ -161,7 +162,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     IType *in_gate_sh_curr = in_gate_sh + buff * buff_elems;
     OType *out_act_sh_curr = out_act_sh + buff * buff_elems;
     OType *out_gate_sh_curr = out_gate_sh + buff * buff_elems;
-
 #pragma unroll
     for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
       const size_t stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
@@ -171,6 +171,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
+      bool dgate_elt = true;  // gating is ideally an identity function
+      if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+        // In case of GPT OSS, clamp the activation and gate values
+        const float limit = p.limit;
+        dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
+        gate_elt = min(max(-limit, gate_elt), limit) + 1;
+      }
 
       if constexpr (IS_DGATED) {
         float grad_elt = static_cast<float>(in_grad_sh_curr[shmem_idx]);
@@ -178,18 +185,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float x = act_elt;
         float act_x;
         float dact_x;
-
-        if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-          const float s = sigmoidf(x);
+        if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+          const float limit = p.limit;
+          const float x = min(act_elt, limit);
+          const float s = sigmoidf(1.702 * x);
           act_x = x * s;
-          dact_x = x * s * (1 - s) + s;
+          if (x < limit) {
+            dact_x = s + s * (1 - s) * 1.702 * x;
+          } else {
+            dact_x = 0.0f;
+          }
         } else {
-          act_x = ActOP(x, {});
-          dact_x = DActOP(x, {});
+          if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+            const float s = sigmoidf(x);
+            act_x = x * s;
+            dact_x = x * s * (1 - s) + s;
+          } else {
+            act_x = ActOP(x, p);
+            dact_x = DActOP(x, p);
+          }
         }
 
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = act_x * grad_elt;
+        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);
@@ -197,7 +215,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         amax = fmaxf(amax, fabsf(after_dact));
         amax = fmaxf(amax, fabsf(after_dgate));
       } else {
-        const float after_act = ActOP(act_elt, {}) * gate_elt;
+        const float after_act = ActOP(act_elt, p) * gate_elt;
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_act);
         amax = fmaxf(amax, fabsf(after_act));
       }
@@ -300,7 +318,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const __grid_constant__ CUtensorMap tensor_map_output_gate_colwise,
                             e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                            const size_t scale_stride_colwise) {
+                            const size_t scale_stride_colwise, const ParamOP p) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
@@ -476,25 +494,39 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
         float after_act_elt;
         float after_gate_elt;
-
+        bool dgate_elt = true;  // gating is ideally an identity function
+        if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+          // In case of GPT OSS, clamp the activation and gate values
+          const float limit = p.limit;
+          dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
+          gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
+        }
         if constexpr (IS_DGATED) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
           const float x = act_elt;
           float act_x;
           float dact_x;
-
-          if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-            const float s = sigmoidf(x);
+          if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+            const float limit = p.limit;
+            const float x = min(act_elt, limit);
+            const float s = sigmoidf(1.702 * x);
             act_x = x * s;
-            dact_x = x * s * (1 - s) + s;
+            dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
           } else {
-            act_x = ActOP(x, {});
-            dact_x = DActOP(x, {});
+            if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+              const float s = sigmoidf(x);
+              act_x = x * s;
+              dact_x = x * s * (1 - s) + s;
+            } else {
+              act_x = ActOP(x, p);
+              dact_x = DActOP(x, p);
+            }
           }
+
           after_act_elt = dact_x * grad_elt * gate_elt;
-          after_gate_elt = act_x * grad_elt;
+          after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
         } else {
-          after_act_elt = ActOP(act_elt, {}) * gate_elt;
+          after_act_elt = ActOP(act_elt, p) * gate_elt;
         }
         // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
         if constexpr (!std::is_same_v<IType, float>) {
@@ -719,23 +751,37 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float gate_elt = static_cast<float>(in_gate.data.elt[e]);
             float after_act_elt;
             float after_gate_elt;
-
+            float dgate_elt = true;
+            if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+              // In case of GPT OSS, clamp the activation and gate values
+              const float limit = p.limit;
+              dgate_elt = gate_elt < limit && gate_elt > -limit;  // Derivative of clamp
+              gate_elt = min(max(-limit, gate_elt), limit) + 1.0f;
+            }
             if constexpr (IS_DGATED) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);
               const float x = act_elt;
               float act_x;
               float dact_x;
-
-              if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-                const float s = sigmoidf(x);
+              if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
+                const float limit = p.limit;
+                const float x = min(act_elt, limit);
+                const float s = sigmoidf(1.702 * x);
                 act_x = x * s;
-                dact_x = x * s * (1 - s) + s;
+                dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
               } else {
-                act_x = ActOP(x, {});
-                dact_x = DActOP(x, {});
+                if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+                  const float s = sigmoidf(x);
+                  act_x = x * s;
+                  dact_x = x * s * (1 - s) + s;
+                } else {
+                  act_x = ActOP(x, {});
+                  dact_x = DActOP(x, {});
+                }
               }
+
               after_act_elt = dact_x * grad_elt * gate_elt;
-              after_gate_elt = act_x * grad_elt;
+              after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
               after_act_rowwise[j] = after_act_elt;
               after_gate_rowwise[j] = after_gate_elt;
             } else {
@@ -883,7 +929,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                     cudaStream_t stream) {
   checkCuDriverContext(stream);
 
@@ -957,15 +1003,14 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
-              tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows,
-              cols);
+              tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows, cols, p);
           NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
   );                                              // NOLINT(*)
 }
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                       cudaStream_t stream) {
   checkCuDriverContext(stream);
 
@@ -1096,7 +1141,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, p);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
@@ -1113,7 +1158,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, p);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::BIDIMENSIONAL:
@@ -1130,7 +1175,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, p);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
           });  // NOLINT(*)
@@ -1138,7 +1183,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
-void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void cast_gated(const Tensor &input, Tensor *output, ParamOP p, cudaStream_t stream) {
   CheckInputTensor(input, "gated_act_input");
   CheckOutputTensor(*output, "gated_act_output");
   NVTE_CHECK(output->flat_first_dim() == input.flat_first_dim(),
@@ -1165,7 +1210,7 @@ void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 reinterpret_cast<fp32 *>(output->amax.dptr),
                 reinterpret_cast<fp32 *>(output->scale_inv.dptr), input.flat_first_dim(),
-                output->flat_last_dim(), {}, stream);
+                output->flat_last_dim(), p, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1174,7 +1219,8 @@ void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaStream_t stream) {
+void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP p,
+                 cudaStream_t stream) {
   CheckInputTensor(grad, "dgated_act_grad");
   CheckInputTensor(input, "dgated_act_input");
   CheckOutputTensor(*output, "dgated_act_output");
@@ -1203,7 +1249,7 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 reinterpret_cast<fp32 *>(output->amax.dptr),
                 reinterpret_cast<fp32 *>(output->scale_inv.dptr), grad.flat_first_dim(),
-                grad.flat_last_dim(), {}, stream);
+                grad.flat_last_dim(), p, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1212,7 +1258,7 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                     cudaStream_t stream) {
   constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
@@ -1252,17 +1298,17 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
-      cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
     } else {
       if constexpr (IS_DGATED) {
-        cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+        cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
       } else {
-        cast_gated<ParamOP, ActOP>(gated_input, output, stream);
+        cast_gated<ParamOP, ActOP>(gated_input, output, p, stream);
       }
     }
   } else if (is_mxfp_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
-      cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
     } else {
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
                  "by 32, got input of shape ", gated_input.data.shape);
@@ -1278,7 +1324,7 @@ namespace detail {
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
 void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, NVTETensor output,
-                           cudaStream_t stream) {
+                           ParamOP p, cudaStream_t stream) {
   using namespace gated_kernels;
   Tensor grad_empty_tensor;
   const Tensor &grad_tensor = IS_DGATED ? *(convertNVTETensorCheck(grad)) : grad_empty_tensor;
@@ -1287,13 +1333,14 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
 
   if (is_supported_by_CC_100()) {
     quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
-                                                      output_tensor, stream);
+                                                      output_tensor, p, stream);
   } else {
     if (is_delayed_tensor_scaling(output_tensor->scaling_mode)) {
       if constexpr (IS_DGATED) {
-        cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, stream);
+        cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, p,
+                                            stream);
       } else {
-        cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, stream);
+        cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, p, stream);
       }
     } else {
       // MX scaling

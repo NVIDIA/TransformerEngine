@@ -11,6 +11,10 @@ namespace transformer_engine {
 
 struct Empty {};
 
+struct GptOssParam {
+  float limit;
+};
+
 template <typename OType, typename IType>
 __device__ inline OType gelu(const IType val, const Empty&) {
   const float cval = val;
@@ -58,9 +62,25 @@ __device__ inline OType silu(const IType val, const Empty& e) {
 }
 
 template <typename OType, typename IType>
+__device__ inline OType oss_silu(const IType val, const GptOssParam& p) {
+  const Empty e = {};
+  const float cval = min(p.limit, static_cast<float>(val));  // Clamping
+  return qgelu<OType, float>(cval, e);
+}
+
+template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
   return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType oss_dsilu(const IType val, const GptOssParam& p) {
+  const Empty e = {};
+  const bool dclamp_val = static_cast<float>(val) <= p.limit;
+  const float clamp_val = min(static_cast<float>(val), p.limit);
+  const float dsilu_val = dqgelu<OType, float>(clamp_val, e);
+  return dclamp_val ? dsilu_val : 0.0f;
 }
 
 template <typename OType, typename IType>
