@@ -1626,6 +1626,14 @@ class FusedAttnFunc(torch.autograd.Function):
                         # DelayedScaling:               Float8Tensor; dtype = torch.float16 or torch.bfloat16
                         #                               fp8_dtype = tex.DType.kFloat8E5M2
                         # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
+                        out_bwd = out_fp8
+                        if bool(int(os.getenv("NVTE_F16_O", "0"))):
+                            out_bwd = out
+                            if bool(int(os.getenv("NVTE_PRINT", "0"))):
+                                layer = int(os.getenv("NVTE_LAYER_NUMBER", str(ctx.layer_number)))
+                                procid = int(os.getenv("SLURM_PROCID", "0"))
+                                if ctx.layer_number == layer and procid == 0:
+                                    print(f">>>>>>>>>>>>>>>>>> bwd f16 O", out_bwd.dtype, dqkv_nominal_dtype, dqkv_te_dtype)
                         dq_, dk_, dv_, *rest = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
@@ -1634,7 +1642,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             q_fp8,
                             k_fp8,
                             v_fp8,
-                            out_fp8,
+                            out_bwd,
                             d_out_fp8,
                             dqkv_nominal_dtype,
                             dqkv_te_dtype,

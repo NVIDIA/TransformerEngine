@@ -1656,8 +1656,8 @@ void fused_attn_fp8_fwd_impl_v1(
     void* devPtrM, void* devPtrZInv, void* devPtrO, void* devPtrDescaleQ, void* devPtrDescaleK,
     void* devPtrDescaleV, void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
     void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
-    void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t fwd_tensor_type,
-    cudnn_frontend::DataType_t output_tensor_type, void* workspace, size_t* workspace_size,
+    void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
+    cudnn_frontend::DataType_t o_tensor_type, void* workspace, size_t* workspace_size,
     cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -1671,6 +1671,9 @@ void fused_attn_fp8_fwd_impl_v1(
   auto bias_h = h;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+  bool is_current_scaling = (o_tensor_type == cudnn_frontend::DataType_t::HALF || o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  bool is_delayed_scaling = (o_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 || o_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
+  NVTE_CHECK(is_current_scaling || is_delayed_scaling, "FP8 fused attention only supports O tensor in kFloat16, kBFloat16, kFloat8E4M3 or kFloat8E5M2!");
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -1697,9 +1700,10 @@ void fused_attn_fp8_fwd_impl_v1(
                                0,
                                0,
                                true,
-                               fwd_tensor_type,
-                               fwd_tensor_type,
-                               output_tensor_type};
+                               qkv_tensor_type,
+                               o_tensor_type,
+                               cudnn_frontend::DataType_t::NOT_SET,
+                               cudnn_frontend::DataType_t::NOT_SET};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -1738,7 +1742,7 @@ void fused_attn_fp8_fwd_impl_v1(
 
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
-      mha_graph->set_io_data_type(fwd_tensor_type)
+      mha_graph->set_io_data_type(qkv_tensor_type)
           .set_intermediate_data_type(fe::DataType_t::FLOAT)
           .set_compute_data_type(fe::DataType_t::FLOAT);
 
@@ -1787,11 +1791,10 @@ void fused_attn_fp8_fwd_impl_v1(
       descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
       scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
 
-      if (output_tensor_type == fwd_tensor_type) {
-        // delayed scaling
+      if (is_delayed_scaling) {
         scale_o = mha_graph->tensor_like(descale_q, "Scale_O");
-      } else {
-        // current scaling
+      }
+      if (is_current_scaling) {
         scale_o = mha_graph->tensor(1.0f);
       }
 
@@ -1848,7 +1851,7 @@ void fused_attn_fp8_fwd_impl_v1(
       O->set_output(true)
           .set_dim({b, h, s_q, d})
           .set_stride(o_stride)
-          .set_data_type(output_tensor_type);
+          .set_data_type(o_tensor_type);
       amax_o->set_output(true)
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
@@ -1932,8 +1935,7 @@ void fused_attn_fp8_fwd_impl_v1(
         {amax_s, devPtrAmaxS},
         {Stats, devPtrM}};
 
-    if (output_tensor_type == fwd_tensor_type) {
-      // delayed scaling
+    if (is_delayed_scaling) {
       variant_pack[scale_o] = devPtrScaleO;
     }
 
@@ -1999,8 +2001,8 @@ void fused_attn_fp8_bwd_impl_v1(
     void* devPtrScaledP, void* devPtrScaledQ, void* devPtrScaledK, void* devPtrScaledV,
     void* devPtrAmaxdP, void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV,
     void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
-    void* devPtrDropoutOffset, cudnn_frontend::DataType_t fwd_tensor_type,
-    cudnn_frontend::DataType_t bwd_tensor_type, cudnn_frontend::DataType_t output_tensor_type,
+    void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
+    cudnn_frontend::DataType_t do_tensor_type, cudnn_frontend::DataType_t dqkv_tensor_type,
     void* workspace, size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -2014,6 +2016,10 @@ void fused_attn_fp8_bwd_impl_v1(
   auto bias_h = h;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
+  bool is_current_scaling = (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF || dqkv_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  bool is_delayed_scaling = (dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 || dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
+  NVTE_CHECK(is_current_scaling || is_delayed_scaling, "FP8 fused attention only supports dQKV tensor in kFloat16, kBFloat16, kFloat8E4M3 or kFloat8E5M2!");
+  bool is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF || o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -2040,9 +2046,10 @@ void fused_attn_fp8_bwd_impl_v1(
                                0,
                                0,
                                false,
-                               fwd_tensor_type,
-                               bwd_tensor_type,
-                               output_tensor_type};
+                               qkv_tensor_type,
+                               o_tensor_type,
+                               do_tensor_type,
+                               dqkv_tensor_type};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -2095,7 +2102,7 @@ void fused_attn_fp8_bwd_impl_v1(
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
 
-      mha_graph->set_io_data_type(fwd_tensor_type)
+      mha_graph->set_io_data_type(qkv_tensor_type)
           .set_intermediate_data_type(fe::DataType_t::FLOAT)
           .set_compute_data_type(fe::DataType_t::FLOAT);
 
@@ -2135,7 +2142,8 @@ void fused_attn_fp8_bwd_impl_v1(
       o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("O")
                                 .set_dim({b, h, s_q, d})
-                                .set_stride(o_stride));
+                                .set_stride(o_stride)
+                                .set_data_type(o_tensor_type));
       dO = mha_graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name("dO")
                                  .set_dim({b, h, s_q, d})
@@ -2160,20 +2168,23 @@ void fused_attn_fp8_bwd_impl_v1(
                                         .set_data_type(fe::DataType_t::FLOAT));
       descale_k = mha_graph->tensor_like(descale_q, "Descale_q");
       descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
-      descale_o = mha_graph->tensor_like(descale_q, "Descale_O");
+      if (is_O_in_F16) {
+        descale_o = mha_graph->tensor(1.0f);
+      } else {
+        descale_o = mha_graph->tensor_like(descale_q, "Descale_O");
+      }
       descale_dO = mha_graph->tensor_like(descale_q, "Descale_dO");
       descale_dP = mha_graph->tensor_like(descale_q, "Descale_dP");
       scale_dP = mha_graph->tensor_like(descale_q, "Scale_dP");
       descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
       scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
 
-      if (output_tensor_type == bwd_tensor_type) {
-        // delayed scaling
+      if (is_delayed_scaling) {
         scale_dQ = mha_graph->tensor_like(descale_q, "Scale_dQ");
         scale_dK = mha_graph->tensor_like(descale_q, "Scale_dK");
         scale_dV = mha_graph->tensor_like(descale_q, "Scale_dV");
-      } else {
-        // current scaling
+      }
+      if (is_current_scaling) {
         scale_dQ = mha_graph->tensor(1.0f);
         scale_dK = mha_graph->tensor(1.0f);
         scale_dV = mha_graph->tensor(1.0f);
@@ -2259,10 +2270,10 @@ void fused_attn_fp8_bwd_impl_v1(
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
 
-      dO->set_data_type(bwd_tensor_type);
-      dQ->set_data_type(output_tensor_type);
-      dK->set_data_type(output_tensor_type);
-      dV->set_data_type(output_tensor_type);
+      dO->set_data_type(do_tensor_type);
+      dQ->set_data_type(dqkv_tensor_type);
+      dK->set_data_type(dqkv_tensor_type);
+      dV->set_data_type(dqkv_tensor_type);
 
       std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // q
                  std::shared_ptr<fe::graph::Tensor_attributes>,  // k
@@ -2343,7 +2354,6 @@ void fused_attn_fp8_bwd_impl_v1(
         {descale_q, devPtrDescaleQ},
         {descale_k, devPtrDescaleK},
         {descale_v, devPtrDescaleV},
-        {descale_o, devPtrDescaleO},
         {descale_dO, devPtrDescaledO},
         {descale_dP, devPtrDescaledP},
         {scale_dP, devPtrScaledP},
@@ -2358,11 +2368,13 @@ void fused_attn_fp8_bwd_impl_v1(
         {amax_dP, devPtrAmaxdP},
     };
 
-    if (output_tensor_type == bwd_tensor_type) {
-      // delayed scaling
+    if (is_delayed_scaling) {
       variant_pack[scale_dQ] = devPtrScaledQ;
       variant_pack[scale_dK] = devPtrScaledK;
       variant_pack[scale_dV] = devPtrScaledV;
+    }
+    if (!is_O_in_F16) {
+      variant_pack[descale_o] = devPtrDescaleO;
     }
 
     /* if (is_bias) {
@@ -2403,7 +2415,11 @@ void fused_attn_fp8_bwd_impl_v1(
       cudaMemcpy(&(tmp[ii++]), devPtrDescaleQ, sizeof(float), cudaMemcpyDeviceToHost);
       cudaMemcpy(&(tmp[ii++]), devPtrDescaleK, sizeof(float), cudaMemcpyDeviceToHost);
       cudaMemcpy(&(tmp[ii++]), devPtrDescaleV, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmp[ii++]), devPtrDescaleO, sizeof(float), cudaMemcpyDeviceToHost);
+      if (is_O_in_F16) {
+        ii+=1;
+      } else {
+        cudaMemcpy(&(tmp[ii++]), devPtrDescaleO, sizeof(float), cudaMemcpyDeviceToHost);
+      }
       cudaMemcpy(&(tmp[ii++]), devPtrDescaledO, sizeof(float), cudaMemcpyDeviceToHost);
       cudaMemcpy(&(tmp[ii++]), devPtrDescaleS, sizeof(float), cudaMemcpyDeviceToHost);
       cudaMemcpy(&(tmp[ii++]), devPtrScaleS, sizeof(float), cudaMemcpyDeviceToHost);
@@ -2414,10 +2430,17 @@ void fused_attn_fp8_bwd_impl_v1(
       cudaMemcpy(&(tmp[ii++]), devPtrAmaxdK, sizeof(float), cudaMemcpyDeviceToHost);
       cudaMemcpy(&(tmp[ii++]), devPtrAmaxdV, sizeof(float), cudaMemcpyDeviceToHost);
       cudaDeviceSynchronize();
+      printf("IMP BWD ref types: FP16 %d, BF16 %d, E4M3 %d, E5M2 %d\n", int(fe::DataType_t::HALF), int(fe::DataType_t::BFLOAT16), int(fe::DataType_t::FP8_E4M3), int(fe::DataType_t::FP8_E5M2));
+      printf("IMP BWD types: QKV %d, O %d, dO %d, dQKV %d\n", int(qkv_tensor_type), int(o_tensor_type), int(do_tensor_type), int(dqkv_tensor_type));
       printf("IMP BWD QKV : descale_q %.4e, descale_k %.4e, descale_v %.4e\n", tmp[0], tmp[1],
              tmp[2]);
-      printf("IMP BWD O/S : descale_o %.4e, descale_do %.4e, descale_s %.4e, scale_s %.4e\n",
-             tmp[3], tmp[4], tmp[5], tmp[6]);
+      if (is_O_in_F16) {
+        printf("IMP BWD O/S : descale_do %.4e, descale_s %.4e, scale_s %.4e\n",
+               tmp[4], tmp[5], tmp[6]);
+      } else {
+        printf("IMP BWD O/S : descale_o %.4e, descale_do %.4e, descale_s %.4e, scale_s %.4e\n",
+               tmp[3], tmp[4], tmp[5], tmp[6]);
+      }
       printf("IMP BWD dP  : descale_dp %.4e, scale_dp %.4e, amax_dp %.4e\n", tmp[7], tmp[8],
              tmp[9]);
       printf("IMP BWD dQKV: amax_dq %.4e, amax_dk %.4e, amax_dv %.4e\n", tmp[10], tmp[11], tmp[12]);
@@ -2565,7 +2588,11 @@ void fused_attn_fp8_bwd_qkvpacked(
   void* devPtrDescaleV = input_QKV->scale_inv.dptr;
 
   void* devPtrO = input_O->data.dptr;
-  void* devPtrDescaleO = input_O->scale_inv.dptr;
+  const DType O_type = input_O->data.dtype;
+  void* devPtrDescaleO = nullptr;
+  if (O_type == DType::kFloat8E4M3 || O_type == DType::kFloat8E5M2) {
+    devPtrDescaleO = input_O->scale_inv.dptr;
+  }
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
 
@@ -2607,7 +2634,7 @@ void fused_attn_fp8_bwd_qkvpacked(
         devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
         devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
         devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrcuSeqlens, devPtrcuSeqlens,
-        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
+        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type),
         get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type), workspace->data.dptr,
         &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
@@ -2772,7 +2799,11 @@ void fused_attn_fp8_bwd_kvpacked(
   void* devPtrDescaleV = input_KV->scale_inv.dptr;
 
   void* devPtrO = input_O->data.dptr;
-  void* devPtrDescaleO = input_O->scale_inv.dptr;
+  const DType O_type = input_O->data.dtype;
+  void* devPtrDescaleO = nullptr;
+  if (O_type == DType::kFloat8E4M3 || O_type == DType::kFloat8E5M2) {
+    devPtrDescaleO = input_O->scale_inv.dptr;
+  }
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
 
@@ -2816,7 +2847,7 @@ void fused_attn_fp8_bwd_kvpacked(
         devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
         devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
         devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
-        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
+        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type),
         get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type), workspace->data.dptr,
         &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
@@ -2964,7 +2995,11 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrDescaleV = input_Q->scale_inv.dptr;
 
   void* devPtrO = input_O->data.dptr;
-  void* devPtrDescaleO = input_O->scale_inv.dptr;
+  const DType O_type = input_O->data.dtype;
+  void* devPtrDescaleO = nullptr;
+  if (O_type == DType::kFloat8E4M3 || O_type == DType::kFloat8E5M2) {
+    devPtrDescaleO = input_O->scale_inv.dptr;
+  }
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
 
@@ -3010,7 +3045,7 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
         devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
         devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
-        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
+        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type),
         get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type), workspace->data.dptr,
         &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
