@@ -135,7 +135,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                std::to_string(out_tensor.shape()), ")");
     if (out_dtype) {
       NVTE_CHECK(*out_dtype == out_tensor.dtype(), "GEMM output has invalid dtype (expected ",
-                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(out_tensor.dtype()), ")");
+                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(out_tensor.dtype()),
+                 ")");
     }
   }
 
@@ -144,7 +145,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   MaybeTensor bias_grad = std::nullopt;
   if (bias.has_value()) {
     if (grad) {
-      auto opts = torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
+      auto opts =
+          torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
       bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
       bias_tensor = makeTransformerEngineTensor(*bias_grad);
     } else {
