@@ -590,7 +590,8 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
     scale_t_stride_x = columnwise_compact ? 1 : scale_t_k;
     scale_t_stride_y = columnwise_compact ? scale_t_k : 1;
   }
-  auto output_dtype = rowwise_option != FP8BlockwiseRowwiseOption::NONE ? output.dtype : output_t.dtype;
+  auto output_dtype =
+      rowwise_option != FP8BlockwiseRowwiseOption::NONE ? output.dtype : output_t.dtype;
 
   const size_t num_blocks_x = DIVUP(row_length, (size_t)kTileDim);
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
