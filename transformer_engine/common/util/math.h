@@ -9,6 +9,8 @@
 
 namespace transformer_engine {
 
+__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
+
 struct Empty {};
 
 template <typename OType, typename IType>
@@ -28,7 +30,7 @@ __device__ inline OType dgelu(const IType val, const Empty&) {
 template <typename OType, typename IType>
 __device__ inline OType sigmoid(const IType val, const Empty&) {
   const float cval = val;
-  return 1.f / (1.f + expf(-cval));
+  return sigmoidf(cval);
 }
 
 template <typename OType, typename IType>
@@ -47,8 +49,8 @@ __device__ inline OType qgelu(const IType val, const Empty& e) {
 template <typename OType, typename IType>
 __device__ inline OType dqgelu(const IType val, const Empty& e) {
   const float cval = val;
-  return 1.702f * cval * dsigmoid<float, float>(1.702f * cval, e) +
-         sigmoid<float, float>(1.702f * cval, e);
+  const float s = sigmoid<float, float>(1.702f * cval, e);
+  return 1.702f * cval * s * (1.f - s) + s;
 }
 
 template <typename OType, typename IType>
@@ -60,7 +62,8 @@ __device__ inline OType silu(const IType val, const Empty& e) {
 template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
-  return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
+  const float s = sigmoid<float, float>(cval, e);
+  return cval * s * (1.f - s) + s;
 }
 
 template <typename OType, typename IType>
