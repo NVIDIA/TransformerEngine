@@ -220,11 +220,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
-        batch_size, max_seqlen_q, max_seqlen_kv, num_heads = (
+        batch_size, max_seqlen_q, max_seqlen_kv = (
             query_layer.shape[1],
             query_layer.shape[0],
             key_layer.shape[0],
-            query_layer.shape[-2],
         )
 
         if "padding" in attn_mask_type and attention_mask is None:
