@@ -47,7 +47,7 @@ def test_custom_recipe_sanity(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Single factory: map roles to quantizers
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -84,7 +84,7 @@ def test_custom_recipe_grouped_linear_sanity():
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -130,7 +130,7 @@ def test_custom_recipe_matches_current_scaling():
     loss_ref.backward()
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -178,7 +178,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("grad_output", "grad_input"):
@@ -212,7 +212,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     # Counters per role
     counts = {"input": 0, "weight": 0, "output": 0, "grad_output": 0, "grad_input": 0}
 
-    def quantizer_factory(role):
+    def quantizer_factory(role, **kwargs):
         if role in counts:
             counts[role] += 1
         if role in ("input", "weight", "output"):
@@ -257,3 +257,55 @@ def test_factories_return_distinct_instances_and_buffers():
     # Mutating one should not affect the other
     q1.scale.fill_(123.0)
     assert not torch.equal(q1.scale, q2.scale)
+
+
+
+
+
+
+
+    # def make_nvfp4_quantizer():
+    #     return MyNVFP4Quantizer(tex.DType.kFloat8E5M2, device="cuda")              # pyright: ignore[reportUndefinedVariable]
+
+    # quantizer_factories = recipe.CustomQuantizerFactories(make_nvfp4_quantizer)
+
+    # custom_recipe = recipe.CustomRecipe(qfactories=quantizer_factories)
+
+    # with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
+    #     out = model(inp)
+
+
+
+
+
+#     # single factory provided by user
+#     def quantizer_factory(role):
+#         if role in ("input", "weight"):         
+#             return MyNVFP4Quantizer()                                     # pyright: ignore[reportUndefinedVariable]
+#         return MyFP8Quantizer()                                           # pyright: ignore[reportUndefinedVariable]
+
+#     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
+
+#     with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
+#         out = model(inp)                                                 # pyright: ignore[reportUndefinedVariable]
+
+
+
+
+
+
+# from typing import Union
+
+# from transformer_engine.pytorch import Quantizer
+ 
+
+# class MyNVFP4Quantizer(Quantizer):
+#     def quantize_impl(self, tensor: torch.Tensor) -> Union[*TensorBase, *Tensor]:       # pyright: ignore[reportUndefinedVariable]
+#         # Custom quantization logic, e.g. python-based or pure silicon
+#         pass
+
+
+# class MyFP8Quantizer(Quantizer):
+#     def quantize_impl(self, tensor: torch.Tensor) -> Union[*TensorBase, *Tensor]:       # pyright: ignore[reportUndefinedVariable]
+#         # Custom quantization logic, e.g. python-based or pure silicon
+#         pass

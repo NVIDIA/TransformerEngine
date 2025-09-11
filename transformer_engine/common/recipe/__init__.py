@@ -371,21 +371,32 @@ class CustomRecipe(Recipe):
     ----------
     qfactory : Callable
                Single factory callable that returns a quantizer instance for a
-               given semantic tensor role. The callable is typically invoked as
-               `qfactory(role)` where `role` is one of the following strings
-               e.g. for linear layers:
-               forward:  "input", "weight", "output"
-               backward: "grad_output", "grad_input"
+               given semantic tensor role. Transformer Engine resolves the role
+               from per-mode role layouts and calls the factory with the
+               resolved role and additional keyword-only context. The callable
+               is typically invoked as:
+                   qfactory(
+                       role: Optional[str],
+                       forward_roles: Tuple[str, ...],
+                       backward_roles: Tuple[str, ...],
+                       mode: Literal["forward", "backward"],
+                       quantizer_index: int,
+                       num_quantizers: int,
+                       **kwargs,
+                   )
 
-               The default role mapping is provided by `resolve_role()` and is
-               based on the quantizer index and mode. Users can subclass
-               `CustomRecipe` and override `resolve_role()` to customize the
-               mapping or to support other operations such as attention.
+               Where `role` is one of the following strings for e.g. te.Linear 
+               (stable public contract):
+               - forward:  "input", "weight", "output"
+               - backward: "grad_output", "grad_input"
+
+               Note:
+               - Users can ignore the keyword-only context if not needed and
+                 accept only `role`. Extra keyword arguments (`forward_roles`,
+                 `backward_roles`, indices) are provided for advanced/custom
+                 mappings.
     """
 
-    # Single factory callable provided by user. Accept a flexible signature to
-    # support evolution of the API. Typical signature:
-    #   (role: Optional[str])
     qfactory: Callable[..., Any]
 
     fp8_dpa: bool = False
@@ -393,27 +404,3 @@ class CustomRecipe(Recipe):
 
     def __repr__(self) -> str:
         return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
-
-    def resolve_role(self, operation: str, mode: str, index: int) -> Optional[str]:
-        """
-        Resolve the tensor semantic role for the given operation, mode, and index.
-        To be redefined in subclass if required.
-        """
-        assert operation in ["linear"], "Only linear is supported for now."
-
-        if operation == "linear":
-            if mode == "forward":
-                if index % 3 == 0:
-                    return "input"
-                elif index % 3 == 1:
-                    return "weight"
-                elif index % 3 == 2:
-                    return "output"
-            elif mode == "backward":
-                if index % 2 == 0:
-                    return "grad_output"
-                elif index % 2 == 1:
-                    return "grad_input"
-        if operation == "attention":
-            raise NotImplementedError("Attention is not supported for now.")
-        return None
