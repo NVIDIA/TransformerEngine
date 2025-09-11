@@ -368,10 +368,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // 9.10.0/9.10.1: known bugs with SDPA F16
         (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001) &&
         // softmax type
-        // pre-9.13: vanilla
-        // 9.13+: vanilla, off-by-one, learnable
-        (cudnn_runtime_version >= 91300 ||
-         (cudnn_runtime_version < 91300 &&
+        // pre-9.13.1: vanilla
+        // 9.13.1+: vanilla, off-by-one, learnable
+        (cudnn_runtime_version >= 91301 ||
+         (cudnn_runtime_version < 91301 &&
           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX))) {
       flag_arb = true;
     }
