@@ -557,7 +557,9 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
             use_fused_attention = False
-            logger.debug("Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type)
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+            )
             use_unfused_attention = False
         if qkv_format == "thd":
             logger.debug(
@@ -571,13 +573,15 @@ def get_attention_backend(
             use_unfused_attention = False
         if context_parallel:
             logger.debug(
-                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type = %s",
+                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type"
+                " = %s",
                 softmax_type,
             )
             use_unfused_attention = False
             if cp_comm_type != "a2a":
                 logger.debug(
-                    "Disabling FusedAttention for context parallelism with softmax_type = %s and cp_comm_type = %s",
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                    " cp_comm_type = %s",
                     softmax_type,
                     cp_comm_type,
                 )
