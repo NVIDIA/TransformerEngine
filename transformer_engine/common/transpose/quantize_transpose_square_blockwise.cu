@@ -14,6 +14,7 @@
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
+#include "common/util/cuda_runtime.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
@@ -70,7 +71,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
                                        const size_t scale_stride_y, const size_t scale_t_stride_x,
                                        const size_t scale_t_stride_y, const float epsilon,
                                        const __grid_constant__ CUtensorMap tensor_map_output_t,
-                                       bool pow_2_scaling, const float* noop_ptr) {
+                                       const bool pow_2_scaling, const float* noop_ptr,
+                                       const bool pdl_sync, const bool pdl_trigger) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
@@ -112,6 +114,13 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   CType block_tile_amax;
   CType block_tile_scale;
   CType amax = 0;
+
+// Block until the previous kernel has completed and flushed results to global memory.
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  if (pdl_sync) {
+    cudaGridDependencySynchronize();
+  }
+#endif
 
 // Step 1: Load a block tile of input data into thread tiles on registers
 #pragma unroll
@@ -170,6 +179,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
       tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
     }
   }
+
+// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
+// store to global memory.
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  if (pdl_trigger) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
+#endif
 
   // Step 3: Store cast output, Step 4: do transpose within thread tile
   OVecCast tmp_output_c;
@@ -253,7 +270,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
-    bool pow_2_scaling, const float* noop_ptr) {
+    const bool pow_2_scaling, const float* noop_ptr, const bool pdl_sync, const bool pdl_trigger) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
@@ -323,6 +340,13 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   CType block_tile_amax;
   CType block_tile_scale;
   CType amax = 0;
+
+// Block until the previous kernel has completed and flushed results to global memory.
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  if (pdl_sync) {
+    cudaGridDependencySynchronize();
+  }
+#endif
 
   if (!empty_thrd_tile) {
     // Step 1: Load a block tile of input data into thread tiles on registers
@@ -397,6 +421,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
       tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
     }
   }
+
+// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
+// store to global memory.
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  if (pdl_trigger) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
+#endif
 
   // Step 3: Store cast output, Step 4: do transpose within thread tile
   // Edge case: in the non-full tile case, there are three subcases
@@ -481,7 +513,8 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                                          SimpleTensor& scale_inv_t, SimpleTensor& output,
                                          SimpleTensor& output_t, const float epsilon,
                                          const bool return_transpose, const bool pow_2_scale,
-                                         const SimpleTensor& noop_tensor, cudaStream_t stream) {
+                                         const SimpleTensor& noop_tensor, const bool pdl_sync,
+                                         const bool pdl_trigger, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_square_blockwise);
   checkCuDriverContext(stream);
 
@@ -523,6 +556,15 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
 
   const size_t num_blocks_x = DIVUP(row_length, BLOCK_TILE_DIM);
   const size_t num_blocks_y = DIVUP(num_rows, BLOCK_TILE_DIM);
+  dim3 grid(num_blocks_x, num_blocks_y, 1);
+  cudaLaunchAttribute attribute[1];
+  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute[0].val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t cfg = {grid, THREADS_PER_BLOCK, 0, stream, NULL, 0};
+  if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) >= 90) {
+    cfg.attrs = attribute;
+    cfg.numAttrs = 1;
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
@@ -533,7 +575,6 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_transpose, kReturnTranspose,
 
-              dim3 grid(num_blocks_x, num_blocks_y, 1);
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
@@ -543,26 +584,29 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                   tensor_map_output_trans =
                       get_tensor_map<OutputType>(output_t, num_rows, row_length);
                 }
-                block_scaled_cast_transpose_kernel<kReturnTranspose, float, InputType, OutputType>
-                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
-                        reinterpret_cast<const InputType*>(input.dptr),
-                        reinterpret_cast<OutputType*>(output.dptr),
-                        reinterpret_cast<OutputType*>(output_t.dptr),
-                        reinterpret_cast<float*>(scale_inv.dptr),
-                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                        tensor_map_output_trans, pow_2_scale, noop_ptr);
+                NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                    &cfg,
+                    block_scaled_cast_transpose_kernel<kReturnTranspose, float, InputType,
+                                                       OutputType>,
+                    reinterpret_cast<const InputType*>(input.dptr),
+                    reinterpret_cast<OutputType*>(output.dptr),
+                    reinterpret_cast<OutputType*>(output_t.dptr),
+                    reinterpret_cast<float*>(scale_inv.dptr),
+                    reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                    scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                    tensor_map_output_trans, pow_2_scale, noop_ptr, pdl_sync, pdl_trigger));
               } else {
-                block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
-                                                              OutputType>
-                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
-                        reinterpret_cast<const InputType*>(input.dptr),
-                        reinterpret_cast<OutputType*>(output.dptr),
-                        reinterpret_cast<OutputType*>(output_t.dptr),
-                        reinterpret_cast<float*>(scale_inv.dptr),
-                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                        pow_2_scale, noop_ptr);
+                NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                    &cfg,
+                    block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float,
+                                                                  InputType, OutputType>,
+                    reinterpret_cast<const InputType*>(input.dptr),
+                    reinterpret_cast<OutputType*>(output.dptr),
+                    reinterpret_cast<OutputType*>(output_t.dptr),
+                    reinterpret_cast<float*>(scale_inv.dptr),
+                    reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                    scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                    pow_2_scale, noop_ptr, pdl_sync, pdl_trigger));
               }  // full-tile
               )  // return_transpose
           )      // OutputType

@@ -261,12 +261,16 @@ struct QuantizationConfig {
   NVTETensor noop_tensor = nullptr;
   Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
       Float8BlockScaleTensorFormat::GEMM_READY;
+  bool pdl_sync = false;
+  bool pdl_trigger = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),                         // force_pow_2_scales
-      sizeof(float),                        // amax_epsilon
-      sizeof(NVTETensor),                   // noop_tensor
-      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
+      sizeof(bool),                          // force_pow_2_scales
+      sizeof(float),                         // amax_epsilon
+      sizeof(NVTETensor),                    // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
+      sizeof(bool),                          // pdl_sync
+      sizeof(bool)                           // pdl_trigger
   };
 };
 

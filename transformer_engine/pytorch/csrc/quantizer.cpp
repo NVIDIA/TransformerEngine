@@ -86,7 +86,8 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
 }
 
 void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                             const std::optional<TensorWrapper>& noop_flag) {
+                             const std::optional<TensorWrapper>& noop_flag, const bool pdl_sync,
+                             const bool pdl_trigger) {
   NVTE_ERROR("NoneQuantizer does not support quantization");
 }
 
@@ -272,7 +273,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
 }
 
 void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                               const std::optional<TensorWrapper>& noop_flag) {
+                               const std::optional<TensorWrapper>& noop_flag, const bool pdl_sync,
+                               const bool pdl_trigger) {
   if (input.numel() == 0) {
     return;
   }
@@ -280,6 +282,7 @@ void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
+  // Ignore pdl_sync/pdl_trigger for float8 delay scaling
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -540,7 +543,9 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                             const std::optional<TensorWrapper>& noop_flag) {
+                                             const std::optional<TensorWrapper>& noop_flag,
+                                             const bool pdl_sync, const bool pdl_trigger) {
+  // Ignore pdl_sync/pdl_trigger for float8 current scaling
   this->quantize_impl(input, out, noop_flag, true);
 }
 
@@ -820,7 +825,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
 }
 
 void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                    const std::optional<TensorWrapper>& noop_flag) {
+                                    const std::optional<TensorWrapper>& noop_flag,
+                                    const bool pdl_sync, const bool pdl_trigger) {
   if (input.numel() == 0) {
     return;
   }
@@ -833,6 +839,8 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
   if (all_gather_usage) {
     quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
   }
+  quant_config.set_pdl_sync(pdl_sync);
+  quant_config.set_pdl_trigger(pdl_trigger);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -1117,7 +1125,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
 }
 
 void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              const std::optional<TensorWrapper>& noop_flag) {
+                              const std::optional<TensorWrapper>& noop_flag, const bool pdl_sync,
+                              const bool pdl_trigger) {
   if (input.numel() == 0) {
     return;
   }
@@ -1125,6 +1134,8 @@ void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
+  quant_config.set_pdl_sync(pdl_sync);
+  quant_config.set_pdl_trigger(pdl_trigger);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
