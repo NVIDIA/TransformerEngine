@@ -1138,7 +1138,7 @@ class CustomRecipeState(RecipeState):
         out = []
         for i in range(self.num_quantizers):
             # TODO(negvet): obtain forward_roles/backward_roles from module/op
-            # configuration (e.g., te.Linear uses (3/2), te.ops.Linear uses (2/1)). 
+            # configuration (e.g., te.Linear uses (3/2), te.ops.Linear uses (2/1)).
             # For now, hardcode the te.Linear layout
             forward_roles = ("input", "weight", "output")
             backward_roles = ("grad_output", "grad_input")

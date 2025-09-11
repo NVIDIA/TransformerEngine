@@ -258,12 +258,6 @@ def test_factories_return_distinct_instances_and_buffers():
     q1.scale.fill_(123.0)
     assert not torch.equal(q1.scale, q2.scale)
 
-
-
-
-
-
-
     # def make_nvfp4_quantizer():
     #     return MyNVFP4Quantizer(tex.DType.kFloat8E5M2, device="cuda")              # pyright: ignore[reportUndefinedVariable]
 
@@ -275,12 +269,9 @@ def test_factories_return_distinct_instances_and_buffers():
     #     out = model(inp)
 
 
-
-
-
 #     # single factory provided by user
 #     def quantizer_factory(role):
-#         if role in ("input", "weight"):         
+#         if role in ("input", "weight"):
 #             return MyNVFP4Quantizer()                                     # pyright: ignore[reportUndefinedVariable]
 #         return MyFP8Quantizer()                                           # pyright: ignore[reportUndefinedVariable]
 
@@ -290,14 +281,10 @@ def test_factories_return_distinct_instances_and_buffers():
 #         out = model(inp)                                                 # pyright: ignore[reportUndefinedVariable]
 
 
-
-
-
-
 # from typing import Union
 
 # from transformer_engine.pytorch import Quantizer
- 
+
 
 # class MyNVFP4Quantizer(Quantizer):
 #     def quantize_impl(self, tensor: torch.Tensor) -> Union[*TensorBase, *Tensor]:       # pyright: ignore[reportUndefinedVariable]

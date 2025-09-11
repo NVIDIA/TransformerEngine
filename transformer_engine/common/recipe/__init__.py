@@ -385,7 +385,7 @@ class CustomRecipe(Recipe):
                        **kwargs,
                    )
 
-               Where `role` is one of the following strings for e.g. te.Linear 
+               Where `role` is one of the following strings for e.g. te.Linear
                (stable public contract):
                - forward:  "input", "weight", "output"
                - backward: "grad_output", "grad_input"
