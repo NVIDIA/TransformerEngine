@@ -7,7 +7,8 @@ from __future__ import annotations
 import warnings
 import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
@@ -85,6 +86,10 @@ class Recipe:
     def float8_block_scaling(self):
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
+
+    def custom(self):
+        """Whether the given recipe is custom."""
+        return isinstance(self, CustomRecipe)
 
 
 @dataclass()
@@ -351,3 +356,51 @@ class Float8BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide quantizer factories.
+
+    .. warning::
+        **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Parameters
+    ----------
+    qfactory : Callable
+               Single factory callable that returns a quantizer instance for a
+               given semantic tensor role. Transformer Engine resolves the role
+               from per-mode role layouts and calls the factory with the
+               resolved role and additional keyword-only context. The callable
+               is typically invoked as:
+                   qfactory(
+                       role: Optional[str],
+                       forward_roles: Tuple[str, ...],
+                       backward_roles: Tuple[str, ...],
+                       mode: Literal["forward", "backward"],
+                       quantizer_index: int,
+                       num_quantizers: int,
+                       **kwargs,
+                   )
+
+               Where `role` is one of the following strings for e.g. te.Linear
+               (stable public contract):
+               - forward:  "input", "weight", "output"
+               - backward: "grad_output", "grad_input"
+
+               Note:
+               - Users can ignore the keyword-only context if not needed and
+                 accept only `role`. Extra keyword arguments (`forward_roles`,
+                 `backward_roles`, indices) are provided for advanced/custom
+                 mappings.
+    """
+
+    qfactory: Callable[..., Any]
+
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"

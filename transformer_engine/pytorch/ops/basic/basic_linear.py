@@ -28,7 +28,7 @@ from ...module.base import (
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.base.float8_tensor_base import Float8TensorBase
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,

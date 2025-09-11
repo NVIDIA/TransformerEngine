@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    CustomRecipe,
 )
 
 from .constants import dist_group_type
@@ -789,6 +790,24 @@ def split_and_copy(
     torch._foreach_copy_(outputs, splits)
 
 
+def _resolve_te_role(
+    mode: str,
+    index: int,
+    forward_roles: Tuple[str, ...],
+    backward_roles: Tuple[str, ...],
+) -> str:
+    """Resolve a tensor semantic role for the given context."""
+    if mode == "forward":
+        if len(forward_roles) == 0:
+            raise ValueError("forward_roles must be non-empty when mode=='forward'")
+        return forward_roles[index % len(forward_roles)]
+    if mode == "backward":
+        if len(backward_roles) == 0:
+            raise ValueError("backward_roles must be non-empty when mode=='backward'")
+        return backward_roles[index % len(backward_roles)]
+    raise ValueError(f"Unexpected mode: {mode}")
+
+
 class RecipeState(abc.ABC):
     """Configuration and state for a quantization recipe.
 
@@ -837,6 +856,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif isinstance(recipe, CustomRecipe):
+            cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1084,3 +1105,61 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class CustomRecipeState(RecipeState):
+    """State for CustomRecipe: produce quantizers per tensor."""
+
+    recipe: CustomRecipe
+    mode: str
+    num_quantizers: int
+    device: Optional[torch.device]
+
+    def __init__(
+        self,
+        recipe: CustomRecipe,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+        if getattr(recipe, "qfactory", None) is None:
+            raise ValueError("CustomRecipe requires `qfactory`.")
+
+    def make_quantizers(self) -> list:
+        qfactory = self.recipe.qfactory
+        out = []
+        for i in range(self.num_quantizers):
+            # TODO(negvet): obtain forward_roles/backward_roles from module/op
+            # configuration (e.g., te.Linear uses (3/2), te.ops.Linear uses (2/1)).
+            # For now, hardcode the te.Linear layout
+            forward_roles = ("input", "weight", "output")
+            backward_roles = ("grad_output", "grad_input")
+
+            role_te = _resolve_te_role(
+                self.mode,
+                i,
+                forward_roles=forward_roles,
+                backward_roles=backward_roles,
+            )
+
+            # Get quantizer from user defined factory
+            # Users can rely on role_te when they do not want to learn TE quantizer ordering
+            # The rest context can still be used for custom ordering
+            quantizer = qfactory(
+                role_te,
+                forward_roles=forward_roles,
+                backward_roles=backward_roles,
+                mode=self.mode,
+                quantizer_index=i,
+                num_quantizers=self.num_quantizers,
+            )
+            out.append(quantizer)
+        return out
