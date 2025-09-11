@@ -207,6 +207,8 @@ class AttentionParams:
         Attention dropout.
     context_parallel: bool, default = `False`
         Whether context parallelism is used or not.
+    cp_comm_type: str, default = "p2p"
+        The communication type of context parallelism.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
     is_training: bool, default = `True`
@@ -555,7 +557,7 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
             use_fused_attention = False
-            logger.debug("Disabling UnfusedAttention for softmax_type = %s in FP8", softmax_type)
+            logger.debug("Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type)
             use_unfused_attention = False
         if qkv_format == "thd":
             logger.debug(
@@ -563,19 +565,20 @@ def get_attention_backend(
             )
             use_fused_attention = False
             logger.debug(
-                "Disabling UnfusedAttention for softmax_type = %s and qkv_format = thd",
+                "Disabling UnfusedDotProductAttention for softmax_type = %s and qkv_format = thd",
                 softmax_type,
             )
             use_unfused_attention = False
         if context_parallel:
             logger.debug(
-                "Disabling UnfusedAttention for context parallelism with softmax_type = %s",
+                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type = %s",
                 softmax_type,
             )
             use_unfused_attention = False
             if cp_comm_type != "a2a":
                 logger.debug(
-                    "Disabling FusedAttention for context parallelism with cp_comm_type = %s",
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and cp_comm_type = %s",
+                    softmax_type,
                     cp_comm_type,
                 )
                 use_fused_attention = False

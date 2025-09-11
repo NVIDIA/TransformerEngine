@@ -100,6 +100,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     s_q = is_ragged_q ? max_t_q : s_q;
     s_kv = is_ragged_kv ? max_t_kv : s_kv;
   }
+
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
   try {
     FADescriptor_v1 descriptor{b,

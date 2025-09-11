@@ -3912,9 +3912,10 @@ def attn_forward_func_with_cp(
     """
 
     if cp_comm_type == "a2a+p2p":
-        assert (
-            isinstance(cp_group, list) and len(cp_group) == 2
-        ), "Hierarchical context parallelism (CP), i.e. a2a+p2p, requires a list of two CP groups!"
+        assert isinstance(
+            cp_group, list
+        ), "Hierarchical CP implementation needs multi-level CP groups!"
+        assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
             cp_comm_type = "p2p"

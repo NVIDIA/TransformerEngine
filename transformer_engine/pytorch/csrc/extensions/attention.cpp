@@ -235,17 +235,17 @@ std::vector<py::object> fused_attn_fwd(
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   };
   // allocate memory for nvte_aux_tensor_pack.tensors
-  // f16_max512: S [b, h, sq, skv]
+  // f16_max512   : S [b, h, sq, skv]
   // f16_arbitrary: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // fp8: M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
+  // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
-  // intermediate softmax tensor
+  // intermediate softmax tensor, S or M
   output_tensor =
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // fp8 has an additional softmax stats tensor
+  // fp8 has an additional softmax stats tensor, ZInv
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
@@ -256,11 +256,11 @@ std::vector<py::object> fused_attn_fwd(
   if (i < nvte_aux_tensor_pack.size) {
     set_tensor_param(i++, rng_state);
   }
-  // bias
+  // bias (optional)
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     set_tensor_param(i++, Bias.value());
   }
-  // softmax_offset
+  // softmax_offset (optional)
   if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
     set_tensor_param(i++, SoftmaxOffset.value());
   }
@@ -513,7 +513,7 @@ std::vector<py::object> fused_attn_bwd(
     }
   }
 
-  // create dSoftmaxOffset the same shape as SoftmaxOffset
+  // create dSoftmaxOffset in the same shape as SoftmaxOffset
   at::Tensor dSoftmaxOffset;
   TensorWrapper te_dSoftmaxOffset;
   if (softmax_type != NVTE_VANILLA_SOFTMAX) {

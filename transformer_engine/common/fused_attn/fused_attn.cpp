@@ -367,6 +367,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         (supported_ragged_offset_size) &&
         // 9.10.0/9.10.1: known bugs with SDPA F16
         (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001) &&
+	// softmax type
+	// pre-9.13: vanilla
+	// 9.13+: vanilla, off-by-one, learnable
         (cudnn_runtime_version >= 91300 ||
          (cudnn_runtime_version < 91300 &&
           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX))) {
@@ -556,8 +559,8 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 #if (CUDNN_VERSION >= 8900)
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor *input_Bias, *input_rng_state, *input_SoftmaxOffset;
-    input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_Bias, *input_SoftmaxOffset;
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
@@ -790,8 +793,8 @@ void nvte_fused_attn_bwd_kvpacked(
 #if (CUDNN_VERSION >= 8903)
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor *input_Bias, *input_rng_state, *input_SoftmaxOffset;
-    input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_Bias, *input_SoftmaxOffset;
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
@@ -1021,8 +1024,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #if (CUDNN_VERSION >= 8900)
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor *input_Bias, *input_rng_state, *input_SoftmaxOffset = nullptr;
-    input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor *input_Bias, *input_SoftmaxOffset;
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }

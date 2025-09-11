@@ -132,7 +132,6 @@ def test_dot_product_attention(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
     )
@@ -143,7 +142,6 @@ def test_dot_product_attention(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
             is_training=is_training,
         )

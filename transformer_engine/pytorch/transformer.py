@@ -200,6 +200,8 @@ class TransformerLayer(torch.nn.Module):
                  'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
                  'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
                  where alpha is a learnable parameter in shape [h].
+                 'off-by-one' and 'learnable' softmax types are also called sink attention
+                 ('zero sink' and 'learnable sink').
 
     Parallelism parameters
     ----------------------

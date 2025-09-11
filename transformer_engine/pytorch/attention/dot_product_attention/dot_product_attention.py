@@ -178,6 +178,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                  'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
                  'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
                  where alpha is a learnable parameter in shape [h].
+                 'off-by-one' and 'learnable' softmax types are also called sink attention
+                 ('zero sink' and 'learnable sink').
 
     Parallelism parameters
     ----------------------
@@ -661,7 +663,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
-            allow_different_data_param_dtypes=self.softmax_type != "vanilla",
+            allow_different_data_and_param_types=self.softmax_type != "vanilla",
         ) as query_layer:
             # checks for RNG
             if self.rng_states_tracker is not None and is_graph_capturing():

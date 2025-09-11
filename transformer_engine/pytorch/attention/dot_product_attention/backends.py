@@ -331,7 +331,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 dtype=query_layer.dtype
             )
 
-        # apply softmax sink
+        # add attention sink to the last column: [b, np, sq, sk+1]
         if self.softmax_type != "vanilla":
             matmul_result = torch.cat(
                 [
@@ -345,7 +345,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_mask = F.pad(attention_mask, (0, 1), mode="constant", value=False)
             attn_mask_type = "arbitrary"
 
-        # attention scores and attention mask [b, np, sq, sk]
+        # attention scores and attention mask
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
             matmul_result, attention_mask, attn_mask_type, softmax_scale
@@ -356,7 +356,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if "padding" in attn_mask_type:
             attention_probs = attention_probs.masked_fill(attention_mask, 0)
 
-        # remove attention sink
+        # remove attention sink: [b, np, sq, sk]
         if self.softmax_type != "vanilla":
             attention_probs = attention_probs[..., :-1]
 

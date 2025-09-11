@@ -20,6 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     AttentionParams,
     AttentionLogging,
+    check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
@@ -179,6 +180,8 @@ class ModelConfig:
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        context_parallel: bool = False,
+        cp_comm_type: str = "p2p",
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,
@@ -204,7 +207,9 @@ class ModelConfig:
         self.alibi_type = alibi_type
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
-        self.window_size = window_size
+        self.window_size = check_set_window_size(self.attn_mask_type, window_size)
+        self.context_parallel = context_parallel
+        self.cp_comm_type = cp_comm_type
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
         self.num_layers = num_layers
@@ -225,10 +230,7 @@ def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
     qkv_layout: str,
-    window_size: Tuple[int, int] = (-1, -1),
     pad_between_seqs: bool = False,
-    context_parallel: bool = False,
-    cp_comm_type: str = "p2p",
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
@@ -278,15 +280,15 @@ def get_available_attention_backends(
             head_dim_qk=config.head_dim_qk,
             head_dim_v=config.head_dim_v,
             attn_mask_type=config.attn_mask_type,
-            window_size=window_size,
+            window_size=config.window_size,
             alibi_slopes_shape=alibi_slopes_shape,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias_shape=core_attention_bias_shape,
             core_attention_bias_requires_grad=core_attention_bias_requires_grad,
             pad_between_seqs=pad_between_seqs,
             attention_dropout=config.dropout_p,
-            context_parallel=context_parallel,
-            cp_comm_type=cp_comm_type,
+            context_parallel=config.context_parallel,
+            cp_comm_type=config.cp_comm_type,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,

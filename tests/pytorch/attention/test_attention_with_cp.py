@@ -69,6 +69,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
 
     config = model_configs_flash_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and qkv_format == "thd":
@@ -163,6 +165,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention is only supported on sm90+!")
 
     config = model_configs_fused_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
@@ -212,9 +216,6 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
-        window_size=config.window_size,
-        context_parallel=True,
-        cp_comm_type=cp_comm_type,
     )
     _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
