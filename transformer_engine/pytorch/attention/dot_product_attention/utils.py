@@ -426,9 +426,9 @@ def get_attention_backend(
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
-#        if use_unfused_attention:
-#            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
-#            use_unfused_attention = False
+    #        if use_unfused_attention:
+    #            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+    #            use_unfused_attention = False
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size

@@ -135,13 +135,16 @@ else:
 
     fa_utils.set_flash_attention_3_params()
 
+
 def _rmse(a, b):
     return torch.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
 
-global_fwd_count = count(0,1)
-global_bwd_count = count(0,1)
+
+global_fwd_count = count(0, 1)
+global_bwd_count = count(0, 1)
 
 import random
+
 
 def set_random_seed(seed: int):
     """Set random seed for Python random and PyTorch."""
@@ -157,6 +160,7 @@ def set_random_seed(seed: int):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+
 def generate_random_diag(n: int, seed: int | None = None) -> torch.Tensor:
     """Generate a random diagonal matrix of size n. Values are -1 or 1."""
     if seed is not None:
@@ -170,6 +174,7 @@ def generate_random_diag(n: int, seed: int | None = None) -> torch.Tensor:
     assert torch.all(torch.abs(S.diagonal()) == 1)
 
     return S
+
 
 def hadamard_matrix(n: int) -> torch.Tensor:
     """Generate NxN Hadamard matrix"""
@@ -186,6 +191,7 @@ def hadamard_matrix(n: int) -> torch.Tensor:
         )
         H = H / torch.sqrt(torch.tensor(2))
         return H
+
 
 def generate_rht(n: int, seed: int | None = None) -> torch.Tensor:
     """Generate NxN Randomized Hadamard Transform tensor"""
@@ -204,6 +210,7 @@ def generate_rht(n: int, seed: int | None = None) -> torch.Tensor:
 
     return RHT
 
+
 def apply_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
     # Check that RHT is square
     assert rht.ndim == 2
@@ -214,6 +221,7 @@ def apply_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
     x = torch.matmul(x, rht)
     x = torch.reshape(x, orig_shape)
     return x
+
 
 def undo_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
     # Check that RHT is square
@@ -226,6 +234,7 @@ def undo_rht(x: torch.Tensor, rht: torch.Tensor) -> torch.Tensor:
     x = torch.reshape(x, orig_shape)
     return x
 
+
 class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
@@ -234,8 +243,12 @@ class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
                 tensors_q = [quantizer(x).dequantize() for x in [tensor1, tensor2, tensor3]]
             else:
                 query_layer, key_layer, value_layer = tensor1, tensor2, tensor3
-                query_layer, key_layer, value_layer = [x.contiguous() for x in [query_layer, key_layer, value_layer]]
-                q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, query_layer, key_layer, value_layer, quantizer)
+                query_layer, key_layer, value_layer = [
+                    x.contiguous() for x in [query_layer, key_layer, value_layer]
+                ]
+                q_fp8, k_fp8, v_fp8 = combine_and_quantize(
+                    qkv_layout, query_layer, key_layer, value_layer, quantizer
+                )
                 tensors_q = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
         elif quantizer_name == "S_quantizer":
             s_fp8 = quantizer(tensor1)
@@ -245,6 +258,7 @@ class _UnfusedDPAQuantizationEmulator(torch.autograd.Function):
         ctx.quantizer = quantizer
         ctx.quantizer_name = quantizer_name
         return tensors_q[0], tensors_q[1], tensors_q[2]
+
     @staticmethod
     def backward(ctx, grad1, grad2, grad3):
         if ctx.quantizer_name == "dP_quantizer":
@@ -423,7 +437,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         dP_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=dP_quantizer.dtype, device="cuda")
 
         # quantize and dequantize q,k,v to simulate CS
-        query_layer, key_layer, value_layer = _UnfusedDPAQuantizationEmulator.apply(query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout)
+        query_layer, key_layer, value_layer = _UnfusedDPAQuantizationEmulator.apply(
+            query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout
+        )
 
         # Raw attention scores. [b * np, sq, sk]
         if core_attention_bias_type == "no_bias":
@@ -470,7 +486,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
 
         # quantize and dequantize dP to simulate CS
-        matmul_result, *_ = _UnfusedDPAQuantizationEmulator.apply(matmul_result, None, None, dP_quantizer, "dP_quantizer", None)
+        matmul_result, *_ = _UnfusedDPAQuantizationEmulator.apply(
+            matmul_result, None, None, dP_quantizer, "dP_quantizer", None
+        )
 
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
@@ -504,7 +522,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         # quantize and dequantize S to simulate CS
-        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(attention_probs, None, None, S_quantizer, "S_quantizer", None)
+        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(
+            attention_probs, None, None, S_quantizer, "S_quantizer", None
+        )
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
@@ -541,7 +561,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = context_layer.view(total_tokens, -1)
 
         # quantize and dequantize dO to simulate CS
-        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(attention_probs, None, None, dO_quantizer, "dO_quantizer", None)
+        attention_probs, *_ = _UnfusedDPAQuantizationEmulator.apply(
+            attention_probs, None, None, dO_quantizer, "dO_quantizer", None
+        )
 
         return context_layer
 
@@ -1129,7 +1151,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
             if bool(int(os.getenv("NVTE_Emulate_in_F16", "0"))):
                 if bool(int(os.getenv("NVTE_Emulate_QDQ_QKV", "0"))):
-                    q_deq16, k_deq16, v_deq16 = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=out_nominal_dtype)
+                    q_deq16, k_deq16, v_deq16 = combine_and_dequantize(
+                        qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=out_nominal_dtype
+                    )
                 else:
                     q_deq16, k_deq16, v_deq16 = q, k, v
                 out_, aux_ctx_tensors = fused_attn_fwd(
@@ -1168,15 +1192,17 @@ class FusedAttnFunc(torch.autograd.Function):
                         t_in = [q, k, v]
                         t_f8 = [out_, aux_ctx_tensors[0], aux_ctx_tensors[1]]
                         t_f16 = [q_deq16, k_deq16, v_deq16]
-                        rmse = [f"{_rmse(x,y).item():.4e}" for x,y in zip(t_in, t_f16)]
+                        rmse = [f"{_rmse(x,y).item():.4e}" for x, y in zip(t_in, t_f16)]
                         tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
                         t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
                         t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
-                        tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
-                        t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
-                        t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
-                        names_minmax = ['qkv        ', 'emu-qkv    ', 'emu-o/stats']
-                        for nm,mm in zip(names_minmax, [tin_minmax_strs, t16_minmax_strs, t8_minmax_strs]):
+                        tin_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in tin_minmax]
+                        t8_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t8_minmax]
+                        t16_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t16_minmax]
+                        names_minmax = ["qkv        ", "emu-qkv    ", "emu-o/stats"]
+                        for nm, mm in zip(
+                            names_minmax, [tin_minmax_strs, t16_minmax_strs, t8_minmax_strs]
+                        ):
                             mm = ", ".join(mm)
                             print(f">>>> fwd p{procid} l{layer_number} {nm}: {mm}")
                         print(f">>>> fwd p{procid} l{layer_number} rmse_qkv   : {", ".join(rmse)}")
@@ -1214,7 +1240,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 )
             # repeat FP8 in F16
             if bool(int(os.getenv("NVTE_REPEAT_in_F16", "0"))):
-                q_clone, k_clone, v_clone = [x.detach().clone() for x in [q,k,v]]
+                q_clone, k_clone, v_clone = [x.detach().clone() for x in [q, k, v]]
                 out_clone, aux_ctx_tensors_clone = fused_attn_fwd(
                     is_training,
                     max_seqlen_q,
@@ -1249,12 +1275,23 @@ class FusedAttnFunc(torch.autograd.Function):
                     rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
                     if layer_number == layer and procid == 0:
                         print(f">> aux[0], {aux_ctx_tensors[0].view(-1)[:10]}")
-                        print(f">> aux[0], {aux_ctx_tensors[1].nonzero().sum()}, {aux_ctx_tensors[1].shape}")
+                        print(
+                            f">> aux[0], {aux_ctx_tensors[1].nonzero().sum()},"
+                            f" {aux_ctx_tensors[1].shape}"
+                        )
                         print(f">> aux[1], {aux_ctx_tensors[1].view(-1)[:10]}")
                         print(f">> aux_clone[0], {aux_ctx_tensors_clone[0].view(-1)[:10]}")
                         out_close = torch.allclose(out_, out_clone, atol=atol, rtol=rtol)
-                        lse_close = torch.allclose(aux_ctx_tensors[0], aux_ctx_tensors_clone[0], atol=atol, rtol=rtol)
-                        rmse = [_rmse(x,y) for x,y in [[out_, out_clone], [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]]]]
+                        lse_close = torch.allclose(
+                            aux_ctx_tensors[0], aux_ctx_tensors_clone[0], atol=atol, rtol=rtol
+                        )
+                        rmse = [
+                            _rmse(x, y)
+                            for x, y in [
+                                [out_, out_clone],
+                                [aux_ctx_tensors[0], aux_ctx_tensors_clone[0]],
+                            ]
+                        ]
                         print(f">>>> fwd p{procid} l{layer_number} {out_close=} {lse_close=}")
                         print(f">>>> fwd p{procid} l{layer_number} {rmse=}")
                         t_in = [q, k, v]
@@ -1263,11 +1300,13 @@ class FusedAttnFunc(torch.autograd.Function):
                         tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
                         t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
                         t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
-                        tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
-                        t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
-                        t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
-                        names_minmax = ['qkv        ', 'f8  o/stats', 'f16 o/stats']
-                        for nm,mm in zip(names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]):
+                        tin_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in tin_minmax]
+                        t8_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t8_minmax]
+                        t16_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t16_minmax]
+                        names_minmax = ["qkv        ", "f8  o/stats", "f16 o/stats"]
+                        for nm, mm in zip(
+                            names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]
+                        ):
                             mm = ", ".join(mm)
                             print(f">>>> fwd p{procid} l{layer_number} {nm}: {mm}")
                         torch.cuda.synchronize()
@@ -1275,12 +1314,31 @@ class FusedAttnFunc(torch.autograd.Function):
                         print(f">>> fwd {global_counter=}")
                         if global_counter % 400 == 0:
                             print(f">> saving fwd for {global_counter=}")
-                            tensors_fp8 = [(x._data,x._scale_inv,x._quantizer.scale,x._quantizer.amax) if isinstance(x,Float8TensorBase) else x for x in [q_fp8, k_fp8, v_fp8, out_, aux_ctx_tensors]]
+                            tensors_fp8 = [
+                                (
+                                    (x._data, x._scale_inv, x._quantizer.scale, x._quantizer.amax)
+                                    if isinstance(x, Float8TensorBase)
+                                    else x
+                                )
+                                for x in [q_fp8, k_fp8, v_fp8, out_, aux_ctx_tensors]
+                            ]
                             tensors_fp8.extend([(S_quantizer.scale, S_quantizer.amax)])
-                            tensors_f16 = [q_clone, k_clone, v_clone, out_clone, aux_ctx_tensors_clone]
+                            tensors_f16 = [
+                                q_clone,
+                                k_clone,
+                                v_clone,
+                                out_clone,
+                                aux_ctx_tensors_clone,
+                            ]
                             save_path = "/results/"
-                            torch.save(tensors_fp8, save_path+"fwd_tensors_fp8_"+str(global_counter)+'.pt')
-                            torch.save(tensors_f16, save_path+"fwd_tensors_f16_"+str(global_counter)+'.pt')
+                            torch.save(
+                                tensors_fp8,
+                                save_path + "fwd_tensors_fp8_" + str(global_counter) + ".pt",
+                            )
+                            torch.save(
+                                tensors_f16,
+                                save_path + "fwd_tensors_f16_" + str(global_counter) + ".pt",
+                            )
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1324,18 +1382,17 @@ class FusedAttnFunc(torch.autograd.Function):
                 and bool(int(os.getenv("NVTE_PRINT", "0")))
                 and layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
             ):
-                #torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 print(f">>>>{layer_number}: {fp8_meta["recipe"]}")
                 for i, x in enumerate(quantizers):
                     if x is None:
                         print(f">>>>{layer_number} {names[i]}: None")
                     else:
                         print(
-                            f">>>>{layer_number} {names[i]}:"
-                            f" {x}"
-                            #f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
-                            #f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x"
-                            #f" amax)={(x.scale * x.amax).item():.4e}"
+                            f">>>>{layer_number} {names[i]}: {x}"
+                            # f" {'CS' if x.__class__ == Float8CurrentScalingQuantizer else 'DS'},"
+                            # f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale x"
+                            # f" amax)={(x.scale * x.amax).item():.4e}"
                         )
                 #        if x.amax.isnan():
                 #            print(
@@ -1541,11 +1598,11 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.dP_quantizer,
                         ctx.dQKV_quantizer,
                     ]
-                    #if (
+                    # if (
                     #    int(os.getenv("SLURM_PROCID", "0")) == 0
                     #    and bool(int(os.getenv("NVTE_PRINT", "0")))
                     #    and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
-                    #):
+                    # ):
                     #    for i, x in enumerate(quantizers):
                     #        if x is not None:
                     #            if x.amax.isnan():
@@ -1555,7 +1612,13 @@ class FusedAttnFunc(torch.autograd.Function):
                     #                )
                     if bool(int(os.getenv("NVTE_Emulate_in_F16", "0"))):
                         if bool(int(os.getenv("NVTE_Emulate_QDQ_QKV", "0"))):
-                            q_deq16, k_deq16, v_deq16 = combine_and_dequantize(ctx.qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=dqkv_nominal_dtype)
+                            q_deq16, k_deq16, v_deq16 = combine_and_dequantize(
+                                ctx.qkv_layout,
+                                q_fp8,
+                                k_fp8,
+                                v_fp8,
+                                src_nominal_dtype=dqkv_nominal_dtype,
+                            )
                         else:
                             q_deq16, k_deq16, v_deq16 = q, k, v
                         if bool(int(os.getenv("NVTE_Emulate_QDQ_O", "0"))):
@@ -1578,7 +1641,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             out_deq16,
                             d_out_deq16,
                             dqkv_nominal_dtype,
-                            TE_DType[dqkv_nominal_dtype], #dqkv_te_dtype,
+                            TE_DType[dqkv_nominal_dtype],  # dqkv_te_dtype,
                             aux_ctx_tensors,
                             FusedAttnBackend["F16_arbitrary_seqlen"],
                             cu_seqlens_q_padded,
@@ -1604,18 +1667,27 @@ class FusedAttnFunc(torch.autograd.Function):
                                 t_in = [q, k, v, out, d_out]
                                 t_f8 = [dq_, dk_, dv_]
                                 t_f16 = [q_deq16, k_deq16, v_deq16, out_deq16, d_out_deq16]
-                                rmse = [f"{_rmse(x,y).item():.4e}" for x,y in zip(t_in, t_f16)]
+                                rmse = [f"{_rmse(x,y).item():.4e}" for x, y in zip(t_in, t_f16)]
                                 tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
                                 t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
                                 t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
-                                tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
-                                t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
-                                t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
-                                names_minmax = ['qkvodo     ', 'emu-qkvodo ', 'emu-dqkv   ']
-                                for nm,mm in zip(names_minmax, [tin_minmax_strs, t16_minmax_strs, t8_minmax_strs]):
+                                tin_minmax_strs = [
+                                    f"({mi:.4e},{ma:.4e})" for (mi, ma) in tin_minmax
+                                ]
+                                t8_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t8_minmax]
+                                t16_minmax_strs = [
+                                    f"({mi:.4e},{ma:.4e})" for (mi, ma) in t16_minmax
+                                ]
+                                names_minmax = ["qkvodo     ", "emu-qkvodo ", "emu-dqkv   "]
+                                for nm, mm in zip(
+                                    names_minmax, [tin_minmax_strs, t16_minmax_strs, t8_minmax_strs]
+                                ):
                                     mm = ", ".join(mm)
                                     print(f">>>> bwd p{procid} l{ctx.layer_number} {nm}: {mm}")
-                                print(f">>>> bwd p{procid} l{ctx.layer_number} rmse_qkvodo: {", ".join(rmse)}")
+                                print(
+                                    f">>>> bwd p{procid} l{ctx.layer_number} rmse_qkvodo:"
+                                    f" {', '.join(rmse)}"
+                                )
 
                     else:
                         # q_fp8, k_fp8, v_fp8, out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16,
@@ -1633,7 +1705,12 @@ class FusedAttnFunc(torch.autograd.Function):
                                 layer = int(os.getenv("NVTE_LAYER_NUMBER", str(ctx.layer_number)))
                                 procid = int(os.getenv("SLURM_PROCID", "0"))
                                 if ctx.layer_number == layer and procid == 0:
-                                    print(f">>>>>>>>>>>>>>>>>> bwd f16 O", out_bwd.dtype, dqkv_nominal_dtype, dqkv_te_dtype)
+                                    print(
+                                        f">>>>>>>>>>>>>>>>>> bwd f16 O",
+                                        out_bwd.dtype,
+                                        dqkv_nominal_dtype,
+                                        dqkv_te_dtype,
+                                    )
                         dq_, dk_, dv_, *rest = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
@@ -1693,16 +1770,15 @@ class FusedAttnFunc(torch.autograd.Function):
                         and bool(int(os.getenv("NVTE_PRINT", "0")))
                         and ctx.layer_number == int(os.getenv("NVTE_LAYER_NUMBER", "1"))
                     ):
-                        #torch.cuda.synchronize()
+                        # torch.cuda.synchronize()
                         for i, x in enumerate(quantizers):
                             if x is None:
                                 print(f">>>>{ctx.layer_number} {names[i]}: None")
                             else:
                                 print(
-                                    f">>>>{ctx.layer_number} {names[i]}:"
-                                    f" {x}"
-                                    #f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale"
-                                    #f" x amax)={(x.scale * x.amax).item():.4e}"
+                                    f">>>>{ctx.layer_number} {names[i]}: {x}"
+                                    # f" scale={x.scale.item():.4e}, amax={x.amax.item():.4e}, (scale"
+                                    # f" x amax)={(x.scale * x.amax).item():.4e}"
                                 )
                         #        if x.amax.isnan():
                         #            print(
@@ -1715,8 +1791,12 @@ class FusedAttnFunc(torch.autograd.Function):
                         )
                     # repeat FP8 in F16
                     if bool(int(os.getenv("NVTE_REPEAT_in_F16", "0"))):
-                        assert all(isinstance(x,torch.Tensor) for x in [q,k,v,out,d_out]), "BWD: qkv must be F16"
-                        q_clone, k_clone, v_clone, out_clone, d_out_clone = [x.detach().clone() for x in [q,k,v,out,d_out]]
+                        assert all(
+                            isinstance(x, torch.Tensor) for x in [q, k, v, out, d_out]
+                        ), "BWD: qkv must be F16"
+                        q_clone, k_clone, v_clone, out_clone, d_out_clone = [
+                            x.detach().clone() for x in [q, k, v, out, d_out]
+                        ]
                         dq_clone, dk_clone, dv_clone, *rest_clone = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
@@ -1728,7 +1808,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             out_clone,
                             d_out_clone,
                             dqkv_nominal_dtype,
-                            TE_DType[dqkv_nominal_dtype], #dqkv_te_dtype,
+                            TE_DType[dqkv_nominal_dtype],  # dqkv_te_dtype,
                             aux_ctx_tensors_clone,
                             FusedAttnBackend["F16_arbitrary_seqlen"],
                             cu_seqlens_q_padded,
@@ -1751,8 +1831,14 @@ class FusedAttnFunc(torch.autograd.Function):
                             atol = float(os.getenv("NVTE_ATOL", "1e-2"))
                             rtol = float(os.getenv("NVTE_ATOL", "1e-2"))
                             if ctx.layer_number == layer and procid == 0:
-                                dqkv_close = [torch.allclose(x, y, atol=atol, rtol=rtol) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
-                                rmse = [_rmse(x,y) for x,y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])]
+                                dqkv_close = [
+                                    torch.allclose(x, y, atol=atol, rtol=rtol)
+                                    for x, y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])
+                                ]
+                                rmse = [
+                                    _rmse(x, y)
+                                    for x, y in zip([dq_, dk_, dv_], [dq_clone, dk_clone, dv_clone])
+                                ]
                                 print(f">>>> bwd p{procid} l{ctx.layer_number} {dqkv_close=}")
                                 print(f">>>> bwd p{procid} l{ctx.layer_number} {rmse=}")
                                 t_in = [q, k, v, out, d_out]
@@ -1761,11 +1847,17 @@ class FusedAttnFunc(torch.autograd.Function):
                                 tin_minmax = [(x.min().item(), x.max().item()) for x in t_in]
                                 t8_minmax = [(x.min().item(), x.max().item()) for x in t_f8]
                                 t16_minmax = [(x.min().item(), x.max().item()) for x in t_f16]
-                                tin_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in tin_minmax]
-                                t8_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t8_minmax]
-                                t16_minmax_strs =[f"({mi:.4e},{ma:.4e})" for (mi,ma) in t16_minmax]
-                                names_minmax = ['qkvodo  ', 'f8  dqkv', 'f16 dqkv']
-                                for nm,mm in zip(names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]):
+                                tin_minmax_strs = [
+                                    f"({mi:.4e},{ma:.4e})" for (mi, ma) in tin_minmax
+                                ]
+                                t8_minmax_strs = [f"({mi:.4e},{ma:.4e})" for (mi, ma) in t8_minmax]
+                                t16_minmax_strs = [
+                                    f"({mi:.4e},{ma:.4e})" for (mi, ma) in t16_minmax
+                                ]
+                                names_minmax = ["qkvodo  ", "f8  dqkv", "f16 dqkv"]
+                                for nm, mm in zip(
+                                    names_minmax, [tin_minmax_strs, t8_minmax_strs, t16_minmax_strs]
+                                ):
                                     mm = ", ".join(mm)
                                     print(f">>>> bwd p{procid} l{ctx.layer_number} {nm}: {mm}")
                                 torch.cuda.synchronize()
@@ -1773,12 +1865,61 @@ class FusedAttnFunc(torch.autograd.Function):
                                 print(f">>> bwd {global_counter=}")
                                 if global_counter % 400 == 0:
                                     print(f">> saving bwd for {global_counter=}")
-                                    tensors_fp8 = [(x._data,x._scale_inv,x._quantizer.scale,x._quantizer.amax) if isinstance(x,Float8TensorBase) else x for x in [q_fp8, k_fp8, v_fp8, out_fp8, d_out_fp8, aux_ctx_tensors, dq_, dk_, dv_]]
-                                    tensors_fp8.extend([(x.scale, x.amax) for x in [ctx.S_quantizer, ctx.dP_quantizer]])
-                                    tensors_f16 = [q_clone, k_clone, v_clone, out_clone, d_out_clone, aux_ctx_tensors_clone, dq_clone, dk_clone, dv_clone]
+                                    tensors_fp8 = [
+                                        (
+                                            (
+                                                x._data,
+                                                x._scale_inv,
+                                                x._quantizer.scale,
+                                                x._quantizer.amax,
+                                            )
+                                            if isinstance(x, Float8TensorBase)
+                                            else x
+                                        )
+                                        for x in [
+                                            q_fp8,
+                                            k_fp8,
+                                            v_fp8,
+                                            out_fp8,
+                                            d_out_fp8,
+                                            aux_ctx_tensors,
+                                            dq_,
+                                            dk_,
+                                            dv_,
+                                        ]
+                                    ]
+                                    tensors_fp8.extend(
+                                        [
+                                            (x.scale, x.amax)
+                                            for x in [ctx.S_quantizer, ctx.dP_quantizer]
+                                        ]
+                                    )
+                                    tensors_f16 = [
+                                        q_clone,
+                                        k_clone,
+                                        v_clone,
+                                        out_clone,
+                                        d_out_clone,
+                                        aux_ctx_tensors_clone,
+                                        dq_clone,
+                                        dk_clone,
+                                        dv_clone,
+                                    ]
                                     save_path = "/results/"
-                                    torch.save(tensors_fp8, save_path+"bwd_tensors_fp8_"+str(global_counter)+'.pt')
-                                    torch.save(tensors_f16, save_path+"bwd_tensors_f16_"+str(global_counter)+'.pt')
+                                    torch.save(
+                                        tensors_fp8,
+                                        save_path
+                                        + "bwd_tensors_fp8_"
+                                        + str(global_counter)
+                                        + ".pt",
+                                    )
+                                    torch.save(
+                                        tensors_f16,
+                                        save_path
+                                        + "bwd_tensors_f16_"
+                                        + str(global_counter)
+                                        + ".pt",
+                                    )
 
                 else:
                     if isinstance(d_out, QuantizedTensor):

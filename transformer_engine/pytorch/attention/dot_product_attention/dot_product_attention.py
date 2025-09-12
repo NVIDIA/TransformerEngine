@@ -12,7 +12,15 @@ import logging
 
 import torch
 
-from transformer_engine.common.recipe import QParams, Recipe, Format, DelayedScaling, Float8CurrentScaling, MXFP8BlockScaling, Float8BlockScaling
+from transformer_engine.common.recipe import (
+    QParams,
+    Recipe,
+    Format,
+    DelayedScaling,
+    Float8CurrentScaling,
+    MXFP8BlockScaling,
+    Float8BlockScaling,
+)
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import (
@@ -472,7 +480,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             fake_secondary_recipe = MXFP8BlockScaling(
                 margin=0,
                 fp8_format=fp8_autocast_recipe.fp8_format,
-                #fp8_format=Format.E5M2,
+                # fp8_format=Format.E5M2,
                 fp8_dpa=fp8_autocast_recipe.fp8_dpa,
                 fp8_mha=fp8_autocast_recipe.fp8_mha,
             )
@@ -493,12 +501,19 @@ class DotProductAttention(TransformerEngineBaseModule):
         if fp8_autocast_recipe.delayed():
             # recipes: [DS]
             recipes = [primary_recipe]
-        if fp8_autocast_recipe.float8_current_scaling() and not force_dpa_recipe_DS and not force_dpa_recipe_MXFP8 and not force_dpa_recipe_BLOCKFP8:
+        if (
+            fp8_autocast_recipe.float8_current_scaling()
+            and not force_dpa_recipe_DS
+            and not force_dpa_recipe_MXFP8
+            and not force_dpa_recipe_BLOCKFP8
+        ):
             secondary_recipe = fake_secondary_recipe
             # recipes: [CS, DS]
             recipes = [primary_recipe, secondary_recipe]
             recipe_ = secondary_recipe
-        if fp8_autocast_recipe.float8_current_scaling() and (force_dpa_recipe_DS or force_dpa_recipe_MXFP8 or force_dpa_recipe_BLOCKFP8):
+        if fp8_autocast_recipe.float8_current_scaling() and (
+            force_dpa_recipe_DS or force_dpa_recipe_MXFP8 or force_dpa_recipe_BLOCKFP8
+        ):
             primary_recipe = fake_secondary_recipe
             # recipes: [DS]
             recipes = [primary_recipe]

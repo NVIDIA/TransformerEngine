@@ -330,9 +330,9 @@ class Float8BlockScaling(Recipe):
         assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
         assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
         assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
-        #assert (
+        # assert (
         #    not self.fp8_dpa and not self.fp8_mha
-        #), "FP8 attention is not supported for Float8BlockScaling."
+        # ), "FP8 attention is not supported for Float8BlockScaling."
 
     def __repr__(self) -> str:
         return (
