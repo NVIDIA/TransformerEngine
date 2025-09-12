@@ -12,6 +12,8 @@ import argparse
 import warnings
 import pprint
 import yaml
+from contextlib import nullcontext
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -35,9 +37,10 @@ class multi_module_model(torch.nn.Module):
         self.num_layers = num_layers
         self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
 
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
+    def forward(self, x, layer_contexts):
+        for layer, context in zip(self.layers, layer_contexts):
+            with context():
+                x = layer(x)
         return x
 
 
@@ -237,11 +240,45 @@ def _parse_args(argv=None, namespace=None):
         default=False,
         help="Print out additional debug information.",
     )
+    parser.add_argument(
+        "--first-last-layers-bf16",
+        action="store_true",
+        default=False,
+        help="Use bf16 for first and last N layers.",
+    )
+    parser.add_argument(
+        "--num-layers-at-start-in-bf16",
+        type=int,
+        default=0,
+        help="Number of layers at the start to run in bf16.",
+    )
+    parser.add_argument(
+        "--num-layers-at-end-in-bf16",
+        type=int,
+        default=0,
+        help="Number of layers at the end to run in bf16.",
+    )
     args = parser.parse_args(argv, namespace)
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
         args.use_cuda_graphs = False
+
+    if not args.first_last_layers_bf16 and (
+        args.num_layers_at_start_in_bf16 > 0 or args.num_layers_at_end_in_bf16 > 0
+    ):
+        warnings.warn(
+            "num-layers-at-start-in-bf16 and num-layers-at-end-in-bf16 are only supported when"
+            " first-last-layers-bf16 is enabled!"
+        )
+        args.num_layers_at_start_in_bf16 = 0
+        args.num_layers_at_end_in_bf16 = 0
+
+    if args.num_layers_at_start_in_bf16 + args.num_layers_at_end_in_bf16 > args.num_layers:
+        raise ValueError(
+            "num-layers-at-start-in-bf16 + num-layers-at-end-in-bf16 must be less than or equal to"
+            " num-layers!"
+        )
 
     return args
 
@@ -381,10 +418,21 @@ def _train(opts):
             "qkv_dgrad": {"method": "ring_exchange"},
             "fc1_dgrad": {"method": "ring_exchange"},
         }
+
+    quantization_modes = [
+        (
+            te.module.base.UserBufferQuantizationMode.FP8
+            if opts.fp8
+            else te.module.base.UserBufferQuantizationMode.NONE
+        )
+    ]
+    if opts.first_last_layers_bf16 and opts.fp8:
+        quantization_modes.append(te.module.base.UserBufferQuantizationMode.NONE)
+
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
         opts.tp,
-        use_fp8=opts.fp8,
+        quantization_modes=quantization_modes,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
@@ -423,6 +471,16 @@ def _train(opts):
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
 
+    layer_contexts = [
+        (
+            partial(te.fp8_autocast, enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=nccl_world)
+            if opts.num_layers_at_start_in_bf16 <= i
+            and i < (opts.num_layers - opts.num_layers_at_end_in_bf16)
+            else nullcontext
+        )
+        for i in range(opts.num_layers)
+    ]
+
     # Prepare random input tensors
     test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
     test_x.retain_grad()
@@ -435,14 +493,13 @@ def _train(opts):
     # Execute fwd/bwd and collect tensors to test
     def run_fwd_bwd(model, x):
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=nccl_world):
-                y = model(x)
-                if isinstance(y, tuple):
-                    out, *_ = y
-                else:
-                    out = y
-                loss = out.sum()
-                loss.backward()
+            y = model(x, layer_contexts)
+            if isinstance(y, tuple):
+                out, *_ = y
+            else:
+                out = y
+            loss = out.sum()
+            loss.backward()
         return out
 
     torch_rng_state = torch.get_rng_state()

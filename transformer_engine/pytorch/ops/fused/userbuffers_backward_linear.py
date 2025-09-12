@@ -14,11 +14,12 @@ from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_exter
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...module.base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_ub,
-    get_workspace,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
+    fill_userbuffers_buffer_for_all_gather,
+    get_dummy_wgrad,
+    get_ub,
+    get_workspace,
 )
 from ...tensor.quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
@@ -240,16 +241,16 @@ class UserbuffersBackwardLinear(FusedOperation):
         with_dgrad_all_gather_x = False
         with_wgrad_reduce_scatter_dx = False
         if tensor_parallel_mode == "row":
-            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
             ub_type_dgrad = CommOverlapType.AG
             with_dgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
             if input_requires_grad and weight_requires_grad:
                 with_bulk_overlap = True
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.AG
                 with_dgrad_all_gather_x = True
-                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
                 ub_type_wgrad = CommOverlapType.RS
                 with_wgrad_reduce_scatter_dx = True
                 if ub_comm_wgrad.is_fp8_ubuf():
@@ -257,7 +258,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                         "Userbuffers reduce-scatter is not supported with FP8 buffers"
                     )
             else:
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.RS
                 with_dgrad_reduce_scatter_dx = True
                 if ub_comm_dgrad.is_fp8_ubuf():
@@ -408,7 +409,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
-                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
 
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -513,20 +514,22 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Saved tensors from forward pass
         (x_local, w) = linear_op_ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
-            if hasattr(linear_op.weight, "__fsdp_param__"):
-                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
-
-            if not hasattr(linear_op.weight, "main_grad"):
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = linear_op.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -558,10 +561,21 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Clear input tensor if possible
         clear_tensor_data(x_local)
 
-        # Return gradients
-        grad_params = [() for _ in range(len(self.basic_ops))]
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
             grad_weight = None
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
+
+        # Return gradients
+        grad_params = [() for _ in range(len(self.basic_ops))]
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
             grad_params[self._op_idxs["bias"]] = (grad_bias,)

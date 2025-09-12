@@ -417,6 +417,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           actual_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }
@@ -455,6 +456,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           layout_group, actual_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
+      NVTE_CHECK_CUDA(cudaGetLastError());
       if (is_ragged_q) {
         variant_pack[offset_q] = devOffsetsQ;
         variant_pack[offset_o] = devOffsetsO;
@@ -885,6 +887,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           actual_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }
@@ -918,6 +921,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           layout_group, actual_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
+      NVTE_CHECK_CUDA(cudaGetLastError());
       if (is_ragged_q) {
         variant_pack[offset_q] = devOffsetsQ;
         variant_pack[offset_o] = devOffsetsO;
