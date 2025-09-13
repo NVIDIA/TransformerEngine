@@ -43,14 +43,6 @@ class MXFP8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
 
-    def __repr__(self) -> str:
-        return (
-            f"quantizer_type={self.__class__.__name__}, "
-            f"fp8_dtype={self.dtype}, "
-            f"rowwise_usage={self.rowwise_usage}, "
-            f"columnwise_usage={self.columnwise_usage}"
-        )
-
     def update_quantized(
         self,
         src: torch.Tensor,

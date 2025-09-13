@@ -388,7 +388,6 @@ class FP8GlobalStateManager:
     ) -> None:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
-        layer = int(os.getenv("NVTE_LAYER_NUMBER", "1"))
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
@@ -397,9 +396,6 @@ class FP8GlobalStateManager:
             if len(amax_buffer) == 0:
                 continue
 
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
-                print(f">>>> reduce_and_update_fp8_tensors: {forward=}, {len(amax_buffer)=}")
-                print(f">>>> amax_buffer {amax_buffer[layer-1]}")
             # Retrieve autocast specific args and concat amaxes.
             recipe, group = cls.autocast_arguments[autocast_key]
             contiguous_amax = torch.cat(amax_buffer)
@@ -419,11 +415,6 @@ class FP8GlobalStateManager:
                 or callable(recipe.scaling_factor_compute_algo)
             )
 
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
-                int(os.getenv("NVTE_PRINT", "0"))
-            ):  # and not forward:
-                print(f">>>> before history: {cls.global_amax_history_buffer[buffer_key][layer-1]}")
-                print(f">>>> before scale  : {cls.global_scale_buffer[buffer_key][layer-1]}")
             if not unfused_update:
                 tex.fused_amax_and_scale_update_after_reduction(
                     contiguous_amax,
@@ -443,11 +434,6 @@ class FP8GlobalStateManager:
                     _amax_and_scale_update(
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
-            if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(
-                int(os.getenv("NVTE_PRINT", "0"))
-            ):  # and not forward:
-                print(f">>>> after history: {cls.global_amax_history_buffer[buffer_key][layer-1]}")
-                print(f">>>> after scale  : {cls.global_scale_buffer[buffer_key][layer-1]}")
 
     @classmethod
     def get_unique_autocast_key(

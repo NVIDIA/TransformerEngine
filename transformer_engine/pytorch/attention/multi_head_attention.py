@@ -728,7 +728,8 @@ class MultiheadAttention(torch.nn.Module):
             FP8GlobalStateManager.is_fp8_enabled()
             and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
         )
-        # Note: remove this when current scaling gemms can produce amax/scale_inv for Float8Tensor
+        # GEMMs in Float8CurrentScaling recipe do not produce amax so setting fp8_output=False here
+        # for qkv_gemm output, attention output, and proj_gemm dgrad
         fp8_current_scaling = (
             FP8GlobalStateManager.is_fp8_enabled()
             and FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
@@ -741,9 +742,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=(
-                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -753,9 +752,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=(
-                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
                 )
 
             num_queries_per_key_value = (
@@ -809,7 +806,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                fp8_output=fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False,
+                fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
             )
 
             if self.qkv_weight_interleaved:
@@ -864,9 +861,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=(
-                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -876,9 +871,7 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=(
-                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]
@@ -989,7 +982,7 @@ class MultiheadAttention(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
-            fp8_output=False if fp8_current_scaling else fp8_mha,
+            fp8_output=fp8_mha and not fp8_current_scaling,
         )
 
         # ===================
@@ -998,7 +991,7 @@ class MultiheadAttention(torch.nn.Module):
         projection_output = self.proj(
             context_layer,
             is_first_microbatch=is_first_microbatch,
-            fp8_grad=False if fp8_current_scaling else isinstance(context_layer, QuantizedTensor),
+            fp8_grad=isinstance(context_layer, QuantizedTensor),
         )
 
         if self.return_bias:

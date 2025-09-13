@@ -264,6 +264,10 @@ def fused_attn_fwd(
         rng_elts_per_thread = (
             max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
         ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+
+        assert (
+            s_quantizer is not None
+        ), "s_quantizer is required as an input for FP8 fused attention."
         assert (
             o_quantizer is not None
         ), "o_quantizer is required as an input for FP8 fused attention."
@@ -428,6 +432,12 @@ def fused_attn_bwd(
         ), "aux_ctx_tensors must contain rng_state as its last element."
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
+        assert (
+            s_quantizer is not None
+        ), "s_quantizer is required as an input for FP8 fused attention backward."
+        assert (
+            dp_quantizer is not None
+        ), "dp_quantizer is required as an input for FP8 fused attention backward."
         assert (
             dqkv_dtype is not None
         ), "dqkv_dtype is required as an input for FP8 fused attention backward."

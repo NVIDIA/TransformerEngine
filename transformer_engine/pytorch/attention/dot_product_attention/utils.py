@@ -34,13 +34,12 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O_CP,
     META_DQKV_CP,
 )
-from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
-from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.constants import TE_DType
 
 
 from transformer_engine.pytorch.utils import (
@@ -426,9 +425,11 @@ def get_attention_backend(
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
-    #        if use_unfused_attention:
-    #            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
-    #            use_unfused_attention = False
+        if use_unfused_attention:
+            allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "1") == "1"
+            if not allow_emulation:
+                logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                use_unfused_attention = False
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -1793,7 +1794,7 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         num_of_nones = 8 if cp_specific_quantizers else 6
@@ -1803,6 +1804,9 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
     O_quantizer = quantizers["scaling_fwd"][META_O]
     O_quantizer.set_usage(rowwise=True, columnwise=False)
+    S_quantizer = quantizers["scaling_fwd"][META_S]
+    S_quantizer.internal = True
+    S_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
@@ -1810,37 +1814,14 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
     dO_quantizer.internal = True
+    dP_quantizer = quantizers["scaling_bwd"][META_DP]
+    dP_quantizer.set_usage(rowwise=True, columnwise=False)
+    dP_quantizer.interal = True
     dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
     dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
     dQKV_CP_quantizer.internal = True
     O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
     O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    S_quantizer = quantizers["scaling_fwd"][META_S]
-    S_quantizer.set_usage(rowwise=True, columnwise=False)
-    S_quantizer.internal = True
-    dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dP_quantizer.interal = True
-    #    if int(os.getenv("SLURM_PROCID", "0")) == 0 and bool(int(os.getenv("NVTE_PRINT", "0"))):
-    #        names = ["QKV_quantizer", "O_quantizer", "S_quantizer", "dQKV_quantizer", "dO_quantizer", "dP_quantizer"]
-    #        for i,x in enumerate([QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer]):
-    #            print(f">>>> utils {names[i]}: {x}, {x.scale=}, {x.amax=}")
-
-    # Force certain values to be fixed
-    # Can be used in experiments: 1) DS, 2) CS + NVTE_DPA_FORCE_DS, 3) CS + not NVTE_DPA_FORCE_DS
-    # 1) and 2) are equivalent
-    # 3) has S, dP in DS; we can fix their scales here (so they're not delayed scaling), or let them be (and they will be DS style)
-    force_dpa_fix_S_scale = bool(int(os.getenv("NVTE_DPA_Fix_S_Scale", "0")))
-    if force_dpa_fix_S_scale:
-        S_quantizer.scale.fill_(448.0)
-    force_dpa_fix_dP_scale = bool(int(os.getenv("NVTE_DPA_Fix_dP_Scale", "0")))
-    if force_dpa_fix_dP_scale:
-        dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
-
-    # CS + not NVTE_DPA_FORCE_DS: O.scale and dQKV.scale already set to 1 in cpp due to cuDNN requirements; no need to set here
-    # O_quantizer.scale.fill_(1.0)
-    # dQKV_quantizer.scale.fill_(1.0)
 
     if cp_specific_quantizers:
         return (
@@ -1858,11 +1839,6 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
-    # MLPerf experiment only
-    if isinstance(qkv_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)):
-        q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
-        return q_fp8, k_fp8, v_fp8
-
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1902,7 +1878,7 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             raise "Invalid qkv_layout " + qkv_layout
 
     q_fp8, k_fp8, v_fp8 = [
-        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        qkv_fp8.__class__.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
         for x in [q_data, k_data, v_data]
     ]
 
@@ -1912,14 +1888,6 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
 def combine_and_dequantize(
     qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
-    # MLPerf experiment only
-    qkv_quantizer = q_fp8._quantizer
-    if isinstance(qkv_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)):
-        assert src_nominal_dtype is not None
-        des_nominal_dtype = src_nominal_dtype if des_nominal_dtype is None else des_nominal_dtype
-        q, k, v = [x.dequantize(dtype=des_nominal_dtype) for x in [q_fp8, k_fp8, v_fp8]]
-        return q, k, v
-
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1936,7 +1904,7 @@ def combine_and_dequantize(
         case 1:
             dim = qkv_layout.find("3")
             qkv_data = combine_tensors([q_data, k_data, v_data], dim)
-            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data)
+            qkv_fp8 = q_fp8.__class__.make_like(q_fp8, data=qkv_data)
             qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
             q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
         case 2:
@@ -1948,7 +1916,7 @@ def combine_and_dequantize(
             numels = [x.numel() for x in tensors]
             numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
             qkv_data = torch.cat([x.reshape(-1) for x in tensors], dim=0)
-            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv_fp8 = q_fp8.__class__.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
             qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
             q, kv = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
             k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
@@ -1959,7 +1927,7 @@ def combine_and_dequantize(
             numels = [x.numel() for x in tensors]
             numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
             qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
-            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv_fp8 = q_fp8.__class__.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
             qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
             q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
         case _:

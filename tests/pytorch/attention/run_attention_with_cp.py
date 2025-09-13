@@ -14,7 +14,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
     Float8Quantizer,

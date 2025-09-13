@@ -56,14 +56,6 @@ class Float8BlockQuantizer(Quantizer):
         self.block_scaling_dim = block_scaling_dim
         self.all_gather_usage = all_gather_usage
 
-    def __repr__(self) -> str:
-        return (
-            f"quantizer_type={self.__class__.__name__}, "
-            f"fp8_dtype={self.dtype}, "
-            f"block_len={self.block_len}, "
-            f"force_pow_2_scales={self.force_pow_2_scales}"
-        )
-
     def update_quantized(
         self,
         src: torch.Tensor,
