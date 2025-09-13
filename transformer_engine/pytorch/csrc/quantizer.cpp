@@ -406,6 +406,15 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_te
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_tensor_with_amax(
+    const std::vector<size_t>& shape, DType dtype, at::Tensor data) {
+  amax.zero_();
+  auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype, data);
+  out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                   getTensorShape(amax));
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()),

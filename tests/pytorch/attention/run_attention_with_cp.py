@@ -15,8 +15,12 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -27,12 +31,15 @@ def run_dpa_with_cp(
     qkv_format="bshd",
     kernel_backend="FlashAttention",
     cp_comm_type="p2p",
-    fp8_mha=False,
+    fp8_dpa="False",
+    fp8_mha="False",
+    scaling_mode="delayed",
 ):
     """Test DotProductAttention module with context parallelism"""
 
     # args are passed as strings
-    fp8_mha = fp8_mha == "True"
+    fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
+    fp8_mha = fp8_mha == "True" and dtype == "fp8"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -77,14 +84,17 @@ def run_dpa_with_cp(
         ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = []
+        cp_comm_sub_groups = [cp_comm_group]
         for sub_ranks in cp_comm_sub_ranks:
             sub_group = dist.new_group(sub_ranks, backend="nccl")
             if rank in sub_ranks:
                 cp_comm_sub_groups.append(sub_group)
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "delayed":
+            fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
+        if scaling_mode == "current":
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -197,11 +207,17 @@ def run_dpa_with_cp(
     k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
-    dout_quantizer = Float8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
-        scale=torch.tensor([1], dtype=torch.float32).cuda(),
-        amax=torch.tensor([0], dtype=torch.float32).cuda(),
-    )
+    if scaling_mode == "delayed":
+        dout_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+    if scaling_mode == "current":
+        dout_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            device="cuda",
+        )
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -230,6 +246,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=fp8_mha,
         )
         if fp8_mha:
             dout_fp8 = dout_quantizer(dout)
@@ -237,7 +254,7 @@ def run_dpa_with_cp(
         else:
             out.backward(dout)
 
-    # run core_attn wit CP
+    # run core_attn with CP
     q_, k_, v_, dout_, *rest = [
         x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
     ]
@@ -284,7 +301,11 @@ def run_dpa_with_cp(
     )
 
     if dtype == "fp8":
-        core_attn.reset_fp8_meta_tensors()
+        if scaling_mode == "delayed":
+            core_attn.reset_fp8_meta_tensors()
+        else:
+            core_attn.fp8_meta_tensors_initialized = False
+            core_attn.init_fp8_meta_tensors(fp8_recipe)
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
@@ -300,6 +321,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=fp8_mha,
         )
         if fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
@@ -313,7 +335,7 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for x in [out_, q_.grad, k_.grad, v_.grad]:
+    for i, x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
 
