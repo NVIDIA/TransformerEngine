@@ -140,6 +140,7 @@ class FP8EmulationFunc(torch.autograd.Function):
     - forward : QKV (quantize+dequantize),  P (pass-through),  S (quantize+dequantize),    O (pass-through)
     - backward:  dO (quantize+dequantize), dS (pass-through), dP (quantize+dequantize), dQKV (pass-through)
     """
+
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
         if quantizer_name == "QKV_quantizer":
@@ -330,15 +331,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if fp8:
             # get quantizers from DPA; all Nones if not fp8
             QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-                dpa_utils.get_attention_quantizers(
-                    fp8, quantizers, cp_specific_quantizers=False
-                )
+                dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_recipe.float8_current_scaling():
-                S_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=S_quantizer.dtype, device="cuda")
-                dP_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=dP_quantizer.dtype, device="cuda")
+                S_quantizer = Float8CurrentScalingQuantizer(
+                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                )
+                dP_quantizer = Float8CurrentScalingQuantizer(
+                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                )
 
             # quantize and dequantize QKV to emulate FP8
             query_layer, key_layer, value_layer = FP8EmulationFunc.apply(
@@ -1032,9 +1035,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # get quantizers from DPA; all Nones if not fp8
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(
-                fp8, quantizers, cp_specific_quantizers=False
-            )
+            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
 
         # get nominal data type for out

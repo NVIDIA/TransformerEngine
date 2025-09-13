@@ -477,7 +477,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         fake_recipe = None
         switch_recipe = False
         append_recipe = False
-        if (fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "") or (not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling"):
+        if (fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "") or (
+            not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling"
+        ):
             fake_recipe = DelayedScaling(
                 fp8_format=fp8_recipe.fp8_format,
                 margin=0,

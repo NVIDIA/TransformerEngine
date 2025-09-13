@@ -1149,18 +1149,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 # q_fp8, k_fp8, v_fp8: Float8Tensor, dtype=fwd_nominal_dtype
                 # q, k, v:             torch.Tensor, dtype=torch.uint8
                 q_f16, k_f16, v_f16 = q, k, v
-                q_fp8, k_fp8, v_fp8 = combine_and_quantize(
-                    qkv_layout, q, k, v, QKV_quantizer
-                )
+                q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
 
             # amax_per_step[0]: amax_s x cp_size
             # amax_per_step[1]: amax_o x cp_size
             amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             for i in range(cp_size):
-                #S_quantizer_per_step[i] = S_quantizer
-                #O_CP_quantizer_per_step[i] = O_CP_quantizer
-                #if fp8_recipe.delayed():
+                # S_quantizer_per_step[i] = S_quantizer
+                # O_CP_quantizer_per_step[i] = O_CP_quantizer
+                # if fp8_recipe.delayed():
                 S_quantizer_per_step[i] = S_quantizer.copy()
                 S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                 O_CP_quantizer_per_step[i] = O_CP_quantizer.copy()
@@ -1361,7 +1359,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     #
                     #           step
                     # section | 0  1  2  3
-                    #--------------------
+                    # --------------------
                     #    G  0 | d, u, u, u,
                     #    P  1 | l, d, u, u,
                     #    U  2 | l, l, d, u,
@@ -1614,7 +1612,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # update FP8 quantizers: amax across cp_size steps
         if fp8 and use_fused_attention:
-            #if fp8_recipe.delayed():
+            # if fp8_recipe.delayed():
             amax_cp_fwd = amax_per_step.amax(dim=1)
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
@@ -2322,9 +2320,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dv[cu_seqlens_kv_padded[-1] :].fill_(0)
 
         if ctx.fp8 and ctx.is_input_fp8:
-            dq, dk, dv = combine_and_quantize(
-                qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
-            )
+            dq, dk, dv = combine_and_quantize(qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
 
         if cp_size_a2a > 1:
             if ctx.fp8 and ctx.is_input_fp8:
