@@ -310,7 +310,7 @@ def run_dpa_with_cp(
     with fp8_context:
         if dtype == "fp8" and scaling_mode == "current":
             core_attn.fp8_meta_tensors_initialized = False
-            #core_attn.init_fp8_metadata(num_gemms=3)
+            # core_attn.init_fp8_metadata(num_gemms=3)
         out_ = core_attn(
             q_,
             k_,

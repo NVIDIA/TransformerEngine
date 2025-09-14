@@ -1823,7 +1823,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8:
             assert ctx.use_fused_attention, "FP8 is only supported with Fused Attention!"
             fused_attn_backend = FusedAttnBackend["FP8"]
-            q, kv, out = (q_fp8._data, kv_fp8._data, out if ctx.fp8_recipe.float8_current_scaling() else out_fp8._data)
+            q, kv, out = (
+                q_fp8._data,
+                kv_fp8._data,
+                out if ctx.fp8_recipe.float8_current_scaling() else out_fp8._data,
+            )
 
             # dout_fp8: Float8Tensor, dtype=bwd_nominal_dtype
             # dout:     torch.Tensor, dtype=torch.uint8

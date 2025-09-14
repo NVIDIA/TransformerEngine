@@ -637,7 +637,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipes))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[-1] if len(recipes) == 2 else recipe_states[0]
+        self.fp8_meta[fp8_meta_tensor_key] = (
+            recipe_states[-1] if len(recipes) == 2 else recipe_states[0]
+        )
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
