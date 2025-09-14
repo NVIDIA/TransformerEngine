@@ -143,6 +143,7 @@ class FP8EmulationFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
+        # pylint: disable=missing-function-docstring
         if quantizer_name == "QKV_quantizer":
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
@@ -151,23 +152,30 @@ class FP8EmulationFunc(torch.autograd.Function):
                 qkv_layout, query_layer, key_layer, value_layer, quantizer
             )
             tensors = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
-        elif quantizer_name == "S_quantizer":
-            s_fp8 = quantizer(tensor1)
-            tensors = (s_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
+        elif quantizer_name in ["S_quantizer", "O_quantizer"]:
+            t_fp8 = quantizer(tensor1)
+            tensors = (t_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
         else:
             tensors = (tensor1, tensor2, tensor3)
         ctx.quantizer = quantizer
         ctx.quantizer_name = quantizer_name
+        ctx.qkv_layout = qkv_layout
         return tensors[0], tensors[1], tensors[2]
 
     @staticmethod
     def backward(ctx, grad1, grad2, grad3):
-        if ctx.quantizer_name == "dP_quantizer":
-            dp_fp8 = ctx.quantizer(grad1)
-            tensors = dp_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
-        elif ctx.quantizer_name == "dO_quantizer":
-            do_fp8 = ctx.quantizer(grad1)
-            tensors = do_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
+        # pylint: disable=missing-function-docstring
+        if ctx.quantizer_name in ["dO_quantizer", "dP_quantizer"]:
+            dt_fp8 = ctx.quantizer(grad1)
+            tensors = dt_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
+        elif ctx.quantizer_name == "dQKV_quantizer":
+            query_grad, key_grad, value_grad = [
+                x.contiguous() for x in [grad1, grad2, grad3]
+            ]
+            dq_fp8, dk_fp8, dv_fp8 = combine_and_quantize(
+                ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer
+            )
+            tensors = combine_and_dequantize(ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8)
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
@@ -343,9 +351,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     fp8_dtype=dP_quantizer.dtype, device="cuda"
                 )
 
+            if '2' in qkv_layout or '3' in qkv_layout:
+                qkv_layout = '_'.join([qkv_layout.replace('3','').replace('2','')]*3)
             # quantize and dequantize QKV to emulate FP8
             query_layer, key_layer, value_layer = FP8EmulationFunc.apply(
                 query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout
+            )
+            # quantize and dequantize dQKV to emulate FP8
+            query_layer, key_layer, value_layer = FP8EmulationFunc.apply(
+                query_layer, key_layer, value_layer, dQKV_quantizer, "dQKV_quantizer", qkv_layout
             )
 
         # Raw attention scores. [b * np, sq, sk]
@@ -470,6 +484,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = context_layer.view(total_tokens, -1)
 
         if fp8:
+            # quantize and dequantize O to emulate FP8
+            context_layer, *_ = FP8EmulationFunc.apply(
+                context_layer, None, None, O_quantizer, "O_quantizer", None
+            )
             # quantize and dequantize dO to emulate FP8
             context_layer, *_ = FP8EmulationFunc.apply(
                 context_layer, None, None, dO_quantizer, "dO_quantizer", None

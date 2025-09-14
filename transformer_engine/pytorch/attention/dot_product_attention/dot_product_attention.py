@@ -19,7 +19,6 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8BlockScaling,
 )
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import (
     get_fp8_te_dtype,
@@ -60,6 +59,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
+import transformer_engine_torch as tex
 
 
 # Setup Attention Logging
@@ -521,8 +521,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         # only reduce over TP group for now; need to consider CP group later
         reduce_over_tp_group_only = True
+        fp8_group = FP8GlobalStateManager.get_fp8_group()
         if reduce_over_tp_group_only:
-            fp8_group = self.tp_group  # FP8GlobalStateManager.get_fp8_group()
+            fp8_group = self.tp_group
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
@@ -596,11 +597,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
-    def set_meta_tensor(self, fwd: bool, recipes: Union[Recipe, List[Recipe]]) -> None:
+    def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
-        if isinstance(recipes, Recipe):
-            recipes = [recipes]
-        fp8_recipe_dpa = recipes[-1]
+        if isinstance(recipe, Recipe):
+            recipe = [recipe]
+        fp8_recipe_dpa = recipe[-1]
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
         # Return early if recipe state matches recipe
@@ -620,9 +621,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ):
                 return
 
-        # When fp8_recipe=Float8CurrentScaling, recipes=[CS, DS], and QKV/dQKV, O/dO use CS quantizers, S/dP use DS quantizers.
+        # When fp8_recipe=Float8CurrentScaling, recipe=[CS, DS], and QKV/dQKV, O/dO use CS quantizers, S/dP use DS quantizers.
         # See table above in init_fp8_metadata for more detail.
-        num_gemms = [2, 1] if len(recipes) == 2 else [3]
+        num_gemms = [2, 1] if len(recipe) == 2 else [3]
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = [x * 3 if fwd else x * 2 for x in num_gemms]
@@ -630,16 +631,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         # Initialize recipe state and quantizers
         recipe_states = [
             RecipeState.create(
-                recipes[i],
+                recipe[i],
                 mode=("forward" if fwd else "backward"),
                 num_quantizers=num_fp8_tensors[i],
             )
-            for i in range(len(recipes))
+            for i in range(len(recipe))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = (
-            recipe_states[-1] if len(recipes) == 2 else recipe_states[0]
-        )
+        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[-1] if len(recipe) == 2 else recipe_states[0]
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())

@@ -36,8 +36,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -426,7 +424,7 @@ def get_attention_backend(
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
         if use_unfused_attention:
-            allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "1") == "1"
+            allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
@@ -1839,6 +1837,7 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    """Combine q,k,v based on qkv_layout and quantize them together"""
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1875,7 +1874,7 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
                 qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
             ]
         case _:
-            raise "Invalid qkv_layout " + qkv_layout
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
 
     q_fp8, k_fp8, v_fp8 = [
         Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
@@ -1888,10 +1887,10 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
 def combine_and_dequantize(
     qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
+    """Combine q,k,v based on qkv_layout and dequantize them together"""
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
-    qkv_quantizer = q_fp8._quantizer
     if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
         src_nominal_dtype = q_fp8.dtype
     else:
@@ -1931,5 +1930,5 @@ def combine_and_dequantize(
             qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
             q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
         case _:
-            raise "Invalid qkv_layout " + qkv_layout
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
     return q, k, v

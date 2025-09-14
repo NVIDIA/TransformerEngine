@@ -1880,6 +1880,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
     if scaling_mode == "delayed":
@@ -1930,6 +1931,15 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
 
+    if unfused_attn_supported:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (UnfusedDotProductAttention)")
+        unfused_attn_fwd_fp8, unfused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
+        )
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
@@ -1962,6 +1972,28 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             rtol,
             rmse_tol,
         )
+    if unfused_attn_supported:
+        _error(
+            unfused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "unfused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+        )
+        if is_training:
+            for i, _ in enumerate(fused_attn_bwd_f16):
+                logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
+                _error(
+                    unfused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"unfused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                )
     if config.dropout_p != 0.0:
         # test cuDNN FP8 dropout
         assert torch.all(
@@ -1989,6 +2021,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                     rtol,
                     rmse_tol,
                 )
+    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "0"
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):
