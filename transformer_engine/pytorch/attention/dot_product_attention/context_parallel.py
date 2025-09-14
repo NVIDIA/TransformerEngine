@@ -795,6 +795,7 @@ def cp_p2p_bwd_prepare_qkv(
 
 def cp_p2p_bwd_fused_attn(
     fp8,
+    fp8_recipe,
     q_fp8,
     kv_fp8,
     out_fp8,
@@ -875,13 +876,15 @@ def cp_p2p_bwd_fused_attn(
 
     fp8_meta_kwargs = {}
     if fp8:
-        q_part, k_part, v_part, out_part = [
+        q_part, k_part, v_part = [
             Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
             for x, y in zip(
-                [q_fp8, kv_fp8, kv_fp8, out_fp8],
-                [q_part, k_part, v_part, out_part],
+                [q_fp8, kv_fp8, kv_fp8],
+                [q_part, k_part, v_part],
             )
         ]
+        if not fp8_recipe.float8_current_scaling():
+            out_part = Float8Tensor.make_like(out_fp8, data=out_part, dtype=fwd_nominal_dtype)
         dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
         fp8_meta_kwargs["s_quantizer"] = S_quantizer
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
@@ -1613,11 +1616,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # update FP8 quantizers: amax across cp_size steps
         if fp8 and use_fused_attention:
-            # if fp8_recipe.delayed():
-            amax_cp_fwd = amax_per_step.amax(dim=1)
-            S_quantizer.amax.copy_(amax_cp_fwd[0])
-            O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
-            O_quantizer.amax.copy_(amax_cp_fwd[1])
+            if fp8_recipe.delayed():
+                amax_cp_fwd = amax_per_step.amax(dim=1)
+                S_quantizer.amax.copy_(amax_cp_fwd[0])
+                O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
+                O_quantizer.amax.copy_(amax_cp_fwd[1])
+            else:
+                O_quantizer = O_CP_quantizer
 
         # prepare for return and ctx saves
         out_fp8 = None
@@ -1639,6 +1644,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8:
             # fwd: fp8, bwd: fp8, save all fp8
             fp8_tensors = (q_fp8, kv_fp8, out_fp8)
+            if fp8_recipe.float8_current_scaling():
+                f16_tensors = (None, None, out_f16)
         elif fp8 and is_input_fp8:
             # fwd: fp8, bwd: f16, save all f16
             q_16 = q_fp8.dequantize()
@@ -1816,7 +1823,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8:
             assert ctx.use_fused_attention, "FP8 is only supported with Fused Attention!"
             fused_attn_backend = FusedAttnBackend["FP8"]
-            q, kv, out = (q_fp8._data, kv_fp8._data, out_fp8._data)
+            q, kv, out = (q_fp8._data, kv_fp8._data, out if ctx.fp8_recipe.float8_current_scaling() else out_fp8._data)
 
             # dout_fp8: Float8Tensor, dtype=bwd_nominal_dtype
             # dout:     torch.Tensor, dtype=torch.uint8
@@ -2000,9 +2007,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fused_attn_inputs = [
                     ctx.fp8,
+                    ctx.fp8_recipe,
                     q_fp8,
                     kv_fp8,
-                    out_fp8,
+                    out if ctx.fp8_recipe.float8_current_scaling() else out_fp8,
                     dout_fp8,
                     softmax_lse,
                     softmax_lse_,
@@ -2279,10 +2287,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            amax_cp_bwd = amax_per_step.amax(dim=1)
-            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
-            ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
-            ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
+            if ctx.fp8_recipe.delayed():
+                amax_cp_bwd = amax_per_step.amax(dim=1)
+                ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+                ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
+                ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
+            else:
+                ctx.dQKV_quantizer = ctx.dQKV_CP_quantizer
 
             dq = dq_buffer
             if ctx.fp8_recipe.delayed():

@@ -517,7 +517,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             switch_recipe = True
 
         fp8_recipe_dpa = fake_recipe if switch_recipe else fp8_recipe
-        fp8_recipes = [fp8_recipe, fake_recipe] if append_recipe else [fp8_recipe_dpa]
+        fp8_recipes = [fp8_recipe, fake_recipe] if append_recipe else fp8_recipe_dpa
 
         # only reduce over TP group for now; need to consider CP group later
         reduce_over_tp_group_only = True
@@ -596,15 +596,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
-    def init_fp8_meta_tensors(self, recipes: Union[Recipe, List[Recipe]]) -> None:
-        """Override to allow multiple recipes. Init scales and amaxes."""
-        self.set_meta_tensor(True, recipes)
-        self.set_meta_tensor(False, recipes)
-
-        self.fp8_meta_tensors_initialized = True
-
     def set_meta_tensor(self, fwd: bool, recipes: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
+        if isinstance(recipes, Recipe):
+            recipes = [recipes]
         fp8_recipe_dpa = recipes[-1]
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
@@ -642,7 +637,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipes))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[-1]
+        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[-1] if len(recipes) == 2 else recipe_states[0]
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
@@ -1362,7 +1357,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "1") == "1"
+                allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,

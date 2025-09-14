@@ -303,14 +303,14 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         if scaling_mode == "delayed":
             core_attn.reset_fp8_meta_tensors()
-        else:
-            core_attn.fp8_meta_tensors_initialized = False
-            core_attn.init_fp8_meta_tensors(fp8_recipe)
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
     with fp8_context:
+        if dtype == "fp8" and scaling_mode == "current":
+            core_attn.fp8_meta_tensors_initialized = False
+            #core_attn.init_fp8_metadata(num_gemms=3)
         out_ = core_attn(
             q_,
             k_,

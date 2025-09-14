@@ -153,7 +153,7 @@ class FP8EmulationFunc(torch.autograd.Function):
             tensors = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
         elif quantizer_name == "S_quantizer":
             s_fp8 = quantizer(tensor1)
-            tensors = (s_fp8.dequantize(), tensor2, tensor3)
+            tensors = (s_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
         else:
             tensors = (tensor1, tensor2, tensor3)
         ctx.quantizer = quantizer
@@ -164,10 +164,10 @@ class FP8EmulationFunc(torch.autograd.Function):
     def backward(ctx, grad1, grad2, grad3):
         if ctx.quantizer_name == "dP_quantizer":
             dp_fp8 = ctx.quantizer(grad1)
-            tensors = dp_fp8.dequantize(), grad2, grad3
+            tensors = dp_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
         elif ctx.quantizer_name == "dO_quantizer":
             do_fp8 = ctx.quantizer(grad1)
-            tensors = do_fp8.dequantize(), grad2, grad3
+            tensors = do_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
