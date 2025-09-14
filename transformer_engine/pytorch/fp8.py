@@ -941,9 +941,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         return [
-            Float8CurrentScalingQuantizer(
-                self.dtype, device=self.device
-            )
+            Float8CurrentScalingQuantizer(self.dtype, device=self.device)
             for i in range(self.num_quantizers)
         ]
 
