@@ -942,7 +942,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
         return [
             Float8CurrentScalingQuantizer(
-                self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
+                self.dtype, device=self.device
             )
             for i in range(self.num_quantizers)
         ]
