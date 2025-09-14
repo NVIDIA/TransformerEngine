@@ -169,9 +169,7 @@ class FP8EmulationFunc(torch.autograd.Function):
             dt_fp8 = ctx.quantizer(grad1)
             tensors = dt_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
         elif ctx.quantizer_name == "dQKV_quantizer":
-            query_grad, key_grad, value_grad = [
-                x.contiguous() for x in [grad1, grad2, grad3]
-            ]
+            query_grad, key_grad, value_grad = [x.contiguous() for x in [grad1, grad2, grad3]]
             dq_fp8, dk_fp8, dv_fp8 = combine_and_quantize(
                 ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer
             )
@@ -351,8 +349,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     fp8_dtype=dP_quantizer.dtype, device="cuda"
                 )
 
-            if '2' in qkv_layout or '3' in qkv_layout:
-                qkv_layout = '_'.join([qkv_layout.replace('3','').replace('2','')]*3)
+            if "2" in qkv_layout or "3" in qkv_layout:
+                qkv_layout = "_".join([qkv_layout.replace("3", "").replace("2", "")] * 3)
             # quantize and dequantize QKV to emulate FP8
             query_layer, key_layer, value_layer = FP8EmulationFunc.apply(
                 query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout
