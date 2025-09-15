@@ -134,6 +134,13 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         return NotImplemented
 
+    @classmethod
+    def outer_impl(cls, *args, **kwargs):
+        """
+        to describe implementation for outer primitive
+        """
+        return cls.impl(*args, **kwargs)
+
     @staticmethod
     @abstractmethod
     def batcher():
@@ -196,7 +203,7 @@ def register_primitive(cls):
     outer_p = core.Primitive(name_of_wrapper_p())
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
     outer_p.multiple_results = cls.multiple_results
-    outer_p.def_impl(cls.impl)
+    outer_p.def_impl(cls.outer_impl)
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
