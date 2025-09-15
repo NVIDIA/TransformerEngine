@@ -66,7 +66,12 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ..tensor.quantized_tensor import (
     QuantizedTensorBase,
     Quantizer,
@@ -515,12 +520,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight_final.update_usage(columnwise_usage=True)
             if isinstance(fc2_weight_final, QuantizedTensorBase):
                 fc2_weight_final.update_usage(columnwise_usage=True)
-            
+
             if cpu_offloading:
                 mark_activation_offload(
                     inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
                 )
-
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already

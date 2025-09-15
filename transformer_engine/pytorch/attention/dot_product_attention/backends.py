@@ -1079,7 +1079,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         from transformer_engine.pytorch.cpu_offload import (
             mark_activation_offload,
-            NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH
+            NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH,
         )
 
         if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:

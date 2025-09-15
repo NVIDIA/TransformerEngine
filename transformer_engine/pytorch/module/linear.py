@@ -66,7 +66,12 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
@@ -383,7 +388,7 @@ class _Linear(torch.autograd.Function):
             if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
-            
+
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
 
@@ -408,7 +413,6 @@ class _Linear(torch.autograd.Function):
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
-
 
             mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage

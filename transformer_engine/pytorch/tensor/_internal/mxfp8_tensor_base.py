@@ -136,7 +136,9 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False):
+    def get_data_tensors(
+        self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False
+    ):
         """Get this Tensor's data."""
         result = []
         if rowwise_data:

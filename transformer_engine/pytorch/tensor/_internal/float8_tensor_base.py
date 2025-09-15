@@ -128,7 +128,9 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False):
+    def get_data_tensors(
+        self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False
+    ):
         """Get this Tensor's data."""
         result = []
         if rowwise_data:

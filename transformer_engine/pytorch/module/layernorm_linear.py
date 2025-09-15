@@ -66,7 +66,12 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 from ..cpp_extensions import (
@@ -409,7 +414,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Weight with column-wise usage is needed for dgrad GEMM.
             if isinstance(weightmat, QuantizedTensorBase):
                 weightmat.update_usage(columnwise_usage=True)
-            
+
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
 

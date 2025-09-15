@@ -291,25 +291,24 @@ class TestsOffloadableLayerState:
         del x
 
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + x_size, 0.1)
-    
 
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     def test_overlap(self, recipe_name):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
-        
+
         offloadable_layer_state = OffloadableLayerState(
-            offload_stream=torch.cuda.Stream(),
-            min_tensor_size_to_offload=0
+            offload_stream=torch.cuda.Stream(), min_tensor_size_to_offload=0
         )
 
         tensors = [Utils.create_tensor(recipe_name) for _ in range(10)]
 
-
         def _run(run_job, run_offload):
             torch.cuda.synchronize()
-            if run_offload: 
-                tensor_ids = [offloadable_layer_state.push_tensor(tensors[i]) for i in range(len(tensors))]
+            if run_offload:
+                tensor_ids = [
+                    offloadable_layer_state.push_tensor(tensors[i]) for i in range(len(tensors))
+                ]
                 offloadable_layer_state.start_offload()
                 if run_job:
                     Utils.long_job()
@@ -703,8 +702,11 @@ class TestTELayers:
         recipe_ctx = Utils.create_recipe_ctx(recipe_name)
         Utils.skip_if_recipe_not_supported(recipe_name)
 
-        if use_cuda_graphs and not retain_pinned_cpu_buffers:   
-            pytest.skip("Cuda graphs are not yet supported with cpu offloading when retain_pinned_cpu_buffers is False.")
+        if use_cuda_graphs and not retain_pinned_cpu_buffers:
+            pytest.skip(
+                "Cuda graphs are not yet supported with cpu offloading when"
+                " retain_pinned_cpu_buffers is False."
+            )
 
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"
@@ -801,7 +803,7 @@ class TestTELayers:
             assert torch.allclose(offload_outs[i], no_offload_outs[i]), f"Error in tensor {i}."
 
         torch.cuda.synchronize()
-    
+
     def test_example_from_doc(self):
         offload_stream = torch.cuda.Stream()
         num_layers = 10
@@ -809,7 +811,11 @@ class TestTELayers:
         inp = [Utils.create_tensor("high precision") for _ in range(num_layers)]
         out = [None] * num_layers
         cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
-            enabled=True, model_layers=num_layers, manual_synchronization=True, offload_stream=offload_stream)
+            enabled=True,
+            model_layers=num_layers,
+            manual_synchronization=True,
+            offload_stream=offload_stream,
+        )
 
         for i in range(num_layers):
             with cpu_offload_context:
@@ -824,7 +830,7 @@ class TestTELayers:
         for i in range(num_layers - 1, -1, -1):
             # these calls are intended to be done in the backward pass
             manual_controller.start_reload_layer(i)
-        
+
         offload_stream.synchronize()
         for i in range(num_layers):
             out[i].sum().backward()
