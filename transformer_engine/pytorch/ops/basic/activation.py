@@ -399,7 +399,7 @@ class GptOssSwiglu(_ActivationOperation):
     This activation has two differences compared to the original SwiGLU
        1. Both gate and pre-activations are clipped based on parameter limit.
        2. Activation uses sigmoid(alpha * x) instead of sigmoid(x) used in Swish activation.
-    
+
     .. warning::    The input tensor is chunked along the last dimension to get gates/pre-activations which is differnt
     from GPT OSS implementation where the gates/pre-activations are assumed to be interleaved in the input tensor.
 

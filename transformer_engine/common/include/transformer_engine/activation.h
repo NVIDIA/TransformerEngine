@@ -173,8 +173,6 @@ void nvte_geglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
-
-
 /*! \brief Computes the gated Swish activation of the input used in GPT OSS.
  *        https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250
  *        This activation has two differences compared to the original SwiGLU
@@ -190,7 +188,8 @@ void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream)
  *  \param[in]     alpha     Scaling factor for the sigmoid function used in the activation.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha, cudaStream_t stream);
+void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha,
+                        cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
