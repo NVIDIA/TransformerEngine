@@ -8,8 +8,6 @@ from typing import Optional, Tuple, Iterable, Union
 
 import math
 import torch
-import triton
-import triton.language as tl
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
@@ -802,43 +800,15 @@ class _ReshapeFunc(torch.autograd.Function):
         return grad.view(ctx.shape), None
 
 
-@triton.jit
-def block_transpose_kernel(x_ptr, t_ptr, M, N, H: tl.constexpr, W: tl.constexpr, EVEN: tl.constexpr):
-    rid = tl.program_id(axis=0)
-    cid = tl.program_id(axis=1)
-    offs = rid*H*N + cid*W + tl.arange(0, H)[:,None]*N + tl.arange(0, W)[None,:]
-    toffs = rid*H + cid*M*W + tl.arange(0, W)[:,None]*M + tl.arange(0, H)[None,:]
-    if EVEN:
-        y = tl.trans(tl.load(x_ptr+offs))
-        tl.store(t_ptr+toffs, y)
-    else:
-        y = tl.trans(tl.load(x_ptr+offs, mask=(cid*W+tl.arange(0, W)[None,:] < N) & (rid*H+tl.arange(0, H)[:,None] < M) ))
-        tl.store(t_ptr+toffs, y, mask=(cid*W+tl.arange(0, W)[:,None] < N) & (rid*H+tl.arange(0, H)[None,:] < M))
-
-def triton_block_transpose(x):
-    M, N = x.shape
-    device = x.device
-    t = torch.empty((N, M),device=device,dtype=x.dtype)
-    H = 64
-    W = 32 if x.dtype.itemsize == 1 else 16
-    EVEN = M%H == 0 and N%W == 0
-    num_stages = 5
-    num_warps = 2
-
-    grid = lambda META: (triton.cdiv(M,H), triton.cdiv(N,W))
-    block_transpose_kernel[grid](
-        x, t,
-        M, N,
-        H, W,
-        EVEN,
-        num_stages=num_stages,
-        num_warps=num_warps
-    )
-    return t
-
 def get_columnwise_fp8_tensor(rowwise_tensor, requires_grad=False):
     columnwise_scale_inv = rowwise_tensor._rowwise_scale_inv.transpose(-2, -1).contiguous()
-    columnwise_data = triton_block_transpose(rowwise_tensor._rowwise_data)
+    M, N = rowwise_tensor.shape
+    columnwise_data = torch.empty((N, M),
+        device=rowwise_tensor.device,
+        dtype=rowwise_tensor._rowwise_data.dtype
+    )
+    tex.fp8_transpose(rowwise_tensor._rowwise_data, rowwise_tensor._fp8_dtype, out=columnwise_data)
+
     return Float8BlockwiseQTensor(
         shape=rowwise_tensor.shape,
         dtype=rowwise_tensor.dtype,
