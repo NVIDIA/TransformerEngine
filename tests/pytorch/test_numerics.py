@@ -2676,8 +2676,7 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         pytorch_out.to(outp_type), expected_quantized_out.dequantize(), **fp8_tols
     )
     # Match results between quantization happening inside vs outside general_gemm
-    torch.testing.assert_close(expected_quantized_out.dequantize(),
-        quantized_out.dequantize())
+    torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
 @pytest.mark.parametrize(
