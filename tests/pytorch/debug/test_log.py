@@ -179,7 +179,7 @@ def test_sanity_log_fp8_model_parameters(feature_dirs):
         pytest.skip(reason_for_no_fp8)
 
     with debug_session(LOG_FP8_MODEL_PARAMETERS_CONFIG_BASE, feature_dirs) as log_dir:
-        with te.fp8_model_init():
+        with te.fp8_model_init(recipe=recipe.DelayedScaling()):
             model = te.Linear(128, 128, params_dtype=torch.bfloat16)
         inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
         for _ in range(10):
