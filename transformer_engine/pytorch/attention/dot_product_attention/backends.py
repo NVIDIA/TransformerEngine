@@ -133,6 +133,9 @@ else:
 
     fa_utils.set_flash_attention_3_params()
 
+# Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
+_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0") == "1"
+
 
 class FP8EmulationFunc(torch.autograd.Function):
     """
@@ -337,7 +340,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if fp8:
             # get quantizers from DPA; all Nones if not fp8
             QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-                dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+                dpa_utils.get_attention_quantizers(fp8, quantizers)
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -1051,7 +1054,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # get quantizers from DPA; all Nones if not fp8
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         # get nominal data type for out
@@ -1311,7 +1314,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     # DelayedScaling:               Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                    out_ = out if ctx.fp8_recipe.float8_current_scaling() else out_fp8
+                    out_ = out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8
                     dq_, dk_, dv_, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -1646,9 +1649,7 @@ class FusedAttention(torch.nn.Module):
                     " with FP8!"
                 )
             if fp8_recipe.float8_current_scaling() and context_parallel:
-                all_quantizers = dpa_utils.get_attention_quantizers(
-                    fp8, quantizers, cp_specific_quantizers=True
-                )
+                all_quantizers = dpa_utils.get_attention_quantizers(fp8, quantizers)
                 for q in all_quantizers:
                     if isinstance(q, Float8CurrentScalingQuantizer):
                         q.with_amax_reduction = True

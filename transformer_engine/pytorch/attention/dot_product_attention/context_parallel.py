@@ -21,7 +21,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.constants import (
@@ -51,6 +50,8 @@ _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 
+# Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
+_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0") == "1"
 
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
@@ -560,7 +561,7 @@ def cp_p2p_fwd_fused_attn(
     v_fp8,
     fwd_nominal_dtype,
     S_quantizer_per_step,
-    O_CP_quantizer_per_step,
+    O_quantizer_per_step,
     rank,
     step,
     cp_size,
@@ -638,7 +639,7 @@ def cp_p2p_fwd_fused_attn(
             for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
         ]
         fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step
-        fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step
+        fp8_meta_kwargs["o_quantizer"] = O_quantizer_per_step
 
     out_per_step, aux_ctx_tensors = fused_attn_fwd(
         is_training,
@@ -834,7 +835,7 @@ def cp_p2p_bwd_fused_attn(
     bwd_output_te_dtype,
     S_quantizer,
     dP_quantizer_per_step,
-    dQKV_CP_quantizer_per_step,
+    dQKV_quantizer_per_step,
     q_part,
     k_part,
     v_part,
@@ -891,12 +892,12 @@ def cp_p2p_bwd_fused_attn(
                 [q_part, k_part, v_part],
             )
         ]
-        if not fp8_recipe.float8_current_scaling():
+        if not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16):
             out_part = Float8Tensor.make_like(out_fp8, data=out_part, dtype=fwd_nominal_dtype)
         dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
         fp8_meta_kwargs["s_quantizer"] = S_quantizer
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
-        fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step
+        fp8_meta_kwargs["dqkv_quantizer"] = dQKV_quantizer_per_step
 
     dq, dk, dv, dbias = fused_attn_bwd(
         max_seqlen_q_,
@@ -1103,7 +1104,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_backend = None
         amax_per_step = None
         S_quantizer_per_step = [None for _ in range(cp_size)]
-        O_CP_quantizer_per_step = [None for _ in range(cp_size)]
+        O_quantizer_per_step = [None for _ in range(cp_size)]
 
         assert isinstance(k, q.__class__) and isinstance(
             v, q.__class__
@@ -1117,13 +1118,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         (
             QKV_quantizer,
             O_quantizer,
-            O_CP_quantizer,
             S_quantizer,
             dQKV_quantizer,
-            dQKV_CP_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         q_f16 = None
         q_fp8, k_fp8, v_fp8 = (None, None, None)
@@ -1165,14 +1164,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # amax_per_step[0]: amax_s x cp_size
             # amax_per_step[1]: amax_o x cp_size
             amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
+            # per_step tensors are not reduced even if Float8CurrentScaling.with_amax_reduction=True;
+            # only used to hold temporary scale/amax values (output only, no quantization op)
             for i in range(cp_size):
-                # S_quantizer_per_step[i] = S_quantizer
-                # O_CP_quantizer_per_step[i] = O_CP_quantizer
-                # if fp8_recipe.delayed():
                 S_quantizer_per_step[i] = S_quantizer.copy()
                 S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
-                O_CP_quantizer_per_step[i] = O_CP_quantizer.copy()
-                O_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
+                O_quantizer_per_step[i] = O_quantizer.copy()
+                O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
             # q_f16:   torch.Tensor, dtype=fwd_nominal_dtype
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
@@ -1349,7 +1347,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             v_fp8,
                             fwd_nominal_dtype,
                             S_quantizer_per_step[i],
-                            O_CP_quantizer_per_step[i],
+                            O_quantizer_per_step[i],
                             rank,
                             i,
                             cp_size,
@@ -1505,6 +1503,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                         if fp8_recipe.float8_current_scaling():
                             out_per_step[i - 1] = out_per_step[i - 1].to(dtype=torch.float32)
+
                     if i == 1:
                         softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
@@ -1621,13 +1620,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # update FP8 quantizers: amax across cp_size steps
         if fp8 and use_fused_attention:
-            if fp8_recipe.delayed():
-                amax_cp_fwd = amax_per_step.amax(dim=1)
-                S_quantizer.amax.copy_(amax_cp_fwd[0])
-                O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
-                O_quantizer.amax.copy_(amax_cp_fwd[1])
-            else:
-                O_quantizer = O_CP_quantizer
+            amax_cp_fwd = amax_per_step.amax(dim=1)
+            S_quantizer.amax.copy_(amax_cp_fwd[0])
+            O_quantizer.amax.copy_(amax_cp_fwd[1])
 
         # prepare for return and ctx saves
         out_fp8 = None
@@ -1651,7 +1646,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8:
             # fwd: fp8, bwd: fp8, save all fp8
             fp8_tensors = (q_fp8, kv_fp8, out_fp8)
-            if fp8_recipe.float8_current_scaling():
+            if fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
                 f16_tensors = (None, None, out_f16)
         elif fp8 and is_input_fp8:
             # fwd: fp8, bwd: f16, save all f16
@@ -1709,7 +1704,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         ctx.fwd_nominal_dtype = fwd_nominal_dtype
         ctx.dQKV_quantizer = dQKV_quantizer
-        ctx.dQKV_CP_quantizer = dQKV_CP_quantizer
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
         ctx.QKV_quantizer = QKV_quantizer
@@ -1720,9 +1714,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.O_quantizer.scale = O_quantizer.scale.clone()
-            if isinstance(S_quantizer, Float8Quantizer):
-                ctx.S_quantizer = S_quantizer.copy()
-                ctx.S_quantizer.scale = S_quantizer.scale.clone()
+            ctx.S_quantizer = S_quantizer.copy()
+            ctx.S_quantizer.scale = S_quantizer.scale.clone()
 
         nvtx_range_pop(f"{nvtx_label}")
 
@@ -1820,7 +1813,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_backend = None
         amax_per_step = None
         dP_quantizer_per_step = [None for _ in range(cp_size)]
-        dQKV_CP_quantizer_per_step = [None for _ in range(cp_size)]
+        dQKV_quantizer_per_step = [None for _ in range(cp_size)]
         buffer_dtype = torch.uint8
         dq_buffer = None
         dout_fp8 = None
@@ -1832,7 +1825,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q, kv, out = (
                 q_fp8._data,
                 kv_fp8._data,
-                out if ctx.fp8_recipe.float8_current_scaling() else out_fp8._data,
+                out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8._data,
             )
 
             # dout_fp8: Float8Tensor, dtype=bwd_nominal_dtype
@@ -1870,7 +1863,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dkv_recv_buffer = torch.empty_like(dkv_send_buffer)
             p2p_comm_buffers = [[kv, dkv_send_buffer], [kv_recv_buffer, dkv_recv_buffer]]
             if ctx.fp8_recipe.float8_current_scaling():
-                dkv_buffer = torch.empty(
+                dkv_buffer = torch.zeros(
                     kv.shape,
                     dtype=torch.float32,
                     device=kv.device,
@@ -1879,11 +1872,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # amax_per_step[0]: amax_dp x cp_size
             # amax_per_step[1]: amax_dqkv x cp_size
             amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
+            # per_step tensors are not reduced even if Float8CurrentScaling.with_amax_reduction=True;
+            # only used to hold temporary scale/amax values (output only, no quantization op)
             for i in range(cp_size):
                 dP_quantizer_per_step[i] = ctx.dP_quantizer.copy()
                 dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
-                dQKV_CP_quantizer_per_step[i] = ctx.dQKV_CP_quantizer.copy()
-                dQKV_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
+                dQKV_quantizer_per_step[i] = ctx.dQKV_quantizer.copy()
+                dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
             if ctx.fp8_meta is not None and ctx.is_output_fp8:
                 assert isinstance(
@@ -2019,7 +2014,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     ctx.fp8_recipe,
                     q_fp8,
                     kv_fp8,
-                    out if ctx.fp8_recipe.float8_current_scaling() else out_fp8,
+                    out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8,
                     dout_fp8,
                     softmax_lse,
                     softmax_lse_,
@@ -2046,7 +2041,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     bwd_output_te_dtype,
                     ctx.S_quantizer,
                     dP_quantizer_per_step[i],
-                    dQKV_CP_quantizer_per_step[i],
+                    dQKV_quantizer_per_step[i],
                 ]
             else:
                 flash_attn_inputs = [
@@ -2294,13 +2289,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            if ctx.fp8_recipe.delayed():
-                amax_cp_bwd = amax_per_step.amax(dim=1)
-                ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
-                ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
-                ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
-            else:
-                ctx.dQKV_quantizer = ctx.dQKV_CP_quantizer
+            amax_cp_bwd = amax_per_step.amax(dim=1)
+            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+            ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
 
             dq = dq_buffer
             if ctx.fp8_recipe.delayed():
@@ -2308,8 +2299,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dk = dkv_recv_buffer[:, : ctx.k_numel].view(cp_size, *ctx.k_shape)
                 dv = dkv_recv_buffer[:, ctx.k_numel :].view(cp_size, *ctx.v_shape)
                 dq, dk, dv = [
-                    ctx.dQKV_CP_quantizer.create_tensor_from_data(
-                        x, fake_dtype=bwd_nominal_dtype, internal=ctx.dQKV_CP_quantizer.internal
+                    ctx.dQKV_quantizer.create_tensor_from_data(
+                        x, fake_dtype=bwd_nominal_dtype, internal=ctx.dQKV_quantizer.internal
                     )
                     for x in [dq, dk, dv]
                 ]
@@ -3026,7 +3017,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         is_output_fp8 = False
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         if fp8:

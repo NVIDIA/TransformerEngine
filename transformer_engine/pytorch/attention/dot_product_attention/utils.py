@@ -31,8 +31,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
@@ -1792,11 +1790,10 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
+        return [None] * 6
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
     QKV_quantizer.internal = True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1815,23 +1812,6 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
