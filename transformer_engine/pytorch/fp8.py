@@ -113,12 +113,13 @@ def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
         return Format.E4M3.value.max_fwd
     return Format.E5M2.value.max_fwd
 
+
 def _get_fp8_blockwise_weight_on_demand_transpose():
     # fp8 blockwise is not supported when sm >= 10.0
-    return (
-        int(os.getenv("NVTE_ON_DEMAND_FP8_WEIGHT_TRANSPOSE", "0")) > 0
-        and get_device_compute_capability() < (10, 0)
-    )
+    return int(
+        os.getenv("NVTE_ON_DEMAND_FP8_WEIGHT_TRANSPOSE", "0")
+    ) > 0 and get_device_compute_capability() < (10, 0)
+
 
 class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global

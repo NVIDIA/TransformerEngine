@@ -803,9 +803,8 @@ class _ReshapeFunc(torch.autograd.Function):
 def get_columnwise_fp8_tensor(rowwise_tensor, requires_grad=False):
     columnwise_scale_inv = rowwise_tensor._rowwise_scale_inv.transpose(-2, -1).contiguous()
     M, N = rowwise_tensor.shape
-    columnwise_data = torch.empty((N, M),
-        device=rowwise_tensor.device,
-        dtype=rowwise_tensor._rowwise_data.dtype
+    columnwise_data = torch.empty(
+        (N, M), device=rowwise_tensor.device, dtype=rowwise_tensor._rowwise_data.dtype
     )
     tex.fp8_transpose(rowwise_tensor._rowwise_data, rowwise_tensor._fp8_dtype, out=columnwise_data)
 
