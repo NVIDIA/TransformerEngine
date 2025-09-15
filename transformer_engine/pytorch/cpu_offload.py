@@ -371,7 +371,7 @@ class OffloadableLayerState:
         if isinstance(tensor_or_tensor_id, torch.Tensor):
             return tensor_or_tensor_id
         # 2. the layer was not offloaded at all
-        elif self.state == "not_offloaded":
+        if self.state == "not_offloaded":
             return self.fwd_gpu_tensor_group.tensor_list[tensor_or_tensor_id]
 
         # 3. the layer was offloaded
