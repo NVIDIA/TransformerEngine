@@ -8,6 +8,7 @@ import math
 import os
 import pickle
 import warnings
+from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
@@ -49,7 +50,7 @@ from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
-__all__ = ["initialize_ub", "destroy_ub"]
+__all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -61,6 +62,15 @@ _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+class UserBufferQuantizationMode(Enum):
+    """
+    UserBufferQuantizationMode is an enum that represents the quantization mode of the UserBuffer.
+    """
+
+    NONE = "none"
+    FP8 = "fp8"
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -111,8 +121,9 @@ def initialize_ub(
     shape: list,
     tp_size: int,
     use_fp8: bool = False,
+    quantization_modes: List[UserBufferQuantizationMode] = None,
     dtype: torch.dtype = torch.bfloat16,
-    ub_cfgs: Optional[dict] = None,
+    ub_cfgs: Optional[Union[dict, List[dict]]] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
     r"""
@@ -128,7 +139,11 @@ def initialize_ub(
     tp_size : int
               number of GPUs in the tensor-parallel process group
     use_fp8 : bool = False
-              allocate the communication buffer for FP8 GEMM inputs/outputs
+              allocate the communication buffer for FP8 GEMM inputs/outputs.
+              DEPRECATED: Please use `quantization_modes` instead.
+    quantization_modes : List[UserBufferQuantizationMode] = None
+              if a list of UserBufferQuantizationMode is provided, a UB communicator is created for each quantization setting in the list.
+              falls back to the legacy `use_fp8` parameter if `None` is provided.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when `use_fp8 = False`
     ub_cfgs: dict = None
@@ -152,6 +167,7 @@ def initialize_ub(
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]`.
+             a list may be provided to specify different overlap configurations for different the quantization settings in `quantization_modes`
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -167,6 +183,28 @@ def initialize_ub(
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
             + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
         )
+
+    if not quantization_modes:
+        warnings.warn(
+            "Initializing Userbuffers with use_fp8 is deprecated. Please use quantization_modes"
+            " instead.",
+            DeprecationWarning,
+        )
+        quantization_modes = [
+            UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE
+        ]
+    else:
+        assert isinstance(quantization_modes, list), "quantization_modes must be a list"
+        assert all(
+            isinstance(mode, UserBufferQuantizationMode) for mode in quantization_modes
+        ), "quantization_modes must be a list of UserBufferQuantizationMode"
+
+    if isinstance(ub_cfgs, dict) or ub_cfgs is None:
+        ub_cfgs = [ub_cfgs] * len(quantization_modes)
+    else:
+        assert len(ub_cfgs) == len(
+            quantization_modes
+        ), "Number of ub_cfgs settings must match number of quantization configurations"
 
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
@@ -309,6 +347,7 @@ def initialize_ub(
 
     def add_ub(
         name: str,
+        quantization_mode: UserBufferQuantizationMode,
         method: str,
         is_reduce_scatter: bool,
         num_sm: int = 16,
@@ -327,7 +366,9 @@ def initialize_ub(
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
-            assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
+            assert (
+                quantization_mode == UserBufferQuantizationMode.FP8
+            ), "Atomic GEMM overlap supported only for FP8 GEMM."
             if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
@@ -367,7 +408,11 @@ def initialize_ub(
                 f" {external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
             )
 
-        buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
+        buffer_dtype = (
+            torch.uint8
+            if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
+            else dtype
+        )
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
@@ -401,38 +446,47 @@ def initialize_ub(
                 comm_priority=comm_priority,
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
-        _ub_communicators[name] = ub_obj
+        _ub_communicators[(name, quantization_mode)] = ub_obj
 
-    if ub_cfgs is not None:
-        for name in dgrad_reduce_scatter_overlap:
-            if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
-                wgrad_name = name.replace("dgrad", "wgrad")
-                assert wgrad_name not in ub_cfgs
-                layers_reduce_scatter_overlap.remove(wgrad_name)
-                layers_all_gather_overlap.remove(name)
-                layers_reduce_scatter_overlap.append(name)
-                methods["bulk"].remove(name)
-                new_method = ub_cfgs[name]["method"]
-                methods[new_method].append(name)
+    for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
+        if user_ub_cfg is not None:
+            for name in dgrad_reduce_scatter_overlap:
+                if (
+                    name in user_ub_cfg
+                    and "method" in user_ub_cfg[name]
+                    and user_ub_cfg[name]["method"] != "bulk"
+                ):
+                    wgrad_name = name.replace("dgrad", "wgrad")
+                    assert wgrad_name not in user_ub_cfg
+                    layers_reduce_scatter_overlap.remove(wgrad_name)
+                    layers_all_gather_overlap.remove(name)
+                    layers_reduce_scatter_overlap.append(name)
+                    methods["bulk"].remove(name)
+                    new_method = user_ub_cfg[name]["method"]
+                    methods[new_method].append(name)
 
-    for name in (
-        methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-    ):
-        ub_cfg = get_default_config(name)
-        if ub_cfgs is not None and name in ub_cfgs:
-            fp8_buf = (name in layers_all_gather_overlap) or (
-                ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
-            )
-            ub_cfg.update(ub_cfgs[name])
-            ub_cfg["fp8_buf"] = fp8_buf
-        add_ub(name, **ub_cfg)
+        for name in (
+            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
+        ):
+            ub_cfg = get_default_config(name)
+            if user_ub_cfg is not None and name in user_ub_cfg:
+                fp8_buf = (name in layers_all_gather_overlap) or (
+                    user_ub_cfg[name].get("fp8_buf", False) and name in methods["pipeline"]
+                )
+                ub_cfg.update(user_ub_cfg[name])
+                ub_cfg["fp8_buf"] = fp8_buf
+            add_ub(name, quantization_mode, **ub_cfg)
 
 
-def get_ub(name: str):
+def get_ub(name: str, use_fp8: bool):
     """Get userbuffer communicator corresponding to give key."""
+    # For now use `use_fp8` boolean input as it matches the current design in the modules
+    # So favour simplicity until the correct design becomes clear.
+    # This is mainly an internal API so we don't need to worry about future changes
+    key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
     assert _ub_communicators is not None, "UB manager is not initialized."
-    assert name in _ub_communicators, f"UB for {name} is not registered."
-    return _ub_communicators[name]
+    assert key in _ub_communicators, f"UB for {name} with use_fp8={use_fp8} is not registered."
+    return _ub_communicators[key]
 
 
 def destroy_ub():
@@ -1428,8 +1482,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
-                if weight_tensor.grad is None:
-                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+                weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:

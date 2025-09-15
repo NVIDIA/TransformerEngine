@@ -307,7 +307,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
                     # Copy into Userbuffers buffer
-                    ub_obj_lnout = get_ub("fc1_fprop")
+                    ub_obj_lnout = get_ub("fc1_fprop", fp8)
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_lnout,
                         ln_out,
@@ -458,7 +458,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_obj_fc2out = None
         reduce_scatter_out = None
         if ub_overlap_rs:
-            ub_obj_fc2out = get_ub("fc2_fprop")
+            ub_obj_fc2out = get_ub("fc2_fprop", fp8)
             dim_size = list(act_out.size())
             dim_size[0] //= tp_world_size
             dim_size[-1] = fc2_weight.size(0)
@@ -740,7 +740,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # Note: Cast to expected dtype and perform tensor-parallel communication
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
-                ub_obj_fc2_dgrad = get_ub("fc2_dgrad")
+                ub_obj_fc2_dgrad = get_ub("fc2_dgrad", ctx.fp8)
             ctx.ub_obj_gradout = ub_obj_fc2_dgrad
             (
                 grad_output,
@@ -764,7 +764,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)
                 if ctx.ub_bulk_dgrad:
-                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad")
+                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_fc1_dgrad,
                         ln_out,
@@ -869,7 +869,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ub_obj_fc2_dgrad.get_communication_stream()
                     )
 
-                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
+                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad", ctx.fp8)
 
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -1036,16 +1036,16 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_dgrad_shape = [reduce(multiply_op, inputmat.shape[:-1]), inputmat.shape[-1]]
             if ctx.ub_overlap_rs_dgrad:
                 # Overlap DGRAD+RS
-                ub_obj_fc1_dgrad = get_ub("fc1_dgrad")
+                ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                 ub_type_fc1_dgrad = tex.CommOverlapType.RS
             else:
                 if ctx.ub_bulk_dgrad:
                     # Overlap ln_out all-gather with DGRAD compute
-                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad")
+                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ub_type_fc1_dgrad = tex.CommOverlapType.AG
                 if ctx.ub_bulk_wgrad:
                     # Overlap FC1 DGRAD reduce-scatter with WGRAD compute
-                    ub_obj_fc1_wgrad = get_ub("fc1_wgrad")
+                    ub_obj_fc1_wgrad = get_ub("fc1_wgrad", ctx.fp8)
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
 
             # --------------------------------------------------
@@ -1197,7 +1197,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             "with Userbuffers (tensor-parallel communication overlapping)"
                         )
                     ctx.wgrad_store.put([ln_out_total, dact], fc1_wgrad_gemm)
-                    fc1_wgrad = None
                     if fuse_gemm_and_bias_fc1_wgrad:
                         fc1_bias_grad = None
                 else:
@@ -1539,7 +1538,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
-            and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
+            and all(
+                ("fc1_fprop", use_fp8) not in _ub_communicators
+                or not get_ub("fc1_fprop", use_fp8).is_atomic_gemm()
+                for use_fp8 in [False, True]
+            )
         )
         self.name = name
 
@@ -1757,7 +1760,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fp8_output = False
         if self.ub_overlap_rs:
-            if get_ub("fc2_fprop").is_fp8_ubuf():
+            if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
         with torch.cuda.device(
@@ -2164,10 +2167,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 if self.fc1_bias.grad is None:
                     self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
             if not self.fuse_wgrad_accumulation:
-                if self.fc2_weight.grad is None:
-                    self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
-                if self.fc1_weight.grad is None:
-                    self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
+                self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
+                self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
             del fc2_bias_grad_
             del fc2_wgrad
             del fc1_wgrad
