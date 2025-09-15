@@ -508,9 +508,9 @@ def main() -> None:
             torch.distributed.get_world_size(group),
             quantization_modes=[
                 (
-                    UserBufferQuantizationMode.FP8
+                    te.module.base.UserBufferQuantizationMode.FP8
                     if model_config.quantization is not None
-                    else UserBufferQuantizationMode.NONE
+                    else te.module.base.UserBufferQuantizationMode.NONE
                 )
             ],
             dtype=model_config.dtype,
