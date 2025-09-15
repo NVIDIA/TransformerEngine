@@ -189,7 +189,7 @@ class _GroupedLinear(torch.autograd.Function):
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
-        )[0]
+        )
 
         if fp8_calibration:
             for i in range(num_gemms):
@@ -378,7 +378,7 @@ class _GroupedLinear(torch.autograd.Function):
                     m_splits=ctx.m_splits,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                )[0]
+                )
 
             if ctx.weights_requires_grad:
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
