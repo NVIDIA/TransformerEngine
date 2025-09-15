@@ -59,6 +59,12 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
+    def get_usage(self) -> Tuple[bool, bool]:
+        """Get the usage of the tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement get_usage function"
+        )
+
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
         """Prepare the tensor base for saving for backward"""
         raise NotImplementedError(
@@ -100,6 +106,7 @@ def prepare_for_saving(
             t, t_obj = tensor.prepare_for_saving()
             tensor_list.extend(t)
             tensor_objects_list.append(t_obj)
+
     return tensor_list, tensor_objects_list
 
 
@@ -341,7 +348,14 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+    def __new__(
+        cls,
+        shape: Iterable[int],
+        dtype: torch.dtype,
+        *,
+        requires_grad: bool = False,
+        device: Optional[torch.device] = None,
+    ):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -352,7 +366,7 @@ class QuantizedTensor(torch.Tensor):
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
-            device=torch.cuda.current_device(),
+            device=torch.cuda.current_device() if device is None else device,
         )
 
         return instance
@@ -382,6 +396,15 @@ class QuantizedTensor(torch.Tensor):
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement clear function"
+        )
+
+    def empty_like(self, *args, **kwargs):
+        """Create a new empty tensor with the same shape and type as this tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement empty_like function"
+        )
 
     def __repr__(self, *, tensor_contents=None) -> str:
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
@@ -434,6 +457,24 @@ class QuantizedTensor(torch.Tensor):
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # Empty like op
+        if func == torch.ops.aten.empty_like.default:
+            tensor = args[0]
+            device = kwargs.get("device", tensor.device)
+            requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
+            pin_memory = kwargs.get("pin_memory", False)
+            rowwise_usage, columnwise_usage = tensor.get_usage()
+            tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+            out = tensor._quantizer.make_empty(
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                device=device,
+                requires_grad=requires_grad,
+                pin_memory=pin_memory,
+            )
+            tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+            return out
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):

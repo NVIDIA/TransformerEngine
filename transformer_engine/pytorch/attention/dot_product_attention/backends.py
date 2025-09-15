@@ -47,6 +47,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+)
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
@@ -511,6 +515,9 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
+        if is_cpu_offload_enabled():
+            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
+
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
@@ -696,12 +703,12 @@ class FlashAttention(torch.nn.Module):
                     use_flash_attn_3=use_flash_attn_3,
                 )
         else:
+
             from transformer_engine.pytorch.cpu_offload import (
-                CPUOffloadEnabled,
                 mark_activation_offload,
             )
 
-            if CPUOffloadEnabled:
+            if is_cpu_offload_enabled():
                 mark_activation_offload(
                     query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
                 )
@@ -936,6 +943,9 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attn, is_output_fp8 = True:  fake_dtype = torch.float8_e4m3fn
         fake_dtype = q.dtype
 
+        if is_cpu_offload_enabled():
+            start_offload(q, k, v, offload_base_tensor=True)
+
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
@@ -1068,11 +1078,11 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
         from transformer_engine.pytorch.cpu_offload import (
-            CPUOffloadEnabled,
             mark_activation_offload,
+            NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH,
         )
 
-        if CPUOffloadEnabled:
+        if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
             if ctx.fp8:
                 tensor_list = fp8_tensors
             else:

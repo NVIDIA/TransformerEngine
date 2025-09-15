@@ -128,15 +128,27 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
+    def get_data_tensors(
+        self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False
+    ):
         """Get this Tensor's data."""
-        if rowwise_data and columnwise_data:
-            return self._data, self._transpose
+        result = []
         if rowwise_data:
-            return self._data
+            result.append(self._data)
         if columnwise_data:
-            return self._transpose
-        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+            result.append(self._transpose)
+        if scales:
+            result.append(self._scale_inv)
+        if not result:
+            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+        if len(result) == 1:
+            return result[0]
+        return tuple(result)
+
+    def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
+        """Set this Tensor's data."""
+        self._data = data
+        self._transpose = transpose
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
@@ -222,3 +234,7 @@ class Float8TensorBase(QuantizedTensorBase):
         if not needs_data_transpose:
             self._transpose = None
             self._transpose_invalid = True
+
+    def get_usage(self) -> Tuple[bool, bool]:
+        """Get the usage of the tensor"""
+        return self._data is not None, self._transpose is not None and not self._transpose_invalid

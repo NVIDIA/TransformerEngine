@@ -209,6 +209,7 @@ class Float8BlockQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -224,12 +225,13 @@ class Float8BlockQuantizer(Quantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Allocate FP8 data transpose if needed
@@ -237,13 +239,17 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
                 columnwise_scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -428,6 +434,31 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                     " (scales and columnwise data untouched)."
                 )
             return Float8BlockwiseQTensor.make_like(tensor)
+
+        if func == torch.ops.aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(src, Float8BlockwiseQTensor) and isinstance(dst, Float8BlockwiseQTensor):
+                if dst._rowwise_data is not None:
+                    dst._rowwise_data.copy_(src._rowwise_data, *args[2:])
+                if dst._rowwise_scale_inv is not None:
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv, *args[2:])
+                if dst._columnwise_data is not None:
+                    dst._columnwise_data.copy_(src._columnwise_data, *args[2:])
+                if dst._columnwise_scale_inv is not None:
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv, *args[2:])
+                return dst
+        if func == torch.ops.aten.numel.default:
+            return (
+                args[0]._rowwise_data.numel()
+                if args[0]._rowwise_data is not None
+                else args[0]._columnwise_data.numel()
+            )
+        if func == torch.ops.aten.is_pinned.default:
+            if args[0]._rowwise_data is not None:
+                return args[0]._rowwise_data.is_pinned()
+            if args[0]._columnwise_data is not None:
+                return args[0]._columnwise_data.is_pinned()
+            raise RuntimeError("Cannot check if pinned for Float8BlockwiseQTensor with no data.")
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

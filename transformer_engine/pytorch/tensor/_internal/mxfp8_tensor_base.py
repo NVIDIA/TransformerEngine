@@ -136,15 +136,30 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
+    def get_data_tensors(
+        self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False
+    ):
         """Get this Tensor's data."""
-        if rowwise_data and columnwise_data:
-            return self._rowwise_data, self._columnwise_data
+        result = []
         if rowwise_data:
-            return self._rowwise_data
+            result.append(self._rowwise_data)
         if columnwise_data:
-            return self._columnwise_data
-        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+            result.append(self._columnwise_data)
+        if scales:
+            if rowwise_data:
+                result.append(self._rowwise_scale_inv)
+            if columnwise_data:
+                result.append(self._columnwise_scale_inv)
+        if not result:
+            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+        if len(result) == 1:
+            return result[0]
+        return tuple(result)
+
+    def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
+        """Set this Tensor's data."""
+        self._rowwise_data = rowwise_data
+        self._columnwise_data = columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
@@ -256,3 +271,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
+
+    def get_usage(self) -> Tuple[bool, bool]:
+        """Get the usage of the tensor"""
+        return self._rowwise_data is not None, self._columnwise_data is not None
