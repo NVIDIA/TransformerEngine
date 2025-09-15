@@ -39,7 +39,10 @@ def _compute_dynamic_range_bottom(tensor):
 
 @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size):
-    """Computes the max dynamic range of the tensor."""
+    """Max blockwise dynamic range (log2 max/min_nonzero).
+       Returns 0 if all blocks are zeros. 
+       Otherwise computes dynamic range over non-zero blocks.
+    """
     total_numel = tensor.numel()
     assert (
         total_numel % block_size == 0
@@ -47,11 +50,21 @@ def compute_max_blockwise_dynamic_range(tensor, block_size):
 
     abs_vals = tensor.reshape(-1, block_size).abs().float()
     per_block_amax = abs_vals.amax(dim=1)
-    if torch.any(per_block_amax == 0):
-        return torch.tensor(float("inf"), device=tensor.device, dtype=tensor.dtype)
 
+    # Identify blocks that contain any non-zero element
+    nonzero_blocks = per_block_amax != 0
+    if not torch.any(nonzero_blocks):
+        # If all blocks are zero, return 0
+        return torch.zeros((), device=tensor.device, dtype=abs_vals.dtype)
+
+    # Compute smallest non-zero magnitude per block
     per_block_amin_nz = abs_vals.masked_fill(abs_vals == 0, float("inf")).amin(dim=1)
-    return (torch.log2(per_block_amax) - torch.log2(per_block_amin_nz)).max()
+
+    # Restrict DR computation to blocks that are non-zero
+    amax_nz = per_block_amax[nonzero_blocks]
+    amin_nz = per_block_amin_nz[nonzero_blocks]
+
+    return (torch.log2(amax_nz) - torch.log2(amin_nz)).max()
 
 
 def compute_variance(variances, numels, sums):

@@ -5,9 +5,9 @@
 """LogTensorStats Feature support for nvidia-dlframework-inspect"""
 
 from typing import Dict, Optional, List
+import re
 
 import torch
-import re
 
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
