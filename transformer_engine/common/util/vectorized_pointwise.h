@@ -435,7 +435,6 @@ __launch_bounds__(unary_kernel_threads) __global__
 
       if constexpr (std::is_same<Param, GptOssParam>::value) {
         // Clamp the gated value and add 1 at the end
-        // https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250
         ComputeType limit = p.limit;
         val2 = std::min(std::max(-limit, val2), limit) + 1;
       }
