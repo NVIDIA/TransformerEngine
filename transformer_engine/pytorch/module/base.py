@@ -473,7 +473,7 @@ def initialize_ub(
                 fp8_buf = (name in layers_all_gather_overlap) or (
                     user_ub_cfg[name].get("fp8_buf", False) and name in methods["pipeline"]
                 )
-                ub_cfg.update(ub_cfgs[name])
+                ub_cfg.update(user_ub_cfg[name])
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
 
@@ -1486,8 +1486,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
-                if weight_tensor.grad is None:
-                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+                weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
