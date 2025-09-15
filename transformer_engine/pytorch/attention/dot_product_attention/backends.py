@@ -1314,7 +1314,11 @@ class FusedAttnFunc(torch.autograd.Function):
                     # DelayedScaling:               Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                    out_ = out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8
+                    out_ = (
+                        out
+                        if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
+                        else out_fp8
+                    )
                     dq_, dk_, dv_, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,

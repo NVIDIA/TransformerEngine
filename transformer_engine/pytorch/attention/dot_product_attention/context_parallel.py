@@ -53,6 +53,7 @@ _seq_chunk_ids_cache_for_reordering_after_attn = {}
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0") == "1"
 
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -1825,7 +1826,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q, kv, out = (
                 q_fp8._data,
                 kv_fp8._data,
-                out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8._data,
+                (
+                    out
+                    if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
+                    else out_fp8._data
+                ),
             )
 
             # dout_fp8: Float8Tensor, dtype=bwd_nominal_dtype
@@ -2014,7 +2019,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     ctx.fp8_recipe,
                     q_fp8,
                     kv_fp8,
-                    out if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16 else out_fp8,
+                    (
+                        out
+                        if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
+                        else out_fp8
+                    ),
                     dout_fp8,
                     softmax_lse,
                     softmax_lse_,
