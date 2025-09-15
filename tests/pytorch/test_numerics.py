@@ -2675,16 +2675,9 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     torch.testing.assert_close(
         pytorch_out.to(outp_type), expected_quantized_out.dequantize(), **fp8_tols
     )
-
-    # For anything other than delayed scaling quantizer, quantization happens in unfused manner in general_gemm
-    # And so the results should exactly match
-    if not isinstance(out_quantizer, Float8Quantizer):
-        torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
-    else:
-        # For delayed scaling quantizer, allow for quantization tolerance
-        torch.testing.assert_close(
-            expected_quantized_out.dequantize(), quantized_out.dequantize(), **fp8_tols
-        )
+    # Match results between quantization happening inside vs outside general_gemm
+    torch.testing.assert_close(expected_quantized_out.dequantize(),
+        quantized_out.dequantize())
 
 
 @pytest.mark.parametrize(
