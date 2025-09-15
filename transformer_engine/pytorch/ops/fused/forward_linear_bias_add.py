@@ -10,14 +10,11 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.ops.basic import AddExtraInput, BasicLinear, Bias
-from transformer_engine.pytorch.ops.op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
-from transformer_engine.pytorch.tensor import Quantizer
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...fp8 import FP8GlobalStateManager
+from ...tensor import Quantizer
+from ..basic import AddExtraInput, BasicLinear, Bias
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class ForwardLinearBiasAdd(FusedOperation):
@@ -118,6 +115,8 @@ class ForwardLinearBiasAdd(FusedOperation):
 
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x_local)
             linear_op_ctx.save_for_backward(x_local, w)
             linear_op_ctx.with_quantized_compute = with_quantized_compute
             linear_op_ctx.input_quantizer = input_quantizer
