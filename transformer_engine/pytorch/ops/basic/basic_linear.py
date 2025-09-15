@@ -13,6 +13,7 @@ from typing import Any, Optional
 import torch
 
 from ...cpp_extensions import general_gemm
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -964,6 +965,8 @@ class BasicLinear(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x_local)
             ctx.save_for_backward(x_local, w)
             ctx.with_quantized_compute = with_quantized_compute
             ctx.input_quantizer = input_quantizer
