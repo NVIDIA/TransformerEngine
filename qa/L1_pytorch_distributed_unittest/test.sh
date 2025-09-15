@@ -20,12 +20,6 @@ FAILED_CASES=""
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
-
-# It is not installed as a requirement,
-# because it is not available on PyPI.
-pip uninstall -y nvdlfw-inspect
-pip install git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git
-
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
