@@ -349,6 +349,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     def _transpose_columnwise_data(self):
         """Plainly transpose the columnwise data and scale inv."""
         if self._columnwise_data is not None:
+            # TODO(yuzhongw, tmoon): Figure out why _old_data is not automatically
+            # deallocated by GC. Manually deallocating is a temporary hack.
             _old_data = self._columnwise_data
             self._columnwise_data = tex.fp8_transpose(
                 self._columnwise_data, self._fp8_dtype, out=None
