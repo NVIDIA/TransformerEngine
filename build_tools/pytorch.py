@@ -19,7 +19,13 @@ def install_requirements() -> List[str]:
 
 def test_requirements() -> List[str]:
     """Test dependencies for TE/PyTorch extensions."""
-    return ["numpy", "torchvision", "transformers", "onnxruntime==1.20.1", "onnxruntime_extensions==0.13.0"]
+    return [
+        "numpy",
+        "torchvision",
+        "transformers",
+        "onnxruntime==1.20.1",
+        "onnxruntime_extensions==0.13.0",
+    ]
 
 
 def setup_pytorch_extension(
