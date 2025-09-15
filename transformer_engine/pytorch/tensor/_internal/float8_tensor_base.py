@@ -128,11 +128,20 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self, scales: bool = False):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False):
         """Get this Tensor's data."""
+        result = []
+        if rowwise_data:
+            result.append(self._data)
+        if columnwise_data:
+            result.append(self._transpose)
         if scales:
-            return self._data, self._transpose, self._scale_inv
-        return self._data, self._transpose
+            result.append(self._scale_inv)
+        if not result:
+            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+        if len(result) == 1:
+            return result[0]
+        return tuple(result)
 
     def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
         """Set this Tensor's data."""

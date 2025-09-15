@@ -885,6 +885,8 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
           float (*DActOP)(float, const ParamOP &)>
 void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                     cudaStream_t stream) {
+  checkCuDriverContext(stream);
+
   if (output->has_data()) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
   }
@@ -948,22 +950,25 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
-          cudaFuncSetAttribute(
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
           cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
               tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows,
-              cols););  // NOLINT(*)
-  );                    // NOLINT(*)
+              cols);
+          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                              // NOLINT(*)
 }
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
 void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                       cudaStream_t stream) {
+  checkCuDriverContext(stream);
+
   const bool USE_ROWWISE_SCALING = output->has_data();
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();
 
@@ -1078,11 +1083,11 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, true, false,
                                                         THREADS_PER_CHUNK_NON_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     true, false, THREADS_PER_CHUNK_NON_COLWISE>
@@ -1092,13 +1097,14 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, false, true,
                                                         THREADS_PER_CHUNK_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     false, true, THREADS_PER_CHUNK_COLWISE>
@@ -1108,13 +1114,14 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::BIDIMENSIONAL:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, true, true,
                                                         THREADS_PER_CHUNK_NON_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     true, true, THREADS_PER_CHUNK_NON_COLWISE>
@@ -1124,6 +1131,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
           });  // NOLINT(*)
   );           // NOLINT(*)
@@ -1206,7 +1214,6 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
           float (*DActOP)(float, const ParamOP &)>
 void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                     cudaStream_t stream) {
-  checkCuDriverContext(stream);
   constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
   CheckOutputTensor(*output, "output", allow_empty);

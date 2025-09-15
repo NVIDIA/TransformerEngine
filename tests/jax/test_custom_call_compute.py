@@ -31,6 +31,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
@@ -182,7 +183,7 @@ ACTIVATION_TYPES = {
 
 class TestActivation:
     def ref_act(self, x, activation_type):
-        return _jax_act_lu(x, activation_type)
+        return _jax_act_lu(x, activation_type).data
 
     def value_n_grad_ref_func(self, x, activation_type):
         jitted_reference = jit(
@@ -337,8 +338,8 @@ class TestNorm:
                 ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
             else:
                 ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-            # if isinstance(ln_out, ScaledTensor):
-            #     ln_out = ln_out.dequantize()
+            # This is a no-op for non-quantized data
+            ln_out = ln_out.dequantize()
             return ln_out
 
         key = jax.random.PRNGKey(0)
@@ -673,10 +674,6 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
-        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         scaled_tensor = tex.grouped_quantize(
             x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
         )
@@ -769,7 +766,9 @@ class TestFusedQuantize:
                 te_output, jax_output, precise_comparison=precise_comparison
             )
         else:
-            assert_allclose(te_output, jax_output)
+            assert isinstance(te_output, NoScaleTensor)
+            assert isinstance(jax_output, NoScaleTensor)
+            assert_allclose(te_output.data, jax_output.data)
 
         if is_dbias:
             # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
@@ -1024,8 +1023,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
         ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
     else:
         ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-    if isinstance(ln_out, ScaledTensor):
-        ln_out = ln_out.dequantize()
+    ln_out = ln_out.dequantize()
     return ln_out
 
 
@@ -1181,7 +1179,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(linear_1_out, activation_type)
+            x = _jax_act_lu(linear_1_out, activation_type).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape
@@ -1312,16 +1310,14 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-        #     lhs, rhs, group_sizes, contracting_dims,
-        # )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs,
+            rhs,
+            group_sizes,
+            contracting_dims,
+        )
 
-        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
@@ -1350,12 +1346,7 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
-        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
-        #         )
-
-        prim_out = tex.grouped_gemm(
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
@@ -1391,9 +1382,9 @@ class TestGroupedDense:
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x, kernel, bias, group_sizes, contracting_dims
@@ -1432,9 +1423,9 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
 
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x,

@@ -104,7 +104,7 @@ class MXFP8Quantizer(Quantizer):
         scale_inv = None
         if self.rowwise_usage:
             data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-            scale_inv = torch.zeros(
+            scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
                 round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
                 dtype=torch.uint8,
@@ -117,7 +117,7 @@ class MXFP8Quantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data, pin_memory=pin_memory)
-            columnwise_scale_inv = torch.zeros(
+            columnwise_scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,

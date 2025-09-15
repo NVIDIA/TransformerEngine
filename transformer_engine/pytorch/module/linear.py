@@ -68,7 +68,6 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, start_offload, mark_not_offload, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import any_feature_enabled
 
 __all__ = ["Linear"]
 
@@ -137,13 +136,19 @@ class _Linear(torch.autograd.Function):
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug:  # turn off userbuffers in debug mode
+            ub_overlap_rs_fprop = False
+            ub_overlap_ag_fprop = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_obj = None
         ub_type = None
         if ub_overlap_rs_fprop:
-            ub_obj = get_ub(ub_name + "_fprop")
+            ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.RS
         elif ub_overlap_ag_fprop:
-            ub_obj = get_ub(ub_name + "_fprop")
+            ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.AG
 
         # ------------------------------------------------------
@@ -359,8 +364,9 @@ class _Linear(torch.autograd.Function):
                 and own_quantized_input
                 and isinstance(inputmat, QuantizedTensorBase)
             ):
-                if ctx.backward_input_needs_gather and isinstance(
-                    quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                if (
+                    ctx.backward_input_needs_gather
+                    and weight_quantizer.supports_only_rowwise_all_gather()
                 ):
                     # All-gather is not supported with FP8 column-wise data
                     inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -519,23 +525,23 @@ class _Linear(torch.autograd.Function):
             dgrad_shape = [reduce(multiply_op, ctx.inp_shape[:-1]), ctx.inp_shape[-1]]
             if ctx.ub_overlap_ag:
                 # Overlap grad_output all-gather with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.AG
             elif ctx.ub_overlap_rs_dgrad:
                 # Overlap dgrad reduce-scatter with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.RS
             else:
                 if ctx.ub_bulk_dgrad:
                     # Overlap inputmat all-gather with dgrad compute
-                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                     ub_obj_dgrad = ctx.ub_obj_gradout
                     ub_type_dgrad = tex.CommOverlapType.AG
                 if ctx.ub_bulk_wgrad:
                     # Overlap dgrad reduce-scatter with wgrad compute
-                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad")
+                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
                     ub_type_wgrad = tex.CommOverlapType.RS
 
             # --------------------------------------------------
@@ -557,6 +563,19 @@ class _Linear(torch.autograd.Function):
                     # tensor usage at a time. Configure quantizer with
                     # usage for only dgrad GEMM.
                     quantizer.set_usage(columnwise=False)
+
+            # Adjust the quantization direction approach depending
+            # on whether wgrad calculations will be performed.
+            # NOTE: If requires_dgrad is False, disabling `rowwise` quantization and keeping `columnwise` quantization
+            #       results in `Assertion failed: output_tensor->has_data(). Quantizing in only the columnwise direction not supported yet!`
+            # NOTE: For `ctx.bias is True`, selected quantize kernel errors with
+            #       `cast_kernels.cuh:1322 in function fp8_quantize_arch_l_100: Not implemented scaling mode or fusion: NVTE_DELAYED_TENSOR_SCALING or IS_DBIAS=true on GPU with compute capability < 10.0.`
+            if (
+                not ctx.use_bias
+                and not ctx.requires_wgrad
+                and ctx.grad_output_quantizer is not None
+            ):
+                ctx.grad_output_quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
@@ -594,7 +613,7 @@ class _Linear(torch.autograd.Function):
                     else:
                         # Quantize input tensor
                         quantizer = ctx.input_quantizer
-                        if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                        if quantizer.supports_only_rowwise_all_gather():
                             # All-gather is not supported with FP8 column-wise data
                             quantizer.set_usage(
                                 rowwise=True,
@@ -612,7 +631,7 @@ class _Linear(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.input_quantizer
-                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                    if quantizer.supports_only_rowwise_all_gather():
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     else:
@@ -744,26 +763,36 @@ class _Linear(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
-                    # UB does not support overlapping grad output
+                    # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
                     # for the dgrad GEMM. We work around by explicitly
-                    # overlapping the NCCL operation with the dgrad GEMM.
+                    # overlapping the AG operation with the dgrad GEMM.
+
+                    # Get the communication stream from the dgrad GEMM to use for the AG
+                    dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
+
+                    # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
+
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    dgrad_comm_stream = ub_obj_dgrad.get_communication_stream()
-                    with torch.cuda.stream(dgrad_comm_stream):
-                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                        grad_output, grad_output_work = gather_along_first_dim(
+
+                    # We use the send stream to copy into the userbuffers.
+                    # This is the same stream that we will use to access the data in the AG,
+                    # so we dont need to add any syncs yet.
+                    with torch.cuda.stream(dgrad_send_stream):
+                        grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                            ub_obj_overlap_wgrad,
                             grad_output_arg,
+                            ctx.grad_output_quantizer,
                             ctx.tp_group,
-                            async_op=True,
-                            quantizer=ctx.grad_output_quantizer,
                         )
-                    # Synchronize with the main stream
-                    grad_output_work.wait()
+
+                    # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
+                    tex.bulk_overlap_ag_with_external_gemm(
+                        ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
+                    )
 
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorBase):
@@ -1082,9 +1111,6 @@ class Linear(TransformerEngineBaseModule):
         self.save_original_input = save_original_input
         self.name = name
 
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if device == "meta":
@@ -1346,9 +1372,7 @@ class Linear(TransformerEngineBaseModule):
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp, fp8_output)
 
-        debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+        debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1358,10 +1382,14 @@ class Linear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         if self.ub_overlap_rs_fprop:
-            if get_ub(self.ub_name + "_fprop").is_fp8_ubuf():
+            if get_ub(
+                self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()
+            ).is_fp8_ubuf():
                 fp8_output = True
         if self.ub_overlap_rs_dgrad:
-            if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
+            if get_ub(
+                self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()
+            ).is_fp8_ubuf():
                 fp8_grad = True
 
         with torch.cuda.device(
@@ -1378,14 +1406,11 @@ class Linear(TransformerEngineBaseModule):
                 if not debug
                 else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
-            if debug:
-                if not any_feature_enabled(quantizers):
-                    # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
-                    debug = False
 
-                if isinstance(weight_tensor, QuantizedTensor):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+            if debug:
+                if self.no_debug_features_active(quantizers):
+                    debug = False
+                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
 
             (
                 input_quantizer,

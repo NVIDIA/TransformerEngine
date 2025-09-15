@@ -136,16 +136,23 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self, scales: bool = False):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True, scales: bool = False):
         """Get this Tensor's data."""
+        result = []
+        if rowwise_data:
+            result.append(self._rowwise_data)
+        if columnwise_data:
+            result.append(self._columnwise_data)
         if scales:
-            return (
-                self._rowwise_data,
-                self._columnwise_data,
-                self._rowwise_scale_inv,
-                self._columnwise_scale_inv,
-            )
-        return self._rowwise_data, self._columnwise_data
+            if rowwise_data:
+                result.append(self._rowwise_scale_inv)
+            if columnwise_data:
+                result.append(self._columnwise_scale_inv)
+        if not result:
+            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+        if len(result) == 1:
+            return result[0]
+        return tuple(result)
 
     def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
         """Set this Tensor's data."""

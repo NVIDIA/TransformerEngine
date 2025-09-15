@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.module.base import get_workspace
 from ...cpp_extensions import general_gemm
 from ...distributed import (
     CudaRNGStatesTracker,
@@ -20,18 +19,24 @@ from ...distributed import (
     reduce_scatter_along_first_dim,
 )
 from ...fp8 import FP8GlobalStateManager, Recipe
-from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
+from ...module.base import (
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+    get_dummy_wgrad,
+    get_workspace,
+)
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
-from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
 )
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize, is_quantized_tensor
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -73,7 +78,8 @@ class BasicLinear(BasicOperation):
         weight's `main_grad` attribute instead of relying on PyTorch
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
-        meaningful.
+        meaningful. This is primarily intented to integrate with
+        Megatron-LM.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -301,6 +307,7 @@ class BasicLinear(BasicOperation):
                 rowwise=True,
                 columnwise=torch.is_grad_enabled(),
             )
+            quantizer.internal = False
             with torch.no_grad():
                 weight = quantizer(weight)
 
@@ -317,21 +324,44 @@ class BasicLinear(BasicOperation):
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        if recipe is not None and not FP8GlobalStateManager.with_fp8_parameters():
-            # Make quantizers use internal tensors
-            self.get_input_quantizer().internal = True
-            self.get_grad_output_quantizer().internal = True
-            self.get_quantizer("forward", 1).internal = True
+        # Input/grad output quantizers use internal tensors
+        input_quantizer = self.get_quantizer("forward", 0)
+        grad_output_quantizer = self.get_quantizer("backward", 0)
+        if input_quantizer is not None:
+            input_quantizer.internal = True
+        if grad_output_quantizer is not None:
+            grad_output_quantizer.internal = True
+
+        # Handle weight quantizer
+        # Note: This function may be called in base class constructor,
+        # before any basic linear attrs have been set.
+        weight_quantizer = self.get_quantizer("forward", 1)
+        if weight_quantizer is None:
+            pass
+        elif is_quantized_tensor(getattr(self, "weight", None)):
+            # Make sure weight param has correct quantizer
+            weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+            weight_quantizer.internal = False
+            self.weight.update_quantizer(weight_quantizer.copy())
+        else:
+            # Use internal tensors if quantized weights will not be
+            # exposed externally
+            weight_quantizer.internal = (
+                not FP8GlobalStateManager.with_fp8_parameters()
+                and not getattr(self, "_with_quantized_weight", False)
+            )
 
     @staticmethod
     def _functional_forward(
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         weight: torch.Tensor,
         *,
+        alpha: float = 1.0,
         bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         out: Optional[torch.Tensor] = None,
+        beta: Optional[float] = None,
         accumulate_into_out: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -351,6 +381,8 @@ class BasicLinear(BasicOperation):
             Input tensor
         weight: torch.Tensor
             Weight tensor
+        alpha: float, default = 1.0
+            Scaling factor applied to the result of the GEMM
         bias: torch.Tensor, optional
             Bias tensor
         device: torch.device, default = default CUDA device
@@ -359,6 +391,8 @@ class BasicLinear(BasicOperation):
             Tensor datatype
         out: torch.Tensor, optional
             Output tensor
+        beta: float, optional
+            Scaling factor applied to original value of out when accumulating into it
         accumulate_into_out: bool, default = `False`
             Add result to output tensor instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -404,7 +438,7 @@ class BasicLinear(BasicOperation):
         if dtype is None:
             if out is not None and isinstance(out, torch.Tensor):
                 dtype = out.dtype
-            elif weight is not None and isinstance(out, torch.Tensor):
+            elif weight is not None and isinstance(weight, torch.Tensor):
                 dtype = weight.dtype
             else:
                 raise ValueError(
@@ -508,6 +542,8 @@ class BasicLinear(BasicOperation):
             get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
+            alpha=alpha,
+            beta=beta,
             accumulate=accumulate_into_out,
             out=y,
             bias=bias,
@@ -545,13 +581,17 @@ class BasicLinear(BasicOperation):
         input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
         weight: Optional[torch.Tensor],
         *,
+        grad_input_alpha: Optional[float] = None,
         input_requires_grad: bool = True,
+        grad_weight_alpha: Optional[float] = None,
         weight_requires_grad: bool = True,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         grad_weight: Optional[torch.Tensor] = None,
+        grad_weight_beta: Optional[float] = None,
         accumulate_into_grad_weight: bool = False,
         grad_input: Optional[torch.Tensor] = None,
+        grad_input_beta: Optional[float] = None,
         accumulate_into_grad_input: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -574,8 +614,12 @@ class BasicLinear(BasicOperation):
         weight: torch.Tensor, optional
             Weight tensor. Required to compute loss gradient w.r.t.
             input.
+        grad_input_alpha: float, optional
+            Scaling factor applied to the result of the dgrad GEMM
         input_requires_grad: bool
             Whether to compute loss gradient w.r.t. input tensor
+        grad_weight_alpha: float, optional
+            Scaling factor applied to the result of the wgrad GEMM
         weight_requires_grad: bool
             Whether to compute loss gradient w.r.t. weight tensor
         device: torch.device, default = default CUDA device
@@ -584,10 +628,14 @@ class BasicLinear(BasicOperation):
             Tensor datatype
         grad_weight: torch.Tensor, optional
             Loss gradient w.r.t. weight tensor
+        grad_weight_beta: float, optional
+            Scaling factor applied to original value of grad_weight when accumulating into it
         accumulate_into_grad_weight: bool, default = `False`
             Add result to weight grad instead of overwriting
         grad_input: torch.Tensor, optional
             Loss gradient w.r.t. input tensor
+        grad_input_beta: float, optional
+            Scaling factor applied to original value of grad_input when accumulating into it
         accumulate_into_grad_input: bool, default = `False`
             Add result to input grad instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -784,6 +832,8 @@ class BasicLinear(BasicOperation):
                 get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
+                alpha=grad_input_alpha,
+                beta=grad_input_beta,
                 accumulate=accumulate_into_grad_input,
                 layout="NN",
                 out=dx,
@@ -834,6 +884,8 @@ class BasicLinear(BasicOperation):
                 dy,
                 get_workspace(),
                 out_dtype=dw_dtype,
+                alpha=grad_weight_alpha,
+                beta=grad_weight_beta,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
                 out=dw,
@@ -933,20 +985,22 @@ class BasicLinear(BasicOperation):
         # Saved tensors from forward pass
         (x_local, w) = ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
-            if hasattr(self.weight, "__fsdp_param__"):
-                self.weight.main_grad = self.weight.get_main_grad()
-
-            if not hasattr(self.weight, "main_grad"):
+            weight_param = self.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = self.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -973,6 +1027,17 @@ class BasicLinear(BasicOperation):
         # Clear input tensor if possible
         clear_tensor_data(x_local)
 
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
             grad_weight = None
+            weight_param = self.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
+
         return grad_input, [grad_weight]
