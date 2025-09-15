@@ -177,7 +177,7 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
         # Perform GEMM
-        out = general_grouped_gemm(
+        general_grouped_gemm(
             weights_fp8,
             inputmats,
             [out],
@@ -366,7 +366,7 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                dgrad = general_grouped_gemm(
+                general_grouped_gemm(
                     weights,
                     grad_output,
                     [dgrad],
