@@ -491,6 +491,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             if fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
                 append_recipe = True
+                switch_recipe = True
             if not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling":
                 switch_recipe = True
         elif not fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "Float8CurrentScaling":
@@ -547,7 +548,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
             # Print in the first iteration of the module.
             self.logger.debug(
-                """Running with fp8_autocast(fp8_recipe=%s), DPA.fp8_meta["recipe"]=%s""",
+                """Running with fp8_autocast(fp8_recipe={%s}), DPA.fp8_meta["recipe"]={%s}""",
                 fp8_recipe,
                 fp8_recipe_dpa,
             )
