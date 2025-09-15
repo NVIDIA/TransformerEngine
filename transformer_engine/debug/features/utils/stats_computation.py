@@ -40,8 +40,8 @@ def _compute_dynamic_range_bottom(tensor):
 @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size):
     """Max blockwise dynamic range (log2 max/min_nonzero).
-       Returns 0 if all blocks are zeros. 
-       Otherwise computes dynamic range over non-zero blocks.
+    Returns 0 if all blocks are zeros.
+    Otherwise computes dynamic range over non-zero blocks.
     """
     total_numel = tensor.numel()
     assert (
