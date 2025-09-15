@@ -197,10 +197,10 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object gpt_oss_swiglu(const at::Tensor &input, py::handle quantizer, float limit);
+py::object gpt_oss_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
 
 py::object gpt_oss_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit);
+                           float limit, float alpha);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/

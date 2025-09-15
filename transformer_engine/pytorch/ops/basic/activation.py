@@ -412,12 +412,13 @@ class GptOssSwiglu(_ActivationOperation):
 
     """
 
-    def __init__(self, *, limit: float, cache_quantized_input: bool = False):
+    def __init__(self, *, limit: float, alpha: float, cache_quantized_input: bool = False):
         super().__init__(cache_quantized_input=cache_quantized_input)
         self.limit = limit
+        self.alpha = alpha
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.gpt_oss_swiglu(*args, limit=self.limit, **kwargs)
+        return tex.gpt_oss_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.gpt_oss_dswiglu(*args, limit=self.limit, **kwargs)
+        return tex.gpt_oss_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)

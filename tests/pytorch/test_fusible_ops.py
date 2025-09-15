@@ -1757,7 +1757,7 @@ class TestBasicOps:
 
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.GptOssSwiglu(limit=0.1),
+            te_ops.GptOssSwiglu(limit=0.1, alpha=1.702),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):

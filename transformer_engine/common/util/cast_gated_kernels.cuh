@@ -187,11 +187,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float dact_x;
         if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
           const float limit = p.limit;
+          const float alpha = p.alpha;
           const float x = min(act_elt, limit);
-          const float s = sigmoidf(1.702 * x);
+          const float s = sigmoidf(alpha * x);
           act_x = x * s;
           if (x < limit) {
-            dact_x = s + s * (1 - s) * 1.702 * x;
+            dact_x = s + s * (1 - s) * alpha * x;
           } else {
             dact_x = 0.0f;
           }
@@ -508,10 +509,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           float dact_x;
           if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
             const float limit = p.limit;
+            const float alpha = p.alpha;
             const float x = min(act_elt, limit);
-            const float s = sigmoidf(1.702 * x);
+            const float s = sigmoidf(alpha * x);
             act_x = x * s;
-            dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
+            dact_x = x < limit ? s + s * (1 - s) * alpha * x : 0.0f;
           } else {
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
@@ -765,10 +767,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               float dact_x;
               if constexpr (std::is_same<ParamOP, GptOssParam>::value) {
                 const float limit = p.limit;
+                const float alpha = p.alpha;
                 const float x = min(act_elt, limit);
-                const float s = sigmoidf(1.702 * x);
+                const float s = sigmoidf(alpha * x);
                 act_x = x * s;
-                dact_x = x < limit ? s + s * (1 - s) * 1.702 * x : 0.0f;
+                dact_x = x < limit ? s + s * (1 - s) * alpha * x : 0.0f;
               } else {
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);

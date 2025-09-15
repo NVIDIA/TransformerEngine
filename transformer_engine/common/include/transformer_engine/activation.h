@@ -186,8 +186,7 @@ void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream)
 /*
 TODO: Add documentation once the API finalizes.
 */
-void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, const float* const args,
-                        int args_size, cudaStream_t stream);
+void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha, cudaStream_t stream);
 
 void nvte_reglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
@@ -251,7 +250,7 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
 TODO: Add documentation once the API finalizes.
 */
 void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                         const float* const args, int args_size, cudaStream_t stream);
+                         float limit, float alpha, cudaStream_t stream);
 
 void nvte_dreglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                  cudaStream_t stream);
