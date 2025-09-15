@@ -13,6 +13,8 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
+import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
 
 
@@ -50,6 +52,8 @@ class Dropout(BasicOperation):
 
         # Save context for backward
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(mask)
             ctx.save_for_backward(mask)
             ctx.is_training = is_training
 
