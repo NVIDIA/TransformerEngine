@@ -10,14 +10,12 @@
 namespace transformer_engine::pytorch {
 
 /* Type aliases for readability */
-using FuncType = void (const NVTETensor, NVTETensor, cudaStream_t);
-using DFuncType = void (const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t);
+using FuncType = void(const NVTETensor, NVTETensor, cudaStream_t);
+using DFuncType = void(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t);
 
 template <FuncType* act_func, auto act_func_with_args, typename... Args>
-py::object activation_helper(const at::Tensor& input,
-                              py::handle quantizer,
-                              int shape_divisor = 1,
-                              Args&&... args) {
+py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1,
+                             Args&&... args) {
   init_extension();
 
   // Input tensor
@@ -37,48 +35,36 @@ py::object activation_helper(const at::Tensor& input,
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (act_func == nullptr) {
-            act_func_with_args(input_cpp.data(),
-                                out_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            act_func(input_cpp.data(),
-                      out_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (act_func == nullptr) {
+        act_func_with_args(input_cpp.data(), out_cpp.data(), std::forward<Args>(args)...,
+                           at::cuda::getCurrentCUDAStream());
+      } else {
+        act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
+      }
     });
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // Compute activation in high-precision fused together with amax, then quantize.
     auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (act_func == nullptr) {
-            act_func_with_args(input_cpp.data(),
-                                temp_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            act_func(input_cpp.data(),
-                      temp_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (act_func == nullptr) {
+        act_func_with_args(input_cpp.data(), temp_cpp.data(), std::forward<Args>(args)...,
+                           at::cuda::getCurrentCUDAStream());
+      } else {
+        act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
+      }
     });
     quantizer_cpp_cs->quantize_with_amax(temp_cpp, out_cpp);
   } else {
     // Compute activation in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (act_func == nullptr) {
-            act_func_with_args(input_cpp.data(),
-                                temp_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            act_func(input_cpp.data(),
-                      temp_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (act_func == nullptr) {
+        act_func_with_args(input_cpp.data(), temp_cpp.data(), std::forward<Args>(args)...,
+                           at::cuda::getCurrentCUDAStream());
+      } else {
+        act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
+      }
     });
     quantizer_cpp->quantize(temp_cpp, out_cpp);
   }
@@ -87,10 +73,8 @@ py::object activation_helper(const at::Tensor& input,
 }
 
 template <DFuncType* dact_func, auto dact_func_with_args, typename... Args>
-py::object dactivation_helper(const at::Tensor& grad_output,
-                               const at::Tensor& input,
-                               py::handle quantizer,
-                               Args&&... args) {
+py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& input,
+                              py::handle quantizer, Args&&... args) {
   init_extension();
 
   // Grad output and input tensors
@@ -112,54 +96,39 @@ py::object dactivation_helper(const at::Tensor& grad_output,
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation backward directly
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (dact_func == nullptr) {
-            dact_func_with_args(grad_output_cpp.data(),
-                                input_cpp.data(),
-                                grad_input_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            dact_func(grad_output_cpp.data(),
-                      input_cpp.data(),
-                      grad_input_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (dact_func == nullptr) {
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                            std::forward<Args>(args)..., at::cuda::getCurrentCUDAStream());
+      } else {
+        dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
+      }
     });
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // Compute activation backward in high-precision fused together with amax, then quantize.
     auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (dact_func == nullptr) {
-            dact_func_with_args(grad_output_cpp.data(),
-                                input_cpp.data(),
-                                temp_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            dact_func(grad_output_cpp.data(),
-                      input_cpp.data(),
-                      temp_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (dact_func == nullptr) {
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                            std::forward<Args>(args)..., at::cuda::getCurrentCUDAStream());
+      } else {
+        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
+      }
     });
     quantizer_cpp_cs->quantize_with_amax(temp_cpp, grad_input_cpp);
   } else {
     // Compute activation backward in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (dact_func == nullptr) {
-            dact_func_with_args(grad_output_cpp.data(),
-                                input_cpp.data(),
-                                temp_cpp.data(),
-                                std::forward<Args>(args)...,
-                                at::cuda::getCurrentCUDAStream());
-        } else {
-            dact_func(grad_output_cpp.data(),
-                      input_cpp.data(),
-                      temp_cpp.data(),
-                      at::cuda::getCurrentCUDAStream());
-        }
+      if constexpr (dact_func == nullptr) {
+        dact_func_with_args(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                            std::forward<Args>(args)..., at::cuda::getCurrentCUDAStream());
+      } else {
+        dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                  at::cuda::getCurrentCUDAStream());
+      }
     });
     quantizer_cpp->quantize(temp_cpp, grad_input_cpp);
   }

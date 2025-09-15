@@ -35,14 +35,16 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
   dgated_act_fn<fp32, Empty, silu<fp32, fp32>, dsilu<fp32, fp32>>(grad, input, output, e, stream);
 }
 
-void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha, cudaStream_t stream) {
+void nvte_gptoss_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha,
+                        cudaStream_t stream) {
   NVTE_API_CALL(nvte_gptoss_swiglu);
   using namespace transformer_engine;
   GptOssParam param = {limit, alpha};
   gated_act_fn<fp32, GptOssParam, oss_silu<fp32, fp32>>(input, output, param, stream);
 }
 
-void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output, float limit, float alpha, cudaStream_t stream) {
+void nvte_gptoss_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+                         float limit, float alpha, cudaStream_t stream) {
   NVTE_API_CALL(nvte_gptoss_dswiglu);
   using namespace transformer_engine;
   GptOssParam param = {limit, alpha};
