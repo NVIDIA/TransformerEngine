@@ -34,7 +34,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.constants import TE_DType
 
 
@@ -343,6 +343,7 @@ def get_attention_backend(
     run_config.update(attention_params_dict)
     if fp8:
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        run_config["fp8_autocast(fp8_recipe)"] = FP8GlobalStateManager.get_fp8_recipe()
     logger.debug("Running with config=%s", run_config)
 
     # The following sections check if `FlashAttention` supports the provided attention params,

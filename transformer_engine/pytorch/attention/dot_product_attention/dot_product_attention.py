@@ -546,12 +546,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_recipe_dpa,
                     fp8_group,
                 )
-            # Print in the first iteration of the module.
-            self.logger.debug(
-                """Running with fp8_autocast(fp8_recipe={%s}), DPA.fp8_meta["recipe"]={%s}""",
-                fp8_recipe,
-                fp8_recipe_dpa,
-            )
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
