@@ -1165,7 +1165,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
 
             # print quantizers
-            print_quantizers("AttnFuncWithCPAndKVP2P.forward >> before: ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
+            print_quantizers(
+                "AttnFuncWithCPAndKVP2P.forward >> before: ",
+                layer_number,
+                QKV_quantizer,
+                O_quantizer,
+                S_quantizer,
+                dQKV_quantizer,
+                dO_quantizer,
+                dP_quantizer,
+            )
 
             # amax_per_step[0]: amax_s x cp_size
             # amax_per_step[1]: amax_o x cp_size
@@ -1632,7 +1641,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if fp8:
             # print quantizers
-            print_quantizers("AttnFuncWithCPAndKVP2P.forward >> after:  ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
+            print_quantizers(
+                "AttnFuncWithCPAndKVP2P.forward >> after:  ",
+                layer_number,
+                QKV_quantizer,
+                O_quantizer,
+                S_quantizer,
+                dQKV_quantizer,
+                dO_quantizer,
+                dP_quantizer,
+            )
 
         # prepare for return and ctx saves
         out_fp8 = None
@@ -1857,7 +1875,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dout = dout_fp8._data
 
             # print quantizers
-            print_quantizers("AttnFuncWithCPAndKVP2P.backward >> before: ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+            print_quantizers(
+                "AttnFuncWithCPAndKVP2P.backward >> before: ",
+                ctx.layer_number,
+                ctx.QKV_quantizer,
+                ctx.O_quantizer,
+                ctx.S_quantizer,
+                ctx.dQKV_quantizer,
+                ctx.dO_quantizer,
+                ctx.dP_quantizer,
+            )
 
             # dout_fp8._fp8_dtype
             bwd_output_te_dtype = ctx.dO_quantizer.dtype
@@ -2359,7 +2386,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if ctx.fp8:
             # print quantizers
-            print_quantizers("AttnFuncWithCPAndKVP2P.backward >> after:  ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+            print_quantizers(
+                "AttnFuncWithCPAndKVP2P.backward >> after:  ",
+                ctx.layer_number,
+                ctx.QKV_quantizer,
+                ctx.O_quantizer,
+                ctx.S_quantizer,
+                ctx.dQKV_quantizer,
+                ctx.dO_quantizer,
+                ctx.dP_quantizer,
+            )
 
         if cp_size_a2a > 1:
             if ctx.fp8 and ctx.is_input_fp8:

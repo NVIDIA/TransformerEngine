@@ -1079,7 +1079,16 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
 
             # print quantizers
-            print_quantizers("FusedAttnFunc.forward >> before: ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
+            print_quantizers(
+                "FusedAttnFunc.forward >> before: ",
+                layer_number,
+                QKV_quantizer,
+                O_quantizer,
+                S_quantizer,
+                dQKV_quantizer,
+                dO_quantizer,
+                dP_quantizer,
+            )
 
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1129,7 +1138,16 @@ class FusedAttnFunc(torch.autograd.Function):
                     out_fp8 = O_quantizer(out_)
 
             # print quantizers
-            print_quantizers("FusedAttnFunc.forward >> after:  ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
+            print_quantizers(
+                "FusedAttnFunc.forward >> after:  ",
+                layer_number,
+                QKV_quantizer,
+                O_quantizer,
+                S_quantizer,
+                dQKV_quantizer,
+                dO_quantizer,
+                dP_quantizer,
+            )
 
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
@@ -1323,7 +1341,16 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8 = ctx.dO_quantizer(d_out)
 
                     # print quantizers
-                    print_quantizers("FusedAttnFunc.backward >> before: ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+                    print_quantizers(
+                        "FusedAttnFunc.backward >> before: ",
+                        ctx.layer_number,
+                        ctx.QKV_quantizer,
+                        ctx.O_quantizer,
+                        ctx.S_quantizer,
+                        ctx.dQKV_quantizer,
+                        ctx.dO_quantizer,
+                        ctx.dP_quantizer,
+                    )
 
                     # get tex.DType for dq, dk, dv data
                     dqkv_te_dtype = d_out_fp8._fp8_dtype
@@ -1401,7 +1428,16 @@ class FusedAttnFunc(torch.autograd.Function):
                         )
 
                     # print quantizers
-                    print_quantizers("FusedAttnFunc.backward >> after:  ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+                    print_quantizers(
+                        "FusedAttnFunc.backward >> after:  ",
+                        ctx.layer_number,
+                        ctx.QKV_quantizer,
+                        ctx.O_quantizer,
+                        ctx.S_quantizer,
+                        ctx.dQKV_quantizer,
+                        ctx.dO_quantizer,
+                        ctx.dP_quantizer,
+                    )
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()

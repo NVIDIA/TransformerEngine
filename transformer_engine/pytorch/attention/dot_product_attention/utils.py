@@ -35,7 +35,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -1823,12 +1826,42 @@ def get_attention_quantizers(fp8, quantizers):
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
 
-def print_quantizers(label, layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer):
+def print_quantizers(
+    label,
+    layer_number,
+    QKV_quantizer,
+    O_quantizer,
+    S_quantizer,
+    dQKV_quantizer,
+    dO_quantizer,
+    dP_quantizer,
+):
     """Print the type and scale/amax of attention quantizers"""
-    names = ["QKV_quantizer", "S_quantizer", "O_quantizer", "dO_quantizer", "dP_quantizer", "dQKV_quantizer"]
-    quantizers = [QKV_quantizer, S_quantizer, O_quantizer, dO_quantizer, dP_quantizer, dQKV_quantizer]
-    if _to_print and _to_print_layer == layer_number and (not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == _to_print_rank)):
-        for i,q in enumerate(quantizers):
+    names = [
+        "QKV_quantizer",
+        "S_quantizer",
+        "O_quantizer",
+        "dO_quantizer",
+        "dP_quantizer",
+        "dQKV_quantizer",
+    ]
+    quantizers = [
+        QKV_quantizer,
+        S_quantizer,
+        O_quantizer,
+        dO_quantizer,
+        dP_quantizer,
+        dQKV_quantizer,
+    ]
+    if (
+        _to_print
+        and _to_print_layer == layer_number
+        and (
+            not dist.is_initialized()
+            or (dist.is_initialized() and dist.get_rank() == _to_print_rank)
+        )
+    ):
+        for i, q in enumerate(quantizers):
             type_str = ""
             if q is None:
                 type_str = "None"
@@ -1836,7 +1869,10 @@ def print_quantizers(label, layer_number, QKV_quantizer, O_quantizer, S_quantize
                 type_str = "DS"
             elif isinstance(q, Float8CurrentScalingQuantizer):
                 type_str = "CS"
-            print(f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}")
+            print(
+                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+            )
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
