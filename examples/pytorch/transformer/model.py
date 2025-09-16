@@ -5,6 +5,7 @@ from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
 from typing import Dict
 from transformer_engine.pytorch.module.layernorm import LayerNorm
 
+
 @dataclass
 class SimpleConfig:
     hidden_size: int
@@ -18,6 +19,7 @@ class SimpleConfig:
     micro_batch_size: int
     max_seq_length: int
 
+
 # THD Model
 class SimpleThDModel(torch.nn.Module):
     def __init__(self, config: SimpleConfig):
@@ -26,7 +28,8 @@ class SimpleThDModel(torch.nn.Module):
         print("Config: ", config)
         self.embedding = torch.nn.Embedding(config.vocab_size, config.hidden_size)
         self.linear = torch.nn.Linear(config.hidden_size, config.vocab_size)
-        self.transformer_layers = torch.nn.ModuleList([
+        self.transformer_layers = torch.nn.ModuleList(
+            [
                 transformer_engine.pytorch.TransformerLayer(
                     hidden_size=config.hidden_size,
                     ffn_hidden_size=config.intermediate_size,
@@ -49,10 +52,12 @@ class SimpleThDModel(torch.nn.Module):
                     sequence_parallel=False,
                 )
                 for i in range(config.num_hidden_layers)
-            ])
+            ]
+        )
         self.emb_layer_norm_after = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.rotary_embeddings = RotaryPositionEmbedding(config.hidden_size // config.num_attention_heads)
-
+        self.rotary_embeddings = RotaryPositionEmbedding(
+            config.hidden_size // config.num_attention_heads
+        )
 
     def forward(
         self,
@@ -78,7 +83,7 @@ class SimpleThDModel(torch.nn.Module):
         if input_ids.dim() == 2:
             # If 2D (batch_size, seq_len), flatten to 1D for THD format
             input_ids = input_ids.view(-1)
-        
+
         hidden_states = self.embedding(input_ids)
 
         # The Encoder part.
@@ -100,6 +105,7 @@ class SimpleThDModel(torch.nn.Module):
 
         return logits
 
+
 # BSHD Model.
 class SimpleBSHDModel(torch.nn.Module):
     def __init__(self, config: SimpleConfig):
@@ -108,32 +114,36 @@ class SimpleBSHDModel(torch.nn.Module):
         print("Config: ", config)
         self.embedding = torch.nn.Embedding(config.vocab_size, config.hidden_size)
         self.linear = torch.nn.Linear(config.hidden_size, config.vocab_size)
-        self.transformer_layers = torch.nn.ModuleList([
-            transformer_engine.pytorch.TransformerLayer(
-                hidden_size=config.hidden_size,
-                ffn_hidden_size=config.intermediate_size,
-                num_attention_heads=config.num_attention_heads,
-                layernorm_epsilon=config.layer_norm_eps,
-                hidden_dropout=0.0,
-                attention_dropout=0.1,
-                qkv_weight_interleaved=True,
-                layer_number=i + 1,
-                layer_type="encoder",
-                self_attn_mask_type="no_mask",
-                activation="gelu",
-                attn_input_format="bshd",
-                seq_length=config.max_seq_length,
-                micro_batch_size=config.micro_batch_size,
-                num_gqa_groups=config.num_attention_heads,
-                fuse_qkv_params=True,
-                params_dtype=torch.bfloat16,
-                window_size=(-1, -1),
-                sequence_parallel=False,
-            )
-            for i in range(config.num_hidden_layers)
-        ])
+        self.transformer_layers = torch.nn.ModuleList(
+            [
+                transformer_engine.pytorch.TransformerLayer(
+                    hidden_size=config.hidden_size,
+                    ffn_hidden_size=config.intermediate_size,
+                    num_attention_heads=config.num_attention_heads,
+                    layernorm_epsilon=config.layer_norm_eps,
+                    hidden_dropout=0.0,
+                    attention_dropout=0.1,
+                    qkv_weight_interleaved=True,
+                    layer_number=i + 1,
+                    layer_type="encoder",
+                    self_attn_mask_type="no_mask",
+                    activation="gelu",
+                    attn_input_format="bshd",
+                    seq_length=config.max_seq_length,
+                    micro_batch_size=config.micro_batch_size,
+                    num_gqa_groups=config.num_attention_heads,
+                    fuse_qkv_params=True,
+                    params_dtype=torch.bfloat16,
+                    window_size=(-1, -1),
+                    sequence_parallel=False,
+                )
+                for i in range(config.num_hidden_layers)
+            ]
+        )
         self.emb_layer_norm_after = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.rotary_embeddings = RotaryPositionEmbedding(config.hidden_size // config.num_attention_heads)
+        self.rotary_embeddings = RotaryPositionEmbedding(
+            config.hidden_size // config.num_attention_heads
+        )
 
     def forward(self, batch: Dict[str, torch.Tensor]):
         """Forward pass of the SimpleBSHDModel.

@@ -4133,27 +4133,28 @@ def get_batch_on_this_cp_rank(
             labels_padded = process_tensor(labels_padded)
             position_ids_padded = process_tensor(position_ids_padded)
     elif qvk_format == "bshd":
+
         def process_tensor(val):
             if val is None:
                 return val
-            
+
             # Dynamically determine sequence dimension based on format
             # For bshd format: batch, sequence, heads, dim
             seq_dim = 1
-            
+
             # Validate tensor has enough dimensions
             if val.ndim < 2:
                 raise ValueError(
                     f"Tensor must have at least 2 dimensions for bshd format, got {val.ndim}"
                 )
-            
+
             # Validate sequence dimension is divisible by 2*cp_size
             if val.shape[seq_dim] % (2 * cp_size) != 0:
                 raise ValueError(
                     f"Sequence dimension (dim {seq_dim}) with size {val.shape[seq_dim]} "
                     f"must be divisible by 2*cp_size={2*cp_size}"
                 )
-            
+
             # Reshape tensor to separate chunks
             try:
                 val = val.view(
@@ -4167,48 +4168,47 @@ def get_batch_on_this_cp_rank(
                     f"Failed to reshape tensor from shape {list(val.shape)} "
                     f"to chunk-separated shape. Error: {e}"
                 )
-            
+
             # Create index tensor on the same device as input to avoid CPU-GPU sync
             index = torch.tensor(
-                [cp_rank, (2 * cp_size - cp_rank - 1)], 
-                device=val.device,
-                dtype=torch.long
+                [cp_rank, (2 * cp_size - cp_rank - 1)], device=val.device, dtype=torch.long
             )
-            
+
             # Select the chunks for this rank
             val = val.index_select(seq_dim, index)
-            
+
             # Reshape back to original format with reduced sequence dimension
             val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
             return val
-        
+
         if cp_size > 1:
             input_ids_padded = process_tensor(input_ids_padded)
             labels_padded = process_tensor(labels_padded)
             position_ids_padded = process_tensor(position_ids_padded)
-    
+
     elif qvk_format == "sbhd":
+
         def process_tensor(val):
             if val is None:
                 return val
-            
+
             # Dynamically determine sequence dimension based on format
             # For sbhd format: sequence, batch, heads, dim
             seq_dim = 0
-            
+
             # Validate tensor has enough dimensions
             if val.ndim < 2:
                 raise ValueError(
                     f"Tensor must have at least 2 dimensions for sbhd format, got {val.ndim}"
                 )
-            
+
             # Validate sequence dimension is divisible by 2*cp_size
             if val.shape[seq_dim] % (2 * cp_size) != 0:
                 raise ValueError(
                     f"Sequence dimension (dim {seq_dim}) with size {val.shape[seq_dim]} "
                     f"must be divisible by 2*cp_size={2*cp_size}"
                 )
-            
+
             # Reshape tensor to separate chunks
             try:
                 val = val.view(
@@ -4221,26 +4221,24 @@ def get_batch_on_this_cp_rank(
                     f"Failed to reshape tensor from shape {list(val.shape)} "
                     f"to chunk-separated shape. Error: {e}"
                 )
-            
+
             # Create index tensor on the same device as input to avoid CPU-GPU sync
             index = torch.tensor(
-                [cp_rank, (2 * cp_size - cp_rank - 1)], 
-                device=val.device,
-                dtype=torch.long
+                [cp_rank, (2 * cp_size - cp_rank - 1)], device=val.device, dtype=torch.long
             )
-            
+
             # Select the chunks for this rank (dim 0 for sbhd after reshape)
             val = val.index_select(0, index)
-            
+
             # Reshape back to original format with reduced sequence dimension
             val = val.view(-1, *val.shape[2:])
             return val
-        
+
         if cp_size > 1:
             input_ids_padded = process_tensor(input_ids_padded)
             labels_padded = process_tensor(labels_padded)
             position_ids_padded = process_tensor(position_ids_padded)
-        
+
     else:
         raise ValueError(f"Support not implemented yet for qvk_format: {qvk_format}!")
 

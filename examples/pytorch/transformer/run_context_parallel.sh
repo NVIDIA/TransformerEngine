@@ -18,7 +18,7 @@ wait_for_completion_marker() {
     local process_name=$2
     local max_wait=60
     local elapsed=0
-    
+
     echo "Waiting for $process_name to complete..."
     while [ ! -f "$marker_file" ]; do
         if [ $elapsed -ge $max_wait ]; then
@@ -78,4 +78,3 @@ rm -f /tmp/bshd_*.pt /tmp/thd_*.pt
 popd > /dev/null
 
 echo "✅ All tests completed successfully!"
-
