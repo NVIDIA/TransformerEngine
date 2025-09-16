@@ -17,6 +17,7 @@ import numpy as np
 from packaging.version import Version as PkgVersion
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
@@ -34,6 +35,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -53,6 +55,10 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+# Print debug info
+_to_print = os.getenv("NVTE_PRINT", "0") == "1"
+_to_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
+_to_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
@@ -1815,6 +1821,22 @@ def get_attention_quantizers(fp8, quantizers):
     dP_quantizer.interal = True
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def print_quantizers(label, layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer):
+    """Print the type and scale/amax of attention quantizers"""
+    names = ["QKV_quantizer", "S_quantizer", "O_quantizer", "dO_quantizer", "dP_quantizer", "dQKV_quantizer"]
+    quantizers = [QKV_quantizer, S_quantizer, O_quantizer, dO_quantizer, dP_quantizer, dQKV_quantizer]
+    if _to_print and _to_print_layer == layer_number and (not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == _to_print_rank)):
+        for i,q in enumerate(quantizers):
+            type_str = ""
+            if q is None:
+                type_str = "None"
+            elif isinstance(q, Float8Quantizer):
+                type_str = "DS"
+            elif isinstance(q, Float8CurrentScalingQuantizer):
+                type_str = "CS"
+            print(f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}")
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):

@@ -44,6 +44,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
     combine_and_quantize,
     combine_and_dequantize,
+    print_quantizers,
 )
 
 _cu_seqlens_info_with_cp_cache = {}
@@ -1044,6 +1045,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         pad_between_seqs,
         use_flash_attn_3,
         fp8_output,
+        layer_number,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1161,6 +1163,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q_f16 = q
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
+
+            # print quantizers
+            print_quantizers("AttnFuncWithCPAndKVP2P.forward >> before: ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
 
             # amax_per_step[0]: amax_s x cp_size
             # amax_per_step[1]: amax_o x cp_size
@@ -1625,6 +1630,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
 
+        if fp8:
+            # print quantizers
+            print_quantizers("AttnFuncWithCPAndKVP2P.forward >> after:  ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
+
         # prepare for return and ctx saves
         out_fp8 = None
         out_f16 = out.to(fwd_nominal_dtype)
@@ -1635,6 +1644,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             out_fp8 = O_quantizer(out_f16)
         out_ret = out_fp8 if (fp8 and is_output_fp8) else out_f16
 
+        ctx.layer_number = layer_number
         ctx.fp8_recipe = fp8_recipe
         ctx.fp8 = fp8 and is_bwd_fp8
         kv = p2p_comm_buffers[-1]
@@ -1845,6 +1855,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 dout_fp8 = ctx.dO_quantizer(dout)
             dout = dout_fp8._data
+
+            # print quantizers
+            print_quantizers("AttnFuncWithCPAndKVP2P.backward >> before: ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
 
             # dout_fp8._fp8_dtype
             bwd_output_te_dtype = ctx.dO_quantizer.dtype
@@ -2344,6 +2357,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv = combine_and_quantize(qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
 
+        if ctx.fp8:
+            # print quantizers
+            print_quantizers("AttnFuncWithCPAndKVP2P.backward >> after:  ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+
         if cp_size_a2a > 1:
             if ctx.fp8 and ctx.is_input_fp8:
                 dq_fp8, dk_fp8, dv_fp8 = dq, dk, dv
@@ -2391,6 +2408,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             attn_dbias,
+            None,
             None,
             None,
             None,
@@ -3506,6 +3524,7 @@ def attn_forward_func_with_cp(
     pad_between_seqs=False,
     use_flash_attn_3=False,
     fp8_output=False,
+    layer_number=1,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
@@ -3652,6 +3671,7 @@ def attn_forward_func_with_cp(
             pad_between_seqs,
             use_flash_attn_3,
             fp8_output,
+            layer_number,
         ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":

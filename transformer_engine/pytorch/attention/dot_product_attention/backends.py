@@ -56,6 +56,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
     combine_and_quantize,
     combine_and_dequantize,
+    print_quantizers,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
@@ -1033,6 +1034,7 @@ class FusedAttnFunc(torch.autograd.Function):
         quantizers,
         deterministic,
         fp8_output,
+        layer_number,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1075,6 +1077,9 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
+
+            # print quantizers
+            print_quantizers("FusedAttnFunc.forward >> before: ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
 
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1122,6 +1127,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16)
                 ):
                     out_fp8 = O_quantizer(out_)
+
+            # print quantizers
+            print_quantizers("FusedAttnFunc.forward >> after:  ", layer_number, QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer)
 
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
@@ -1208,6 +1216,9 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
         ctx.fp8_meta = fp8_meta
 
+        ctx.layer_number = layer_number
+        ctx.QKV_quantizer = QKV_quantizer
+        ctx.O_quantizer = O_quantizer
         ctx.dQKV_quantizer = dQKV_quantizer
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
@@ -1311,6 +1322,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     else:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
 
+                    # print quantizers
+                    print_quantizers("FusedAttnFunc.backward >> before: ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
+
                     # get tex.DType for dq, dk, dv data
                     dqkv_te_dtype = d_out_fp8._fp8_dtype
 
@@ -1385,6 +1399,9 @@ class FusedAttnFunc(torch.autograd.Function):
                         dq, dk, dv = combine_and_quantize(
                             ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
                         )
+
+                    # print quantizers
+                    print_quantizers("FusedAttnFunc.backward >> after:  ", ctx.layer_number, ctx.QKV_quantizer, ctx.O_quantizer, ctx.S_quantizer, ctx.dQKV_quantizer, ctx.dO_quantizer, ctx.dP_quantizer)
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
@@ -1436,6 +1453,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             dbias,
+            None,
             None,
             None,
             None,
@@ -1715,6 +1733,7 @@ class FusedAttention(torch.nn.Module):
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     fp8_output=fp8_output,
+                    layer_number=self.layer_number,
                 )
         else:
             with self.attention_dropout_ctx():
@@ -1747,6 +1766,7 @@ class FusedAttention(torch.nn.Module):
                     quantizers,
                     self.deterministic,
                     fp8_output,
+                    self.layer_number,
                 )
 
         # ...hd -> ...(hd)
