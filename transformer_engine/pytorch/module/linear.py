@@ -318,6 +318,8 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
 
         # Deallocate GEMM input tensor if no longer needed
+        # TODO(yuzhongw, tmoon): Figure out why inputmat_total is not automatically
+        # deallocated by GC. Manually deallocating is a temporary hack.
         if with_input_all_gather_nccl:
             clear_tensor_data(inputmat_total)
             inputmat_total = None
