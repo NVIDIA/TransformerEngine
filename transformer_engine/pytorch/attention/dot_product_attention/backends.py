@@ -1040,6 +1040,9 @@ class FusedAttnFunc(torch.autograd.Function):
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
         nvtx_range_push(f"{nvtx_label}")
 
+        # recipe passed in through fp8_autocast; may be different from fp8_meta["recipe"]
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+
         # input types are inferred from the real data while output types are controlled by fp8_output
         # fp8_output should be set upstream as (DPA.fp8 and DPA.fp8_meta["recipe"].fp8_mha)
         assert isinstance(k, q.__class__) and isinstance(
@@ -1115,17 +1118,25 @@ class FusedAttnFunc(torch.autograd.Function):
                 if not is_output_fp8 or not is_bwd_fp8:
                     out = out_.dequantize().view(out_.shape)
             else:
-                if is_output_fp8 or is_bwd_fp8:
+                if is_output_fp8 or (is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16)):
                     out_fp8 = O_quantizer(out_)
 
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
 
             # save appropriate tensors
-            fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8) if is_bwd_fp8 else (None, None, None, None)
-            if not is_bwd_fp8 and is_input_fp8:
-                q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
-            qkvo_tensors = (q, k, v, out)
+            fp8_tensors = (None, None, None, None)
+            qkvo_tensors = (None, None, None, None)
+            if is_bwd_fp8:
+                if fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16:
+                    fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
+                    qkvo_tensors = (None, None, None, out)
+                else:
+                    fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
+            if not is_bwd_fp8:
+                if is_input_fp8:
+                    q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
+                qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
             out_, aux_ctx_tensors = fused_attn_fwd(
@@ -1158,11 +1169,11 @@ class FusedAttnFunc(torch.autograd.Function):
             out = out_
             out_ret = out_
             fp8_tensors = (None, None, None, None)
-            qkvo_tensors = q, k, v, out
+            qkvo_tensors = (q, k, v, out)
 
         nvtx_range_pop(f"{nvtx_label}")
 
-        ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        ctx.fp8_recipe = fp8_recipe
         ctx.fp8 = is_bwd_fp8
 
         from transformer_engine.pytorch.cpu_offload import (
