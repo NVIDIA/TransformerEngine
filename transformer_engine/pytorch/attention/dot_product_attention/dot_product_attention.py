@@ -487,7 +487,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 amax_compute_algo="most_recent",
                 fp8_dpa=fp8_recipe.fp8_dpa,
                 fp8_mha=fp8_recipe.fp8_mha,
-                reduce_amax=False,
+                reduce_amax=True,
             )
             if fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
                 append_recipe = True
@@ -520,11 +520,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe_dpa = fake_recipe if switch_recipe else fp8_recipe
         fp8_recipes = [fp8_recipe, fake_recipe] if append_recipe else fp8_recipe_dpa
 
-        # only reduce over TP group for now; need to consider CP group later
-        reduce_over_tp_group_only = True
+        # reduce over TP+CP groups; expect fp8_group to be set up so
         fp8_group = FP8GlobalStateManager.get_fp8_group()
-        if reduce_over_tp_group_only:
-            fp8_group = self.tp_group
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
@@ -537,8 +534,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
             self.fp8_meta["recipe"] = fp8_recipe_dpa
-            if reduce_over_tp_group_only or fp8_recipe != fp8_recipe_dpa:
-                # Either fp8_group has changed or both fp8_recipe and fp8_group have changed.
+            if fp8_recipe != fp8_recipe_dpa:
+                # fp8_recipe has changed, rehash the key.
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
@@ -569,8 +566,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
-            if reduce_over_tp_group_only or fp8_recipe != fp8_recipe_dpa:
-                # Either fp8_group has changed or both fp8_recipe and fp8_group have changed.
+            if fp8_recipe != fp8_recipe_dpa:
+                # fp8_recipe has changed, rehash the key.
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
