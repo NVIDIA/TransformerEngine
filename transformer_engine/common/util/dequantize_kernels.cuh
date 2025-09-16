@@ -226,7 +226,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
@@ -247,7 +247,7 @@ static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t str
   );                      // NOLINT(*)
 }
 
-static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);
@@ -341,7 +341,7 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
-  } else if (is_mxfp_scaling(input.scaling_mode)) {
+  } else if (is_mxfp8_scaling(input.scaling_mode)) {
     if (is_supported_by_CC_100()) {
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
