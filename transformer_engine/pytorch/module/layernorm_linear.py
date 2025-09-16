@@ -355,9 +355,12 @@ class _LayerNormLinear(torch.autograd.Function):
         if not weight.requires_grad and not return_layernorm_output:
             clear_tensor_data(ln_out, ln_out_total)
             ln_out = ln_out_total = None
-        elif ln_out_total is not ln_out_return and ln_out_total is not ln_out:
-            clear_tensor_data(ln_out_total)
-            ln_out_total = None
+        else:
+            _ln_out_all_gather_nccl = with_input_all_gather and not ub_overlap_ag_fprop
+            if _ln_out_all_gather_nccl and not return_layernorm_output_gathered:
+                # ln_out_total is gathered by NCCL and not needed to be returned
+                clear_tensor_data(ln_out_total)
+                ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -901,7 +904,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     elif ctx.return_layernorm_output_gathered and ctx.ln_out_needs_gather:
                         # ln_out is not the returned tensor
                         clear_tensor_data(ln_out)
-                    if ctx.ln_out_needs_gather:
+                    if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
+                        # ln_out_total is gathered by NCCL
                         clear_tensor_data(ln_out_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM

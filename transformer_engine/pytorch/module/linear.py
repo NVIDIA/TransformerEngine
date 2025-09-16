@@ -886,10 +886,15 @@ class _Linear(torch.autograd.Function):
                     # Deallocate input tensor if permitted
                     if ctx.owns_input:
                         clear_tensor_data(inputmat_total)
-                    elif ctx.backward_input_needs_gather:
+                    elif ctx.backward_input_needs_gather and not ctx.ub_bulk_dgrad:
+                        # inputmat_total is all gathered by NCCL
                         clear_tensor_data(inputmat_total)
 
-                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                    _grad_output_all_gather_nccl = (
+                        (ctx.parallel_mode == "row" and ctx.sequence_parallel) # grad output is all gathered
+                        and not ctx.ub_overlap_ag # all gathered by NCCL
+                    )
+                    if _grad_output_all_gather_nccl:
                         clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
