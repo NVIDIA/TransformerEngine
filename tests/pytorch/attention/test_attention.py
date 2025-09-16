@@ -1710,8 +1710,9 @@ def test_mha_fp8_vs_f16(
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
+        logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1721,6 +1722,8 @@ def test_mha_fp8_vs_f16(
             rtol,
             rmse_tol,
         )
+    logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+    logging.debug("========== {:^25s} ==========".format("forward output"))
     _error(
         fused_attn_fwd_fp8,
         fused_attn_fwd_f16,
@@ -1961,8 +1964,9 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     rtol = 5e-2
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
-    logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
+        logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1973,6 +1977,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             rmse_tol,
         )
     if unfused_attn_supported:
+        logging.debug("========== {:^25s} ==========".format("unfused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
         _error(
             unfused_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -2000,6 +2006,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             fused_attn_fwd_fp8 == 1
         ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
     else:
+        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
         _error(
             fused_attn_fwd_fp8,
             fused_attn_fwd_f16,
