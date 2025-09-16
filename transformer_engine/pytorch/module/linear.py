@@ -891,8 +891,10 @@ class _Linear(torch.autograd.Function):
                         clear_tensor_data(inputmat_total)
 
                     _grad_output_all_gather_nccl = (
-                        (ctx.parallel_mode == "row" and ctx.sequence_parallel) # grad output is all gathered
-                        and not ctx.ub_overlap_ag # all gathered by NCCL
+                        (
+                            ctx.parallel_mode == "row" and ctx.sequence_parallel
+                        )  # grad output is all gathered
+                        and not ctx.ub_overlap_ag  # all gathered by NCCL
                     )
                     if _grad_output_all_gather_nccl:
                         clear_tensor_data(grad_output)
