@@ -608,12 +608,16 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
   userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
                        recv_stream);
 
+  // We sync with the internal comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
   for (auto stream : {send_stream, recv_stream}) {
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
-    // We sync with the comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _stop_comm, 0));
   }
+
+  // Next we sync with the main stream
+  // We have to recapture an event off the comm stream to enable cuda graph capture otherwise the comm stream will be never be joined in the graph
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }
 
 /***************************************************************************************************
