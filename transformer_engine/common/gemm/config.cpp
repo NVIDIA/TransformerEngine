@@ -4,24 +4,22 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "./config.h"
+
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstring>
 
 #include "../util/logging.h"
-#include "./config.h"
 
-NVTEMatmulConfig nvte_create_matmul_config() {
-  return new transformer_engine::MatmulConfig;
-}
+NVTEMatmulConfig nvte_create_matmul_config() { return new transformer_engine::MatmulConfig; }
 
-void nvte_get_matmul_config_attribute(NVTEMatmulConfig config,
-                                      NVTEMatmulConfigAttribute attr, void *buf,
-                                      size_t size_in_bytes, size_t *size_written) {
+void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      void *buf, size_t size_in_bytes, size_t *size_written) {
   // Write attribute size
-  NVTE_CHECK(attr < kNVTEMatmulConfigNumAttributes,
-             "Invalid NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(attr < kNVTEMatmulConfigNumAttributes, "Invalid NVTEMatmulConfigAttribute (got ",
+             static_cast<int>(attr), ")");
   NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
   const auto &attr_size = transformer_engine::MatmulConfig::attr_sizes[attr];
   *size_written = attr_size;
@@ -68,12 +66,11 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config,
   }
 }
 
-void nvte_set_matmul_config_attribute(NVTEMatmulConfig config,
-                                            NVTEMatmulConfigAttribute attr, const void *buf,
-                                            size_t size_in_bytes) {
+void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      const void *buf, size_t size_in_bytes) {
   // Check attribute and buffer
-  NVTE_CHECK(attr < kNVTEMatmulConfigNumAttributes,
-             "Invalid NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(attr < kNVTEMatmulConfigNumAttributes, "Invalid NVTEMatmulConfigAttribute (got ",
+             static_cast<int>(attr), ")");
   const auto &attr_size = transformer_engine::MatmulConfig::attr_sizes[attr];
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for matmul config attribute "

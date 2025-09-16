@@ -20,8 +20,7 @@ namespace {
 
 constexpr int amax_kernel_threads = 512;
 
-__launch_bounds__(1) __global__
-    void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
+__launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
@@ -171,8 +170,7 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   float *amax_ptr = reinterpret_cast<float *>(
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
-      launch_amax_kernel<nvec>(
+      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType); launch_amax_kernel<nvec>(
           reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(), noop_ptr,
           stream););  // NOLINT(*)
 }

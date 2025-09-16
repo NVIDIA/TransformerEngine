@@ -66,9 +66,8 @@ NVTEMatmulConfig nvte_create_matmul_config();
  *                           buf. If buf is NULL, then the number of
  *                           bytes that would have been written.
  */
-void nvte_get_matmul_config_attribute(NVTEMatmulConfig config,
-                                      NVTEMatmulConfigAttribute attr, void *buf,
-                                      size_t size_in_bytes, size_t *size_written);
+void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      void *buf, size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Set an option in matrix multiplication configuration.
  *
@@ -77,9 +76,8 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config,
  *  \param[out] buf Memory address to read option value.
  *  \param[in] size_in_bytes Size of buf.
  */
-void nvte_set_matmul_config_attribute(NVTEMatmulConfig config,
-                                      NVTEMatmulConfigAttribute attr, const void *buf,
-                                      size_t size_in_bytes);
+void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      const void *buf, size_t size_in_bytes);
 
 /*! \brief Destroy a matrix multiplication configuration. */
 void nvte_destroy_matmul_config(NVTEMatmulConfig config);
@@ -130,9 +128,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
  *  \param[in]  config    Additional configuration.
  *  \param[in]  stream    CUDA stream used for the operation.
  */
-void nvte_cublas_gemm_v2(int transa, int transb,
-                         float alpha, const NVTETensor A, const NVTETensor B,
-                         float beta, const NVTETensor C, NVTETensor D,
+void nvte_cublas_gemm_v2(int transa, int transb, float alpha, const NVTETensor A,
+                         const NVTETensor B, float beta, const NVTETensor C, NVTETensor D,
                          NVTETensor workspace, NVTEMatmulConfig config, cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations,
@@ -226,10 +223,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream to wait on.
  */
-void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
-                                   const NVTETensor* bias, NVTETensor* pre_gelu_out,
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
                                    const int num_gemms, bool transa, bool transb, bool grad,
-                                   NVTETensor* workspace, bool accumulate,
+                                   NVTETensor *workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    cudaStream_t stream);
 #ifdef __cplusplus
@@ -286,14 +283,14 @@ class MatmulConfigWrapper {
 
   /*! \brief Set bias tensor. */
   void set_bias_tensor(NVTETensor bias_tensor) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigBiasTensor,
-                                     &bias_tensor, sizeof(NVTETensor));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigBiasTensor, &bias_tensor,
+                                     sizeof(NVTETensor));
   }
 
   /*! \brief Set bias gradient tensor. */
   void set_dbias_tensor(NVTETensor dbias_tensor) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigDBiasTensor,
-                                     &dbias_tensor, sizeof(NVTETensor));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigDBiasTensor, &dbias_tensor,
+                                     sizeof(NVTETensor));
   }
 
   /*! \brief Set whether to compute GELU in GEMM epilogue. */
@@ -322,8 +319,7 @@ class MatmulConfigWrapper {
 
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
   void set_sm_count(int sm_count) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount,
-                                     &sm_count, sizeof(int));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &sm_count, sizeof(int));
   }
 
  private:

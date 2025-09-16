@@ -4,13 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/hadamard_transform.h>
-
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
+#include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
 
@@ -336,10 +335,9 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
   }
 }
 
-__launch_bounds__(1)
-__global__ void ZeroAmaxKernel(float* __restrict__ output_pre_rht_amax_ptr,
-                               float* __restrict__ output_identity_amax_ptr,
-                               float* __restrict__ output_transpose_amax_ptr) {
+__launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_pre_rht_amax_ptr,
+                                                    float* __restrict__ output_identity_amax_ptr,
+                                                    float* __restrict__ output_transpose_amax_ptr) {
   if (output_pre_rht_amax_ptr != nullptr) {
     *output_pre_rht_amax_ptr = 0;
   }
@@ -662,9 +660,8 @@ __global__ void HadamardTransformKernel(const T* __restrict__ input, T* __restri
 
 }  // namespace
 
-void hadamard_transform(const Tensor& input_, Tensor& output_,
-                        uint16_t random_sign_mask, uint16_t random_sign_mask_t,
-                        cudaStream_t stream) {
+void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
+                        uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform);
 
   // Check tensors
@@ -674,15 +671,14 @@ void hadamard_transform(const Tensor& input_, Tensor& output_,
              "Input tensor must be BF16 tensor, but scaling mode is ",
              to_string(input_.scaling_mode), ".");
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
-             "Input tensor must be BF16 tensor, but dtype is ",
-             to_string(input_.dtype()), ".");
+             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   NVTE_CHECK(output_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Output tensor must be simple tensor, but scaling mode is ",
              to_string(output_.scaling_mode), ".");
-  const SimpleTensor &input = input_.data;
+  const SimpleTensor& input = input_.data;
   SimpleTensor output;
-  SimpleTensor &output_t = output_.data;
+  SimpleTensor& output_t = output_.data;
 
   // Check requested outputs
   const bool return_identity = output.dptr != nullptr;
@@ -744,11 +740,8 @@ void hadamard_transform(const Tensor& input_, Tensor& output_,
 
 // Kernel that will apply the 16x16 hadamard transform the input and input.T, and then
 // get the absolute max value of the result.
-void hadamard_transform_amax(const Tensor &input_,
-                             Tensor &output_,
-                             uint16_t random_sign_mask,
-                             uint16_t random_sign_mask_t,
-                             cudaStream_t stream) {
+void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
+                             uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_amax);
 
   // Check input tensor
@@ -756,15 +749,14 @@ void hadamard_transform_amax(const Tensor &input_,
              "Input tensor must be BF16 tensor, but scaling mode is ",
              to_string(input_.scaling_mode), ".");
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
-             "Input tensor must be BF16 tensor, but dtype is ",
-             to_string(input_.dtype()), ".");
+             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
-  const SimpleTensor &input = input_.data;
+  const SimpleTensor& input = input_.data;
 
   // Check amax tensors
-  SimpleTensor &output_pre_rht_amax = output_.amax;
+  SimpleTensor& output_pre_rht_amax = output_.amax;
   SimpleTensor output_identity_amax;
-  SimpleTensor &output_transpose_amax = output_.columnwise_amax;
+  SimpleTensor& output_transpose_amax = output_.columnwise_amax;
 
   // Check requested outputs
   const bool return_pre_rht_amax = output_pre_rht_amax.dptr != nullptr;
@@ -776,10 +768,9 @@ void hadamard_transform_amax(const Tensor &input_,
   }
 
   // Zero out amaxes if needed
-  ZeroAmaxKernel<<<1, 1, 0, stream>>>(
-    reinterpret_cast<float *>(output_pre_rht_amax.dptr),
-    reinterpret_cast<float *>(output_identity_amax.dptr),
-    reinterpret_cast<float *>(output_transpose_amax.dptr));
+  ZeroAmaxKernel<<<1, 1, 0, stream>>>(reinterpret_cast<float*>(output_pre_rht_amax.dptr),
+                                      reinterpret_cast<float*>(output_identity_amax.dptr),
+                                      reinterpret_cast<float*>(output_transpose_amax.dptr));
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   checkCuDriverContext(stream);
@@ -824,8 +815,7 @@ void hadamard_transform_amax(const Tensor &input_,
 
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
 
-  dim3 grid(DIVUP(row_length, kChunkBlockXSmall),
-            DIVUP(num_rows, kChunkBlockYSmall));
+  dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       return_transposed_amax, kReturnTransposedAmax,
@@ -862,26 +852,20 @@ void hadamard_transform_amax(const Tensor &input_,
 
 }  // namespace transformer_engine
 
-void nvte_hadamard_transform(const NVTETensor input, NVTETensor output,
-                             int random_sign_mask, int random_sign_mask_t,
-                             cudaStream_t stream) {
+void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int random_sign_mask,
+                             int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform);
   using namespace transformer_engine;
-  hadamard_transform(*convertNVTETensorCheck(input),
-                     *convertNVTETensorCheck(output),
+  hadamard_transform(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                      static_cast<uint16_t>(random_sign_mask),
-                     static_cast<uint16_t>(random_sign_mask_t),
-                     stream);
+                     static_cast<uint16_t>(random_sign_mask_t), stream);
 }
 
-void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output,
-                                  int random_sign_mask, int random_sign_mask_t,
-                                  cudaStream_t stream) {
+void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int random_sign_mask,
+                                  int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform_amax);
   using namespace transformer_engine;
-  hadamard_transform_amax(*convertNVTETensorCheck(input),
-                          *convertNVTETensorCheck(output),
+  hadamard_transform_amax(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                           static_cast<uint16_t>(random_sign_mask),
-                          static_cast<uint16_t>(random_sign_mask_t),
-                          stream);
+                          static_cast<uint16_t>(random_sign_mask_t), stream);
 }

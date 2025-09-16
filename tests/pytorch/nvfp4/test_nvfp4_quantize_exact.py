@@ -115,7 +115,7 @@ def check_quantization_nvfp4_versus_reference(
     # Compare only the valid portion of scale tensors (reference may not have padding)
     ref_sx_shape = sx_ref.shape
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
-    
+
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
     if return_transpose:
@@ -147,7 +147,7 @@ def check_quantization_nvfp4_versus_reference(
         (1024, 2048),
         (2048, 1024),
         # # largest tile
-        (8192, 8192)
+        (8192, 8192),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)

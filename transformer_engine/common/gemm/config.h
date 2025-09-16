@@ -21,13 +21,13 @@ struct MatmulConfig {
   int sm_count = 0;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(NVTETensor),   // bias_tensor
-      sizeof(NVTETensor),   // dbias_tensor
-      sizeof(bool),         // with_gelu_epilogue
-      sizeof(bool),         // with_dgelu_epilogue
-      sizeof(NVTETensor),   // epilogue_aux_tensor
-      sizeof(bool),         // use_split_accumulator
-      sizeof(int)           // sm_count
+      sizeof(NVTETensor),  // bias_tensor
+      sizeof(NVTETensor),  // dbias_tensor
+      sizeof(bool),        // with_gelu_epilogue
+      sizeof(bool),        // with_dgelu_epilogue
+      sizeof(NVTETensor),  // epilogue_aux_tensor
+      sizeof(bool),        // use_split_accumulator
+      sizeof(int)          // sm_count
   };
 };
 

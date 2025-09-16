@@ -234,8 +234,9 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
       : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
   return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
 #else
-  NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                    "Try recompiling with sm_XXXa instead of sm_XXX.");
+  NVTE_DEVICE_ERROR(
+      "FP4 cvt PTX instructions are architecture-specific. "
+      "Try recompiling with sm_XXXa instead of sm_XXX.");
   uint16_t dummy = 0;
   return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
 #endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
@@ -259,8 +260,9 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
       : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
   return reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x)[0];
 #else
-  NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                    "Try recompiling with sm_XXXa instead of sm_XXX.");
+  NVTE_DEVICE_ERROR(
+      "FP4 cvt PTX instructions are architecture-specific. "
+      "Try recompiling with sm_XXXa instead of sm_XXX.");
   uint16_t dummy = 0;
   return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
 #endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
@@ -333,14 +335,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoad;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);        // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsLoad;                            // Row in shared memory
-    const size_t c_g = block_idx_x * kTileDim + c_s * kNVecSMem;        // Column in global memory
-    size_t r_g = block_idx_y * kTileDim + r_s;                          // Row in global memory
-    const size_t stride_g = static_cast<size_t>(r_stride) * row_length; // Stride in global memory
-    const size_t num_ele = (c_g < row_length
-                            ? min(static_cast<size_t>(kNVecIn), row_length - c_g)
-                            : 0);  // For not aligned case
+        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);         // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsLoad;                             // Row in shared memory
+    const size_t c_g = block_idx_x * kTileDim + c_s * kNVecSMem;         // Column in global memory
+    size_t r_g = block_idx_y * kTileDim + r_s;                           // Row in global memory
+    const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
+    const size_t num_ele = (c_g < row_length ? min(static_cast<size_t>(kNVecIn), row_length - c_g)
+                                             : 0);          // For not aligned case
     const IType* input_g = &input[r_g * row_length + c_g];  // Input address in global memory
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -385,15 +386,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);      // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsStore;                           // Row in shared memory
-    const size_t c_g = block_idx_x * kTileDim + c_s * kNVecSMem;        // Column in global memory
-    size_t r_g = block_idx_y * kTileDim + r_s;                          // Row in global memory
-    const size_t stride_g = static_cast<size_t>(r_stride) * row_length; // Stride in global memory
-    const size_t num_ele = (c_g < row_length
-                            ? min(static_cast<size_t>(kNVecOut / kNFP4PerContainer),
-                                  (row_length - c_g) / kNFP4PerContainer)
-                            : 0);  // For not aligned case
+        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);       // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsStore;                            // Row in shared memory
+    const size_t c_g = block_idx_x * kTileDim + c_s * kNVecSMem;         // Column in global memory
+    size_t r_g = block_idx_y * kTileDim + r_s;                           // Row in global memory
+    const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
+    const size_t num_ele =
+        (c_g < row_length ? min(static_cast<size_t>(kNVecOut / kNFP4PerContainer),
+                                (row_length - c_g) / kNFP4PerContainer)
+                          : 0);  // For not aligned case
     OType* output_g =
         &output_c[(r_g * row_length + c_g) / kNFP4PerContainer];  // Output address in global memory
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
@@ -532,16 +533,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     constexpr int c_stride =
         kThreadsPerBlock / kNumThreadsStore;  // Stride in columns of shared memory
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
-    const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;    // Row in shared memory
-    int c_s = threadIdx.x / kNumThreadsStore;                       // Column in shared memory
-    size_t r_g = block_idx_x * kTileDim + c_s * kNVecSMem;          // Row in global memory
-    const size_t c_g = block_idx_y * kTileDim + r_s;                // Column in global memory
-    const size_t stride_g
-      = static_cast<size_t>(c_stride) * kNVecSMem * num_rows;  // Stride in global memory
-    const size_t num_ele = (c_g < num_rows
-                            ? min(static_cast<size_t>(kNVecOut / kNFP4PerContainer),
-                                  (num_rows - c_g) / kNFP4PerContainer)
-                            : 0);  // For not aligned case
+    const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;  // Row in shared memory
+    int c_s = threadIdx.x / kNumThreadsStore;                     // Column in shared memory
+    size_t r_g = block_idx_x * kTileDim + c_s * kNVecSMem;        // Row in global memory
+    const size_t c_g = block_idx_y * kTileDim + r_s;              // Column in global memory
+    const size_t stride_g =
+        static_cast<size_t>(c_stride) * kNVecSMem * num_rows;  // Stride in global memory
+    const size_t num_ele = (c_g < num_rows ? min(static_cast<size_t>(kNVecOut / kNFP4PerContainer),
+                                                 (num_rows - c_g) / kNFP4PerContainer)
+                                           : 0);  // For not aligned case
     OType* output_g =
         &output_t[(r_g * num_rows + c_g) / kNFP4PerContainer];  // Output address in global memory
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
@@ -570,7 +570,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           int warp_idx = threadIdx.x / kThreadsPerWarp;  // 0 ~ 7
           constexpr int kNumColsPerWarp =
               kThreadsPerWarp / kNumThreadsStore * kNVecSMem;  // 8 elements
-          constexpr int kNumWarpsPerBlock = kThreadsPerBlock / kThreadsPerWarp;  // 8 warps per block
+          constexpr int kNumWarpsPerBlock =
+              kThreadsPerBlock / kThreadsPerWarp;  // 8 warps per block
           constexpr int kNumColsPerIter = kNumColsPerWarp * kNumWarpsPerBlock;
           int tid_in_warp_x = (threadIdx.x / kNumThreadsStore) % kNumColsPerWarp;
           int tid_in_warp_y = (threadIdx.x % kThreadsPerWarp) % kNumThreadsStore;
@@ -606,8 +607,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
         if (write_scale_inv) {
           size_t row_idx = block_idx_x * kTileDim + c_s * kNVecSMem + smem_idx;
-          size_t col_idx = (block_idx_y * (kNumThreadsStore / kNumThreadsReduce)
-                            + (threadIdx.x % kNumThreadsStore) / kNumThreadsReduce);
+          size_t col_idx = (block_idx_y * (kNumThreadsStore / kNumThreadsReduce) +
+                            (threadIdx.x % kNumThreadsStore) / kNumThreadsReduce);
           if constexpr (kSwizzledScale) {
             size_t offset = scale_factor_swizzled_offset<ScaleType>(
                 row_idx, col_idx, DIVUP(num_rows, kScaleBlockDim));

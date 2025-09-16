@@ -19,6 +19,7 @@ HIGH_PRECISION_FLOAT_DTYPES = (
 
 class Fp4Formats(enum.Enum):
     """FP4 data format"""
+
     E2M1 = "e2m1"
 
 

@@ -150,15 +150,15 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                                    const size_t cols,
                                    const float global_amax,
                                    std::vector<std::vector<fp8e4m3>>& math_scales) {
-    
+
     const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
     const size_t blocks_X = divide_round_up(cols, block_size_X);
-    
+
     math_scales.resize(blocks_Y, std::vector<fp8e4m3>(blocks_X));
-    
+
     for (size_t block_Y = 0; block_Y < blocks_Y; ++block_Y) {
         for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
             const size_t i_min = block_Y * block_size_Y;
@@ -200,7 +200,7 @@ void quantize_nvfp4_2d(float (*OP)(const float),
     // Step 1: Compute mathematical 8x8 scaling factors
     std::vector<std::vector<fp8e4m3>> math_scales;
     compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
-    
+
     const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
@@ -221,7 +221,7 @@ void quantize_nvfp4_2d(float (*OP)(const float),
 
     // Step 3: Apply quantization using the mathematical scaling factors
     std::array<std::array<float, block_size_X>, block_size_Y> cache_buffer;
-    
+
     for (size_t block_Y = 0; block_Y < blocks_Y; ++block_Y) {
         for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
             const size_t i_min = block_Y * block_size_Y;
@@ -255,11 +255,11 @@ void quantize_nvfp4_2d(float (*OP)(const float),
                     const size_t cache_idx_y = i - i_min;
                     const size_t cache_idx_x1 = j - j_min;
                     const size_t cache_idx_x2 = std::min(cache_idx_x1 + 1, block_size_X - 1);
-                    
+
                     const float cached_x = cache_buffer[cache_idx_y][cache_idx_x1];
-                    const float cached_y = ((j + 1) < j_max && cache_idx_x2 < block_size_X) ? 
+                    const float cached_y = ((j + 1) < j_max && cache_idx_x2 < block_size_X) ?
                                           cache_buffer[cache_idx_y][cache_idx_x2] : 0.0f;
-                    
+
                     const float scaled_elt_x = cached_x * scale_reciprocal;
                     const float scaled_elt_y = cached_y * scale_reciprocal;
                     const float2 scaled_elt_pair = {scaled_elt_x, scaled_elt_y};
@@ -303,19 +303,19 @@ void compute_ref(float (*OP)(const float),
                  const size_t scales_stride,
                  const size_t scales_stride_t,
                  const bool use_2d_quantization = false)
-{   
+{
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
-    
+
     if (use_2d_quantization) {
         // Step 1: Compute mathematical 8×8 scaling factors
         std::vector<std::vector<fp8e4m3>> math_scales;
         compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
-        
+
         constexpr size_t block_size_Y = 16;
         constexpr size_t block_size_X = 16;
         const size_t blocks_Y = divide_round_up(rows, block_size_Y);
         const size_t blocks_X = divide_round_up(cols, block_size_X);
-        
+
         // Step 2: Generate scales (128×8) by replicating row-wise
         for (size_t i = 0; i < rows; ++i) {
             const size_t block_Y = i / block_size_Y;
@@ -324,7 +324,7 @@ void compute_ref(float (*OP)(const float),
                 scales[scale_idx] = math_scales[block_Y][block_X];
             }
         }
-        
+
         // Step 3: Generate scales_t (128×8) with proper transposed block mapping
         for (size_t i = 0; i < cols; ++i) {  // cols = 128, which becomes rows of transposed data
             const size_t block_X_orig = i / block_size_X;  // i was column index in original, so maps to block_X
@@ -333,12 +333,12 @@ void compute_ref(float (*OP)(const float),
                 scales_t[scale_idx] = math_scales[block_Y_new][block_X_orig];
             }
         }
-        
+
         // Step 4: Process quantized outputs using the same algorithm as quantize_nvfp4_2d
         // (This part processes the actual FP4 data using the mathematical scaling factors)
         quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax); // scales already filled
         quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax); // scales_t already filled
-        
+
     } else {
         quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_2d_quantization);
         quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax, use_2d_quantization);
@@ -351,7 +351,7 @@ void compare_nvfp4_tensors(const std::string& name,
                            double atol = 1e-5, double rtol = 1e-8) {
     std::vector<std::string> mismatch_messages;
     size_t total_mismatches = 0;
-    
+
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; j += 2) {
             const int idx = i * cols + j;
@@ -378,11 +378,11 @@ void compare_nvfp4_tensors(const std::string& name,
                 if (assertion) {
                     total_mismatches++;
                     std::string msg = "Mismatch at place (" + std::to_string(idx + k) + "): " +
-                                    std::to_string(t) + " vs " + std::to_string(r) + 
-                                    " (abs_diff: " + std::to_string(fabs(t - r)) + 
+                                    std::to_string(t) + " vs " + std::to_string(r) +
+                                    " (abs_diff: " + std::to_string(fabs(t - r)) +
                                     ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
                     mismatch_messages.push_back(msg);
-                    
+
                     // Optional: limit number of detailed messages to avoid overwhelming output
                     if (mismatch_messages.size() <= 100) {
                         std::cout << "Error in tensor " << name << ": " << msg << std::endl;
@@ -391,11 +391,11 @@ void compare_nvfp4_tensors(const std::string& name,
             }
         }
     }
-    
+
     // Always report summary - either success or failure
     std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
     std::cout << "Total elements checked: " << (rows * cols) << std::endl;
-    
+
     if (total_mismatches > 0) {
         std::cout << "STATUS: FAILED for output" << std::endl;
         std::cout << "Total mismatches found: " << total_mismatches << std::endl;
@@ -404,7 +404,7 @@ void compare_nvfp4_tensors(const std::string& name,
             std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
         }
         std::cout << "============================" << std::endl;
-        
+
         GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
     } else {
         std::cout << "STATUS: PASSED for output" << std::endl;
@@ -421,27 +421,27 @@ void dump_nvfp4_tensor_data(const std::string& prefix,
     std::string test_file = prefix + "_test.txt";
     std::string ref_file = prefix + "_ref.txt";
     std::string diff_file = prefix + "_diff.txt";
-    
+
     std::ofstream test_out(test_file);
     std::ofstream ref_out(ref_file);
     std::ofstream diff_out(diff_file);
-    
+
     if (test_out.is_open() && ref_out.is_open() && diff_out.is_open()) {
         for (int i = 0; i < rows; ++i) {
             for (int j = 0; j < cols; j += 2) {
                 const int idx = i * cols + j;
                 double2 test_data_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[idx/2]));
                 double2 ref_data_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[idx/2]));
-                
+
                 for (int k = 0; k < 2; ++k) {
                     const double t = (k == 0 ? test_data_pair.x : test_data_pair.y);
                     const double r = (k == 0 ? ref_data_pair.x : ref_data_pair.y);
                     const int pos = idx + k;
-                    
+
                     test_out << "pos[" << pos << "] = " << t << std::endl;
                     ref_out << "pos[" << pos << "] = " << r << std::endl;
-                    diff_out << "pos[" << pos << "] test=" << t << " ref=" << r 
-                            << " abs_diff=" << fabs(t - r) 
+                    diff_out << "pos[" << pos << "] test=" << t << " ref=" << r
+                            << " abs_diff=" << fabs(t - r)
                             << " rel_diff=" << (r == 0 ? 0.0 : fabs((t - r) / r)) << std::endl;
                 }
             }
@@ -455,26 +455,26 @@ void dump_nvfp4_tensor_data(const std::string& prefix,
 void print_detailed_tensor_comparison(const std::string& name,
                                      const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
                                      const int rows, const int cols) {
-    printf("\n=== DETAILED COMPARISON for %s (%d×%d = %d elements) ===\n", 
+    printf("\n=== DETAILED COMPARISON for %s (%d×%d = %d elements) ===\n",
            name.c_str(), rows, cols, rows * cols);
-    
+
     const int total_elements = rows * cols;
     const int check_count = 128;
-    
+
     printf("--- FIRST %d ELEMENTS ---\n", check_count);
     printf("Index | Test_Value    | Ref_Value     | Match\n");
     printf("------|---------------|---------------|-------\n");
     for (int i = 0; i < std::min(check_count, total_elements); ++i) {
         double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
         double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-        
+
         double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
         double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
         bool match = (fabs(t - r) < 1e-6);
-        
+
         printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
     }
-    
+
     if (total_elements > 2 * check_count) {
         printf("\n--- LAST %d ELEMENTS ---\n", check_count);
         printf("Index | Test_Value    | Ref_Value     | Match\n");
@@ -482,11 +482,11 @@ void print_detailed_tensor_comparison(const std::string& name,
         for (int i = total_elements - check_count; i < total_elements; ++i) {
             double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
             double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-            
+
             double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
             double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
             bool match = (fabs(t - r) < 1e-6);
-            
+
             printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
         }
     }
@@ -528,7 +528,7 @@ void performTest(float (*OP)(const float),
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    // Use get_scale_tensor_dims for NVFP4 scale tensor dimensions 
+    // Use get_scale_tensor_dims for NVFP4 scale tensor dimensions
     // Now that CheckScaleTensorShape is fixed, this should work correctly
     const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
     const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
@@ -587,10 +587,10 @@ void performTest(float (*OP)(const float),
     const size_t RNG_sequence = 321;
     quant_config.set_rng_seed(RNG_seed);
     quant_config.set_rng_sequence(RNG_sequence);
-    
+
     // Set 2D quantization based on compile-time flag
     quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
-    
+
     // Call appropriate function based on operation type
     // Activation functions take 3 parameters (input, output, stream)
     // nvte_quantize_v2 takes 4 parameters (input, output, quant_config, stream)
@@ -620,7 +620,7 @@ void performTest(float (*OP)(const float),
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);
-    
+
     const fp8e4m3* kernel_scales = output.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
     const fp8e4m3* ref_scales_ptr = ref_scales.get();
     const fp8e4m3* kernel_scales_t = output.columnwise_cpu_scale_inv_ptr<fp8e4m3>();

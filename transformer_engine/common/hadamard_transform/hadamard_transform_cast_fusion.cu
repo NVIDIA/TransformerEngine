@@ -4,14 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/hadamard_transform.h>
-
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <cutlass/arch/barrier.h>
+#include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
 #include <cute/algorithm/gemm.hpp>
@@ -19,9 +18,9 @@
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
-#include "common/utils.cuh"
 #include "common/util/cuda_runtime.h"
 #include "common/util/ptx.cuh"
+#include "common/utils.cuh"
 #include "curanddx.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
@@ -708,8 +707,7 @@ rht_gemm_ttt_wrapper(int m, int n,
 
 // clang-format on
 
-void hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
-                                               Tensor &output_,
+void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &output_,
                                                const Tensor &hadamard_matrix_,
                                                QuantizationConfig quant_config,
                                                cudaStream_t stream) {
@@ -720,8 +718,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
              "Input tensor must be BF16 tensor, but scaling mode is ",
              to_string(input_.scaling_mode), ".");
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
-             "Input tensor must be BF16 tensor, but dtype is ",
-             to_string(input_.dtype()), ".");
+             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   const SimpleTensor &input = input_.data;
   SimpleTensor &global_amax = output_.amax;
@@ -750,11 +747,11 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK((hadamard_matrix_.shape()
-              == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
-             "Hadamard matrix must have shape=",
-             std::vector<size_t>{kHadamardDimension, kHadamardDimension},
-             ", but got shape=", hadamard_matrix_.shape(), ".");
+  NVTE_CHECK(
+      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
+      "Hadamard matrix must have shape=",
+      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
+      ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
   const size_t ndim = input.shape.size();
@@ -804,11 +801,11 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
       detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
           /*m=*/m,
           /*n=*/n,
-          /*A=*/reinterpret_cast<TA const*>(input.dptr),
-          /*B=*/reinterpret_cast<TB const*>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC*>(output_t.dptr),
-          /*SFC=*/reinterpret_cast<TSFC*>(scale_inv_t.dptr),
-          /*global_amax=*/reinterpret_cast<float const*>(global_amax.dptr),
+          /*A=*/reinterpret_cast<TA const *>(input.dptr),
+          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
           /*rng_seed=*/rng_seed,
           /*rng_sequence=*/rng_sequence,
           /*sm_count=*/sm_count,
@@ -828,9 +825,7 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
   }
-  hadamard_transform_cast_fusion_columnwise(*convertNVTETensorCheck(input),
-                                            *convertNVTETensorCheck(output),
-                                            *convertNVTETensorCheck(hadamard_matrix),
-                                            quant_config_cpp,
-                                            stream);
+  hadamard_transform_cast_fusion_columnwise(
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
+      *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp, stream);
 }

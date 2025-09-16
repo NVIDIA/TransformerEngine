@@ -2100,47 +2100,39 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       bool use_2d_quantization = quant_config_cpp.nvfp4_2d_quantization;
       auto dtype = input_tensor->dtype();
 
-#define _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4()                      \
-  quantize_transpose_vector_blockwise_fp4(                              \
-    /*input=*/input_tensor->data,                                       \
-    /*global_amax=*/global_amax,                                        \
-    /*scale_inv=*/output_tensor->scale_inv,                             \
-    /*scale_inv_t=*/output_tensor->columnwise_scale_inv,                \
-    /*output=*/output_tensor->data,                                     \
-    /*output_t=*/output_tensor->columnwise_data,                        \
-    /*epsilon=*/0.0f,                                                   \
-    /*return_identity=*/output_tensor->has_data(),                      \
-    /*return_transpose=*/output_tensor->has_columnwise_data(),          \
-    /*pow2_scale=*/false,                                               \
-    /*swizzled_scale=*/false,                                           \
-    /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,   \
-    /*rng_seed=*/quant_config_cpp.rng_seed,                             \
-    /*rng_sequence=*/quant_config_cpp.rng_sequence,                     \
-    /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,     \
-    /*noop_tensor=*/noop_tensor->data,                                  \
-    /*stream=*/stream);
+#define _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4()                                                 \
+  quantize_transpose_vector_blockwise_fp4(                                                         \
+      /*input=*/input_tensor->data, /*global_amax=*/global_amax,                                   \
+      /*scale_inv=*/output_tensor->scale_inv, /*scale_inv_t=*/output_tensor->columnwise_scale_inv, \
+      /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,                 \
+      /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),                             \
+      /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,             \
+      /*swizzled_scale=*/false, /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,  \
+      /*rng_seed=*/quant_config_cpp.rng_seed, /*rng_sequence=*/quant_config_cpp.rng_sequence,      \
+      /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,                              \
+      /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
 
       bool use_optimized_kernel = dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0 &&
                                   output_tensor->has_data();
 
       if (use_optimized_kernel) {
         if (use_2d_quantization) {
-          nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, true>(*input_tensor, noop_tensor, output_tensor,
-            &quant_config_cpp, stream);
+          nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, true>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         } else {
-          nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, false>(*input_tensor, noop_tensor, output_tensor,
-            &quant_config_cpp, stream);
+          nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, false>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
 
       } else {
-          auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
-                                  : output_tensor->columnwise_amax;
+        auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
+                                                                  : output_tensor->columnwise_amax;
 
-          NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-                      "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_NVFP4_1D_SCALING for "
-                      "2D quantization");
+        NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                   "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_NVFP4_1D_SCALING for "
+                   "2D quantization");
 
-          _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4();
+        _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4();
       }
 #undef _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4
       break;
@@ -2167,14 +2159,14 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format
-                                == Float8BlockScaleTensorFormat::COMPACT);
+        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
+                                Float8BlockScaleTensorFormat::COMPACT);
         rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
                                          : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format
-                                   == Float8BlockScaleTensorFormat::COMPACT);
+        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
+                                   Float8BlockScaleTensorFormat::COMPACT);
         columnwise_option = columnwise_compact
                                 ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;

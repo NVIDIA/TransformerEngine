@@ -27,9 +27,8 @@ extern "C" {
  *  \param[in]      random_sign_mask_t 16-bit sign mask.
  *  \param[in]      stream             CUDA stream used for the operation.
  */
-void nvte_hadamard_transform(const NVTETensor input, NVTETensor output,
-                             int random_sign_mask, int random_sign_mask_t,
-                             cudaStream_t stream);
+void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int random_sign_mask,
+                             int random_sign_mask_t, cudaStream_t stream);
 
 /*! \brief Perform the absolute maximum reduction on the input tensor with/without
  *         randomized hadamard transform. The rowwise result is the absolute maximum
@@ -44,9 +43,8 @@ void nvte_hadamard_transform(const NVTETensor input, NVTETensor output,
  *  \param[in]      random_sign_mask_t 16-bit sign mask.
  *  \param[in]      stream             CUDA stream used for the operation.
  */
-void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output,
-                                  int random_sign_mask, int random_sign_mask_t,
-                                  cudaStream_t stream);
+void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int random_sign_mask,
+                                  int random_sign_mask_t, cudaStream_t stream);
 
 /*! \brief Perform the columnwise hadamard transform cast fusion.
  *
@@ -58,8 +56,7 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output,
  *  \param[in]      quant_config    Quantization configuration.
  *  \param[in]      stream          CUDA stream used for the operation.
  */
-void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input,
-                                                    NVTETensor output,
+void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTETensor output,
                                                     const NVTETensor hadamard_matrix,
                                                     const NVTEQuantizationConfig quant_config,
                                                     cudaStream_t stream);

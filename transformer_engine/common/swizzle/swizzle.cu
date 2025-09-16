@@ -332,12 +332,11 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
 }  // namespace
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
-  NVTE_CHECK(input->scaling_mode == NVTE_MXFP8_1D_SCALING
-             || input->scaling_mode == NVTE_BLOCK_SCALING_1D
-             || input->scaling_mode == NVTE_BLOCK_SCALING_2D
-             || input->scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Input tensor has invalid scaling mode (",
-             to_string(input->scaling_mode), ").");
+  NVTE_CHECK(input->scaling_mode == NVTE_MXFP8_1D_SCALING ||
+                 input->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                 input->scaling_mode == NVTE_BLOCK_SCALING_2D ||
+                 input->scaling_mode == NVTE_NVFP4_1D_SCALING,
+             "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
   NVTE_CHECK(is_fp8_dtype(input->dtype()) || is_fp4_dtype(input->dtype()),
              "Input tensor has invalid dtype (", to_string(input->dtype()), ").");
 
@@ -423,22 +422,25 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
     switch (vec_load_size) {
       case 4:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(
                 input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
         break;
       case 2:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(
                 input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
         break;
       case 1:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(
                 input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
@@ -461,24 +463,27 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
     switch (vec_load_size) {
       case 4:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
                                                            output->columnwise_scale_inv.dptr, m, k,
                                                            original_M, original_K);
         break;
       case 2:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
                                                            output->columnwise_scale_inv.dptr, m, k,
                                                            original_M, original_K);
         break;
       case 1:
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
             <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
                                                            output->columnwise_scale_inv.dptr, m, k,

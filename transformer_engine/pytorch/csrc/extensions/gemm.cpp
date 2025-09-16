@@ -264,10 +264,9 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_cublas_gemm_v2(transa, transb,
-                            alpha, A_tensor.data(), B_tensor.data(),
-                            *beta, D_tensor.data(), D_tensor.data(),
-                            te_workspace.data(), config, main_stream);
+        nvte_cublas_gemm_v2(transa, transb, alpha, A_tensor.data(), B_tensor.data(), *beta,
+                            D_tensor.data(), D_tensor.data(), te_workspace.data(), config,
+                            main_stream);
       });
     }
   } else {

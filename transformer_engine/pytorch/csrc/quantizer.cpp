@@ -1507,10 +1507,10 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      NVTE_SCOPED_GIL_RELEASE(
-          { nvte_hadamard_transform_amax(input.data(), out.data(),
-                                         0, this->rht_matrix_random_sign_mask_t,
-                                         stream); });
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+                                     this->rht_matrix_random_sign_mask_t, stream);
+      });
     } else {
       // raise error since it's not supported yet
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
@@ -1624,9 +1624,8 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
 
         NVTE_SCOPED_GIL_RELEASE({
           // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
-          nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(),
-                                  0, this->rht_matrix_random_sign_mask_t,
-                                  stream);
+          nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
+                                  this->rht_matrix_random_sign_mask_t, stream);
         });
 
         // Quantize kernel will treat everything as rowwise input/output, which is
@@ -1640,10 +1639,8 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
                    "RHT matrix is not set");
         auto rht_matrix_nvte = makeTransformerEngineTensor(this->rht_matrix);
         NVTE_SCOPED_GIL_RELEASE({
-          nvte_hadamard_transform_cast_fusion_columnwise(input.data(),
-                                                         out_transpose.data(),
-                                                         rht_matrix_nvte.data(),
-                                                         quant_config, stream);
+          nvte_hadamard_transform_cast_fusion_columnwise(
+              input.data(), out_transpose.data(), rht_matrix_nvte.data(), quant_config, stream);
         });
       }
     }
