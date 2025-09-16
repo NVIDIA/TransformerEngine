@@ -1628,7 +1628,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # prepare for return and ctx saves
         out_fp8 = None
         out_f16 = out.to(fwd_nominal_dtype)
-        if fp8 and (is_output_fp8 or (is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16))):
+        if fp8 and (
+            is_output_fp8
+            or (is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16))
+        ):
             out_fp8 = O_quantizer(out_f16)
         out_ret = out_fp8 if (fp8 and is_output_fp8) else out_f16
 
