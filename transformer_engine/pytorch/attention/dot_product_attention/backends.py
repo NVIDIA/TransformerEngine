@@ -142,6 +142,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
+        return_max_score: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -149,6 +150,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
+        self.return_max_score = return_max_score
 
         def mask_func(x, y):
             return (
@@ -337,6 +339,12 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if "padding" in attn_mask_type:
             attention_probs = attention_probs.masked_fill(attention_mask, 0)
 
+        # max attention score
+        max_score = None
+        if self.return_max_score:
+            max_indices = torch.argmax(attention_probs, dim=-1, keepdim=True)
+            max_score = torch.max(matmul_result.gather(dim=-1, index=max_indices))
+
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         with self.attention_dropout_ctx():
@@ -391,6 +399,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # [tq, np, hn] --> [tq, hp]
             context_layer = context_layer.view(total_tokens, -1)
 
+        if self.return_max_score:
+            return context_layer, max_score
         return context_layer
 
 
@@ -442,6 +452,7 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        return_max_score: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -465,6 +476,7 @@ class FlashAttention(torch.nn.Module):
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
             self.logger.addHandler(attn_log._stream_handler)
+        self.return_max_score = return_max_score
 
     def forward(
         self,
@@ -660,6 +672,7 @@ class FlashAttention(torch.nn.Module):
                         batch_size * context_len,
                     )
 
+        max_score = None
         use_flash_attn_3 = False
         if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
             use_flash_attn_3 = True
@@ -762,7 +775,11 @@ class FlashAttention(torch.nn.Module):
                         softmax_scale=self.softmax_scale,
                         causal="causal" in attn_mask_type,
                         **fa_optional_forward_kwargs,
+                        return_attn_probs=self.return_max_score,
                     )
+                    #if self.return_max_score and (self.attention_dropout == 0.0 or not self.training):
+                    #    output, _, S_dmask = output
+                    #    max_score = torch.max(S_dmask)
                 else:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
@@ -889,6 +906,8 @@ class FlashAttention(torch.nn.Module):
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
+        if self.return_max_score:
+            return output.contiguous(), max_score
         return output.contiguous()
 
 
@@ -925,6 +944,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         quantizers,
         deterministic,
+        return_max_score,
     ):
         # pylint: disable=missing-function-docstring
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
@@ -939,6 +959,7 @@ class FusedAttnFunc(torch.autograd.Function):
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
+        max_score = None
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             assert isinstance(k, q.__class__) and isinstance(
@@ -1035,7 +1056,7 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
         else:
             # q, k, v, out_ret: torch.float16 or torch.bfloat16
-            out_ret, aux_ctx_tensors = fused_attn_fwd(
+            out_ret, aux_ctx_tensors, max_score = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1061,6 +1082,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 window_size,
                 rng_gen,
+                return_max_score,
             )
             out_save = out_ret
             fp8_tensors = (None, None, None, None)
@@ -1121,11 +1143,12 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        return out_ret
+        return out_ret, max_score
 
     @staticmethod
-    def backward(ctx, d_out):
+    def backward(ctx, *args):
         # pylint: disable=missing-function-docstring
+        d_out = args[0]
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -1321,6 +1344,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -1390,6 +1414,7 @@ class FusedAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        return_max_score: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -1402,6 +1427,7 @@ class FusedAttention(torch.nn.Module):
         ) == "1" and get_device_compute_capability() == (9, 0)
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.return_max_score = return_max_score
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1634,7 +1660,11 @@ class FusedAttention(torch.nn.Module):
                     fp8_meta,
                     quantizers,
                     self.deterministic,
+                    self.return_max_score,
                 )
 
+        if self.return_max_score and not context_parallel:
+            # ...hd -> ...(hd)
+            return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)
-        return output.view(*output.shape[:-2], -1)
+        return output[0].view(*output[0].shape[:-2], -1)

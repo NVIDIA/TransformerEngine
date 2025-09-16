@@ -153,6 +153,7 @@ class ModelConfig:
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        return_max_score = False,
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,
@@ -178,6 +179,7 @@ class ModelConfig:
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = window_size
+        self.return_max_score = return_max_score
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
         self.num_layers = num_layers
@@ -263,6 +265,7 @@ def get_available_attention_backends(
             fp8_meta=fp8_meta,
             is_training=is_training,
             inference_params=inference_params,
+            return_max_score=config.return_max_score,
         )
         (
             use_flash_attention,

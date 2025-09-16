@@ -166,7 +166,7 @@ def test_dot_product_attention(
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
+        unfused_attn_fwd, max_score, unfused_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "UnfusedDotProductAttention",
@@ -180,7 +180,7 @@ def test_dot_product_attention(
     # FusedAttention backend
     if fused_attn_supported:
         if len(fused_attn_backends) == 1:
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, max_score, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -192,7 +192,7 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, max_score, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -203,7 +203,7 @@ def test_dot_product_attention(
                 is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+            fused_attn_fwd_1, max_score_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -216,7 +216,7 @@ def test_dot_product_attention(
 
     # FlashAttention backend
     if flash_attn_supported:
-        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, max_score, flash_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "FlashAttention",
@@ -256,6 +256,32 @@ def test_dot_product_attention(
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+
+
+model_configs_max_score = {
+    #     test:             b,  h, hg,  d
+    "max_score_1_0": ModelConfig(8, 128, 16, 64),
+    "max_score_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
+    "max_score_2_0": ModelConfig(2, 2048, 24, 128),
+    "max_score_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    "max_score_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048),
+    "max_score_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
+    "max_score_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
+    "max_score_4_1": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048),
+    "max_score_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
+    "max_score_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
+    "max_score_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
+    "max_score_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
+}
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_max_score])
+@pytest.mark.parametrize("model", model_configs_max_score.keys())
+def test_dpa_max_score(dtype, model_configs, model):
+    """Test DotProductAttention module with checkpointing"""
+    config = model_configs[model]
+    config.return_max_score=True
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 
@@ -989,6 +1015,7 @@ def _run_dot_product_attention(
         tp_group=None,
         layer_number=1,
         attention_type=config.attn_type,
+        return_max_score=config.return_max_score,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()
@@ -1004,7 +1031,7 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-    out = block(
+    out, max_score = block(
         q,
         k,
         v,
@@ -1025,13 +1052,18 @@ def _run_dot_product_attention(
         fast_zero_fill=True,
     )
     if is_training:
-        out.backward(d_out)
+        out.backward((d_out, torch.zeros(1,device="cuda")))
+
+    if config.return_max_score:
+        out = (out, max_score)
+    else:
+        out = (out, None)
 
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
-            return out, (q.grad, k.grad, v.grad)
+            return *out, (q.grad, k.grad, v.grad)
         else:
-            return out, (None, None, None)
+            return *out, (None, None, None)
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1065,9 +1097,9 @@ def _run_dot_product_attention(
                 return out_orig, (None, None, None)
         else:
             if is_training:
-                return out, (q.grad, k.grad, v.grad)
+                return *out, (q.grad, k.grad, v.grad)
             else:
-                return out, (None, None, None)
+                return *out, (None, None, None)
 
 
 model_configs_te_layer = {

@@ -75,7 +75,7 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
     size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right);
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right, bool return_max_sum_exp);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -87,7 +87,7 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
-    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
+    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread, bool return_max_sum_exp);
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,

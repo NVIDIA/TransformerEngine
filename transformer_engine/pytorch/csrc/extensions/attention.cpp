@@ -60,11 +60,11 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
     size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right, bool return_max_sum_exp) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
       bias_type, attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
-      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
+      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right, return_max_sum_exp);
   return fused_attention_backend;
 }
 
@@ -79,7 +79,7 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
-    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
+    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread, bool return_max_sum_exp) {
   TensorWrapper te_Q, te_K, te_V, te_O, te_S;
 
   auto none = py::none();
@@ -203,7 +203,7 @@ std::vector<py::object> fused_attn_fwd(
         &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -215,41 +215,40 @@ std::vector<py::object> fused_attn_fwd(
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<py::object> output_tensors;
   output_tensors.push_back(o_python);
-  for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    // allocate memory for nvte_aux_tensor_pack.tensors
-    at::Tensor output_tensor;
-    if (nvte_aux_tensor_pack.size >= 2) {
-      if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
-        if (i < nvte_aux_tensor_pack.size - 2) {
-          NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-          output_tensor = allocateSpace(
-              nvte_shape_to_vector(temp_shape),
-              static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
-        } else if (i == nvte_aux_tensor_pack.size - 2) {
-          output_tensor = rng_state;
-        } else if (i == nvte_aux_tensor_pack.size - 1) {
-          output_tensor = Bias.value();
-        }
-      } else {
-        NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-        output_tensor =
-            (i < nvte_aux_tensor_pack.size - 1)
-                ? allocateSpace(
-                      nvte_shape_to_vector(temp_shape),
-                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false)
-                : rng_state;
-      }
-    } else {
-      NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-      output_tensor = allocateSpace(
-          nvte_shape_to_vector(temp_shape),
-          static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
-    }
+  auto set_tensor_param = [&](size_t i, const at::Tensor &output_tensor) {
     output_tensors.push_back(py::cast(output_tensor));
     NVTEBasicTensor temp_data = {output_tensor.data_ptr(),
                                  nvte_tensor_type(nvte_aux_tensor_pack.tensors[i]),
                                  nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
+  };
+  // allocate memory for nvte_aux_tensor_pack.tensors
+  // f16_max512   : S [b, h, sq, skv]
+  // f16_arbitrary:
+  // return_max_sum_exp=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv]
+  // return_max_sum_exp=true: Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv]
+  // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
+  size_t i = 0;
+  at::Tensor output_tensor;
+  // intermediate softmax tensor, S or M
+  output_tensor =
+      allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+                    static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+  set_tensor_param(i++, output_tensor);
+  // fp8 has an additional softmax stats tensor, ZInv
+  if (return_max_sum_exp || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    output_tensor =
+        allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+    set_tensor_param(i++, output_tensor);
+  }
+  // rng_state
+  if (i < nvte_aux_tensor_pack.size) {
+    set_tensor_param(i++, rng_state);
+  }
+  // bias (optional)
+  if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
+    set_tensor_param(i++, Bias.value());
   }
 
   // execute the kernel
@@ -259,7 +258,7 @@ std::vector<py::object> fused_attn_fwd(
         &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 

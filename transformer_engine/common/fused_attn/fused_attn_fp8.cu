@@ -1699,7 +1699,9 @@ void fused_attn_fp8_fwd_impl_v1(
                                0,
                                true,
                                fwd_tensor_type,
-                               fwd_tensor_type};
+                               fwd_tensor_type,
+                               false,
+                               true};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -2004,7 +2006,9 @@ void fused_attn_fp8_bwd_impl_v1(
                                0,
                                false,
                                fwd_tensor_type,
-                               bwd_tensor_type};
+                               bwd_tensor_type,
+                               false,
+                               true};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
