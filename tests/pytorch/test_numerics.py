@@ -1805,7 +1805,6 @@ def test_grouped_linear_accuracy(
     bias,
     delay_wgrad_compute,
     parallel_mode=None,
-    bitwise_match=True,
     use_cutlass=False,
 ):
     fp8 = recipe is not None
@@ -1879,13 +1878,11 @@ def test_grouped_linear_accuracy(
     )
 
     for o, o_ref in zip(outputs, outputs_ref):
-        if bitwise_match:
-            # cuBLAS implementation should be bit-wise match
-            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-        elif use_cutlass:
+        if use_cutlass:
             torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
         else:
-            torch.testing.assert_close(o, o_ref)
+            # cuBLAS implementation should be bit-wise match
+            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
@@ -1918,7 +1915,6 @@ def test_grouped_linear_accuracy_cutlass(
         False,
         delay_wgrad_compute,
         None,
-        bitwise_match=False,
         use_cutlass=True,
     )
     os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
@@ -2659,7 +2655,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
-            torch.testing.assert_close(o, o_ref)
+            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=2e-3)
 
     if use_cutlass:
         os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)

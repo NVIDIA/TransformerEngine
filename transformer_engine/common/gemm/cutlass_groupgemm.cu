@@ -4,29 +4,12 @@
  * See LICENSE for license information.
  **************************************************************************************************/
 
+#include "../common.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/cutlass.h"
 #include "cutlass_groupgemm.cuh"
 
 namespace grouped_gemm {
-
-cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return CUDA_R_16F;
-    case DType::kFloat32:
-      return CUDA_R_32F;
-    case DType::kBFloat16:
-      return CUDA_R_16BF;
-    case DType::kFloat8E4M3:
-      return CUDA_R_8F_E4M3;
-    case DType::kFloat8E5M2:
-      return CUDA_R_8F_E5M2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
 
 // Explicit template instantiation to match the template declarations in the .cuh
 template void CutlassGroupedGemm<false, false, cutlass::half_t>(const NVTETensor*,
@@ -61,8 +44,8 @@ void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* 
   auto* inputA = transformer_engine::convertNVTETensorCheck(A[0]);
   auto* inputB = transformer_engine::convertNVTETensorCheck(B[0]);
 
-  auto A_type = grouped_gemm::get_cuda_dtype(inputA->data.dtype);
-  auto B_type = grouped_gemm::get_cuda_dtype(inputB->data.dtype);
+  auto A_type = get_cuda_dtype(inputA->data.dtype);
+  auto B_type = get_cuda_dtype(inputB->data.dtype);
 
   float one = 1.0;
   float zero = 0.0;

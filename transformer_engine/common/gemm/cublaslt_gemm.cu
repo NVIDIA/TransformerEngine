@@ -723,7 +723,7 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   // Deprecation warning
   NVTE_WARN(
       "nvte_multi_stream_cublas_gemm is deprecated and will be removed in a future release. "
-      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support where "
+      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support when "
       "applicable).");
 
   multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad, workspace,
@@ -788,10 +788,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
-    auto *OutputB = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
-    auto D_type = get_cuda_dtype(OutputB->data.dtype);
+    auto D_type = get_cuda_dtype(OutputD->data.dtype);
 
     return (A_type == B_type) && (A_type == D_type) &&
            ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
