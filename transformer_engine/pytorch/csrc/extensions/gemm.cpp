@@ -355,15 +355,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<at::Tensor> bias, DType bias_type, bool single_output,
     std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
-  std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
-      te_pre_gelu_out_vector, te_workspace_vector;
-  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, wrappers;
-  std::vector<at::Tensor> D_vectors;
-
-  auto none = py::none();
-
-  std::vector<size_t> single_output_begins;
-  std::vector<size_t> single_output_ends;
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
@@ -373,6 +364,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     output_data_ptr = (*D)[0].data_ptr();
   }
 
+  const auto none = py::none();
+  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, te_D_wrappers, te_bias_wrappers,
+      te_pre_gelu_out_wrappers;
+  std::vector<at::Tensor> D_vectors;
   for (size_t i = 0; i < A.size(); i++) {
     auto te_A = makeTransformerEngineTensor(A[i], none);
     auto te_B = makeTransformerEngineTensor(B[i], none);
@@ -438,29 +433,72 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out =
         makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
 
-    te_A_vector.emplace_back(te_A.data());
-    te_B_vector.emplace_back(te_B.data());
-    te_D_vector.emplace_back(te_D.data());
-    te_bias_vector.emplace_back(te_bias.data());
-    te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out.data());
-
     te_A_wrappers.emplace_back(std::move(te_A));
     te_B_wrappers.emplace_back(std::move(te_B));
-    wrappers.emplace_back(std::move(te_D));
-    wrappers.emplace_back(std::move(te_bias));
-    wrappers.emplace_back(std::move(te_pre_gelu_out));
+    te_D_wrappers.emplace_back(std::move(te_D));
+    te_bias_wrappers.emplace_back(std::move(te_bias));
+    te_pre_gelu_out_wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
-  // Optionally swizzle the scaling factors
-  // Keep the swizzled scaling factor tensors alive during the GEMMs.
-  auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
-  auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
+  // Keep the swizzled scaling factor tensors alive during the GEMM.
+  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
+  // Optionally swizzle the scaling factors
+  swizzled_scale_inverses_list.emplace_back(
+      multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa));
+  swizzled_scale_inverses_list.emplace_back(
+      multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb));
+
+  // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
+  // as it is not natively supported by cublasLt
+  if (transformer_engine::cuda::sm_arch() > 90) {
+    // Check if is using FP8 block scaling
+    bool exists_tensor_using_fp8_block_scaling = false;
+    bool exists_tensor_not_using_fp8_block_scaling = false;
+    for (const auto& tensor_wrappers : {&te_A_wrappers, &te_B_wrappers}) {
+      for (const TensorWrapper& tensor : *tensor_wrappers) {
+        const NVTEScalingMode scaling_mode = tensor.scaling_mode();
+        if (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D)
+          exists_tensor_using_fp8_block_scaling = true;
+        else
+          exists_tensor_not_using_fp8_block_scaling = true;
+      }
+    }
+    if (exists_tensor_using_fp8_block_scaling) {
+      NVTE_CHECK(!exists_tensor_not_using_fp8_block_scaling,
+                 "Either all tensors or no tensor must be FP8 block scaling tensors");
+      // Convert tensors to mxfp8 and swizzle their scaling factors
+      for (TensorWrapper& A_tensor : te_A_wrappers) {
+        swizzled_scale_inverses_list.emplace_back(
+            convert_block_scaling_to_mxfp8_tensor(A_tensor, transa));
+      }
+      for (TensorWrapper& B_tensor : te_B_wrappers) {
+        swizzled_scale_inverses_list.emplace_back(
+            convert_block_scaling_to_mxfp8_tensor(B_tensor, !transb));
+      }
+      // Use TN GEMM to avoid having to transpose data.
+      transa = true;
+      transb = false;
+    }
+  }
+
+  std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
+      te_pre_gelu_out_vector;
+  for (size_t i = 0; i < te_A_wrappers.size(); i++) {
+    te_A_vector.emplace_back(te_A_wrappers[i].data());
+    te_B_vector.emplace_back(te_B_wrappers[i].data());
+    te_D_vector.emplace_back(te_D_wrappers[i].data());
+    te_bias_vector.emplace_back(te_bias_wrappers[i].data());
+    te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out_wrappers[i].data());
+  }
+
+  std::vector<NVTETensor> te_workspace_vector;
+  std::vector<TensorWrapper> te_workspace_wrappers;
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
                                            std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
-    wrappers.emplace_back(std::move(wsp));
+    te_workspace_wrappers.emplace_back(std::move(wsp));
   }
 
   // For now, we only have multi-stream cublas backend.
