@@ -322,8 +322,7 @@ class NVFP4Quantizer(Quantizer):
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
-        # TODO(ksivamani): No calibration?
-        pass
+        pass  # Calibration is no-op
 
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""

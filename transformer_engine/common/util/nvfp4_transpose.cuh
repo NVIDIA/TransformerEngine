@@ -1352,7 +1352,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
   }  // end of stages
 
-  //Vectorized store scaling factors through SHMEM
+  // Vectorized store scaling factors through SHMEM
   if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
     using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
     const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
