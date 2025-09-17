@@ -4,11 +4,11 @@
  * See LICENSE for license information.
  **************************************************************************************************/
 
-#include "../common.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/cutlass.h"
-#include "cutlass_groupgemm.cuh"
+#include "cutlass_grouped_gemm.cuh"
 
+namespace transformer_engine {
 namespace grouped_gemm {
 
 // Explicit template instantiation to match the template declarations in the .cuh
@@ -37,15 +37,14 @@ template void CutlassGroupedGemm<false, true, cutlass::bfloat16_t>(const NVTETen
                                                                    cudaStream_t, int, int);
 
 }  // namespace grouped_gemm
+}  // namespace transformer_engine
 
 void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D, int num_gemms,
                           bool transa, bool transb, bool grad, NVTETensor* workspace,
                           bool accumulate, int device, int math_sm_count, cudaStream_t stream) {
-  auto* inputA = transformer_engine::convertNVTETensorCheck(A[0]);
-  auto* inputB = transformer_engine::convertNVTETensorCheck(B[0]);
-
-  auto A_type = get_cuda_dtype(inputA->data.dtype);
-  auto B_type = get_cuda_dtype(inputB->data.dtype);
+  using namespace transformer_engine;
+  auto* inputA = convertNVTETensorCheck(A[0]);
+  auto* inputB = convertNVTETensorCheck(B[0]);
 
   float one = 1.0;
   float zero = 0.0;
@@ -68,9 +67,9 @@ void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* 
     }
   };
 
-  if (A_type == CUDA_R_16BF) {
+  if (inputA->data.dtype == DType::kBFloat16) {
     dispatch(cutlass::bfloat16_t{});
-  } else if (A_type == CUDA_R_16F) {
+  } else if (inputA->data.dtype == DType::kFloat16) {
     dispatch(cutlass::half_t{});
   } else {
     NVTE_ERROR("Unsupported dtype: only BF16(FP16) are supported.");

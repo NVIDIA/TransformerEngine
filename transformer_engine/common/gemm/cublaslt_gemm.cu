@@ -19,7 +19,7 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
-#include "cutlass_groupgemm.cuh"
+#include "cutlass_grouped_gemm.cuh"
 
 namespace {
 
@@ -747,7 +747,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPGEMM", false);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool warn_fallback = transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 
   auto cublas_path = [&]() {
     multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
@@ -811,7 +812,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
   } else {
-    NVTE_WARN("cuBLAS fallback.");
+    if (warn_fallback) {
+      NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+    }
     cublas_path();
   }
 }

@@ -9,7 +9,7 @@
 //
 
 /**
- * @file: cutlass_groupgemm.cuh
+ * @file: cutlass_grouped_gemm.cuh
  * @author: min.yang@shopee.com, yangfan.bai@shopee.com, finch.li@shopee.com
  * @date: 2025-08-08 16:20:00
  * @brief: cutlass group gemm kernel.
@@ -40,6 +40,7 @@
 #include "cutlass/util/device_memory.h"
 #include "cutlass/util/packed_stride.hpp"
 
+namespace transformer_engine {
 namespace grouped_gemm {
 
 template <bool trans_a>
@@ -340,6 +341,7 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
 }
 
 }  // namespace grouped_gemm
+}  // namespace transformer_engine
 
 void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D, int num_gemms,
                           bool transa, bool transb, bool grad, NVTETensor* workspace,

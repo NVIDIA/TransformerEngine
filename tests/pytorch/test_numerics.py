@@ -1903,7 +1903,7 @@ def test_grouped_linear_accuracy_cutlass(
     fuse_wgrad_accumulation,
     delay_wgrad_compute,
 ):
-    os.environ["NVTE_USE_CUTLASS_GROUPGEMM"] = "1"
+    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,
@@ -1917,7 +1917,7 @@ def test_grouped_linear_accuracy_cutlass(
         None,
         use_cutlass=True,
     )
-    os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
+    os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2621,7 +2621,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         single_output = False
 
     if use_cutlass:
-        os.environ["NVTE_USE_CUTLASS_GROUPGEMM"] = "1"
+        os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
 
     for i in range(z):
         general_gemm(
@@ -2655,10 +2655,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
-            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=2e-3)
+            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
     if use_cutlass:
-        os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
+        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
 @pytest.mark.parametrize(

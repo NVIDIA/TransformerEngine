@@ -86,7 +86,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     gemm/cutlass_groupgemm.cu
+     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -129,12 +129,12 @@ target_include_directories(transformer_engine PUBLIC
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
   set_source_files_properties(
-    "gemm/cutlass_groupgemm.cu"
+    "gemm/cutlass_grouped_gemm.cu"
     PROPERTIES
     COMPILE_FLAGS
     "-gencode arch=compute_90a,code=sm_90a")
 else()
-  message(FATAL_ERROR "cutlass gemm/cutlass_groupgemm.cu kernel required sm 90a")
+  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
 endif()
 
 # Configure dependencies
