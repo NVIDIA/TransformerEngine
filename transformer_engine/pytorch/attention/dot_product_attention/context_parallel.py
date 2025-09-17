@@ -1127,7 +1127,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dP_quantizer,
         ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
-        q_f16 = None
+        q_f16, k_f16, v_f16 = (None, None, None)
         q_fp8, k_fp8, v_fp8 = (None, None, None)
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
@@ -1157,10 +1157,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
             else:
-                # q_f16:               torch.Tensor, dtype=fwd_nominal_dtype
+                # q_f16, k_f16, v_f16: torch.Tensor, dtype=fwd_nominal_dtype
                 # q_fp8, k_fp8, v_fp8: Float8Tensor, dtype=fwd_nominal_dtype
                 # q, k, v:             torch.Tensor, dtype=torch.uint8
-                q_f16 = q
+                q_f16, k_f16, v_f16 = q, k, v
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
 
@@ -1187,9 +1187,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 O_quantizer_per_step[i] = O_quantizer.copy()
                 O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
-            # q_f16:   torch.Tensor, dtype=fwd_nominal_dtype
-            # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
-            q_f16 = q
+            # q_f16, k_f16, v_f16: torch.Tensor, dtype=fwd_nominal_dtype
+            # q, k, v:             torch.Tensor, dtype=fwd_nominal_dtype
+            q_f16, k_f16, v_f16 = q, k, v
             if use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
@@ -1665,14 +1665,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.layer_number = layer_number
         ctx.fp8_recipe = fp8_recipe
         ctx.fp8 = fp8 and is_bwd_fp8
-        kv = p2p_comm_buffers[-1]
+
         kv_fp8 = None
-        kv_f16 = None
+        kv = p2p_comm_buffers[-1]
         if fp8:
             q_fp8, kv_fp8 = [
                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
                 for x, y in zip([q_fp8, k_fp8], [q, kv])
             ]
+        # q, kv, out
         fp8_tensors = (None, None, None)
         f16_tensors = (None, None, None)
         if ctx.fp8:
@@ -1688,7 +1689,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             # fwd: f16, bwd: f16, save all f16
             q_f16 = q_f16.view(q.shape)
-            kv_f16 = kv
+            kv_f16 = torch.cat((k_f16.view(-1), v_f16.view(-1)), dim=-1)
             f16_tensors = (q_f16, kv_f16, out_f16)
 
         tensors_to_save, tensor_objects = prepare_for_saving(
@@ -2060,14 +2061,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_inputs = [
                     ctx.fp8,
                     ctx.fp8_recipe,
-                    q_fp8,
-                    kv_fp8,
+                    q_fp8 if ctx.fp8 else q,
+                    kv_fp8 if ctx.fp8 else kv,
                     (
                         out
                         if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
                         else out_fp8
                     ),
-                    dout_fp8,
+                    dout_fp8 if ctx.fp8 else dout,
                     softmax_lse,
                     softmax_lse_,
                     rng_states,
