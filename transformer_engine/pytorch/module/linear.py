@@ -317,6 +317,13 @@ class _Linear(torch.autograd.Function):
         # Finished forward GEMM...
         # ------------------------------------------------------
 
+        # Deallocate GEMM input tensor if no longer needed
+        # TODO(yuzhongw, tmoon): Figure out why inputmat_total is not automatically
+        # deallocated by GC. Manually deallocating is a temporary hack.
+        if with_input_all_gather_nccl:
+            clear_tensor_data(inputmat_total)
+            inputmat_total = None
+
         # ------------------------------------------------------
         # Prepare output tensor
         # Note: Perform tensor-parallel communication
@@ -878,9 +885,16 @@ class _Linear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor if permitted
+                    # Deallocate tensors if permitted
                     if ctx.owns_input:
+                        # Input tensor is internal
                         clear_tensor_data(inputmat_total)
+                    elif ctx.backward_input_needs_gather:
+                        # Gathered input tensor is internal
+                        clear_tensor_data(inputmat_total)
+                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                        # Gathered grad output tensor is internal
+                        clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad:
