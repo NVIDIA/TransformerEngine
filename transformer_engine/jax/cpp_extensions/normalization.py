@@ -886,6 +886,8 @@ def layernorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
+    amax_across_tpsp=False,
+    amax_across_fsdp=False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray, jnp.ndarray]:
     """Layer normalization forward pass with optional quantization.
 
@@ -899,6 +901,8 @@ def layernorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -958,7 +962,14 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_across_tpsp=amax_across_tpsp,
+            amax_across_fsdp=amax_across_fsdp,
+        )
         return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()
@@ -1088,6 +1099,8 @@ def rmsnorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
+    amax_across_tpsp=False,
+    amax_across_fsdp=False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray]:
     """Root mean square normalization forward pass with optional quantization.
 
@@ -1099,6 +1112,8 @@ def rmsnorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1159,7 +1174,12 @@ def rmsnorm_fwd(
             quantizer=None,
         )
         out, _ = _quantize_dbias_impl(
-            out.data, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
+            out.data,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_across_tpsp=amax_across_tpsp,
+            amax_across_fsdp=amax_across_fsdp,
         )
         return out, rsigma
 
@@ -1284,6 +1304,8 @@ def normalization_fwd(
     epsilon: float,
     norm_type: str,
     quantizer: Optional[Quantizer],
+    amax_across_tpsp=False,
+    amax_across_fsdp=False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1300,6 +1322,8 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1317,12 +1341,29 @@ def normalization_fwd(
         zero_centered_gamma is not supported if norm_type is 'rmsnorm'.
     """
     if norm_type == "layernorm":
-        output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
+        output, mu, rsigma = layernorm_fwd(
+            x,
+            gamma,
+            beta,
+            zero_centered_gamma,
+            epsilon,
+            quantizer,
+            amax_across_tpsp=amax_across_tpsp,
+            amax_across_fsdp=amax_across_fsdp,
+        )
     elif norm_type == "rmsnorm":
         assert (
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
-        output, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer)
+        output, rsigma = rmsnorm_fwd(
+            x,
+            gamma,
+            zero_centered_gamma,
+            epsilon,
+            quantizer,
+            amax_across_tpsp=amax_across_tpsp,
+            amax_across_fsdp=amax_across_fsdp,
+        )
         mu = None
     else:
         raise ValueError(f"{norm_type=} is not supported.")

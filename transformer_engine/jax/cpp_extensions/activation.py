@@ -984,6 +984,8 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
+    amax_across_tpsp=False,
+    amax_across_fsdp=False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -992,6 +994,8 @@ def act_lu(
             Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
 
     Returns:
         If quantizer is None:
@@ -1049,7 +1053,14 @@ def act_lu(
             activation_type=activation_type,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_across_tpsp=amax_across_tpsp,
+            amax_across_fsdp=amax_across_fsdp,
+        )
         return out
 
     if isinstance(quantizer, DelayedScaleQuantizer):
