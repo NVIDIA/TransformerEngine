@@ -434,7 +434,7 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        # Temporarily disabling fused attention for kv caching for sm89 irrespective of cuDNN version 
+        # Temporarily disabling fused attention for kv caching for sm89 irrespective of cuDNN version
         # until the cuDNN bug is resolved
         if device_compute_capability == (8, 9):
             logger.debug("Disabling FusedAttention for KV caching for sm89")
