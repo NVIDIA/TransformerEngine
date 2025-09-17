@@ -554,6 +554,9 @@ class AmaxCalculationPrimitive:
         amax_across_tpsp,
         amax_across_fsdp,
     ):
+        """
+        amax calcuation abstract
+        """
         del amax_across_tpsp, amax_across_fsdp
 
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
@@ -568,6 +571,9 @@ class AmaxCalculationPrimitive:
         amax_across_tpsp,
         amax_across_fsdp,
     ):
+        """
+        amax calcuation implementation
+        """
         del amax_across_tpsp, amax_across_fsdp
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32).reshape((1,))
         return amax
@@ -580,6 +586,9 @@ class AmaxCalculationPrimitive:
         arg_infos,
         result_infos,
     ):
+        """
+        amax calcuation infer_sharding_from_operands
+        """
         del (amax_across_tpsp, amax_across_fsdp, arg_infos, result_infos)  # Unused.
         amax_sharding = NamedSharding(
             mesh,
@@ -596,6 +605,9 @@ class AmaxCalculationPrimitive:
         arg_infos,
         result_infos,
     ):
+        """
+        amax calcuation partition
+        """
         del result_infos
 
         amax_sharding = NamedSharding(
@@ -626,6 +638,9 @@ class AmaxCalculationPrimitive:
 
 
 def register_primitive(cls):
+    """
+    Only register outter primitive.
+    """
     from jax._src import dispatch
     from jax.experimental.custom_partitioning import custom_partitioning
     from jax.interpreters import mlir
