@@ -1683,13 +1683,21 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 f16_tensors = (None, None, out_f16)
         elif fp8 and is_input_fp8:
             # fwd: fp8, bwd: f16, save all f16
+            # dequantize fp8 inputs
             q_f16 = q_fp8.dequantize()
             kv_f16 = kv_fp8.dequantize()
             f16_tensors = (q_f16, kv_f16, out_f16)
-        else:
-            # fwd: f16, bwd: f16, save all f16
+        elif fp8:
+            # fwd: fp8, bwd: f16, save all f16
+            # inputs are already in f16
             q_f16 = q_f16.view(q.shape)
             kv_f16 = torch.cat((k_f16.view(-1), v_f16.view(-1)), dim=-1)
+            f16_tensors = (q_f16, kv_f16, out_f16)
+        else:
+            # fwd: f16, bwd: f16, save all f16
+            # inputs and kernels are both f16
+            q_f16 = q_f16.view(q.shape)
+            kv_f16 = kv
             f16_tensors = (q_f16, kv_f16, out_f16)
 
         tensors_to_save, tensor_objects = prepare_for_saving(
@@ -2061,14 +2069,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_inputs = [
                     ctx.fp8,
                     ctx.fp8_recipe,
-                    q_fp8 if ctx.fp8 else q,
-                    kv_fp8 if ctx.fp8 else kv,
+                    q_fp8,
+                    kv_fp8,
                     (
                         out
                         if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
                         else out_fp8
                     ),
-                    dout_fp8 if ctx.fp8 else dout,
+                    dout_fp8,
                     softmax_lse,
                     softmax_lse_,
                     rng_states,
