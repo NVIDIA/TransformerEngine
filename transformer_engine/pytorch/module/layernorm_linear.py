@@ -355,12 +355,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if not weight.requires_grad and not return_layernorm_output:
             clear_tensor_data(ln_out, ln_out_total)
             ln_out = ln_out_total = None
-        else:
-            _ln_out_all_gather_nccl = with_input_all_gather and not ub_overlap_ag_fprop
-            if _ln_out_all_gather_nccl and not return_layernorm_output_gathered:
-                # ln_out_total is gathered by NCCL and not needed to be returned
-                clear_tensor_data(ln_out_total)
-                ln_out_total = None
+        elif with_input_all_gather and not return_layernorm_output_gathered:
+            clear_tensor_data(ln_out_total)
+            ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -897,16 +894,19 @@ class _LayerNormLinear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor if permitted
+                    # Deallocate input tensors if permitted
                     if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
-                        # Do not need to return layernorm output
+                        # Input tensors have not been exposed externally
                         clear_tensor_data(ln_out)
-                    elif ctx.return_layernorm_output_gathered and ctx.ln_out_needs_gather:
-                        # ln_out is not the returned tensor
+                    elif ctx.ln_out_needs_gather and ctx.return_layernorm_output_gathered:
+                        # Non-gathered input has not been exposed externally
                         clear_tensor_data(ln_out)
-                    if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
-                        # ln_out_total is gathered by NCCL
+                    if ctx.ln_out_needs_gather:
+                        # Gathered input is internal
                         clear_tensor_data(ln_out_total)
+                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                        # Gathered grad output tensor is internal
+                        clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad:
@@ -1182,7 +1182,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.return_layernorm_output_gathered = return_layernorm_output_gathered
+        self.return_layernorm_output_gathered = (
+            return_layernorm_output_gathered if return_layernorm_output else False
+        )
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
 
