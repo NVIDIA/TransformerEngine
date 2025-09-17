@@ -272,13 +272,12 @@ def _layernorm_mlp_fwd_rule(
         epsilon,
         norm_type,
         quantizer=ffn1_quantizer_set.x,
+        amax_across_tpsp=True,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(
-        kernel_1,
-        flatten_axis=-2,
-        quantizer=ffn1_quantizer_set.kernel,
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_across_fsdp=True
     )
 
     # NN GEMM
@@ -315,8 +314,7 @@ def _layernorm_mlp_fwd_rule(
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
     casted_kernel_2 = tex.quantize(
-        kernel_2,
-        quantizer=ffn2_quantizer_set.kernel,
+        kernel_2, quantizer=ffn2_quantizer_set.kernel, amax_across_fsdp=True
     )
 
     # NN GEMM
@@ -417,6 +415,7 @@ def _layernorm_mlp_bwd_rule(
         grad,
         is_dbias=use_bias_2,
         quantizer=ffn1_quantizer_set.dgrad,
+        amax_across_tpsp=True,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim

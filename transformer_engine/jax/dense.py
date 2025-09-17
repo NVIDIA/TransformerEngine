@@ -64,6 +64,7 @@ def dense(
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    using_global_amax_of_x: bool = False,
 ):
     """Perform dense layer transformation with optional quantization.
 
@@ -77,6 +78,7 @@ def dense(
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        using_global_amax_of_x: Indicate wether to use global amax for x. Only works when using current-scaling. Default is False.
 
     Returns:
         Transformed output tensor
@@ -93,6 +95,7 @@ def dense(
         input_axes,
         kernel_axes,
         quantizer_set,
+        using_global_amax_of_x,
     )
     return output
 
@@ -103,6 +106,7 @@ def dense(
         3,
         4,
         5,
+        7,
     ),
 )
 def _dense(
@@ -113,6 +117,7 @@ def _dense(
     input_axes,
     kernel_axes,
     quantizer_set,
+    using_global_amax_of_x,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
 
@@ -127,6 +132,7 @@ def _dense(
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        using_global_amax_of_x: Indicate wether to use global amax for x. Only works when using current-scaling. Default is False.
 
     Returns:
         Transformed output tensor
@@ -139,6 +145,7 @@ def _dense(
         input_axes,
         kernel_axes,
         quantizer_set,
+        using_global_amax_of_x,
     )
     return output
 
@@ -151,6 +158,7 @@ def _dense_fwd_rule(
     input_axes,
     kernel_axes,
     quantizer_set,
+    using_global_amax_of_x,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -175,6 +183,7 @@ def _dense_fwd_rule(
         x,
         flatten_axis=flatten_axis_x,
         quantizer=quantizer_set.x,
+        amax_across_tpsp=using_global_amax_of_x,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -182,6 +191,7 @@ def _dense_fwd_rule(
         kernel,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.kernel,
+        amax_across_fsdp=True,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -212,7 +222,7 @@ def _dense_fwd_rule(
 
 
 def _dense_bwd_rule(
-    contracting_dims, input_axes, kernel_axes, ctx, grad
+    contracting_dims, input_axes, kernel_axes, using_global_amax_of_x, ctx, grad
 ):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
@@ -238,6 +248,7 @@ def _dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
+        amax_across_tpsp=using_global_amax_of_x,
     )
 
     # GEMM NT
