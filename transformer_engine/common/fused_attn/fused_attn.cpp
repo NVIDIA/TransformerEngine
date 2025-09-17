@@ -253,7 +253,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
            cudnn_runtime_version >= 91100)) &&
          // 9.11/9.12 bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
          (!((cudnn_runtime_version == 91100 || cudnn_runtime_version == 91200 ||
-             cudnn_runtime_version == 91300) &&
+             cudnn_runtime_version == 91300 || cudnn_runtime_version == 91400) &&
             is_training && sm_arch_ == 90 && head_dim_qk >= 128 && head_dim_v >= 128 &&
             !(head_dim_qk == 192 && head_dim_v == 128) && head_dim_qk != head_dim_v))) &&
         // bias type
