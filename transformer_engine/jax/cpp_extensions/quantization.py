@@ -637,7 +637,7 @@ class AmaxCalculationPrimitive:
         return mesh, sharded_impl, amax_sharding, arg_shardings
 
 
-def register_primitive(cls):
+def register_primitive_only_outter(cls):
     """
     Only register outter primitive.
     """
@@ -662,7 +662,7 @@ def register_primitive(cls):
     cls.primitive = native_p
 
 
-register_primitive(AmaxCalculationPrimitive)
+register_primitive_only_outter(AmaxCalculationPrimitive)
 
 
 def _jax_quantize(
