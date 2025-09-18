@@ -750,7 +750,7 @@ def _quantize_dbias_impl(
         # until the tensor is dequantized (e.g. in the GEMM).
         amax = x.amax
         if amax is None:
-            amax = AmaxCalculationPrimitive.primitive.bind(
+            amax = AmaxCalculationPrimitive.outer_primitive.bind(
                 x.data,
                 amax_scope=amax_scope,
             )
