@@ -12,6 +12,20 @@
 
 namespace transformer_engine::pytorch {
 
+/*! convert fp4 data shape back to original shape */
+std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose) {
+  std::vector<size_t> ret;
+  size_t start_idx = (transpose) ? 1 : 0;
+  for (size_t i = start_idx; i < shape.size() - 1; ++i) {
+    ret.push_back(shape[i]);
+  }
+  ret.push_back(shape.back() * 2);
+  if (transpose) {
+    ret.push_back(shape.front());
+  }
+  return ret;
+}
+
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {

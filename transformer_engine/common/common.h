@@ -184,25 +184,6 @@ struct Tensor {
      */
     switch (scaling_mode) {
       case NVTE_NVFP4_1D_SCALING:
-        // This function returns the shape of the tensor dimensions
-        // as opposed to the shape of the tensor storage container.
-        // For NVFP4, 2 elements share a byte.
-        if (!has_data() && has_columnwise_data()) {
-          std::vector<size_t> ret;
-          if (!columnwise_data.shape.empty()) {
-            for (size_t i = 1; i < columnwise_data.shape.size() - 1; i++) {
-              ret.push_back(columnwise_data.shape[i]);
-            }
-            ret.push_back(columnwise_data.shape[columnwise_data.shape.size() - 1] * 2);
-            ret.push_back(columnwise_data.shape.front());
-          }
-          return ret;
-        } else {
-          auto data_shape_nvfp4 = data.shape;
-          data_shape_nvfp4.back() *= 2;
-          return data_shape_nvfp4;
-        }
-        break;
       case NVTE_DELAYED_TENSOR_SCALING:
         if (!has_data() && has_columnwise_data()) {
           std::vector<size_t> ret;

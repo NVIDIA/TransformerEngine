@@ -37,14 +37,7 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   auto input_shape = nvte_shape_to_vector(nvte_input_shape);
   auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
 
-  // TODO(ksivamani): This is dirty and only needed because for nvfp4 we return
-  // perceived shape and not actual storage shape. Maybe refactor swizzle login
-  // or find a cleaner way.
-  // NOTE: Since we are getting static shape for columnwise data, this trick is not needed.
   NVTE_CHECK(input_shape.size() >= 2, "Wrong ndims for swizzle input shape.");
-  if (rowwise && nvfp4) {
-    input_shape.back() /= 2;
-  }
 
   // Allocate memory for swizzled output.
   auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);

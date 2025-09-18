@@ -42,21 +42,6 @@ std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
   return ret;
 }
 
-/*! convert fp4 data shape back to original shape */
-template <typename T = size_t>
-std::vector<T> convert_shape_back_from_fp4(const std::vector<T>& shape, bool transpose) {
-  std::vector<T> ret;
-  size_t start_idx = (transpose) ? 1 : 0;
-  for (size_t i = start_idx; i < shape.size() - 1; ++i) {
-    ret.push_back(shape[i]);
-  }
-  ret.push_back(shape.back() * 2);
-  if (transpose) {
-    ret.push_back(shape.front());
-  }
-  return ret;
-}
-
 }  // namespace
 
 constexpr size_t NVFP4_BLOCK_SIZE = 16;
@@ -1261,9 +1246,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   // Construct C++ tensor
   TensorWrapper out_cpp(NVTE_NVFP4_1D_SCALING);
   if (rowwise_usage) {
-    auto row_data_shape_fp4 = convert_shape_for_fp4(shape);
-    out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1,
-                             row_data_shape_fp4);
+    out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                   rowwise_scale_inv_shape);
     out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
@@ -1272,7 +1255,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
     // and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
     std::vector<size_t> shape_2d = {flat_first_dim, flat_last_dim};
-    auto col_data_shape_fp4 = convert_shape_for_fp4(make_transpose_shape<size_t>(shape_2d));
+    auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
     out_cpp.set_columnwise_data(columnwise_data_tensor.data_ptr(), DType::kFloat4E2M1,
                                 col_data_shape_fp4);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
@@ -1405,8 +1388,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   // Construct C++ tensor
   TensorWrapper out_cpp(NVTE_NVFP4_1D_SCALING);
   if (rowwise_usage) {
-    auto row_data_shape_fp4 = convert_shape_for_fp4(shape);
-    out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, row_data_shape_fp4);
+    out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                   getTensorShape(*rowwise_scale_inv));
     out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, std::vector<size_t>{1});
@@ -1415,7 +1397,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
     // and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
     std::vector<size_t> shape_2d = {flat_first_dim, flat_last_dim};
-    auto col_data_shape_fp4 = convert_shape_for_fp4(make_transpose_shape<size_t>(shape_2d));
+    auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), DType::kFloat4E2M1,
                                 col_data_shape_fp4);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
@@ -1575,7 +1557,7 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
         // NOTE (frsun): This is non-intuitive, we are writing the
         // result of transposed RHT to the output of rowwise.
         rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                          std::vector<size_t>{cols, rows});
+                                          std::vector<size_t>{cols, rows * 2});
 
         NVTE_SCOPED_GIL_RELEASE({
           // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
