@@ -122,6 +122,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_name: str,
+        offload_activation: bool,
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
@@ -424,11 +425,12 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            offload_activation = False
-            if hasattr(inp, "offloading_activation"):
-                offload_activation = True
-                if inputmat.is_contiguous():
-                    inputmat = inputmat.contiguous()
+            # Do not offload weights and biases
+            weight.offloading_activation = False
+            weightmat.offloading_activation = False
+            if bias is not None:
+                bias.offloading_activation = False
+            ln_weight.offloading_activation = False
             ctx.offload_activation = offload_activation
 
             if offload_activation and cpu_offloading:
@@ -441,6 +443,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.has_grad_added_to_main_grad = True
                     ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
                     weight.grad_added_to_main_grad = True
+                    ctx.weight_object = weight
                 else:
                     ctx.has_grad_added_to_main_grad = False
 
@@ -1043,6 +1046,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_bulk_dgrad
             None,  # ub_bulk_wgrad
             None,  # ub_name
+            None,  # offload_activation
             None,  # fsdp_group
             None,  # debug
             None,  # module
@@ -1178,6 +1182,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
+        offload_activation: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1194,7 +1199,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
-
+        self.offload_activation = offload_activation
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
 
@@ -1597,6 +1602,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_name,
+                self.offload_activation,
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
