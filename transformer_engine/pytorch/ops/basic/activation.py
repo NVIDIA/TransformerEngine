@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -111,6 +112,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -413,7 +416,11 @@ class ClampedSwiGLU(_ActivationOperation):
         Quantize input tensor when caching for use in the backward pass.
     """
 
-    def __init__(self, *, limit: float, alpha: float, cache_quantized_input: bool = False):
+    def __init__(self,
+                 *,
+                 limit: float = 7.0,
+                 alpha: float = 1.702,
+                 cache_quantized_input: bool = False):
         super().__init__(cache_quantized_input=cache_quantized_input)
         self.limit = limit
         self.alpha = alpha

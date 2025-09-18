@@ -191,7 +191,7 @@ void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream)
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha,
-                        cudaStream_t stream);
+                         cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -268,7 +268,7 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                         float limit, float alpha, cudaStream_t stream);
+                          float limit, float alpha, cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,

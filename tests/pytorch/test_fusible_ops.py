@@ -1746,11 +1746,11 @@ class TestBasicOps:
         )
         # A low value of limit = 0.1 is used for this test instead of the original
         # default = 7.0 used in GPT OSS. This is because low value kills decent number
-        # of gradients allowing us to check for correctness of gradient computation of 
+        # of gradients allowing us to check for correctness of gradient computation of
         # ClampedSwiGLU.
         limit = 0.1
         alpha = 1.702
-        
+
         # Plain PyTorch implementation
         x_glu, x_linear = x_ref.chunk(2, dim=-1)
         x_glu = x_glu.clamp(min=None, max=limit)
