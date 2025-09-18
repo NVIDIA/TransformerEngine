@@ -15,9 +15,9 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if CUDA_VERSION > 12080
 #include <cuda_fp4.h>
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // CUDA_VERSION > 12080
 
 #include <cfloat>
 
@@ -30,6 +30,7 @@
 
 namespace transformer_engine {
 
+#if CUDA_VERSION > 12080
 namespace nvfp4_transpose {
 
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
@@ -1375,6 +1376,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace nvfp4_transpose
+#endif  // CUDA_VERSION > 12080
+
 
 // Compile-time flag to choose kernel variant
 #ifndef USE_2D_NVFP4_KERNEL
@@ -1385,6 +1388,7 @@ template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const P
           bool use_2d_quantization>
 void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                               const QuantizationConfig *quant_config, cudaStream_t stream) {
+#if CUDA_VERSION > 12080
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
@@ -1491,6 +1495,10 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
             scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
             scale_stride, scale_stride_transpose, rng_seed, rng_sequence);
       }););
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ",
+             CUDA_VERSION);
+#endif  // CUDA_VERSION > 12080
 }
 }  // namespace transformer_engine
 

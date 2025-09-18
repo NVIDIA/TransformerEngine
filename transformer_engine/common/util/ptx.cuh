@@ -14,6 +14,10 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#if CUDA_VERSION >= 12080
+#include <cuda_fp4.h>
+#endif  // CUDA_VERSION >= 12080
+
 namespace transformer_engine {
 namespace ptx {
 
@@ -264,19 +268,19 @@ using fp16x4 = FPx4<fp16>;
 using fp8e4m3x4 = FPx4<fp8e4m3>;
 using fp8e5m2x4 = FPx4<fp8e5m2>;
 
-#include <cuda_fp4.h>
-using fp4e2m1 = __nv_fp4_e2m1;
-using fp4e2m1x2 = __nv_fp4x2_e2m1;
-using fp4e2m1x4 = __nv_fp4x4_e2m1;
-
 static_assert(sizeof(floatx2) == 8);
 static_assert(sizeof(bf16x2) == 4);
 static_assert(sizeof(fp16x2) == 4);
 static_assert(sizeof(fp8e4m3x2) == 2);
 static_assert(sizeof(fp8e5m2x2) == 2);
-static_assert(sizeof(fp4e2m1x2) == 1);
 
+#if CUDA_VERSION >= 12080
+using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
+static_assert(sizeof(fp4e2m1x2) == 1);
 static_assert(sizeof(fp4e2m1x4) == 2);
+#endif  // CUDA_VERSION >= 12080
 
 // cvt.rn.satfinite.e2m1x2.f32 d, a, b;  // Convert two FP32 values to two packed e2m1
 
@@ -294,6 +298,7 @@ static_assert(sizeof(fp4e2m1x4) == 2);
 // from input b is stored in the lower 4 bits of d.
 
 // SIMD like "Fused" cast + multiplication (x4)
+#if CUDA_VERSION >= 12080
 template <typename Tx2>
 __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, const Tx2 &in23,
                                            const float scale) {
@@ -303,6 +308,7 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
   const float x3 = static_cast<float>(in23.y) * scale;
   out = fp4e2m1x4(make_float4(x0, x1, x2, x3));
 }
+#endif  // CUDA_VERSION >= 12080
 
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
@@ -439,7 +445,7 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
 }
 
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 }  // namespace ptx
 

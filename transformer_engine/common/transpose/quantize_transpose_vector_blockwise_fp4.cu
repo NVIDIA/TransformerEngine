@@ -24,6 +24,7 @@
 
 namespace transformer_engine {
 
+#if CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
 namespace {
 
@@ -663,6 +664,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
 }  // namespace
 }  // namespace quantize_transpose_nvfp4
+#endif  // CUDA_VERSION >= 12080
 
 namespace detail {
 
@@ -674,6 +676,7 @@ void quantize_transpose_vector_blockwise_fp4(
     const size_t rng_sequence, const bool use_2d_quantization, const SimpleTensor& noop_tensor,
     cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
+#if CUDA_VERSION >= 12080
 
   // pow 2 scale is for MXFP4 since it's using E8M0 scaling
   // raise error if pow2_scale is true
@@ -786,6 +789,10 @@ void quantize_transpose_vector_blockwise_fp4(
       )                                                          // InputType
 
   NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ",
+             CUDA_VERSION);
+#endif  // CUDA_VERSION >= 12080
 }
 
 }  // namespace detail

@@ -190,12 +190,14 @@ using std::uint8_t;
 
 // Reference implementation ported from TransformerEngine
 // https://github.com/NVIDIA/TransformerEngine/blob/097afc00d72800ca7328ae1ff8a0d84399b51880/transformer_engine/common/utils.cuh#L933
+#if CUDA_VERSION >= 12080
 __device__ __forceinline__ uint8_t float_to_e8m0_ru_helper(float val) {
   constexpr cudaRoundMode kRoundingMode = cudaRoundPosInf;
   constexpr __nv_saturation_t kSaturation = __NV_SATFINITE;
   __nv_fp8_storage_t biased_exponent = __nv_cvt_float_to_e8m0(val, kSaturation, kRoundingMode);
   return static_cast<uint8_t>(biased_exponent);
 }
+#endif  // CUDA_VERSION >= 12080
 
 /************ END - Kitchen float_to_e8m0_utils.cuh - END ***************/
 

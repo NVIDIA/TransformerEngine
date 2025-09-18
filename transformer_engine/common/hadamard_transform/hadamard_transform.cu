@@ -743,6 +743,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
                              uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_amax);
+#if CUDA_VERSION >= 12080
 
   // Check input tensor
   NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
@@ -848,6 +849,10 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
                   random_sign_mask_t, num_rows, row_length);)));
 
   NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("Hadamard transform requires CUDA 12.8+, but compile-time CUDA version is ",
+             CUDA_VERSION);
+#endif  // CUDA_VERSION >= 12080
 }
 
 }  // namespace transformer_engine
