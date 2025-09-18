@@ -95,8 +95,13 @@ class Float8TensorBase(QuantizedTensorBase):
         return instance
 
     def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        for t in (self._data, self._transpose, self._scale_inv):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully.
+
+        Scale-inv tensor is not deallocated because it's often shared
+        between multiple FP8 tensors.
+
+        """
+        for t in (self._data, self._transpose):
             if t is not None:
                 t.data = _empty_tensor()
         self._transpose_invalid = True

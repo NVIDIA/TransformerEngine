@@ -39,16 +39,21 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
+
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
@@ -119,6 +124,11 @@ if fp8_block_scaling_available:
 if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
+
+use_cutlass_grouped_gemm = [False]
+# Only enable cutlass grouped gemm on Hopper
+if torch.cuda.get_device_capability() == (9, 0):
+    use_cutlass_grouped_gemm.append(True)
 
 
 def is_fused_attn_available(
@@ -1800,6 +1810,7 @@ def test_grouped_linear_accuracy(
     bias,
     delay_wgrad_compute,
     parallel_mode=None,
+    use_cutlass=False,
 ):
     fp8 = recipe is not None
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
@@ -1871,9 +1882,47 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
-    # Shoule be bit-wise match
-    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+    for o, o_ref in zip(outputs, outputs_ref):
+        if use_cutlass:
+            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
+        else:
+            # cuBLAS implementation should be bit-wise match
+            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (9, 0),
+    reason="Only enable CUTLASS grouped gemm on Hopper",
+)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+def test_grouped_linear_accuracy_cutlass(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute,
+):
+    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+    test_grouped_linear_accuracy(
+        dtype,
+        num_gemms,
+        bs,
+        model,
+        None,
+        False,
+        fuse_wgrad_accumulation,
+        False,
+        delay_wgrad_compute,
+        None,
+        use_cutlass=True,
+    )
+    os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2537,10 +2586,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         (16, 10027, 128, 512),
     ],
 )
-@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm(shape, dtype, layout, accumulate):
+@pytest.mark.parametrize("use_cutlass", use_cutlass_grouped_gemm)
+def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     torch.manual_seed(0)
     z, m, k, n = shape
 
@@ -2575,6 +2625,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         grad = True
         single_output = False
 
+    if use_cutlass:
+        os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+
     for i in range(z):
         general_gemm(
             A[i],
@@ -2602,9 +2655,82 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         single_output=single_output,
     )
 
-    # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        if not use_cutlass:
+            # cublas implementation should be bit-wise match
+            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+
+    if use_cutlass:
+        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+
+
+@pytest.mark.parametrize("N", [32])
+@pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "input_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    ],
+)
+@pytest.mark.parametrize(
+    "out_quantizer",
+    [
+        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8Quantizer(
+            torch.ones(1).cuda().squeeze(), torch.ones(1).cuda().squeeze(), tex.DType.kFloat8E4M3
+        ),
+    ],
+)
+def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_quantizer):
+    # For MXFP8 and CurrentScaling, below unfused quantization should happen
+    # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
+    # Skip invalid configurations
+    is_mxfp8_needed = isinstance(input_quantizer, MXFP8Quantizer) or isinstance(
+        out_quantizer, MXFP8Quantizer
+    )
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if is_mxfp8_needed and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
+    weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
+    outp_type = torch.float32
+    quantized_out, *_ = general_gemm(
+        weight_fp8,
+        inp_fp8,
+        get_workspace(),
+        outp_type,
+        quantization_params=out_quantizer,
+        bias=None,
+        use_split_accumulator=False,
+    )
+
+    out, *_ = general_gemm(
+        weight_fp8,
+        inp_fp8,
+        get_workspace(),
+        outp_type,
+        quantization_params=None,
+        bias=None,
+        use_split_accumulator=False,
+    )
+    expected_quantized_out = out_quantizer(out)
+
+    # Match results again Pytorch GEMM and allow for quantization tolerance
+    pytorch_out = torch.matmul(
+        inp_fp8.dequantize().to(torch.float64),
+        torch.transpose(weight_fp8.dequantize().to(torch.float64), 0, 1),
+    )
+    fp8_tols = dict(rtol=0.125, atol=0.0675)
+    torch.testing.assert_close(
+        pytorch_out.to(outp_type), expected_quantized_out.dequantize(), **fp8_tols
+    )
+    # Match results between quantization happening inside vs outside general_gemm
+    torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
 @pytest.mark.parametrize(

@@ -246,6 +246,14 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
       using type = int64_t;                               \
       { __VA_ARGS__ }                                     \
     } break;                                              \
+    case DType::kBFloat16: {                              \
+      using type = bf16;                                  \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
+    case DType::kFloat32: {                               \
+      using type = float;                                 \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
     default:                                              \
       NVTE_ERROR("Invalid type.");                        \
   }

@@ -9,7 +9,9 @@ set -e
 TE_LIB_PATH=$(pip3 show transformer-engine | grep -E "Location:|Editable project location:" | tail -n 1 | awk '{print $NF}')
 export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
-cd $TE_PATH/tests/cpp
-cmake -GNinja -S. -Bbuild
-cmake --build build
-mpirun --allow-run-as-root --np 4 --oversubscribe ./build/comm_gemm/test_comm_gemm
+if [[ $(nvidia-smi --list-gpus | wc -l) -ge 4 ]]; then
+	cd $TE_PATH/tests/cpp_distributed
+	cmake -GNinja -S. -Bbuild
+	cmake --build build
+	mpirun --allow-run-as-root --np 4 --oversubscribe ./build/test_comm_gemm
+fi
