@@ -6,8 +6,8 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math
-from packaging import version
 from enum import Enum
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -539,6 +539,10 @@ class QuantizePrimitive(BaseDBiasQuantizePrimitive):
 
 
 class AmaxScope(Enum):
+    """
+    Amax Scope Enum
+    """
+
     LOCAL = 1
     TPSP = 2
     FSDP = 3
