@@ -1747,7 +1747,7 @@ def _test_grouped_linear_accuracy(
         assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
-        
+
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs

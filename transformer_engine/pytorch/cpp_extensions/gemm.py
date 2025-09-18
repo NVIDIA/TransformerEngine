@@ -56,10 +56,9 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    
+
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-
 
     if ub_type is not None:
         assert ub is not None, (
@@ -130,7 +129,7 @@ def general_gemm(
     }
 
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    
+
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
 
@@ -182,7 +181,7 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
-    
+
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
         if single_output:
@@ -221,7 +220,7 @@ def general_grouped_gemm(
         ]  # this should differ with respect to single output
 
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
-    
+
     bias = tex.te_general_grouped_gemm(
         A,
         transa,

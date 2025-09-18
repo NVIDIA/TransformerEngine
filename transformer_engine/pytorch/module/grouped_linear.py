@@ -411,7 +411,9 @@ class _GroupedLinear(torch.autograd.Function):
                     inputmats: list
                     if ctx.fp8 or ctx.debug:
                         if not ctx.debug:
-                            inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                            inputmats = tex.split_quantize(
+                                inp_view, ctx.m_splits, ctx.input_quantizers
+                            )
                         else:
                             inputmats = torch.split(
                                 cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
