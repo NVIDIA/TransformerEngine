@@ -330,6 +330,10 @@ enum NVTEQuantizationConfigAttribute {
    *  likely be refactored away in the future.
    */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
+  /*! Whether to enable PDL sync */
+  kNVTEQuantizationConfigPDLSync = 4,
+  /*! Whether to enable PDL trigger */
+  kNVTEQuantizationConfigPDLTrigger = 5,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -836,6 +840,18 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_,
                                            kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
                                            &format, sizeof(Float8BlockScaleTensorFormat));
+  }
+
+  /*! \brief Set PDL sync */
+  void set_pdl_sync(bool pdl_sync) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigPDLSync, &pdl_sync,
+                                           sizeof(bool));
+  }
+
+  /*! \brief Set PDL trigger */
+  void set_pdl_trigger(bool pdl_trigger) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigPDLTrigger, &pdl_trigger,
+                                           sizeof(bool));
   }
 
  private:
