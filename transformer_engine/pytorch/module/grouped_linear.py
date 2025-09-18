@@ -877,7 +877,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 "Please make sure this is intentional."
             )
             weight_tensors = [
-                w.dequantize() if isinstance(w, QuantizedTensorStorage) else w for w in weight_tensors
+                w.dequantize() if isinstance(w, QuantizedTensorStorage) else w
+                for w in weight_tensors
             ]
         return weight_tensors
 

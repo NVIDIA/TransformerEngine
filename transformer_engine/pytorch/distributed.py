@@ -1085,8 +1085,8 @@ def _all_gather_fp8_blockwise(
         dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
     else:
         raise ValueError(
-            "Invalid type for input tensor (expected torch.Tensor or Float8BlockwiseQTensorStorage, "
-            f"found {inp.__class__.__name__})"
+            "Invalid type for input tensor (expected torch.Tensor or"
+            f" Float8BlockwiseQTensorStorage, found {inp.__class__.__name__})"
         )
     world_size = get_distributed_world_size(process_group)
 
@@ -1406,7 +1406,9 @@ def gather_along_first_dim(
         )
 
     # FP8 block scaling case, block length = 128
-    if isinstance(inp, Float8BlockwiseQTensorStorage) or isinstance(quantizer, Float8BlockQuantizer):
+    if isinstance(inp, Float8BlockwiseQTensorStorage) or isinstance(
+        quantizer, Float8BlockQuantizer
+    ):
         return _all_gather_fp8_blockwise(
             inp,
             process_group,

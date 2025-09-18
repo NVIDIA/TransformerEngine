@@ -69,8 +69,8 @@ void init_float8blockwise_extension() {
   if (Float8BlockwiseQTensorStoragePythonClass) return;
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
-  auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage");
+  auto fp8_base_module = py::module_::import(
+      "transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage");
   Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
   Float8BlockwiseQTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(

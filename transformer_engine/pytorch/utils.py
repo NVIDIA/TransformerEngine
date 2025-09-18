@@ -225,7 +225,9 @@ class SplitAlongDim(torch.autograd.Function):
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
         from transformer_engine.pytorch.float8_tensor import Float8Tensor
-        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
 
         if isinstance(mixed_x_layer, Float8TensorStorage) and not isinstance(
             mixed_x_layer, Float8Tensor

@@ -1123,9 +1123,15 @@ class CustomRecipeState(RecipeState):
         # Hardcode linear-specific roles for now
         roles: List[str]
         if self.mode == "forward":
-            roles = [("linear_input", "linear_weight", "linear_output")[i % 3] for i in range(self.num_quantizers)]
+            roles = [
+                ("linear_input", "linear_weight", "linear_output")[i % 3]
+                for i in range(self.num_quantizers)
+            ]
         elif self.mode == "backward":
-            roles = [("linear_grad_output", "linear_grad_input")[i % 2] for i in range(self.num_quantizers)]
+            roles = [
+                ("linear_grad_output", "linear_grad_input")[i % 2]
+                for i in range(self.num_quantizers)
+            ]
         else:
             roles = ["unknown"] * self.num_quantizers
 

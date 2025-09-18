@@ -235,7 +235,13 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Counters per role
-    counts = {"linear_input": 0, "linear_weight": 0, "linear_output": 0, "linear_grad_output": 0, "linear_grad_input": 0}
+    counts = {
+        "linear_input": 0,
+        "linear_weight": 0,
+        "linear_output": 0,
+        "linear_grad_output": 0,
+        "linear_grad_input": 0,
+    }
 
     def quantizer_factory(role):
         if role in counts:

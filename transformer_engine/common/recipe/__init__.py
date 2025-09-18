@@ -371,7 +371,7 @@ class CustomRecipe(Recipe):
     ----------
     qfactory : Callable
                Factory callable that returns a quantizer instance for a
-               given semantic tensor role. 
+               given semantic tensor role.
                The callable is typically invoked as:
                    qfactory(
                        role: str,

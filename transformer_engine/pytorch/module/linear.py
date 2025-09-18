@@ -672,7 +672,9 @@ class _Linear(torch.autograd.Function):
                 # Make sure required data is available
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
-                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorStorage):
+                if ctx.weight_quantizer is not None and isinstance(
+                    weight_fp8, QuantizedTensorStorage
+                ):
                     weight_fp8.update_usage(columnwise_usage=True)
 
                 # Choose whether to use GEMM kernel with split accumulator

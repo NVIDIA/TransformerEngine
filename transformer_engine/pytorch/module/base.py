@@ -1212,7 +1212,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(
                 grad_output,
-                (QuantizedTensor, Float8TensorStorage, MXFP8TensorStorage, Float8BlockwiseQTensorStorage),
+                (
+                    QuantizedTensor,
+                    Float8TensorStorage,
+                    MXFP8TensorStorage,
+                    Float8BlockwiseQTensorStorage,
+                ),
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
@@ -1223,7 +1228,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(
             grad_output,
-            (QuantizedTensor, Float8TensorStorage, MXFP8TensorStorage, Float8BlockwiseQTensorStorage),
+            (
+                QuantizedTensor,
+                Float8TensorStorage,
+                MXFP8TensorStorage,
+                Float8BlockwiseQTensorStorage,
+            ),
         ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias

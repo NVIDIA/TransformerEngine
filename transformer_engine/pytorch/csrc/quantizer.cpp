@@ -612,8 +612,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
 
   py::object ret;
   if (internal) {
-  py::handle Float8BlockwiseQTensorClass(
-      reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass));
+    py::handle Float8BlockwiseQTensorClass(
+        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass));
     ret = Float8BlockwiseQTensorClass(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
@@ -933,7 +933,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   // Construct Python MXFP8 tensor
   py::object out_py;
   if (internal) {
-  py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
+    py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
     out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py,
                               "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
