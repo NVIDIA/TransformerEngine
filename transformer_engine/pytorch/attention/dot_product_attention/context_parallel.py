@@ -21,7 +21,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.constants import (
     dist_group_type,
@@ -1657,7 +1657,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         out_f16 = out.to(fwd_nominal_dtype)
         if fp8 and (
             is_output_fp8
-            or (is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16))
+            or (is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16))
         ):
             out_fp8 = O_quantizer(out_f16)
         out_ret = out_fp8 if (fp8 and is_output_fp8) else out_f16
@@ -1691,7 +1691,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # fwd: fp8, bwd: f16, save all f16
             # inputs are already in f16
             q_f16 = q_f16.view(q.shape)
-            kv_f16 = torch.cat((k_f16.view(-1), v_f16.view(-1)), dim=-1)
+            kv_f16 = kv_fp8.dequantize()
             f16_tensors = (q_f16, kv_f16, out_f16)
         else:
             # fwd: f16, bwd: f16, save all f16
@@ -1770,6 +1770,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_label = "transformer_engine.AttnFuncWithCPAndKVP2P.backward"
         nvtx_range_push(f"{nvtx_label}")
 
+        # corner case:
+        # dout is expected to be in FP8 if is_output_fp8=True,
+        # but in the case it's not, convert it to FP8 before any operation
+        if ctx.fp8 and ctx.is_output_fp8 and not isinstance(dout, QuantizedTensorBase):
+            dout = ctx.dO_quantizer(dout)
+            if ctx.use_fused_attention:
+                dout._data = dout._data.contiguous()
+        elif ctx.use_fused_attention:
+            dout = dout.contiguous()
+
         # set up CP groups for cp_comm_type = {'p2p', 'a2a+p2p'}
         cp_size_a2a = ctx.cp_size_a2a
         rank_a2a = ctx.rank_a2a
@@ -1847,10 +1857,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # [b, h, sq] -> [b, h, sq, 1] or
             # [t, np] -> [t, h, 1]
             softmax_lse.unsqueeze_(-1)
-            dout = dout.contiguous()
+
+        # assume fwd and bwd always use the same high precision, i.e. torch.float16 or torch.bfloat16
+        # used when some tensors are base tensors and loose the "dtype" attribute
+        bwd_nominal_dtype = ctx.fwd_nominal_dtype
 
         # convert out, dout to the right type
-        bwd_nominal_dtype = dout.dtype
         fused_attn_backend = None
         amax_per_step = None
         dP_quantizer_per_step = [None for _ in range(cp_size)]
@@ -1876,8 +1888,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # dout_fp8: Float8Tensor, dtype=bwd_nominal_dtype
             # dout:     torch.Tensor, dtype=torch.uint8
             if ctx.is_output_fp8:
-                assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
-                ctx.dO_quantizer = dout._quantizer
                 dout_fp8 = dout
             else:
                 dout_fp8 = ctx.dO_quantizer(dout)
@@ -1938,10 +1948,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
             if ctx.fp8_meta is not None and ctx.is_output_fp8:
-                assert isinstance(
-                    dout, Float8TensorBase
-                ), "dout must be Float8TensorBases for FP8 MHA!"
-                dout = dout.dequantize()
+                if isinstance(dout, QuantizedTensorBase):
+                    dout = dout.dequantize(dtype=bwd_nominal_dtype)
             dq_buffer = torch.empty_like(q)
             p2p_comm_buffers = [
                 torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),

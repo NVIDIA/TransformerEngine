@@ -24,7 +24,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    QuantizedTensor,
+    QuantizedTensorBase,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -1133,7 +1133,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     out = out_.dequantize().view(out_.shape)
             else:
                 if is_output_fp8 or (
-                    is_bwd_fp8 and not (fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16)
+                    is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
                 ):
                     out_fp8 = O_quantizer(out_)
 
@@ -1156,7 +1156,7 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_tensors = (None, None, None, None)
             qkvo_tensors = (None, None, None, None)
             if is_bwd_fp8:
-                if fp8_recipe.float8_current_scaling and _dpa_fp8_cs_o_in_f16:
+                if fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                     qkvo_tensors = (None, None, None, out)
                 else:
@@ -1203,6 +1203,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8_recipe = fp8_recipe
         ctx.fp8 = is_bwd_fp8
+        # assume fwd and bwd always use the same high precision, i.e. torch.float16 or torch.bfloat16
+        # used when some tensors are base tensors and loose the "dtype" attribute
+        ctx.nominal_dtype = out_nominal_dtype
 
         from transformer_engine.pytorch.cpu_offload import (
             CPUOffloadEnabled,
@@ -1265,13 +1268,16 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
-        if ctx.is_output_fp8:
-            assert isinstance(d_out, Float8Tensor), (
-                "Gradient of the DPA output is expected to be in Float8Tensor type but found"
-                " {d_out.__class__}."
-            )
 
-        d_out = d_out.contiguous()
+        # corner case:
+        # d_out is expected to be in FP8 if is_output_fp8=True,
+        # but in the case it's not, convert it to FP8 before any operation
+        if ctx.fp8 and ctx.is_output_fp8 and not isinstance(d_out, QuantizedTensorBase):
+            d_out = ctx.dO_quantizer(d_out)
+            if not ctx.use_FAv2_bwd:
+                d_out._data = d_out._data.contiguous()
+        elif not ctx.use_FAv2_bwd:
+            d_out = d_out.contiguous()
         (
             q_fp8,
             k_fp8,
@@ -1329,7 +1335,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 # get nominal data type of dq, dk, dv
                 # FP16/BF16 attention: torch.float16 or torch.bfloat16
                 # FP8 attention:       torch.float16 or torch.bfloat16
-                dqkv_nominal_dtype = d_out.dtype
+                dqkv_nominal_dtype = ctx.nominal_dtype
 
                 if ctx.fp8:
                     # d_out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1439,8 +1445,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.dP_quantizer,
                     )
                 else:
-                    if isinstance(d_out, QuantizedTensor):
-                        d_out = d_out.dequantize()
+                    if isinstance(d_out, QuantizedTensorBase):
+                        d_out = d_out.dequantize(dtype=ctx.nominal_dtype)
                     dqkv_te_dtype = TE_DType[d_out.dtype]
                     # q, k, v, out, d_out, dq, dk, dv: torch.Tensor; torch.float16 or torch.bfloat16
                     dq, dk, dv, *rest = fused_attn_bwd(
