@@ -34,7 +34,7 @@ RUN <<"EOF" bash -e
   && pip3 install cmake==3.21.0 nvidia-cudnn-cu12==9.9.0.52 \
   || [[ ! "${FRAMEWORK}" == "core" ]]
 EOF
-RUN pip3 install ninja pybind11
+RUN pip3 install ninja pybind11 nvidia-mathdx==25.1.1
 
 # Install google logging lib for paddle ci as a hotfix.
 # TODO (ksivamai): fix in TE build
