@@ -145,7 +145,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             cp_size,
             cp_rank,
         )
-        ctx.save_for_backward(freqs, cu_seqlens)
+        ctx.save_for_backward(freqs, cu_seqlens, start_positions)
         ctx.tensor_format = tensor_format
         ctx.cp_size = cp_size
         ctx.cp_rank = cp_rank
@@ -156,10 +156,11 @@ class FusedRoPEFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """Fused RoPE backward."""
-        freqs, cu_seqlens = ctx.saved_tensors
+        freqs, cu_seqlens, start_positions = ctx.saved_tensors
         grad_input = tex.fused_rope_backward(
             grad_output,
             freqs,
+            start_positions,
             QKVFormat[ctx.tensor_format],
             ctx.interleaved,
             cu_seqlens,
@@ -167,7 +168,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             ctx.cp_rank,
         )
 
-        return grad_input, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None
 
 
 class FusedQKVRoPEFunc(torch.autograd.Function):
