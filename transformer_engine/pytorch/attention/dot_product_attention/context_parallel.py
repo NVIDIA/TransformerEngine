@@ -408,7 +408,7 @@ def get_fa_args(
                     max_seqlen_q,
                     max_seqlen_kv,
                     *[None]
-                    * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+                    * 9,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, seqlens_rotary, q_descale, k_descale, v_descale
                 ]
             return [
                 *[None]
@@ -416,7 +416,7 @@ def get_fa_args(
                 max_seqlen_q,
                 max_seqlen_kv,
                 *[None]
-                * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+                * 9,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, seqlens_rotary, q_descale, k_descale, v_descale
             ]
         if qkv_format == "thd":
             return [
@@ -879,6 +879,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
+                                if not enable_mla:
+                                    # If MHA, then split the KV into k_part and v_part.
+                                    # Otherwise (MHA), k_part and v_part have already been split.
+                                    k_part = (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    )
+                                    v_part = (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    )
                                 fa_forward_args_thd = get_fa_args(
                                     True,
                                     use_flash_attn_3,
@@ -888,19 +901,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     max_seqlen_q=max_seqlen_q,
                                     max_seqlen_kv=max_seqlen_kv,
                                 )
-                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
-                                    (
-                                        kv_inputs[i % 2][..., 0, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][0]
-                                    ),
-                                    (
-                                        kv_inputs[i % 2][..., 1, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][1]
-                                    ),
+                                    k_part,
+                                    v_part,
                                     *fa_forward_args_thd,
                                     causal=True,
                                     **fa_forward_kwargs,
@@ -1035,6 +1039,22 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
+                                if enable_mla:
+                                    k_part = k_part.contiguous()
+                                    v_part = v_part.contiguous()
+                                else:
+                                    # If MHA, then split the KV into k_part and v_part.
+                                    # Otherwise (MHA), k_part and v_part have already been split.
+                                    k_part = (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    )
+                                    v_part = (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    )
                                 fa_forward_args_thd = get_fa_args(
                                     True,
                                     use_flash_attn_3,
@@ -1051,19 +1071,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
-                                    (
-                                        kv_inputs[i % 2][..., 0, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][0]
-                                    ),
-                                    (
-                                        kv_inputs[i % 2][..., 1, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][1]
-                                    ),
+                                    k_part,
+                                    v_part,
                                     *fa_forward_args_thd,
                                     causal=False,
                                     **fa_forward_kwargs,
@@ -1194,6 +1205,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
+                                if not enable_mla:
+                                    # If MHA, then split the KV into k_part and v_part.
+                                    # Otherwise (MHA), k_part and v_part have already been split.
+                                    k_part = (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    )
+                                    v_part = (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    )
                                 fa_forward_args_thd = get_fa_args(
                                     True,
                                     use_flash_attn_3,
@@ -1210,19 +1234,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
-                                    (
-                                        kv_inputs[i % 2][..., 0, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][0]
-                                    ),
-                                    (
-                                        kv_inputs[i % 2][..., 1, :, :]
-                                        if qkv_format in ["bshd", "sbhd"]
-                                        else kv_inputs[i % 2][1]
-                                    ),
+                                    k_part,
+                                    v_part,
                                     *fa_forward_args_thd,
                                     causal=False,
                                     **fa_forward_kwargs,
@@ -1319,6 +1334,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                 attn_biases[i] = rest[0] if len(rest) > 0 else None
                         else:
+                            if not enable_mla:
+                                # If MHA, then split the KV into k_part and v_part.
+                                # Otherwise (MHA), k_part and v_part have already been split.
+                                k_part = (
+                                    kv_inputs[i % 2][..., 0, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][0]
+                                )
+                                v_part = (
+                                    kv_inputs[i % 2][..., 1, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][1]
+                                )
                             fa_forward_args_thd = get_fa_args(
                                 True,
                                 use_flash_attn_3,
@@ -1328,19 +1356,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 max_seqlen_q=max_seqlen_q,
                                 max_seqlen_kv=max_seqlen_kv,
                             )
-                            # Need to add MLA support once Flash Attention supports MLA
                             fa_outputs = flash_attn_fwd(
                                 q,
-                                (
-                                    kv_inputs[i % 2][..., 0, :, :]
-                                    if qkv_format in ["bshd", "sbhd"]
-                                    else kv_inputs[i % 2][0]
-                                ),
-                                (
-                                    kv_inputs[i % 2][..., 1, :, :]
-                                    if qkv_format in ["bshd", "sbhd"]
-                                    else kv_inputs[i % 2][1]
-                                ),
+                                k_part,
+                                v_part,
                                 *fa_forward_args_thd,
                                 causal=False,
                                 **fa_forward_kwargs,
@@ -1915,7 +1934,27 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             dv_ = dv_._data
                     else:
                         dq_ = torch.empty_like(q_)
-                        dkv_ = torch.empty_like(kv_)
+                        if ctx.enable_mla:
+                            dk_ = torch.empty_like(k_part)
+                            dv_ = torch.empty_like(v_part)
+                        else:
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
+                            dkv_ = torch.empty_like(kv_)
+                            dk_ = (
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            )
+                            dv_ = (
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            )
                         fa_backward_args_thd = get_fa_args(
                             False,
                             ctx.use_flash_attn_3,
@@ -1925,16 +1964,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             max_seqlen_q=ctx.max_seqlen_q,
                             max_seqlen_kv=ctx.max_seqlen_kv,
                             dq=dq_,
-                            dk=(
-                                dkv_[..., 0, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[0]
-                            ),
-                            dv=(
-                                dkv_[..., 1, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[1]
-                            ),
+                            dk=dk_,
+                            dv=dv_,
                         )
                         if ctx.use_flash_attn_3 or (
                             fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
@@ -1945,12 +1976,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = 0
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
-                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
-                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
+                            k_part,
+                            v_part,
                             out_,
                             softmax_lse,
                             *fa_backward_args_thd,
@@ -2066,7 +2096,29 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             dv_ = dv_._data
                     else:
                         dq_ = torch.empty_like(q_)
-                        dkv_ = torch.empty_like(kv_)
+                        if ctx.enable_mla:
+                            k_part = k_part.contiguous()
+                            v_part = v_part.contiguous()
+                            dk_ = torch.empty_like(k_part)
+                            dv_ = torch.empty_like(v_part)
+                        else:
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
+                            dkv_ = torch.empty_like(kv_)
+                            dk_ = (
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            )
+                            dv_ = (
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            )
                         fa_backward_args_thd = get_fa_args(
                             False,
                             ctx.use_flash_attn_3,
@@ -2076,16 +2128,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             max_seqlen_q=ctx.max_seqlen_q,
                             max_seqlen_kv=ctx.max_seqlen_kv // 2,
                             dq=dq_,
-                            dk=(
-                                dkv_[..., 0, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[0]
-                            ),
-                            dv=(
-                                dkv_[..., 1, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[1]
-                            ),
+                            dk=dk_,
+                            dv=dv_,
                         )
                         if ctx.use_flash_attn_3 or (
                             fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
@@ -2096,12 +2140,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
-                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
-                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
+                            k_part,
+                            v_part,
                             out_,
                             softmax_lse,
                             *fa_backward_args_thd,
@@ -2210,7 +2253,27 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             dv_ = dv_._data
                     else:
                         dq_ = torch.empty_like(q_)
-                        dkv_ = torch.empty_like(kv_)
+                        if ctx.enable_mla:
+                            dk_ = torch.empty_like(k_part)
+                            dv_ = torch.empty_like(v_part)
+                        else:
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
+                            dkv_ = torch.empty_like(kv_)
+                            dk_ = (
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            )
+                            dv_ = (
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            )
                         fa_backward_args_thd = get_fa_args(
                             False,
                             ctx.use_flash_attn_3,
@@ -2220,16 +2283,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             max_seqlen_q=ctx.max_seqlen_q // 2,
                             max_seqlen_kv=ctx.max_seqlen_kv,
                             dq=dq_,
-                            dk=(
-                                dkv_[..., 0, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[0]
-                            ),
-                            dv=(
-                                dkv_[..., 1, :, :]
-                                if ctx.qkv_format in ["bshd", "sbhd"]
-                                else dkv_[1]
-                            ),
+                            dk=dk_,
+                            dv=dv_,
                         )
                         if ctx.use_flash_attn_3 or (
                             fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
@@ -2240,12 +2295,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
-                            kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0],
-                            kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
+                            k_part,
+                            v_part,
                             out_,
                             softmax_lse_,
                             *fa_backward_args_thd,
@@ -2317,7 +2371,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                 else:
                     dq_ = torch.empty_like(q)
-                    dkv_ = torch.empty_like(kv)
+                    if ctx.enable_mla:
+                        dk_ = torch.empty_like(k_part)
+                        dv_ = torch.empty_like(v_part)
+                    else:
+                        k_part = kv[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[0]
+                        v_part = kv[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[1]
+                        dkv_ = torch.empty_like(kv)
+                        dk_ = dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0]
+                        dv_ = dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1]
                     fa_backward_args_thd = get_fa_args(
                         False,
                         ctx.use_flash_attn_3,
@@ -2327,8 +2389,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         max_seqlen_q=ctx.max_seqlen_q,
                         max_seqlen_kv=ctx.max_seqlen_kv,
                         dq=dq_,
-                        dk=dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
-                        dv=dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
+                        dk=dk_,
+                        dv=dv_,
                     )
                     if ctx.use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                         fa_backward_kwargs["window_size"] = (-1, -1)
@@ -2337,12 +2399,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         fa_backward_kwargs["window_size_right"] = -1
                     if not ctx.use_flash_attn_3:
                         fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                    # Need to add MLA support once Flash Attention supports MLA
                     flash_attn_bwd(
                         dout,
                         q,
-                        kv[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[0],
-                        kv[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[1],
+                        k_part,
+                        v_part,
                         out,
                         softmax_lse,
                         *fa_backward_args_thd,

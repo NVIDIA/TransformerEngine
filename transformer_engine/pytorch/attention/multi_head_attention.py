@@ -903,23 +903,11 @@ class MultiheadAttention(torch.nn.Module):
 
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
-            # adjust key and value for inference
-            if inference_params is not None:
-                if self.qkv_format == "sbhd":
-                    sequence_length = key_layer.size(0)
-                elif self.qkv_format == "bshd":
-                    sequence_length = key_layer.size(1)
-                else:
-                    raise ValueError(
-                        f"qkv_format={self.qkv_format} not supported for KV caching and RoPE."
-                    )
-
-                sequence_start = inference_params.get_seqlens_pre_step()
-                # sequence_start = inference_params.seqlens[0]
-                sequence_end = sequence_start + sequence_length
-
-                q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
-                k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+            # Applyig RoPE for inference needs start positions of sequences
+            # for each iteration.
+            sequence_start_positions = (
+                inference_params.get_seqlens_pre_step() if inference_params is not None else None
+            )
 
             if pad_between_seqs:
                 rotary_pos_cu_seq_lens_q = cu_seqlens_q_padded
@@ -936,6 +924,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=rotary_pos_cu_seq_lens_q,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
             key_layer = apply_rotary_pos_emb(
@@ -946,6 +935,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=rotary_pos_cu_seq_lens_kv,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
 
