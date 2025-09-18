@@ -231,7 +231,7 @@ def run_dpa_with_cp(
             fp8_dtype=tex.DType.kFloat8E5M2,
             device="cuda",
         )
-    qkv_layout = '_'.join([qkv_format]*3)
+    qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
     q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
 
@@ -273,7 +273,8 @@ def run_dpa_with_cp(
 
     # run core_attn with CP
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
+        x.clone().detach()
+        for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":

@@ -1133,7 +1133,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     out = out_.dequantize().view(out_.shape)
             else:
                 if is_output_fp8 or (
-                    is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
+                    is_bwd_fp8
+                    and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
                 ):
                     out_fp8 = O_quantizer(out_)
 
