@@ -416,11 +416,9 @@ class ClampedSwiGLU(_ActivationOperation):
         Quantize input tensor when caching for use in the backward pass.
     """
 
-    def __init__(self,
-                 *,
-                 limit: float = 7.0,
-                 alpha: float = 1.702,
-                 cache_quantized_input: bool = False):
+    def __init__(
+        self, *, limit: float = 7.0, alpha: float = 1.702, cache_quantized_input: bool = False
+    ):
         super().__init__(cache_quantized_input=cache_quantized_input)
         self.limit = limit
         self.alpha = alpha
