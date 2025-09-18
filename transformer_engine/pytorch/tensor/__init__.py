@@ -7,15 +7,15 @@
 import torch
 
 from .quantized_tensor import (
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
-from .base.float8_tensor_base import Float8TensorBase
-from .base.mxfp8_tensor_base import MXFP8TensorBase
-from .base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .storage.float8_tensor_storage import Float8TensorStorage
+from .storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
@@ -27,10 +27,10 @@ __all__ = [
     "Float8CurrentScalingQuantizer",
     "MXFP8Quantizer",
     "Float8BlockQuantizer",
-    "QuantizedTensorBase",
-    "Float8TensorBase",
-    "MXFP8TensorBase",
-    "Float8BlockwiseQTensorBase",
+    "QuantizedTensorStorage",
+    "Float8TensorStorage",
+    "MXFP8TensorStorage",
+    "Float8BlockwiseQTensorStorage",
     "QuantizedTensor",
     "Float8Tensor",
     "MXFP8Tensor",
@@ -78,10 +78,10 @@ def get_all_tensor_types():
         torch.Tensor,
         torch.nn.Parameter,
         Float8Tensor,
-        Float8TensorBase,
+        Float8TensorStorage,
         MXFP8Tensor,
-        MXFP8TensorBase,
+        MXFP8TensorStorage,
         Float8BlockwiseQTensor,
-        Float8BlockwiseQTensorBase,
+        Float8BlockwiseQTensorStorage,
     ]
     return all_tensor_types

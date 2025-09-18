@@ -13,7 +13,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
-from .base.float8_tensor_base import Float8TensorBase, _FromFloat8Func
+from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -155,7 +155,7 @@ class Float8Quantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=1 / self.scale,
                 fp8_dtype=self.dtype,
@@ -341,7 +341,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
@@ -396,7 +396,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         return True
 
 
-class Float8Tensor(Float8TensorBase, QuantizedTensor):
+class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,

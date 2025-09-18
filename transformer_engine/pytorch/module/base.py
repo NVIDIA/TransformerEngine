@@ -37,14 +37,14 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quantizer
+from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.base.float8_tensor_base import Float8TensorBase
-from ..tensor.base.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
-from ..tensor.base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -502,7 +502,7 @@ def fill_userbuffers_buffer_for_all_gather(
     local_tensor: torch.Tensor,
     quantizer: Optional[Quantizer],
     process_group,
-) -> tuple[torch.Tensor | QuantizedTensorBase, torch.Tensor | QuantizedTensorBase]:
+) -> tuple[torch.Tensor | QuantizedTensorStorage, torch.Tensor | QuantizedTensorStorage]:
     """Fill local shard of Userbuffers buffer with data for all-gather
 
     Returns the full tensor and the local shard, both using the
@@ -526,7 +526,7 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unquantized data
     if quantizer is None:
-        if isinstance(local_tensor, QuantizedTensorBase):
+        if isinstance(local_tensor, QuantizedTensorStorage):
             local_tensor = local_tensor.dequantize()
         if comm.is_fp8_ubuf():
             raise RuntimeError(
@@ -539,8 +539,8 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # FP8 data
     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-        if not isinstance(local_tensor, Float8TensorBase):
-            if isinstance(local_tensor, QuantizedTensorBase):
+        if not isinstance(local_tensor, Float8TensorStorage):
+            if isinstance(local_tensor, QuantizedTensorStorage):
                 local_tensor.dequantize()
             quantizer.set_usage(rowwise=True, columnwise=False)
             local_tensor = quantizer(local_tensor)
@@ -551,7 +551,7 @@ def fill_userbuffers_buffer_for_all_gather(
             )
         comm.copy_into_buffer(local_tensor._data, local_chunk=True)
         global_tensor_data = comm.get_buffer(shape=global_shape)
-        global_tensor = Float8TensorBase(
+        global_tensor = Float8TensorStorage(
             data=global_tensor_data,
             fp8_scale_inv=local_tensor._scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
@@ -563,8 +563,8 @@ def fill_userbuffers_buffer_for_all_gather(
     if isinstance(quantizer, MXFP8Quantizer):
 
         # Cast to MXFP8 if needed
-        if not isinstance(local_tensor, MXFP8TensorBase):
-            if isinstance(local_tensor, QuantizedTensorBase):
+        if not isinstance(local_tensor, MXFP8TensorStorage):
+            if isinstance(local_tensor, QuantizedTensorStorage):
                 local_tensor.dequantize()
             local_tensor = quantizer(local_tensor)
         if not comm.is_fp8_ubuf():
@@ -619,7 +619,7 @@ def fill_userbuffers_buffer_for_all_gather(
             rowwise_data, rowwise_scale_inv = global_data, global_scale_inv
         else:
             columnwise_data, columnwise_scale_inv = global_data, global_scale_inv
-        global_tensor = MXFP8TensorBase(
+        global_tensor = MXFP8TensorStorage(
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
             columnwise_data=columnwise_data,
@@ -781,10 +781,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             f"({len(weight_quantizers)}) must match"
         )
         for weight, quantizer in zip(weight_tensors, weight_quantizers):
-            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+            if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                 weight.update_quantizer(quantizer)
 
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
@@ -1163,9 +1163,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output,
                     (
                         QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
+                        Float8TensorStorage,
+                        MXFP8TensorStorage,
+                        Float8BlockwiseQTensorStorage,
                     ),
                 ):
                     grad_output = quantizer(grad_output)
@@ -1194,9 +1194,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output_.get_tensor(True),
                     (
                         QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
+                        Float8TensorStorage,
+                        MXFP8TensorStorage,
+                        Float8BlockwiseQTensorStorage,
                     ),
                 )
                 and ctx.use_bias
@@ -1212,7 +1212,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(
                 grad_output,
-                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+                (QuantizedTensor, Float8TensorStorage, MXFP8TensorStorage, Float8BlockwiseQTensorStorage),
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
@@ -1223,7 +1223,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(
             grad_output,
-            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+            (QuantizedTensor, Float8TensorStorage, MXFP8TensorStorage, Float8BlockwiseQTensorStorage),
         ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
@@ -1378,14 +1378,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Reset cache if workspace is invalid
         if out is not None and quantizer is not None:
             reset_cache = False
-            if isinstance(out, Float8TensorBase):
+            if isinstance(out, Float8TensorStorage):
                 if (
                     not is_non_tn_fp8_gemm_supported()
                     and quantizer.columnwise_usage
                     and out._transpose is None
                 ):
                     reset_cache = True
-            elif isinstance(out, MXFP8TensorBase):
+            elif isinstance(out, MXFP8TensorStorage):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     reset_cache = True
                 elif quantizer.columnwise_usage and out._columnwise_data is None:
@@ -1576,7 +1576,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = self.fp8_meta["recipe"]
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, QuantizedTensorBase):
+            if isinstance(tensor, QuantizedTensorStorage):
                 quantizer = tensor._get_quantizer()
                 if quantizer is None:
                     continue

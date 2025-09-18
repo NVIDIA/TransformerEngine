@@ -23,14 +23,14 @@
 namespace transformer_engine::pytorch {
 
 PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
-PyTypeObject *Float8TensorBasePythonClass = nullptr;
+PyTypeObject *Float8TensorStoragePythonClass = nullptr;
 PyTypeObject *Float8QuantizerClass = nullptr;
 PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
-PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
+PyTypeObject *MXFP8TensorStoragePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
-PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorStoragePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 
 void init_float8_extension() {
@@ -43,9 +43,9 @@ void init_float8_extension() {
   Float8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor.base.float8_tensor_base");
-  Float8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorBase"));
+      py::module_::import("transformer_engine.pytorch.tensor.storage.float8_tensor_storage");
+  Float8TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorStorage"));
   NVTE_CHECK(Float8TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch Float8 extension.");
 }
@@ -58,29 +58,29 @@ void init_mxfp8_extension() {
   MXFP8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor.base.mxfp8_tensor_base");
-  MXFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorBase"));
+      py::module_::import("transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage");
+  MXFP8TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorStorage"));
   NVTE_CHECK(MXFP8TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
 void init_float8blockwise_extension() {
-  if (Float8BlockwiseQTensorBasePythonClass) return;
+  if (Float8BlockwiseQTensorStoragePythonClass) return;
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor.base.float8_blockwise_tensor_base");
+      py::module_::import("transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage");
   Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
-  Float8BlockwiseQTensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorBase"));
+  Float8BlockwiseQTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorStorage"));
   Float8BlockwiseQTensorPythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockwiseQTensor"));
 
   NVTE_CHECK(Float8BlockwiseQuantizerClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");
-  NVTE_CHECK(Float8BlockwiseQTensorBasePythonClass != nullptr,
+  NVTE_CHECK(Float8BlockwiseQTensorStoragePythonClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");
   NVTE_CHECK(Float8BlockwiseQTensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");

@@ -16,7 +16,7 @@ from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from .base.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
+from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -169,14 +169,14 @@ class MXFP8Quantizer(Quantizer):
         data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
         return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
 
-    def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
+    def onnx_dequantize(self, tensor: Union[MXFP8TensorStorage, MXFP8Tensor]) -> torch.Tensor:
         return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
 
-class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
+class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -201,7 +201,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,

@@ -16,8 +16,8 @@ from torch.utils._pytree import tree_map
 from transformer_engine.common.recipe import Recipe
 
 
-class QuantizedTensorBase:
-    r"""Base class for all *TensorBase classes.
+class QuantizedTensorStorage:
+    r"""Base class for all *TensorStorage classes.
 
     This class (and its subclasses) are optimization for when
     the full QuantizedTensor is not needed (when it is fully
@@ -25,9 +25,9 @@ class QuantizedTensorBase:
     PyTorch's autograd).
 
     When creating a new tensor type X one should create both
-    XTensorBase class inheriting from QuantizedTensorBase and
-    XTensor inheriting from XTensorBase and QuantizedTensor.
-    XTensorBase should contain all data members needed to
+    XTensorStorage class inheriting from QuantizedTensorStorage and
+    XTensor inheriting from XTensorStorage and QuantizedTensor.
+    XTensorStorage should contain all data members needed to
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (liek __torch_dispatch__)."""
@@ -58,7 +58,7 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement prepare_for_saving function"
@@ -106,13 +106,13 @@ class QuantizedTensorBase:
 
 
 def prepare_for_saving(
-    *tensors: Union[torch.Tensor, QuantizedTensorBase],
+    *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
-    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorBase]]
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorStorage]]
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal TensorBase types too."""
+    the internal *TensorStorage types too."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
@@ -127,12 +127,12 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorBase]]],
+    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorStorage]]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
 ) -> (
-    list[Optional[torch.Tensor | QuantizedTensorBase]]
-    | tuple[list[Optional[torch.Tensor | QuantizedTensorBase]], list[Optional[torch.Tensor]]]
+    list[Optional[torch.Tensor | QuantizedTensorStorage]]
+    | tuple[list[Optional[torch.Tensor | QuantizedTensorStorage]], list[Optional[torch.Tensor]]]
 ):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []

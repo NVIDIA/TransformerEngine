@@ -13,7 +13,7 @@ from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
-from .base.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -278,7 +278,7 @@ class Float8BlockQuantizer(Quantizer):
         return Float8BlockScaling
 
 
-class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
+class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     """Tensor class with FP8 data quantized via NxN blocks or 1xN blocks.
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -303,7 +303,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                holds configuration about quantization and dequantization modes.
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,

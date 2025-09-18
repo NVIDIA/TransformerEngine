@@ -28,7 +28,7 @@ from ...module.base import (
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor.base.float8_tensor_base import Float8TensorBase
+from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -567,7 +567,7 @@ class BasicLinear(BasicOperation):
         # Prepare input tensor for backward pass
         if weight_requires_grad:
             if with_quantized_compute and is_quantized_tensor(x_local):
-                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:

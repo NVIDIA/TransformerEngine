@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 import transformer_engine_torch as tex
 from ...tensor import Quantizer
-from ...tensor.base.float8_tensor_base import Float8TensorBase
+from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_autocast_dtype, maybe_dequantize
 from ..op import BasicOperation, OperationContext
 
@@ -55,7 +55,7 @@ class Dropout(BasicOperation):
             out = input_
         elif impl == "fused":
             x = input_
-            if not isinstance(x, Float8TensorBase):
+            if not isinstance(x, Float8TensorStorage):
                 x = maybe_dequantize(x, dtype=dtype)
             out, mask = tex.dropout_fwd(x, self.dropout_probability)
         elif impl == "unfused":

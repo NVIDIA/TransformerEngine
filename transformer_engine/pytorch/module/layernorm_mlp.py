@@ -68,7 +68,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -517,9 +517,9 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(fc1_weight_final, QuantizedTensorBase):
+            if isinstance(fc1_weight_final, QuantizedTensorStorage):
                 fc1_weight_final.update_usage(columnwise_usage=True)
-            if isinstance(fc2_weight_final, QuantizedTensorBase):
+            if isinstance(fc2_weight_final, QuantizedTensorStorage):
                 fc2_weight_final.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
@@ -816,10 +816,10 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # Make sure required data is available
-            if isinstance(grad_output, QuantizedTensorBase):
+            if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.fc2_weight_quantizer is not None and isinstance(
-                ctx.fc2_weight, QuantizedTensorBase
+                ctx.fc2_weight, QuantizedTensorStorage
             ):
                 ctx.fc2_weight.update_usage(columnwise_usage=True)
 
@@ -901,14 +901,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(act_out, QuantizedTensorBase):
+                    if isinstance(act_out, QuantizedTensorStorage):
                         act_out.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
                         act_out = ctx.fc2_input_quantizer(act_out)
 
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(grad_output, QuantizedTensorBase):
+                    if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -1065,7 +1065,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorBase
+                ctx.fc1_weight_quantizer, QuantizedTensorStorage
             ):
                 ctx.fc1_weight.update_usage(columnwise_usage=True)
 
@@ -1136,7 +1136,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ln_out_total_work.wait()
                     ln_out_total_work = None
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(ln_out_total, QuantizedTensorBase):
+                    if isinstance(ln_out_total, QuantizedTensorStorage):
                         ln_out_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -1146,7 +1146,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(dact, QuantizedTensorBase):
+                    if isinstance(dact, QuantizedTensorStorage):
                         dact.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -2119,7 +2119,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].amax_reduction_group = self.tp_group
 
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         return [self.fc1_weight, self.fc2_weight]
 
