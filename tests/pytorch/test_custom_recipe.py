@@ -47,10 +47,10 @@ def test_custom_recipe_sanity(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Single factory: map roles to quantizers
-    def quantizer_factory(role, **kwargs):
-        if role in ("input", "weight", "output"):
+    def quantizer_factory(role):
+        if role in ("linear_input", "linear_weight", "linear_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("grad_output", "grad_input"):
+        if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -84,10 +84,10 @@ def test_custom_recipe_grouped_linear_sanity():
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role, **kwargs):
-        if role in ("input", "weight", "output"):
+    def quantizer_factory(role):
+        if role in ("linear_input", "linear_weight", "linear_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("grad_output", "grad_input"):
+        if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -126,14 +126,30 @@ def test_custom_recipe_matches_current_scaling():
     ref_recipe = recipe.Float8CurrentScaling()
     with fp8_autocast(enabled=True, fp8_recipe=ref_recipe):
         out_ref = model_ref(inp_ref)
-    loss_ref = out_ref.float().sum()
+    # Assert dtypes for reference quantizers: HYBRID = E4M3 (fwd), E5M2 (bwd)
+    ref_fwd_in = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+    ref_fwd_w = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+    ref_fwd_out = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
+    ref_bwd_go = model_ref.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+    ref_bwd_gi = model_ref.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+    assert ref_fwd_in.dtype == tex.DType.kFloat8E4M3
+    assert ref_fwd_w.dtype == tex.DType.kFloat8E4M3
+    assert ref_fwd_out.dtype == tex.DType.kFloat8E4M3
+    assert ref_bwd_go.dtype == tex.DType.kFloat8E5M2
+    assert ref_bwd_gi.dtype == tex.DType.kFloat8E5M2
+
+    # Stress dynamic range in grad_output
+    scale = torch.ones(out_features, device="cuda", dtype=torch.float32)
+    scale[0] = 1e8
+    scale[1] = 1e-8
+    loss_ref = (out_ref.float() * scale.view(1, -1)).sum()
     loss_ref.backward()
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
-    def quantizer_factory(role, **kwargs):
-        if role in ("input", "weight", "output"):
+    def quantizer_factory(role):
+        if role in ("linear_input", "linear_weight", "linear_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("grad_output", "grad_input"):
+        if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -141,7 +157,19 @@ def test_custom_recipe_matches_current_scaling():
 
     with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
         out_custom = model_custom(inp_custom)
-    loss_custom = out_custom.float().sum()
+    # Assert dtypes for custom quantizers match reference mapping
+    cus_fwd_in = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+    cus_fwd_w = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+    cus_fwd_out = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
+    cus_bwd_go = model_custom.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+    cus_bwd_gi = model_custom.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+    assert cus_fwd_in.dtype == tex.DType.kFloat8E4M3
+    assert cus_fwd_w.dtype == tex.DType.kFloat8E4M3
+    assert cus_fwd_out.dtype == tex.DType.kFloat8E4M3
+    assert cus_bwd_go.dtype == tex.DType.kFloat8E5M2
+    assert cus_bwd_gi.dtype == tex.DType.kFloat8E5M2
+
+    loss_custom = (out_custom.float() * scale.view(1, -1)).sum()
     loss_custom.backward()
 
     # Compare forward outputs (exact match expected)
@@ -156,9 +184,6 @@ def test_custom_recipe_matches_current_scaling():
     custom_params = dict(model_custom.named_parameters())
     for name, p_ref in ref_params.items():
         p_cus = custom_params[name]
-        # Parameter tensors should be identical initially; now check grads
-        if p_ref.grad is None and p_cus.grad is None:
-            continue
         assert p_ref.grad is not None and p_cus.grad is not None
         assert torch.allclose(p_ref.grad, p_cus.grad, rtol=0.0, atol=0.0)
 
@@ -178,10 +203,10 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def quantizer_factory(role, **kwargs):
-        if role in ("input", "weight", "output"):
+    def quantizer_factory(role):
+        if role in ("linear_input", "linear_weight", "linear_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("grad_output", "grad_input"):
+        if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -210,14 +235,14 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Counters per role
-    counts = {"input": 0, "weight": 0, "output": 0, "grad_output": 0, "grad_input": 0}
+    counts = {"linear_input": 0, "linear_weight": 0, "linear_output": 0, "linear_grad_output": 0, "linear_grad_input": 0}
 
-    def quantizer_factory(role, **kwargs):
+    def quantizer_factory(role):
         if role in counts:
             counts[role] += 1
-        if role in ("input", "weight", "output"):
+        if role in ("linear_input", "linear_weight", "linear_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
-        if role in ("grad_output", "grad_input"):
+        if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
 
@@ -231,11 +256,11 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     loss.backward()
 
     # Single GEMM: forward should request input, weight, output; backward grad_output, grad_input
-    assert counts["input"] == 1
-    assert counts["weight"] == 1
-    assert counts["output"] == 1
-    assert counts["grad_output"] == 1
-    assert counts["grad_input"] == 1
+    assert counts["linear_input"] == 1
+    assert counts["linear_weight"] == 1
+    assert counts["linear_output"] == 1
+    assert counts["linear_grad_output"] == 1
+    assert counts["linear_grad_input"] == 1
 
 
 def test_factories_return_distinct_instances_and_buffers():

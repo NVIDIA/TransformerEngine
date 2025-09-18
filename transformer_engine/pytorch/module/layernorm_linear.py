@@ -62,6 +62,8 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ...debug.pytorch.debug_state import TEDebugState
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..export import is_in_onnx_export_mode, assert_warmed_up
