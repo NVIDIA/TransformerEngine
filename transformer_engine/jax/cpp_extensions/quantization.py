@@ -7,6 +7,7 @@ from functools import reduce
 from typing import Tuple, Optional, Union
 import math
 from packaging import version
+from enum import Enum
 
 import jax
 import jax.numpy as jnp
@@ -537,27 +538,33 @@ class QuantizePrimitive(BaseDBiasQuantizePrimitive):
     """Subclass of BaseDBiasQuantizePrimitive for quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
-class AmaxCalculationPrimitive:
+class AmaxScope(Enum):
+    LOCAL = 1
+    TPSP = 2
+    FSDP = 3
+
+
+class AmaxCalculationPrimitive(BasePrimitive):
     """
     Amax Calculation Primitive with custom_partitioning
     """
 
     name = "jax_local_amax"
     multiple_results = False
-    impl_static_args = (1, 2)  # use_global_amax
-    primitive = None
+    impl_static_args = (1,)  # amax_scope
+    inner_primitive = None
+    outer_primitive = None
 
     @staticmethod
     def abstract(
         x_aval,
         *,
-        amax_across_tpsp,
-        amax_across_fsdp,
+        amax_scope,
     ):
         """
         amax calcuation abstract
         """
-        del amax_across_tpsp, amax_across_fsdp
+        del amax_scope
 
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -568,20 +575,18 @@ class AmaxCalculationPrimitive:
     @staticmethod
     def impl(
         x,
-        amax_across_tpsp,
-        amax_across_fsdp,
+        amax_scope,
     ):
         """
         amax calcuation implementation
         """
-        del amax_across_tpsp, amax_across_fsdp
+        del amax_scope
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32).reshape((1,))
         return amax
 
     @staticmethod
     def infer_sharding_from_operands(
-        amax_across_tpsp,
-        amax_across_fsdp,
+        amax_scope,
         mesh,
         arg_infos,
         result_infos,
@@ -589,7 +594,7 @@ class AmaxCalculationPrimitive:
         """
         amax calcuation infer_sharding_from_operands
         """
-        del (amax_across_tpsp, amax_across_fsdp, arg_infos, result_infos)  # Unused.
+        del (amax_scope, arg_infos, result_infos)  # Unused.
         amax_sharding = NamedSharding(
             mesh,
             PartitionSpec(None),
@@ -599,8 +604,7 @@ class AmaxCalculationPrimitive:
 
     @staticmethod
     def partition(
-        amax_across_tpsp,
-        amax_across_fsdp,
+        amax_scope,
         mesh,
         arg_infos,
         result_infos,
@@ -619,15 +623,14 @@ class AmaxCalculationPrimitive:
         def sharded_impl(x):
             amax = AmaxCalculationPrimitive.impl(
                 x,
-                amax_across_tpsp=amax_across_tpsp,
-                amax_across_fsdp=amax_across_fsdp,
+                amax_scope=amax_scope,
             )
-            if amax_across_tpsp:  # Only run AR across TP/SP
+            if amax_scope is AmaxScope.TPSP:  # Run AR across TP/SP
                 gmesh = global_mesh_resource()
                 amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tp_resource, mesh)
                 amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
 
-            if amax_across_fsdp:  # Only run AR across FSDP
+            if amax_scope is AmaxScope.FSDP:  # Run AR across FSDP
                 gmesh = global_mesh_resource()
                 amax = lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
 
@@ -637,32 +640,7 @@ class AmaxCalculationPrimitive:
         return mesh, sharded_impl, amax_sharding, arg_shardings
 
 
-def register_primitive_only_outter(cls):
-    """
-    Only register outter primitive.
-    """
-    from jax._src import dispatch
-    from jax.experimental.custom_partitioning import custom_partitioning
-    from jax.interpreters import mlir
-
-    native_p = jax.extend.core.Primitive(cls.name)
-    dispatch.prim_requires_devices_during_lowering.add(native_p)
-    native_p.multiple_results = cls.multiple_results
-    native_p.def_impl(cls.impl)
-    native_p.def_abstract_eval(cls.abstract)
-    native_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
-    native_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands,
-        partition=cls.partition,
-        # sharding_rule=cls.shardy_sharding_rule,
-    )
-    mlir.register_lowering(
-        native_p, mlir.lower_fun(native_p_lower, multiple_results=cls.multiple_results)
-    )
-    cls.primitive = native_p
-
-
-register_primitive_only_outter(AmaxCalculationPrimitive)
+register_primitive(AmaxCalculationPrimitive, outer_only=True)
 
 
 def _jax_quantize(
@@ -711,8 +689,7 @@ def _quantize_dbias_impl(
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
     flatten_axis: int = -1,
-    amax_across_tpsp=False,  # Only works when using current-scaling
-    amax_across_fsdp=False,  # Only works when using current-scaling
+    amax_scope: AmaxScope = AmaxScope.LOCAL,  # Only works when using current-scaling
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -771,8 +748,7 @@ def _quantize_dbias_impl(
         if amax is None:
             amax = AmaxCalculationPrimitive.primitive.bind(
                 x.data,
-                amax_across_tpsp=amax_across_tpsp,
-                amax_across_fsdp=amax_across_fsdp,
+                amax_scope=amax_scope,
             )
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
@@ -845,8 +821,7 @@ def quantize(
     x: Union[jnp.ndarray, NoScaleTensor],
     quantizer: Quantizer,
     flatten_axis: int = -1,
-    amax_across_tpsp=False,
-    amax_across_fsdp=False,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -857,8 +832,7 @@ def quantize(
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
             is None.
-        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
-        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
 
     Returns:
         A ScaledTensor containing the quantized input tensor.
@@ -867,8 +841,7 @@ def quantize(
         x,
         quantizer=quantizer,
         flatten_axis=flatten_axis,
-        amax_across_tpsp=amax_across_tpsp,
-        amax_across_fsdp=amax_across_fsdp,
+        amax_scope=amax_scope,
     )
     return out
 
@@ -878,8 +851,7 @@ def quantize_dbias(
     quantizer: Quantizer,
     is_dbias: bool = True,
     flatten_axis: int = -1,
-    amax_across_tpsp=False,
-    amax_across_fsdp=False,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -890,8 +862,7 @@ def quantize_dbias(
         is_dbias: If True, compute bias gradient. Defaults to True.
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
-        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
-        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
 
 
     Returns:
@@ -906,8 +877,7 @@ def quantize_dbias(
         quantizer=quantizer,
         is_dbias=is_dbias,
         flatten_axis=flatten_axis,
-        amax_across_tpsp=amax_across_tpsp,
-        amax_across_fsdp=amax_across_fsdp,
+        amax_scope=amax_scope,
     )
 
 

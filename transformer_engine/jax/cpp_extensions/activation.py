@@ -27,7 +27,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_dbias, _quantize_dbias_impl
+from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -984,8 +984,7 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    amax_across_tpsp=False,
-    amax_across_fsdp=False,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -994,8 +993,7 @@ def act_lu(
             Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
-        amax_across_tpsp: Indicate if running all-reduce along TP/SP mesh axes for amax. Only works when using current-scaling. Default is False.
-        amax_across_fsdp: Indicate if running all-reduce along FSDP mesh axes for amax. Only works when using current-scaling. Default is False.
+        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
 
     Returns:
         If quantizer is None:
@@ -1058,8 +1056,7 @@ def act_lu(
             is_dbias=False,
             quantizer=quantizer,
             dq_dtype=x.dtype,
-            amax_across_tpsp=amax_across_tpsp,
-            amax_across_fsdp=amax_across_fsdp,
+            amax_scope=amax_scope,
         )
         return out
 

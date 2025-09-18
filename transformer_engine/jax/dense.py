@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
+from .cpp_extensions.quantization import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
     ScalingMode,
@@ -183,7 +184,7 @@ def _dense_fwd_rule(
         x,
         flatten_axis=flatten_axis_x,
         quantizer=quantizer_set.x,
-        amax_across_tpsp=using_global_amax_of_x,
+        amax_scope=AmaxScope.TPSP if using_global_amax_of_x else AmaxScope.LOCAL,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -191,7 +192,7 @@ def _dense_fwd_rule(
         kernel,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.kernel,
-        amax_across_fsdp=True,
+        amax_scope=AmaxScope.FSDP,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -248,7 +249,7 @@ def _dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
-        amax_across_tpsp=using_global_amax_of_x,
+        amax_scope=AmaxScope.TPSP,
     )
 
     # GEMM NT
