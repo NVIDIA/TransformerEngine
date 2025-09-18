@@ -790,8 +790,7 @@ void quantize_transpose_vector_blockwise_fp4(
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ",
-             CUDA_VERSION);
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 }
 

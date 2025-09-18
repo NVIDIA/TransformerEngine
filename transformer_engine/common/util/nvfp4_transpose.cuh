@@ -1378,7 +1378,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }  // namespace nvfp4_transpose
 #endif  // CUDA_VERSION > 12080
 
-
 // Compile-time flag to choose kernel variant
 #ifndef USE_2D_NVFP4_KERNEL
 #define USE_2D_NVFP4_KERNEL 0
@@ -1496,8 +1495,7 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
             scale_stride, scale_stride_transpose, rng_seed, rng_sequence);
       }););
 #else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ",
-             CUDA_VERSION);
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION > 12080
 }
 }  // namespace transformer_engine
