@@ -199,22 +199,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 4;
 
-  // Helper function to construct tensor view
-  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
-  // will survive until all views are deleted.
-  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
-    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    bool is_empty_shape = product(shape) == 0;
-    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
-    }
-    return at::from_blob(
-        buffer->data_ptr<uint8_t>() + offset, shape_int64,
-        [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
-  };
-
   // Allocate row-wise data
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
   std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
@@ -349,22 +333,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 1;
-
-  // Helper function to construct tensor view
-  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
-  // will survive until all views are deleted.
-  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
-    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    bool is_empty_shape = product(shape) == 0;
-    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
-    }
-    return at::from_blob(
-        buffer->data_ptr<uint8_t>() + offset, shape_int64,
-        [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
-  };
 
   // Allocate row-wise data
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;

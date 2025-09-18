@@ -291,4 +291,17 @@ size_t roundup(const size_t value, const size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
+at::Tensor make_torch_view(std::shared_ptr<at::Tensor>& buffer, const std::vector<size_t>& shape,
+                           size_t offset, at::ScalarType dtype) {
+  std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+  bool is_empty_shape = product(shape) == 0;
+  if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
+    return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+  }
+  return at::from_blob(
+      buffer->data_ptr<uint8_t>() + offset, shape_int64,
+      [buffer](void*) {},  // deleter holds shared_ptr
+      at::device(at::kCUDA).dtype(dtype));
+}
+
 }  // namespace transformer_engine::pytorch
