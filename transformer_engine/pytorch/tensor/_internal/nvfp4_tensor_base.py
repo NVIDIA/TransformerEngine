@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from ..quantized_tensor import QuantizedTensorBase
@@ -33,9 +34,7 @@ class _FromNVFP4Func(torch.autograd.Function):
 
         # Make sure FP8 data is in expected format
         if tensor._rowwise_data is not None:
-            # TODO(zhongbo): Implement this
-            raise NotImplementedError("Casting back from the rowwise not implemented yet!")
-            # return tex.dequantize(tensor, dtype)
+            return tex.dequantize(tensor, dtype)
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
     @staticmethod
