@@ -1707,8 +1707,8 @@ def _is_te_module(module):
 def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
     """
     Inject FSDP process gorup references into FSDP-wrapped TE modules in an FSDP-wrapped root
-    module in order to scatter their
-    activation tensors after each forward pass and gather them before the backward pass.
+    module in order to scatter/gather the Fp8 weight copies at the same time FSDP scatters/gathers
+    its `FlatParameters`.
 
     Parameters
     ----------

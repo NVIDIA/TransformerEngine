@@ -50,7 +50,7 @@ class _FromMXFP8Func(torch.autograd.Function):
 
 
 class MXFP8TensorStorage(QuantizedTensorStorage):
-    """Mixin/storage class that holds data attributes of MXFP8Tensor.
+    """Mixin class that holds data attributes of MXFP8Tensor.
 
     MXFP8Tensor inherits from the PyTorch tensor class and this mixin
     class. If this class is instantiated directly, it has the same

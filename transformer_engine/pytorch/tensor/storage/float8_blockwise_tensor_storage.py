@@ -23,7 +23,7 @@ from ...utils import _empty_tensor
 
 
 class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
-    """Mixin/storage class that holds data attributes of Float8BlockwiseQTensor.
+    """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
     Float8BlockwiseQTensor inherits from the PyTorch tensor class and this
     mixin class. If this class is instantiated directly, it has the same
