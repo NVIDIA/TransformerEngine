@@ -23,6 +23,7 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "./config.h"
+#include "./cutlass_grouped_gemm.cuh"
 
 namespace {
 
@@ -854,9 +855,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
       CUBLAS_VERSION);
 #else
   NVTE_CHECK(
-      cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
+      transformer_engine::cuda::cudart_version() >= 12020 &&
+          transformer_engine::cuda::cudart_version() < 13000,
       "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
-      cuda::cudart_version());
+      transformer_engine::cuda::cudart_version());
   NVTE_CHECK(
       cublas_version() >= 120205 && cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
@@ -883,13 +885,11 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 #endif
 }
 
-void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
-                                   const int num_gemms, bool transa, bool transb, bool grad,
-                                   NVTETensor *workspace, bool accumulate,
-                                   bool use_split_accumulator, int math_sm_count,
-                                   cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
+void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                              const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                              bool transa, bool transb, bool grad, NVTETensor *workspace,
+                              bool accumulate, bool use_split_accumulator, int math_sm_count,
+                              cudaStream_t stream) {
   using namespace transformer_engine;
 
   int num_streams = nvte_get_num_compute_streams();
@@ -938,6 +938,25 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   }
 }
 
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor *workspace, bool accumulate,
+                                   bool use_split_accumulator, int math_sm_count,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
+  using namespace transformer_engine;
+
+  // Deprecation warning
+  NVTE_WARN(
+      "nvte_multi_stream_cublas_gemm is deprecated and will be removed in a future release. "
+      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support when "
+      "applicable).");
+
+  multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad, workspace,
+                           accumulate, use_split_accumulator, math_sm_count, stream);
+}
+
 namespace transformer_engine {
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -945,3 +964,85 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
 }  //  namespace transformer_engine
+
+void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                            const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                            bool transa, bool transb, bool grad, NVTETensor *workspace,
+                            bool accumulate, bool use_split_accumulator, int math_sm_count,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_gemm);
+
+  const int current_device = transformer_engine::cuda::current_device();
+  const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool warn_fallback =
+      transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
+  auto cublas_path = [&]() {
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+  };
+
+  // Currently only support cutlass group gemm on Hopper Arch
+  if (!(is_hopper && use_cutlass)) {
+    cublas_path();
+    return;
+  }
+
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (transformer_engine::convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
+
+  auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
+    int64_t ref_k = -1;
+    for (size_t i = 0; i < num_gemms; i++) {
+      const auto tensor = transformer_engine::convertNVTETensorCheck(p[i]);
+      const int k = trans ? tensor->data.shape[0] : tensor->data.shape[1];
+
+      if ((k & 127) != 0) return false;
+
+      if (ref_k < 0)
+        ref_k = k;
+      else if (k != ref_k)
+        return false;
+    }
+
+    return true;
+  };
+
+  auto is_supported_dtype = [&]() -> bool {
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+    auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto A_type = get_cuda_dtype(inputA->data.dtype);
+    auto B_type = get_cuda_dtype(inputB->data.dtype);
+    auto D_type = get_cuda_dtype(OutputD->data.dtype);
+
+    return (A_type == B_type) && (A_type == D_type) &&
+           ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
+  };
+
+  // CUTLASS Grouped GEMM fast path (SM90/TMA)
+  // Conditions:
+  //  - No fused epilogue: both bias and pre_gelu_out are empty.
+  //  - Supported dtypes only: FP16/BF16 (FP32 accumulate).
+  //  - Uniform K across groups and K % 128 == 0.
+  //  - use_split_accumulator is ignored for FP16/BF16.
+  //  - grad is irrelevant when bias/pre_gelu_out are empty.
+  //
+  // Otherwise, fall back to cuBLAS.
+  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
+      all_groups_uniform_k128(B, transb)) {
+    cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+                         current_device, math_sm_count, stream);
+  } else {
+    if (warn_fallback) {
+      NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+    }
+    cublas_path();
+  }
+}

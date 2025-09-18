@@ -50,7 +50,6 @@ set(CUTLASS_INCLUDE_DIR
 set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
-
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -111,6 +110,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/utils.cu
      gemm/config.cpp
      gemm/cublaslt_gemm.cu
+     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -154,19 +154,31 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+  set_source_files_properties(
+    "gemm/cutlass_grouped_gemm.cu"
+    PROPERTIES
+    COMPILE_FLAGS
+    "-gencode arch=compute_90a,code=sm_90a")
+else()
+  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
+endif()
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
 target_include_directories(transformer_engine PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-                           ${CUTLASS_INCLUDE_DIR}
-                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE ${MATHDX_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE
+                          ${CUTLASS_INCLUDE_DIR}
+                          ${CUTLASS_TOOLS_INCLUDE_DIR})
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
