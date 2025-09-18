@@ -1804,6 +1804,8 @@ def test_grouped_linear_accuracy(
     fp8 = recipe is not None
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2593,6 +2595,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         A,
         B,
         out,
+        [None] * z,
         dtype,
         get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
@@ -2671,6 +2674,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         A_fp8,
         B_fp8,
         out,
+        [None] * z,
         dtype,
         get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
