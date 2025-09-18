@@ -365,7 +365,7 @@ def get_fa_args(
                     max_seqlen_q,
                     max_seqlen_kv,
                     *[None]
-                    * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+                    * 9,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, seqlens_rotary, q_descale, k_descale, v_descale
                 ]
             return [
                 *[None]
@@ -373,7 +373,7 @@ def get_fa_args(
                 max_seqlen_q,
                 max_seqlen_kv,
                 *[None]
-                * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+                * 9,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, seqlens_rotary, q_descale, k_descale, v_descale
             ]
         if qkv_format == "thd":
             return [
