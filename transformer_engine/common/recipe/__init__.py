@@ -370,31 +370,17 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-               Single factory callable that returns a quantizer instance for a
-               given semantic tensor role. Transformer Engine resolves the role
-               from per-mode role layouts and calls the factory with the
-               resolved role and additional keyword-only context. The callable
-               is typically invoked as:
+               Factory callable that returns a quantizer instance for a
+               given semantic tensor role. 
+               The callable is typically invoked as:
                    qfactory(
-                       role: Optional[str],
-                       forward_roles: Tuple[str, ...],
-                       backward_roles: Tuple[str, ...],
-                       mode: Literal["forward", "backward"],
-                       quantizer_index: int,
-                       num_quantizers: int,
-                       **kwargs,
+                       role: str,
                    )
 
                Where `role` is one of the following strings for e.g. te.Linear
                (stable public contract):
                - forward:  "input", "weight", "output"
                - backward: "grad_output", "grad_input"
-
-               Note:
-               - Users can ignore the keyword-only context if not needed and
-                 accept only `role`. Extra keyword arguments (`forward_roles`,
-                 `backward_roles`, indices) are provided for advanced/custom
-                 mappings.
     """
 
     qfactory: Callable[..., Any]
