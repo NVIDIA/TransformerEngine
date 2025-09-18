@@ -218,14 +218,14 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
   return dactivation_helper<nvte_dswiglu, nullptr>(grad, input, quantizer);
 }
 
-/* gpt_oss functions */
-py::object gpt_oss_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha) {
-  return activation_helper<nullptr, nvte_gptoss_swiglu>(input, quantizer, 2, limit, alpha);
+/* clamped functions */
+py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha) {
+  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, 2, limit, alpha);
 }
 
-py::object gpt_oss_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
                            float limit, float alpha) {
-  return dactivation_helper<nullptr, nvte_gptoss_dswiglu>(grad, input, quantizer, limit, alpha);
+  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha);
 }
 
 }  // namespace transformer_engine::pytorch

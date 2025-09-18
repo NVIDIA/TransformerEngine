@@ -27,7 +27,7 @@ __all__ = [
     "SReGLU",
     "SiLU",
     "SwiGLU",
-    "GptOssSwiglu",
+    "ClampedSwiGLU",
 ]
 
 
@@ -392,7 +392,7 @@ class SwiGLU(_ActivationOperation):
         return tex.dswiglu(*args, **kwargs)
 
 
-class GptOssSwiglu(_ActivationOperation):
+class ClampedSwiGLU(_ActivationOperation):
     r"""GPT-OSS
     Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
 
@@ -419,7 +419,7 @@ class GptOssSwiglu(_ActivationOperation):
         self.alpha = alpha
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.gpt_oss_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
+        return tex.clamped_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.gpt_oss_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
+        return tex.clamped_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)

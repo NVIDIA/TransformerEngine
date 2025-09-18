@@ -11,7 +11,7 @@ namespace transformer_engine {
 
 struct Empty {};
 
-struct GptOssParam {
+struct ClampedSwiGLUParam {
   float limit;
   float alpha = 1.702f;  // Default value for QuickGELU
 };
@@ -75,7 +75,7 @@ __device__ inline OType silu(const IType val, const Empty& e) {
 }
 
 template <typename OType, typename IType>
-__device__ inline OType oss_silu(const IType val, const GptOssParam& p) {
+__device__ inline OType oss_silu(const IType val, const ClampedSwiGLUParam& p) {
   const float cval = min(p.limit, static_cast<float>(val));  // Clamping
   return qgelu_with_alpha<OType, float>(cval, p.alpha);
 }
@@ -87,7 +87,7 @@ __device__ inline OType dsilu(const IType val, const Empty& e) {
 }
 
 template <typename OType, typename IType>
-__device__ inline OType oss_dsilu(const IType val, const GptOssParam& p) {
+__device__ inline OType oss_dsilu(const IType val, const ClampedSwiGLUParam& p) {
   const bool dclamp_val = static_cast<float>(val) <= p.limit;
   const float clamp_val = min(static_cast<float>(val), p.limit);
   const float dsilu_val = dqgelu_with_alpha<OType, float>(clamp_val, p.alpha);

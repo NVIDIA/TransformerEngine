@@ -1711,7 +1711,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
-    def test_gpt_oss_swiglu(
+    def test_clamped_swiglu(
         self,
         *,
         out_shape: Iterable[int] = (32, 32),
@@ -1721,6 +1721,7 @@ class TestBasicOps:
         quantize_forward: bool,
         quantize_backward: bool,
     ):
+        # Test SwiGLU variant used in GPT OSS.
         # Tensor dimensions
         in_shape = list(out_shape)
         in_shape[-1] *= 2
@@ -1743,12 +1744,18 @@ class TestBasicOps:
             test_device=device,
             requires_grad=False,
         )
-
+        # A low value of limit = 0.1 is used for this test instead of the original
+        # default = 7.0 used in GPT OSS. This is because low value kills decent number
+        # of gradients allowing us to check for correctness of gradient computation of 
+        # ClampedSwiGLU.
+        limit = 0.1
+        alpha = 1.702
+        
         # Plain PyTorch implementation
         x_glu, x_linear = x_ref.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=0.1)
-        x_linear = x_linear.clamp(min=-0.1, max=0.1)
-        out_glu = x_glu * torch.sigmoid(1.702 * x_glu)
+        x_glu = x_glu.clamp(min=None, max=limit)
+        x_linear = x_linear.clamp(min=-limit, max=limit)
+        out_glu = x_glu * torch.sigmoid(alpha * x_glu)
         y_ref = out_glu * (x_linear + 1)
         y_ref.backward(dy_ref)
 
@@ -1757,7 +1764,7 @@ class TestBasicOps:
 
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.GptOssSwiglu(limit=0.1, alpha=1.702),
+            te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):

@@ -15,7 +15,7 @@ from .activation import (
     SReGLU,
     SiLU,
     SwiGLU,
-    GptOssSwiglu,
+    ClampedSwiGLU,
 )
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
