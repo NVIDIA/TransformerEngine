@@ -12,6 +12,7 @@ from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
@@ -31,6 +32,7 @@ def run_dpa_with_cp(
     qkv_format="bshd",
     kernel_backend="FlashAttention",
     cp_comm_type="p2p",
+    fp8_bwd="True",
     fp8_dpa="False",
     fp8_mha="False",
     scaling_mode="delayed",
@@ -38,6 +40,8 @@ def run_dpa_with_cp(
     """Test DotProductAttention module with context parallelism"""
 
     # args are passed as strings
+    fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
+    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_bwd else "0"
     fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
     fp8_mha = fp8_mha == "True" and dtype == "fp8"
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -203,21 +207,33 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
-    q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
-    k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
-    v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
-    dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
+    q_orig = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
+    k_orig = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
+    v_orig = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
+    dout_orig = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
     if scaling_mode == "delayed":
+        qkv_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
         dout_quantizer = Float8Quantizer(
             fp8_dtype=tex.DType.kFloat8E5M2,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
     if scaling_mode == "current":
+        qkv_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
         dout_quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=tex.DType.kFloat8E5M2,
             device="cuda",
         )
+    qkv_layout = '_'.join([qkv_format]*3)
+    q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
+    q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -236,6 +252,7 @@ def run_dpa_with_cp(
         fp8_context = nullcontext()
 
     with fp8_context:
+        # q, k, v, out in FP8; dout in F16
         out = core_attn(
             q,
             k,
@@ -246,9 +263,9 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=fp8_mha,
+            fp8_output=True,
         )
-        if fp8_mha:
+        if fp8_bwd:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
         else:
@@ -256,7 +273,7 @@ def run_dpa_with_cp(
 
     # run core_attn with CP
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
+        x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -286,6 +303,13 @@ def run_dpa_with_cp(
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
+    q_, k_, v_, dout_ = [x.contiguous() for x in [q_, k_, v_, dout_]]
+    if scaling_mode == "delayed":
+        qkv_quantizer.scale.fill_(1.0)
+        qkv_quantizer.amax.fill_(0.0)
+        dout_quantizer.scale.fill_(1.0)
+        dout_quantizer.amax.fill_(0.0)
+    q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
         bias_ = bias_.view(
@@ -308,6 +332,7 @@ def run_dpa_with_cp(
         fp8_context = nullcontext()
 
     with fp8_context:
+        # q, k, v, out in FP8; dout in F16
         out_ = core_attn(
             q_,
             k_,
@@ -318,9 +343,9 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=fp8_mha,
+            fp8_output=True,
         )
-        if fp8_mha:
+        if fp8_bwd:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:

@@ -1947,9 +1947,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dQKV_quantizer_per_step[i] = ctx.dQKV_quantizer.copy()
                 dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
-            if ctx.fp8_meta is not None and ctx.is_output_fp8:
-                if isinstance(dout, QuantizedTensorBase):
-                    dout = dout.dequantize(dtype=bwd_nominal_dtype)
+            if isinstance(dout, QuantizedTensorBase):
+                dout = dout.dequantize(dtype=bwd_nominal_dtype)
             dq_buffer = torch.empty_like(q)
             p2p_comm_buffers = [
                 torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),

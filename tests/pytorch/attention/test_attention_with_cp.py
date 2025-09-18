@@ -136,11 +136,12 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
+@pytest.mark.parametrize("fp8_bwd", [True, False])
 @pytest.mark.parametrize("fp8_mha", [False, True])
 @pytest.mark.parametrize("fp8_dpa", [False, True])
 @pytest.mark.parametrize("scaling_mode", [None, "delayed", "current"])
 def test_cp_with_fused_attention(
-    dtype, model, qkv_format, cp_comm_type, fp8_mha, fp8_dpa, scaling_mode
+    dtype, model, qkv_format, cp_comm_type, fp8_bwd, fp8_mha, fp8_dpa, scaling_mode
 ):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
@@ -152,6 +153,10 @@ def test_cp_with_fused_attention(
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
     if dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
+    if dtype == "fp8" and not fp8_dpa and fp8_mha:
+        pytest.skip("Duplicate tests to fp8_dpa=True and fp8_mha=True!")
+    if dtype != "fp8" and fp8_bwd:
+        pytest.skip("Only fp8 works with fp8_bwd=True!")
 
     config = model_configs_fused_attn[model]
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
@@ -215,6 +220,7 @@ def test_cp_with_fused_attention(
             qkv_format=qkv_format,
             kernel_backend="FusedAttention",
             cp_comm_type=cp_comm_type,
+            fp8_bwd=fp8_bwd,
             fp8_dpa=fp8_dpa,
             fp8_mha=fp8_mha,
             scaling_mode=scaling_mode,

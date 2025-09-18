@@ -2148,6 +2148,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
+            fp8_output=fp8_dpa,
         )
     if is_training:
         out.backward(out_grad)

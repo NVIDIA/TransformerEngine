@@ -724,16 +724,14 @@ class MultiheadAttention(torch.nn.Module):
         # Query, Key, and Value
         # ======================
 
-        fp8_mha = (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
-        )
-        # GEMMs in Float8CurrentScaling recipe do not produce amax so setting fp8_output=False here
-        # for qkv_gemm output, attention output, and proj_gemm dgrad
-        fp8_current_scaling = (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
-        )
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
+        qkv_fp8_output = fp8 and fp8_recipe.fp8_mha and rotary_pos_emb is None and not fp8_recipe.float8_current_scaling()
+        # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
+        dpa_fp8_output = fp8 and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
+        # Proj Gemm: match DPA output except for Float8CurrentScaling
+        proj_fp8_grad = dpa_fp8_output and not fp8_recipe.float8_current_scaling()
 
         layernorm_output = None
         if self.attention_type == "self":
@@ -742,7 +740,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
+                    fp8_output=qkv_fp8_output,
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -752,7 +750,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
+                    fp8_output=qkv_fp8_output,
                 )
 
             num_queries_per_key_value = (
@@ -806,7 +804,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
+                fp8_output=qkv_fp8_output,
             )
 
             if self.qkv_weight_interleaved:
@@ -861,7 +859,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
+                    fp8_output=qkv_fp8_output,
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -871,7 +869,7 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None and not fp8_current_scaling,
+                    fp8_output=qkv_fp8_output,
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]
@@ -982,7 +980,7 @@ class MultiheadAttention(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
-            fp8_output=fp8_mha and not fp8_current_scaling,
+            fp8_output=dpa_fp8_output,
         )
 
         # ===================
@@ -991,7 +989,7 @@ class MultiheadAttention(torch.nn.Module):
         projection_output = self.proj(
             context_layer,
             is_first_microbatch=is_first_microbatch,
-            fp8_grad=isinstance(context_layer, QuantizedTensor),
+            fp8_grad=proj_fp8_grad,
         )
 
         if self.return_bias:
