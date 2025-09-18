@@ -332,7 +332,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
                 if ctx.debug:
-                    # For debug mode, we compute grad biad by hand.
+                    ## For debug mode, we compute grad bias by hand.
                     for i in range(ctx.num_gemms):
                         grad_biases[i] = grad_output[i].sum(dim=0)
                     grad_output = DebugQuantizer.multi_tensor_quantize(
@@ -409,13 +409,20 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if ctx.fp8:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                    if ctx.fp8 or ctx.debug:
+                        if not ctx.debug:
+                            inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                        else:
+                            inputmats = torch.split(
+                                cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
+                            )
+                            inputmats = DebugQuantizer.multi_tensor_quantize(
+                                inputmats, ctx.input_quantizers
+                            )
                     else:
                         inputmats = torch.split(
                             cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
                         )
-
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     quantization_params=ctx.grad_weight_quantizers,

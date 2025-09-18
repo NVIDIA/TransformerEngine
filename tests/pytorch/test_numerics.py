@@ -1747,7 +1747,7 @@ def _test_grouped_linear_accuracy(
         assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
-
+        
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
@@ -1770,7 +1770,7 @@ def _test_grouped_linear_accuracy(
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    for p in block.parameters():
+    for name, p in block.named_parameters():
         if p.requires_grad:
             if getattr(p, "main_grad", None) is not None:
                 outputs.append(p.main_grad)
@@ -1904,6 +1904,8 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:

@@ -56,10 +56,10 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    # assert quantization_params is None, "FP8 output not supported yet"
-
+    
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
+
 
     if ub_type is not None:
         assert ub is not None, (
@@ -117,6 +117,9 @@ def general_gemm(
         accumulate,
         use_split_accumulator,
     )
+
+    print(f"out is not none: {out is not None} bias: {bias} bias_dtype: {bias_dtype}")
+
     kwargs = {
         "comm_overlap": ub,
         "comm_type": ub_type,
@@ -127,7 +130,7 @@ def general_gemm(
     }
 
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-
+    
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
 
@@ -179,7 +182,7 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
-
+    
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
         if single_output:
@@ -190,13 +193,14 @@ def general_grouped_gemm(
                 size = m_splits[i]
                 out[i] = out_init[start_idx : start_idx + size]
                 start_idx += size
+        out_bias = []
         for i in range(num_gemms):
-            general_gemm(
+            outs = general_gemm(
                 A[i],
                 B[i],
-                workspaces[i],
+                workspaces[0],
                 quantization_params=quantization_params[i],
-                out_dtype=out_dtype,
+                out_dtype=out[0].dtype,
                 layout=layout,
                 accumulate=accumulate,
                 out=out[i],
@@ -204,10 +208,11 @@ def general_grouped_gemm(
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
             )
+            out_bias.append(outs[1])
         if single_output:
-            out = torch.cat(out, dim=0)
+            out = out_init
 
-        return out, bias, None
+        return out, out_bias, None
 
     if gelu:
         gelu_input = [
@@ -216,6 +221,7 @@ def general_grouped_gemm(
         ]  # this should differ with respect to single output
 
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
+    
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
