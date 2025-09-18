@@ -249,7 +249,7 @@ def _dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
-        amax_scope=AmaxScope.TPSP,
+        amax_scope=AmaxScope.LOCAL if using_global_amax_of_x else AmaxScope.TPSP,
     )
 
     # GEMM NT
