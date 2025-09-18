@@ -354,8 +354,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Deallocate GEMM input tensor if no longer needed
         if not weight.requires_grad and not return_layernorm_output:
-            ln_out = ln_out_total = None
             clear_tensor_data(ln_out, ln_out_total)
+            ln_out = ln_out_total = None
+        elif with_input_all_gather and not return_layernorm_output_gathered:
+            clear_tensor_data(ln_out_total)
+            ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -892,9 +895,19 @@ class _LayerNormLinear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor if permitted
-                    if not ctx.return_layernorm_output:
+                    # Deallocate input tensors if permitted
+                    if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
+                        # Input tensors have not been exposed externally
+                        clear_tensor_data(ln_out)
+                    elif ctx.ln_out_needs_gather and ctx.return_layernorm_output_gathered:
+                        # Non-gathered input has not been exposed externally
+                        clear_tensor_data(ln_out)
+                    if ctx.ln_out_needs_gather:
+                        # Gathered input is internal
                         clear_tensor_data(ln_out_total)
+                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                        # Gathered grad output tensor is internal
+                        clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad:
@@ -1170,7 +1183,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.return_layernorm_output_gathered = return_layernorm_output_gathered
+        self.return_layernorm_output_gathered = (
+            return_layernorm_output_gathered if return_layernorm_output else False
+        )
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
 
@@ -1768,7 +1783,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
