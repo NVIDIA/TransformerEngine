@@ -900,7 +900,7 @@ def layernorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
-        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:
@@ -1108,7 +1108,7 @@ def rmsnorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
-        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:
@@ -1315,7 +1315,7 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
-        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:

@@ -836,7 +836,7 @@ def quantize(
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
             is None.
-        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A ScaledTensor containing the quantized input tensor.
@@ -866,7 +866,7 @@ def quantize_dbias(
         is_dbias: If True, compute bias gradient. Defaults to True.
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
-        amax_scope: Indicate the scope to run amax calculation. Default is AmaxScope.LOCAL.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
 
     Returns:
