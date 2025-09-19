@@ -101,7 +101,12 @@ class LogTensorStats(BaseLogTensorStats):
     def _is_supported_stat(self, stat: str | Dict):
         """Returns True if the stat is supported by this feature."""
         if isinstance(stat, dict):
-            raise NotImplementedError("Max blockwise dynamic range is not supported for dict stats")
+            stat_name = list(stat.keys())[0]
+            assert stat_name == "max_blockwise_dynamic_range"
+            stat_dict = stat[stat_name]
+            assert set(stat_dict.keys()) == {"block_size", "dims"}
+            assert stat_dict["block_size"] > 0 and stat_dict["dims"] in [1, 2]
+            return True
         return stat in BaseLogTensorStats._get_supported_stats_list(None) | {
             "cur_amax",
             "dynamic_range",
@@ -112,8 +117,8 @@ class LogTensorStats(BaseLogTensorStats):
         parsed_stats = []
         for stat in stats:
             if isinstance(stat, dict):
-                block_size = stat["block_size"]
-                dims = stat["dims"]
+                block_size = stat["max_blockwise_dynamic_range"].get("block_size", 32)
+                dims = stat["max_blockwise_dynamic_range"].get("dims", 1)
                 add_max_blockwise_dynamic_range_stats(block_size, dims)
                 parsed_stats.append(
                     f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"

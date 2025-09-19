@@ -39,7 +39,7 @@ def _compute_dynamic_range_bottom(tensor):
 
 
 @torch.compile
-def compute_max_blockwise_dynamic_range(tensor, block_size):
+def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
     """Max blockwise dynamic range (log2 max/min_nonzero).
     Returns 0 if all blocks are zeros.
     Otherwise computes dynamic range over non-zero blocks.
@@ -52,24 +52,25 @@ def compute_max_blockwise_dynamic_range(tensor, block_size):
 
     tensor = tensor.abs().float()
     if dims == 1:
-        per_block_amax = tensor.reshape(-1, block_size).amax(dim=1)
+        tensor = tensor.reshape(-1, block_size)
+        per_block_amax = tensor.amax(dim=1)
+        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
     else:
-        per_block_amax = tensor.reshape(-1, block_size, block_size).amax(dim=(1, 2))
+        dim_a = tensor.shape[-2] // block_size
+        dim_b = tensor.shape[-1] // block_size
+        tensor = tensor.reshape(-1, dim_a, block_size, dim_b, block_size).\
+            permute(0, 1, 3, 2, 4).reshape(-1, block_size, block_size)
+        per_block_amax = tensor.amax(dim=(1, 2))
+        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
 
     # Identify blocks that contain any non-zero element
     nonzero_blocks = per_block_amax != 0
     if not torch.any(nonzero_blocks):
         # If all blocks are zero, return 0
         return torch.zeros((), device=tensor.device, dtype=torch.float32)
+    
 
-    # Compute smallest non-zero magnitude per block
-    per_block_amin_nz = abs_vals.masked_fill(abs_vals == 0, float("inf")).amin(dim=1)
-
-    # Restrict DR computation to blocks that are non-zero
-    amax_nz = per_block_amax[nonzero_blocks]
-    amin_nz = per_block_amin_nz[nonzero_blocks]
-
-    return (torch.log2(amax_nz) - torch.log2(amin_nz)).max()
+    return (torch.log2(per_block_amax) - torch.log2(per_block_amin)).max()
 
 
 @torch.compile

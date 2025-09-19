@@ -238,7 +238,10 @@ def test_log_stats_numerics(feature_dirs):
 
         epsilon = 1e-10
         tensor = torch.zeros(1024, 1024).cuda() + epsilon
-        tensor[0, :] = 1000
+        A = 1000
+        B = 50
+        tensor[0, :] = A
+        tensor[1:4, :] = B
 
         debug_api.transformer_engine.inspect_tensor(
             layer_name="layer_name",
@@ -254,6 +257,7 @@ def test_log_stats_numerics(feature_dirs):
 
         output = read_log(log_dir)
 
+    
     for line in output.splitlines():
         if "max_blockwise_dynamic_range_block_size_4_dims_1" in line:
             max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
@@ -263,13 +267,13 @@ def test_log_stats_numerics(feature_dirs):
             )
         elif "max_blockwise_dynamic_range_block_size_4_dims_2" in line:
             max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
-            expected = 0
+            expected = math.log2(A) - math.log2(B)
             assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
                 expected, abs=1e-4
             )
         elif "dynamic_range" in line:
             dynamic_range = float(line.split("value=")[1])
-            expected = math.log2(1000) - math.log2(epsilon)
+            expected = math.log2(A) - math.log2(epsilon)
             assert dynamic_range == pytest.approx(expected, abs=1e-4)
 
 
