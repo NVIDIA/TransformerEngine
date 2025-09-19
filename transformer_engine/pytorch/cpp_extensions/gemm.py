@@ -214,7 +214,6 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
