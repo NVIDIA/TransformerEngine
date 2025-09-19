@@ -235,6 +235,10 @@ def test_cp_with_fused_attention(
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
+    if fp8_dpa:
+        os.environ["NVTE_DPA_FP8_RECIPE_DPA"] = "1"
+    if fp8_mha:
+        os.environ["NVTE_DPA_FP8_RECIPE_MHA"] = "1"
     subprocess.run(
         get_bash_arguments(
             num_gpus_per_node=num_gpus,

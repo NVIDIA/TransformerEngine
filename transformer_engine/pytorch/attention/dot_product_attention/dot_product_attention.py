@@ -13,6 +13,7 @@ import logging
 import torch
 
 from transformer_engine.common.recipe import (
+    Format,
     Recipe,
     DelayedScaling,
     Float8CurrentScaling,
@@ -88,9 +89,16 @@ _alibi_cache = {
 }
 
 # Force DotProductAttention to use a different recipe than the fp8_recipe set in fp8_autocast().
-# Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling",
-# "Float8CurrentScaling", "MXFP8BlockScaling" and "Float8BlockScaling". New recipes are hard-coded.
+# Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"
+# and "Float8CurrentScaling". Use other relevant variables here to define the recipe, e.g. fp8_dpa.
 _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+formats = {"HYBRID": Format.HYBRID, "E4M3": Format.E4M3, "E5M2": Format.E5M2}
+_dpa_fp8_recipe_format = formats[os.getenv("NVTE_DPA_FP8_RECIPE_FORMAT", "HYBRID")]
+_dpa_fp8_recipe_dpa = os.getenv("NVTE_DPA_FP8_RECIPE_DPA", "0") == "1"
+_dpa_fp8_recipe_mha = os.getenv("NVTE_DPA_FP8_RECIPE_MHA", "0") == "1"
+_dpa_fp8_recipe_amax_algo = os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_ALGO", "most_recent")
+_dpa_fp8_recipe_amax_histlen = int(os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_HISTLEN", "1"))
+_dpa_fp8_recipe_amax_reduce_ds = os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_REDUCE_DS", "1") == "1"
 
 __all__ = ["DotProductAttention"]
 
@@ -463,64 +471,56 @@ class DotProductAttention(TransformerEngineBaseModule):
         # global recipe set in fp8_autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
 
-        # switch/append recipe: fp8_recipe is unchanged but DPA.fp8_meta["recipe"] may be different
-        # from fp8_recipe, and DPA.quantizers may be a mix of different types as well
+        # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
+        # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
         #
-        # fp8_recipe                    | NVTE_DPA_FP8_RECIPE | self.fp8_meta["recipe"] | self.quantizers
-        # ----------------------------------------------------------------------------------------------
-        # DelayedScaling (DS)           | unset               | DS                      | all DS
-        # Float8CurrentScaling (CS)     | unset               | DS                      | CS for QKV, O, dO, dQKV; DS for S, dP
-        # MXFP8BlockScaling (MXFP8)     | unset               | MXFP8                   | all MXFP8
-        # Float8BlockScaling (BlockFP8) | unset               | BlockFP8                | all BlockFP8
-        # x={DS, CS, MXFP8, BlockFP8}   | y                   | refer to row x=y        | refer to row x=y
-        #
-        fake_recipe = None
-        switch_recipe = False
-        append_recipe = False
-        if (fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "") or (
-            not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling"
-        ):
+        # fp8_recipe                | NVTE_DPA_FP8_RECIPE | self.fp8_meta["recipe"] | self.quantizers
+        # --------------------------------------------------------------------------------------------
+        # DelayedScaling (DS)       | unset               | DS                      | all DS
+        # Float8CurrentScaling (CS) | unset               | DS                      | CS for QKV, O, dO, dQKV; DS for S, dP
+        # x={DS, CS}                | y                   | refer to row x=y        | refer to row x=y
+        fp8_recipe_dpa = fp8_recipe
+        fp8_recipes = fp8_recipe
+        if fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
             fake_recipe = DelayedScaling(
-                fp8_format=fp8_recipe.fp8_format,
-                margin=0,
-                amax_history_len=1,
-                amax_compute_algo="most_recent",
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-                reduce_amax=True,
+                fp8_format=_dpa_fp8_recipe_format,
+                amax_history_len=_dpa_fp8_recipe_amax_histlen,
+                amax_compute_algo=_dpa_fp8_recipe_amax_algo,
+                fp8_dpa=_dpa_fp8_recipe_dpa,
+                fp8_mha=_dpa_fp8_recipe_mha,
+                reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
             )
-            if fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
-                append_recipe = True
-                switch_recipe = True
-            if not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling":
-                switch_recipe = True
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling":
+            fake_recipe = DelayedScaling(
+                fp8_format=_dpa_fp8_recipe_format,
+                amax_history_len=_dpa_fp8_recipe_amax_histlen,
+                amax_compute_algo=_dpa_fp8_recipe_amax_algo,
+                fp8_dpa=_dpa_fp8_recipe_dpa,
+                fp8_mha=_dpa_fp8_recipe_mha,
+                reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
         elif not fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "Float8CurrentScaling":
-            fake_recipe = Float8CurrentScaling(
-                fp8_format=fp8_recipe.fp8_format,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-            )
-            switch_recipe = True
-        elif not fp8_recipe.mxfp8() and _dpa_fp8_recipe == "MXFP8BlockScaling":
-            fake_recipe = MXFP8BlockScaling(
-                margin=0,
-                fp8_format=fp8_recipe.fp8_format,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-            )
-            switch_recipe = True
-        elif not fp8_recipe.float8_block_scaling() and _dpa_fp8_recipe == "Float8BlockScaling":
-            fake_recipe = Float8BlockScaling(
-                fp8_format=fp8_recipe.fp8_format,
-                fp8_dpa=fp8_recipe.fp8_dpa,
-                fp8_mha=fp8_recipe.fp8_mha,
-            )
-            switch_recipe = True
-
-        fp8_recipe_dpa = fake_recipe if switch_recipe else fp8_recipe
-        fp8_recipes = [fp8_recipe, fake_recipe] if append_recipe else fp8_recipe_dpa
+            fake_recipes = [Float8CurrentScaling(
+                    fp8_format=_dpa_fp8_recipe_format,
+                    fp8_dpa=_dpa_fp8_recipe_dpa,
+                    fp8_mha=_dpa_fp8_recipe_mha,
+                ), DelayedScaling(
+                    fp8_format=_dpa_fp8_recipe_format,
+                    amax_history_len=_dpa_fp8_recipe_amax_histlen,
+                    amax_compute_algo=_dpa_fp8_recipe_amax_algo,
+                    fp8_dpa=_dpa_fp8_recipe_dpa,
+                    fp8_mha=_dpa_fp8_recipe_mha,
+                    reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
+                )]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
 
         # reduce over TP+CP groups; expect fp8_group to be set up so
+        # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
@@ -528,6 +528,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        if self.fp8_parameters or fp8_enabled:
+            self.fp8_meta["global_recipe"] = fp8_recipe
+            self.fp8_meta["local_recipes"] = fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
 
         if self.fp8_parameters or fp8_enabled:
             if self.fp8_initialized and fp8_recipe_dpa == self.fp8_meta["recipe"]:
@@ -1371,6 +1374,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         alibi_slopes=alibi_slopes,
                         inference_params=inference_params,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                        fp8_meta=self.fp8_meta,
                         quantizers=self.quantizers,
                         fp8_output=fp8_output,
                     )
@@ -1390,6 +1394,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes=alibi_slopes,
                     inference_params=inference_params,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                    fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
                     fp8_output=fp8_output,
                 )

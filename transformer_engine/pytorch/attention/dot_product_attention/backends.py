@@ -239,6 +239,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         inference_params: Optional[InferenceParams] = None,
         fp8: bool = False,
+        fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
         fp8_output: bool = False,
     ) -> torch.Tensor:
@@ -345,6 +346,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if fp8_meta.get("local_recipes", None) is not None:
+                fp8_recipe = fp8_meta["local_recipes"][0]
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
                     fp8_dtype=S_quantizer.dtype, device="cuda"
@@ -1042,8 +1045,11 @@ class FusedAttnFunc(torch.autograd.Function):
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
         nvtx_range_push(f"{nvtx_label}")
 
-        # recipe passed in through fp8_autocast; may be different from fp8_meta["recipe"]
+        # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
+        # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
 
         # input types are inferred from the real data while output types are controlled by fp8_output
         # fp8_output should be set upstream as (DPA.fp8 and DPA.fp8_meta["recipe"].fp8_mha)
@@ -1716,6 +1722,8 @@ class FusedAttention(torch.nn.Module):
 
         if fp8:
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if fp8_meta.get("local_recipes", None) is not None:
+                fp8_recipe = fp8_meta["local_recipes"][0]
             assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
                 f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
                 " is required for FP8 attention!"

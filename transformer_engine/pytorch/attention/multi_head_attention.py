@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Multi-head Attention."""
+import os
 import collections
 from typing import Callable, List, Optional, Tuple, Union
 import torch
@@ -32,6 +33,13 @@ from transformer_engine.pytorch.attention.dot_product_attention import DotProduc
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+
+# Force DotProductAttention to use a different recipe than the fp8_recipe set in fp8_autocast().
+# Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"
+# and "Float8CurrentScaling". Use other relevant variables here to define the recipe, e.g. fp8_dpa.
+_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+_dpa_fp8_recipe_dpa = os.getenv("NVTE_DPA_FP8_RECIPE_DPA", "0") == "1"
+_dpa_fp8_recipe_mha = os.getenv("NVTE_DPA_FP8_RECIPE_MHA", "0") == "1"
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -725,18 +733,26 @@ class MultiheadAttention(torch.nn.Module):
         # ======================
 
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if _dpa_fp8_recipe == "":
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            fp8_dpa = fp8_recipe.fp8_dpa
+            fp8_mha = fp8_recipe.fp8_mha
+            float8_current_scaling = fp8_recipe.float8_current_scaling()
+        else:
+            fp8_dpa = _dpa_fp8_recipe_dpa
+            fp8_mha = _dpa_fp8_recipe_mha
+            float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
         # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
         qkv_fp8_output = (
             fp8
-            and fp8_recipe.fp8_mha
+            and fp8_mha
             and rotary_pos_emb is None
-            and not fp8_recipe.float8_current_scaling()
+            and not float8_current_scaling
         )
         # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
-        dpa_fp8_output = fp8 and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
+        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
         # Proj Gemm: match DPA output except for Float8CurrentScaling
-        proj_fp8_grad = dpa_fp8_output and not fp8_recipe.float8_current_scaling()
+        proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
         layernorm_output = None
         if self.attention_type == "self":

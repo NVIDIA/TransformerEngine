@@ -1116,7 +1116,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         is_input_fp8 = isinstance(q, Float8Tensor)
         is_output_fp8 = fp8_output
         is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
+        # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
 
         (
             QKV_quantizer,
@@ -3099,7 +3103,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         is_input_fp8 = isinstance(q, Float8Tensor)
         is_output_fp8 = fp8_output
         is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
+        # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
         fwd_nominal_dtype = q.dtype
         fused_attn_backend = None
 
