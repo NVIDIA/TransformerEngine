@@ -327,7 +327,7 @@ class _GroupedLinear(torch.autograd.Function):
                     )
             elif ctx.debug:
                 grad_output = DebugQuantizer.multi_tensor_quantize(
-                    grad_output, ctx.grad_output_quantizers, ctx.m_splits, ctx.activation_dtype
+                    grad_output_view, ctx.grad_output_quantizers, ctx.m_splits, ctx.activation_dtype
                 )
             else:
                 # Only split grad output. Grad bias is fused with
