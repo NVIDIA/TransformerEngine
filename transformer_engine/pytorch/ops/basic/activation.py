@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -110,6 +111,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
