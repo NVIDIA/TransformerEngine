@@ -438,7 +438,7 @@ def run_dpa_with_cp(
         assert False, f"{dtype} is an unsupported dtype!"
 
     def _error(a, b):
-        a,b = [x.contiguous() for x in [a,b]]
+        a, b = [x.contiguous() for x in [a, b]]
         torch.testing.assert_close(a, b, **tols)
 
     if qkv_format == "bshd":
