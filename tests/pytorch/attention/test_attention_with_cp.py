@@ -89,6 +89,17 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         )
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
+    dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
+    available_backends, *_ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtypes[dtype],
+        qkv_layout="_".join([qkv_format] * 3),
+        window_size=config.window_size,
+        context_parallel=True,
+    )
+    flash_attn_supported, *_ = available_backends
+    if not flash_attn_supported:
+        pytest.skip("No attention backend available.")
 
     subprocess.run(
         get_bash_arguments(

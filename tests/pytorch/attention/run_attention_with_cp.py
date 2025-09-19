@@ -233,7 +233,8 @@ def run_dpa_with_cp(
         )
     qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
-    q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
+    if dtype == "fp8":
+        q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -265,7 +266,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=True,
         )
-        if fp8_bwd:
+        if dtype == "fp8" and fp8_bwd:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
         else:
@@ -310,7 +311,8 @@ def run_dpa_with_cp(
         qkv_quantizer.amax.fill_(0.0)
         dout_quantizer.scale.fill_(1.0)
         dout_quantizer.amax.fill_(0.0)
-    q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
+    if dtype == "fp8":
+        q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
         bias_ = bias_.view(
@@ -346,7 +348,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=True,
         )
-        if fp8_bwd:
+        if dtype == "fp8" and fp8_bwd:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
