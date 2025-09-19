@@ -226,7 +226,7 @@ def test_fused_rope_thd(
 
 @pytest.mark.parametrize("start_positions", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [128,256])
+@pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [1.0])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad])
 @pytest.mark.parametrize("cp_size", [2])
