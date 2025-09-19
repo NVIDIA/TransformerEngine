@@ -117,8 +117,6 @@ def general_gemm(
         use_split_accumulator,
     )
 
-    print(f"out is not none: {out is not None} bias: {bias} bias_dtype: {bias_dtype}")
-
     kwargs = {
         "comm_overlap": ub,
         "comm_type": ub_type,
@@ -177,6 +175,7 @@ def general_grouped_gemm(
         grad_bias = empty_tensors
 
     bias = bias if use_bias else empty_tensors
+
     if use_bias:
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
