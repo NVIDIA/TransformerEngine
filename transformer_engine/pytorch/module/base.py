@@ -1188,18 +1188,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
-            if (
-                isinstance(
-                    grad_output_.get_tensor(True),
-                    (
-                        QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
-                    ),
-                )
-                and ctx.use_bias
-            ):
+            if ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias = None
@@ -1514,6 +1503,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
         self.debug_last_iteration = TEDebugState.get_iteration()
+
+        if self.wgrad_store is not None:
+            if debug and self.wgrad_store.delay_wgrad_compute():
+                raise RuntimeError("Delayed wgrad compute is not supported in debug mode.")
         return debug
 
     def no_debug_features_active(self, quantizers):
