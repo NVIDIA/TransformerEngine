@@ -32,7 +32,6 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 # Force DotProductAttention to use a different recipe than the fp8_recipe set in fp8_autocast().
 # Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"

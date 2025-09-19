@@ -17,8 +17,6 @@ from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
     Float8CurrentScaling,
-    MXFP8BlockScaling,
-    Float8BlockScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import (

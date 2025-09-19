@@ -1131,7 +1131,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dP_quantizer,
         ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
-        q_f16, k_f16, v_f16 = (None, None, None)
+        q_f16 = None
         q_fp8, k_fp8, v_fp8 = (None, None, None)
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
@@ -1161,10 +1161,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
             else:
-                # q_f16, k_f16, v_f16: torch.Tensor, dtype=fwd_nominal_dtype
+                # q_f16:               torch.Tensor, dtype=fwd_nominal_dtype
                 # q_fp8, k_fp8, v_fp8: Float8Tensor, dtype=fwd_nominal_dtype
                 # q, k, v:             torch.Tensor, dtype=torch.uint8
-                q_f16, k_f16, v_f16 = q, k, v
+                q_f16 = q
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
                 q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
 
@@ -1191,9 +1191,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 O_quantizer_per_step[i] = O_quantizer.copy()
                 O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
-            # q_f16, k_f16, v_f16: torch.Tensor, dtype=fwd_nominal_dtype
-            # q, k, v:             torch.Tensor, dtype=fwd_nominal_dtype
-            q_f16, k_f16, v_f16 = q, k, v
+            # q_f16:   torch.Tensor, dtype=fwd_nominal_dtype
+            # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
+            q_f16 = q
             if use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
@@ -3115,7 +3115,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
-        q_f16, k_f16, v_f16 = (None, None, None)
         q_fp8, k_fp8, v_fp8 = (None, None, None)
         if fp8:
             if use_fused_attention:
@@ -3124,7 +3123,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
                 else:
-                    q_f16, k_f16, v_f16 = q, k, v
                     q_fp8, k_fp8, v_fp8 = combine_and_quantize(qkv_layout, q, k, v, QKV_quantizer)
                     q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
                 fp8_meta_kwargs = {}
@@ -3133,7 +3131,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            q_f16, k_f16, v_f16 = q, k, v
             if use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
