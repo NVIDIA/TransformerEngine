@@ -12,11 +12,16 @@ from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -27,12 +32,18 @@ def run_dpa_with_cp(
     qkv_format="bshd",
     kernel_backend="FlashAttention",
     cp_comm_type="p2p",
-    fp8_mha=False,
+    fp8_bwd="True",
+    fp8_dpa="False",
+    fp8_mha="False",
+    scaling_mode="delayed",
 ):
     """Test DotProductAttention module with context parallelism"""
 
     # args are passed as strings
-    fp8_mha = fp8_mha == "True"
+    fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
+    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_bwd else "0"
+    fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
+    fp8_mha = fp8_mha == "True" and dtype == "fp8"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -77,14 +88,17 @@ def run_dpa_with_cp(
         ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = []
+        cp_comm_sub_groups = [cp_comm_group]
         for sub_ranks in cp_comm_sub_ranks:
             sub_group = dist.new_group(sub_ranks, backend="nccl")
             if rank in sub_ranks:
                 cp_comm_sub_groups.append(sub_group)
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "delayed":
+            fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
+        if scaling_mode == "current":
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -193,15 +207,36 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
-    q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
-    k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
-    v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
-    dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
-    dout_quantizer = Float8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
-        scale=torch.tensor([1], dtype=torch.float32).cuda(),
-        amax=torch.tensor([0], dtype=torch.float32).cuda(),
-    )
+    q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    dout_orig = torch.clamp(
+        torch.randn(attn_output_shape, dtype=dtypes[dtype]), min=-1, max=1
+    ).cuda()
+    if scaling_mode == "delayed":
+        qkv_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+        dout_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+    if scaling_mode == "current":
+        qkv_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        dout_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            device="cuda",
+        )
+    qkv_layout = "_".join([qkv_format] * 3)
+    q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
+    if dtype == "fp8":
+        q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -220,6 +255,7 @@ def run_dpa_with_cp(
         fp8_context = nullcontext()
 
     with fp8_context:
+        # q, k, v, out in FP8; dout in F16
         out = core_attn(
             q,
             k,
@@ -230,16 +266,18 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=True,
         )
-        if fp8_mha:
+        if dtype == "fp8" and fp8_bwd:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
         else:
             out.backward(dout)
 
-    # run core_attn wit CP
+    # run core_attn with CP
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
+        x.clone().detach()
+        for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -269,6 +307,14 @@ def run_dpa_with_cp(
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
+    q_, k_, v_, dout_ = [x.contiguous() for x in [q_, k_, v_, dout_]]
+    if scaling_mode == "delayed":
+        qkv_quantizer.scale.fill_(1.0)
+        qkv_quantizer.amax.fill_(0.0)
+        dout_quantizer.scale.fill_(1.0)
+        dout_quantizer.amax.fill_(0.0)
+    if dtype == "fp8":
+        q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
         bias_ = bias_.view(
@@ -284,12 +330,14 @@ def run_dpa_with_cp(
     )
 
     if dtype == "fp8":
-        core_attn.reset_fp8_meta_tensors()
+        core_attn.fp8_initialized = False
+        core_attn.fp8_meta_tensors_initialized = False
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
     with fp8_context:
+        # q, k, v, out in FP8; dout in F16
         out_ = core_attn(
             q_,
             k_,
@@ -300,8 +348,9 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=True,
         )
-        if fp8_mha:
+        if dtype == "fp8" and fp8_bwd:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
@@ -313,7 +362,7 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for x in [out_, q_.grad, k_.grad, v_.grad]:
+    for i, x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
 
@@ -384,30 +433,13 @@ def run_dpa_with_cp(
     elif dtype == "fp16":
         tols = dict(atol=5e-3, rtol=5e-3)
     elif dtype == "fp8":
-        tols = dict(atol=5e-1, rtol=5e-1)
-        rmse_tol = 0.1
+        tols = dict(atol=0.0675, rtol=0.125)
     else:
         assert False, f"{dtype} is an unsupported dtype!"
 
-    def _rmse(a, b):
-        return torch.sqrt((a - b).square().mean()).item()
-
     def _error(a, b):
-        if dtype != "fp8":
-            torch.testing.assert_close(a, b, **tols)
-        else:
-            try:
-                torch.testing.assert_close(a, b, **tols)
-            except Exception as e:
-                logging.debug(e)
-
-            rmse = _rmse(a, b)
-            rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-            assert (
-                rmse < rmse_tol * rmse_range
-            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-            )
+        a, b = [x.contiguous() for x in [a, b]]
+        torch.testing.assert_close(a, b, **tols)
 
     if qkv_format == "bshd":
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):

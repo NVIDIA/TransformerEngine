@@ -17,6 +17,7 @@ import numpy as np
 from packaging.version import Version as PkgVersion
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
@@ -31,11 +32,13 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -43,6 +46,8 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
+    SplitAlongDim,
+    combine_tensors,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
@@ -53,6 +58,10 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+# Print debug info
+_to_print = os.getenv("NVTE_PRINT", "0") == "1"
+_to_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
+_to_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
@@ -422,8 +431,10 @@ def get_attention_backend(
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
         if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
-            use_unfused_attention = False
+            allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+            if not allow_emulation:
+                logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                use_unfused_attention = False
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -1820,11 +1831,10 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
+        return [None] * 6
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
     QKV_quantizer.internal = True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1833,6 +1843,7 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     S_quantizer = quantizers["scaling_fwd"][META_S]
     S_quantizer.internal = True
     S_quantizer.set_usage(rowwise=True, columnwise=False)
+
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1842,22 +1853,152 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def print_quantizers(
+    label,
+    layer_number,
+    QKV_quantizer,
+    O_quantizer,
+    S_quantizer,
+    dQKV_quantizer,
+    dO_quantizer,
+    dP_quantizer,
+):
+    """Print the type and scale/amax of attention quantizers"""
+    names = [
+        "QKV_quantizer",
+        "S_quantizer",
+        "O_quantizer",
+        "dO_quantizer",
+        "dP_quantizer",
+        "dQKV_quantizer",
+    ]
+    quantizers = [
+        QKV_quantizer,
+        S_quantizer,
+        O_quantizer,
+        dO_quantizer,
+        dP_quantizer,
+        dQKV_quantizer,
+    ]
+    if (
+        _to_print
+        and _to_print_layer == layer_number
+        and (
+            not dist.is_initialized()
+            or (dist.is_initialized() and dist.get_rank() == _to_print_rank)
+        )
+    ):
+        for i, q in enumerate(quantizers):
+            type_str = ""
+            if q is None:
+                type_str = "None"
+            elif isinstance(q, Float8Quantizer):
+                type_str = "DS"
+            elif isinstance(q, Float8CurrentScalingQuantizer):
+                type_str = "CS"
+            print(
+                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+            )
+
+
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    """Combine q,k,v based on qkv_layout and quantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    src_nominal_dtype = q.dtype
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv = combine_tensors([q, k, v], dim)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv = combine_tensors([k, v], dim)
+            tensors = [q, kv]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, kv_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+            k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
+        case 3:
+            tensors = [q, k, v]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+
+    q_fp8, k_fp8, v_fp8 = [
+        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        for x in [q_data, k_data, v_data]
+    ]
+
+    return q_fp8, k_fp8, v_fp8
+
+
+def combine_and_dequantize(
+    qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
+):
+    """Combine q,k,v based on qkv_layout and dequantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
+        src_nominal_dtype = q_fp8.dtype
+    else:
+        assert src_nominal_dtype is not None, "The nominal dtype of input tensors is required!"
+    if des_nominal_dtype is None:
+        des_nominal_dtype = src_nominal_dtype
+
+    q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv_data = combine_tensors([q_data, k_data, v_data], dim)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv_data = combine_tensors([k_data, v_data], dim)
+            tensors = [q_data, kv_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, kv = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+            k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
+        case 3:
+            tensors = [q_data, k_data, v_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+    return q, k, v
