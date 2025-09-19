@@ -40,7 +40,7 @@ void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit,
   NVTE_API_CALL(nvte_clamped_swiglu);
   using namespace transformer_engine;
   ClampedSwiGLUParam param = {limit, alpha};
-  gated_act_fn<fp32, ClampedSwiGLUParam, oss_silu<fp32, fp32>>(input, output, param, stream);
+  gated_act_fn<fp32, ClampedSwiGLUParam, clamped_silu<fp32, fp32>>(input, output, param, stream);
 }
 
 void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
@@ -48,6 +48,6 @@ void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETen
   NVTE_API_CALL(nvte_clamped_dswiglu);
   using namespace transformer_engine;
   ClampedSwiGLUParam param = {limit, alpha};
-  dgated_act_fn<fp32, ClampedSwiGLUParam, oss_silu<fp32, fp32>, oss_dsilu<fp32, fp32>>(
+  dgated_act_fn<fp32, ClampedSwiGLUParam, clamped_silu<fp32, fp32>, clamped_dsilu<fp32, fp32>>(
       grad, input, output, param, stream);
 }
