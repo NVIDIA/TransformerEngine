@@ -82,10 +82,9 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   nvte_cublas_handle_init();
 
-  auto &comm_handler = CommunicatorHandler::get();
-
   // Init UB buffer
   if (collective_op != JAXX_Collective_Op::NONE) {
+    auto &comm_handler = CommunicatorHandler::get();
     std::vector<size_t> lhs_shape = {
         product(lhs.dimensions(), 0, lhs_axis_boundary),
         product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};

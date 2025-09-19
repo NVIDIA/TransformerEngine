@@ -382,7 +382,6 @@ class GemmPrimitive(BasePrimitive):
             lhs_contracting_dims,
             rhs_contracting_dims,
         ) = map(sanitize_dims, operand_ndims, contracting_dims)
-
         assert _dims_are_consecutive(lhs_contracting_dims), (
             "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
             f"{lhs_contracting_dims}."
@@ -451,8 +450,7 @@ class GemmPrimitive(BasePrimitive):
             assert out_dtype == jnp.bfloat16, f"Unsupported out_dtype={out_dtype}"
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
-        # Validate bias -- shape always depends on pure GEMM output
-        # (Phuong) This is not true for TP + Hidden
+        # Validate bias
         bias_shape = (0,)
         bias_dtype = out_dtype
         if fuse_bias:
@@ -471,7 +469,7 @@ class GemmPrimitive(BasePrimitive):
                 bias_shape = rhs_non_contracting_shape
         bias_grad = jax.core.ShapedArray(shape=bias_shape, dtype=bias_dtype)
 
-        # Validate pre-GeLU -- shape always depends on pure GEMM output
+        # Validate pre-GeLU
         pre_gelu_shape = (0,)
         pre_gelu_dtype = out_dtype
         if fuse_gelu:
@@ -538,8 +536,8 @@ class GemmPrimitive(BasePrimitive):
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
-            "lhs_axis_boundary": int(max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)),
-            "rhs_axis_boundary": int(min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1),
+            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+            "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
             "fuse_bias": fuse_bias,
@@ -730,13 +728,7 @@ class GemmPrimitive(BasePrimitive):
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
-        lhs_bdims, _, rhs_bdims = batch_dims
-
-        # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
-        out_bdims = (None,)
+        lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Batched GEMM is not supported
         assert (
@@ -1210,7 +1202,7 @@ def _te_gemm(
         if rhs_q.data_layout == "T":
             rhs_cdims = transpose_dims(rhs_q.ndim, rhs_cdims, flatten_axis=rhs_q.flatten_axis)
 
-    # Dummy empties for bias, gelu and aux_in
+    # Dummy empties for bias and gelu
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
     if bias is None or not (fuse_bias and not grad):
         bias = jnp.empty(0, dtype=out_dtype)
