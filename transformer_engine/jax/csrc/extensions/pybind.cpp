@@ -5,6 +5,8 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "cgemm_helper.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -57,7 +59,7 @@ pybind11::dict Registrations() {
 
   // GEMM
   dict["te_gemm_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
   // Grouped GEMM
@@ -84,6 +86,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -158,6 +162,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
       .export_values();
 }
 
