@@ -607,10 +607,10 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
   // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
-  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
-                       send_stream);
-  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
-                       recv_stream);
+  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+                       _ub_comm, send_stream);
+  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+                       _ub_comm, recv_stream);
 
   // We sync with the internal comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
   for (auto stream : {send_stream, recv_stream}) {
