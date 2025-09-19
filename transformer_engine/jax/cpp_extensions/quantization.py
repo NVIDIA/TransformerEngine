@@ -6,6 +6,7 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math
+from enum import Enum
 from packaging import version
 
 import jax
@@ -27,7 +28,12 @@ from .misc import (
     get_min_device_compute_capability,
     NamedSharding,
 )
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp,
+    global_mesh_resource,
+    lax_paral_op,
+)
 from ..quantize import (
     ScaledTensor2x,
     ScaledTensor,
@@ -532,6 +538,116 @@ class QuantizePrimitive(BaseDBiasQuantizePrimitive):
     """Subclass of BaseDBiasQuantizePrimitive for quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
+class AmaxScope(Enum):
+    """
+    Amax Scope Enum
+    """
+
+    LOCAL = 1
+    TPSP = 2
+    FSDP = 3
+
+
+class AmaxCalculationPrimitive(BasePrimitive):
+    """
+    Amax Calculation Primitive with custom_partitioning
+    """
+
+    name = "jax_local_amax"
+    multiple_results = False
+    impl_static_args = (1,)  # amax_scope
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        x_aval,
+        *,
+        amax_scope,
+    ):
+        """
+        amax calcuation abstract
+        """
+        del amax_scope
+
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        out_shape = (1,) * len(x_aval.shape)
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.float32)
+        return out_aval
+
+    @staticmethod
+    def impl(
+        x,
+        amax_scope,
+    ):
+        """
+        amax calcuation implementation
+        """
+        del amax_scope
+        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32).reshape((1,))
+        return amax
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        amax_scope,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """
+        amax calcuation infer_sharding_from_operands
+        """
+        del (amax_scope, arg_infos, result_infos)  # Unused.
+        amax_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None),
+            desc="AmaxCalculationPrimitive.out_sharding",
+        )
+        return amax_sharding
+
+    @staticmethod
+    def partition(
+        amax_scope,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """
+        amax calcuation partition
+        """
+        del result_infos
+
+        amax_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None),
+            desc="AmaxCalculationPrimitive.out_sharding",
+        )
+
+        def sharded_impl(x):
+            amax = AmaxCalculationPrimitive.impl(
+                x,
+                amax_scope=amax_scope,
+            )
+            if amax_scope is AmaxScope.TPSP:  # Run AR across TP/SP
+                gmesh = global_mesh_resource()
+                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tp_resource, mesh)
+                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
+
+            if amax_scope is AmaxScope.FSDP:  # Run AR across FSDP
+                gmesh = global_mesh_resource()
+                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
+
+            return amax
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        return mesh, sharded_impl, amax_sharding, arg_shardings
+
+
+register_primitive(AmaxCalculationPrimitive, outer_only=True)
+
+
 def _jax_quantize(
     x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, flatten_axis: int = -1
 ):
@@ -578,6 +694,7 @@ def _quantize_dbias_impl(
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
     flatten_axis: int = -1,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,  # Only works when using current-scaling
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -634,7 +751,10 @@ def _quantize_dbias_impl(
         # until the tensor is dequantized (e.g. in the GEMM).
         amax = x.amax
         if amax is None:
-            amax = jnp.amax(jnp.abs(x.data), keepdims=True).astype(jnp.float32).reshape((1,))
+            amax = AmaxCalculationPrimitive.outer_primitive.bind(
+                x.data,
+                amax_scope=amax_scope,
+            )
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
@@ -706,6 +826,7 @@ def quantize(
     x: Union[jnp.ndarray, NoScaleTensor],
     quantizer: Quantizer,
     flatten_axis: int = -1,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -716,6 +837,7 @@ def quantize(
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
             is None.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A ScaledTensor containing the quantized input tensor.
@@ -724,6 +846,7 @@ def quantize(
         x,
         quantizer=quantizer,
         flatten_axis=flatten_axis,
+        amax_scope=amax_scope,
     )
     return out
 
@@ -733,6 +856,7 @@ def quantize_dbias(
     quantizer: Quantizer,
     is_dbias: bool = True,
     flatten_axis: int = -1,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -743,6 +867,8 @@ def quantize_dbias(
         is_dbias: If True, compute bias gradient. Defaults to True.
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
+
 
     Returns:
         A tuple containing:
@@ -756,6 +882,7 @@ def quantize_dbias(
         quantizer=quantizer,
         is_dbias=is_dbias,
         flatten_axis=flatten_axis,
+        amax_scope=amax_scope,
     )
 
 
