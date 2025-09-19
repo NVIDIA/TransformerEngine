@@ -229,8 +229,9 @@ log:
       end_step: 10
 """
 
+
 def test_log_stats_numerics(feature_dirs):
-    """ Check corectness of dynamic range and max blockwise dynamic range stats """
+    """Check corectness of dynamic range and max blockwise dynamic range stats"""
     stats = ["dynamic_range", "max_blockwise_4_dynamic_range"]
     log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
 
