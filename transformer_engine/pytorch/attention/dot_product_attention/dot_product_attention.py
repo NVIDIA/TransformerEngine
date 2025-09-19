@@ -504,18 +504,21 @@ class DotProductAttention(TransformerEngineBaseModule):
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = fp8_recipe_dpa
         elif not fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "Float8CurrentScaling":
-            fake_recipes = [Float8CurrentScaling(
+            fake_recipes = [
+                Float8CurrentScaling(
                     fp8_format=_dpa_fp8_recipe_format,
                     fp8_dpa=_dpa_fp8_recipe_dpa,
                     fp8_mha=_dpa_fp8_recipe_mha,
-                ), DelayedScaling(
+                ),
+                DelayedScaling(
                     fp8_format=_dpa_fp8_recipe_format,
                     amax_history_len=_dpa_fp8_recipe_amax_histlen,
                     amax_compute_algo=_dpa_fp8_recipe_amax_algo,
                     fp8_dpa=_dpa_fp8_recipe_dpa,
                     fp8_mha=_dpa_fp8_recipe_mha,
                     reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
-                )]
+                ),
+            ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
 
@@ -530,7 +533,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
         if self.fp8_parameters or fp8_enabled:
             self.fp8_meta["global_recipe"] = fp8_recipe
-            self.fp8_meta["local_recipes"] = fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
+            self.fp8_meta["local_recipes"] = (
+                fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
+            )
 
         if self.fp8_parameters or fp8_enabled:
             if self.fp8_initialized and fp8_recipe_dpa == self.fp8_meta["recipe"]:

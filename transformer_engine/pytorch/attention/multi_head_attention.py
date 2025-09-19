@@ -743,12 +743,7 @@ class MultiheadAttention(torch.nn.Module):
             fp8_mha = _dpa_fp8_recipe_mha
             float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
         # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
-        qkv_fp8_output = (
-            fp8
-            and fp8_mha
-            and rotary_pos_emb is None
-            and not float8_current_scaling
-        )
+        qkv_fp8_output = fp8 and fp8_mha and rotary_pos_emb is None and not float8_current_scaling
         # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
         dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
         # Proj Gemm: match DPA output except for Float8CurrentScaling
