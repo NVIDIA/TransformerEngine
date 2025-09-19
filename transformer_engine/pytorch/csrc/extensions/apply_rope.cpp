@@ -28,9 +28,10 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  auto start_positions_cu = TensorWrapper();  // empty cu_seqlens tensor
+  auto start_positions_cu = TensorWrapper();  // empty start_positions tensor
   if (start_positions) {
     start_positions_cu = makeTransformerEngineTensor(start_positions.value());
+    TORCH_CHECK(start_positions_cu.ndim() == 1, "expected 1D tensor");
   }
 
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
