@@ -1,0 +1,415 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="960"
+   height="388.06406"
+   overflow="hidden"
+   version="1.1"
+   id="svg41"
+   sodipodi:docname="calibration_1_half.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="3.0072355"
+     inkscape:cx="479.8427"
+     inkscape:cy="194.03203"
+     inkscape:window-width="3440"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g41" />
+  <defs
+     id="defs41">
+    <clipPath
+       clipPathUnits="userSpaceOnUse"
+       id="clipPath41">
+      <rect
+         style="fill:none"
+         id="rect42"
+         width="1006.0705"
+         height="388.06406"
+         x="-19.692804"
+         y="26.643204" />
+    </clipPath>
+  </defs>
+  <g
+     id="g41"
+     clip-path="url(#clipPath41)"
+     transform="translate(0,-26.643204)">
+    <rect
+       x="0"
+       y="0"
+       width="960"
+       height="480"
+       fill="#ffffff"
+       id="rect1" />
+    <rect
+       x="81"
+       y="206"
+       width="129"
+       height="164"
+       stroke="#042433"
+       stroke-width="2"
+       stroke-miterlimit="8"
+       fill="#e8e8e8"
+       id="rect2" />
+    <rect
+       x="96"
+       y="231"
+       width="103"
+       height="71"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#d9f2d0"
+       id="rect3" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(133.202,254)"
+       id="text3">High</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(119.448,270)"
+       id="text4">precision</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(126.448,286)"
+       id="text5">weight</text>
+    <rect
+       x="96"
+       y="313"
+       width="103"
+       height="48"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#f7cbcb"
+       id="rect5" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(130.702,325)"
+       id="text6">Initial</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(112.115,341)"
+       id="text7">FP8 scaling</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(125.035,357)"
+       id="text8">factors</text>
+    <rect
+       x="240"
+       y="243"
+       width="82"
+       height="45"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#fbe3d6"
+       id="rect8" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(268.651,262)"
+       id="text9">FP8</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(258.151,278)"
+       id="text10">Weight</text>
+    <rect
+       x="344"
+       y="187"
+       width="82"
+       height="44"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#fbe3d6"
+       id="rect10" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(373.003,205)"
+       id="text11">FP8</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(368.583,221)"
+       id="text12">Input</text>
+    <rect
+       x="334"
+       y="104"
+       width="103"
+       height="71"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#d9f2d0"
+       id="rect12" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(370.67,127)"
+       id="text13">High</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(356.917,143)"
+       id="text14">precision</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(368.837,159)"
+       id="text15">input</text>
+    <rect
+       x="344"
+       y="243"
+       width="82"
+       height="45"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#c1e5f5"
+       id="rect15" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(373,262)"
+       id="text16">FP8</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(364.333,278)"
+       id="text17">GEMM</text>
+    <path
+       d="M 0.015735,-0.999876 34.0184,-0.464776 33.987,1.53498 -0.015735,0.999876 Z M 32.7325,-3.48538 40.6686,0.64 32.6066,4.51362 Z"
+       transform="matrix(1,0,0,-1,199,266.64)"
+       id="path17" />
+    <path
+       d="m 322,265 h 15.791 v 2 H 322 Z m 14.458,-3 8,4 -8,4 z"
+       id="path18" />
+    <path
+       d="m 386,231 v 5.349 h -2 V 231 Z m 3,4.016 -4,8 -4,-8 z"
+       id="path19" />
+    <path
+       d="m 386,175 v 5.349 h -2 V 175 Z m 3,4.016 -4,8 -4,-8 z"
+       id="path20" />
+    <path
+       d="m 302.844,247 4.063,5.911 -1.676,0.697 5.118,5.065 -1.676,0.846 6.327,8.481 -10.73,-6.499 2.047,-0.903 -6.667,-4.163 2.389,-1.286 -7.039,-4.367 z"
+       fill="#ff0000"
+       fill-rule="evenodd"
+       id="path21" />
+    <path
+       d="m 408.452,190 3.86,5.63 -1.592,0.664 4.862,4.824 -1.592,0.805 6.01,8.077 -10.193,-6.19 1.944,-0.859 -6.333,-3.965 2.269,-1.225 -6.687,-4.159 z"
+       fill="#ff0000"
+       fill-rule="evenodd"
+       id="path22" />
+    <path
+       d="m 409.452,247 3.86,5.63 -1.592,0.664 4.862,4.824 -1.592,0.805 6.01,8.077 -10.193,-6.19 1.944,-0.859 -6.333,-3.965 2.269,-1.225 -6.687,-4.159 z"
+       fill="#ff0000"
+       fill-rule="evenodd"
+       id="path23" />
+    <path
+       d="M 0.0369111,-0.999319 6.03282,-0.777852 5.959,1.22079 -0.0369111,0.999319 Z M 8.10061,-0.673792 14.0656,-0.0265058 13.8498,1.96182 7.88485,1.31454 Z M 16.1141,0.247765 22.0214,1.2984 21.6712,3.2675 15.7639,2.21686 Z M 24.0392,1.73603 29.8647,3.17232 29.386,5.11418 23.5604,3.67789 Z m 7.8008,2.03501 5.5037,1.74085 0.2724,0.10597 -0.7252,1.86389 -0.2422,-0.09424 0.061,0.0215 -5.4729,-1.73109 z m 7.64,2.57203 4.6694,1.81681 0.9564,0.44699 -0.8468,1.81193 -0.9264,-0.43303 0.0608,0.02603 -4.6387,-1.80484 z m 7.4377,3.1106 3.679,1.71943 1.7562,0.9737 -0.9698,1.7492 -1.726,-0.957 0.0615,0.0313 -3.6477,-1.7047 z m 7.1844,3.66303 2.5248,1.3999 2.6656,1.7467 -1.0962,1.6728 -2.6347,-1.7264 0.0632,0.0381 -2.4926,-1.382 z m 6.8632,4.2428 1.2157,0.7966 3.6532,2.8401 -1.2275,1.579 -3.6214,-2.8153 0.0657,0.0469 -1.1819,-0.7745 z m 6.4982,4.9445 4.161,3.8856 0.2694,0.3094 -1.5085,1.3132 -0.2354,-0.2704 0.0717,0.0743 -4.1232,-3.8503 z m 5.7436,5.7035 2.187,2.5121 1.5663,2.3083 -1.6549,1.123 -1.5326,-2.2585 0.0732,0.0951 -2.1475,-2.4668 z m 4.8763,6.4753 0.3629,0.5348 2.2811,4.6599 0.1233,0.5117 -1.9444,0.4684 -0.0976,-0.4049 0.0741,0.2055 -2.2018,-4.4979 0.0707,0.1218 -0.3232,-0.4763 z m 3.2357,7.6508 0.0649,0.2693 -1.9444,0.4684 -0.0649,-0.2693 z m 2.7866,-1.5294 -2.4916,8.5902 -5.3772,-7.1474 z"
+       transform="matrix(1,0,0,-1,199,337.194)"
+       id="path24" />
+    <path
+       d="M 0.0162082,-0.999869 6.01542,-0.902619 5.983,1.09712 -0.0162082,0.999869 Z M 8.01516,-0.870203 14.0144,-0.772953 13.982,1.22678 7.98274,1.12953 Z m 7.99894,0.129666 1.4291,0.023166 4.5969,0.218922 -0.0951,1.997739 -4.5813,-0.21818 0.0314,0.001 -1.4134,-0.02291 z m 8.0237,0.337229 5.9932,0.28542 -0.0951,1.997738 -5.9932,-0.28542 z m 7.991,0.3805603 2.7203,0.1295537 3.2969,0.257336 -0.1557,1.993938 -3.2817,-0.25616 0.0302,0.0019 -2.7052,-0.12883 z M 40.0399,0.519778 46.0217,0.986688 45.8661,2.98062 39.8843,2.51371 Z M 48.0156,1.14232 51.7818,1.43629 54.021,1.67858 53.8059,3.66698 51.5815,3.42629 51.6113,3.42907 47.86,3.13626 Z m 7.9938,0.75141 5.9652,0.64546 -0.2152,1.9884 -5.9651,-0.64546 z m 7.9536,0.86061 4.4428,0.48073 1.5466,0.2147 -0.275,1.981 -1.5317,-0.21262 0.0299,0.00369 -4.4278,-0.4791 z m 7.9704,0.97043 5.943,0.82499 -0.275,1.98101 -5.943,-0.825 z m 7.924,1.09999 4.628,0.64245 1.3394,0.22872 L 85.4882,7.66739 84.1641,7.4413 84.195,7.44607 79.5824,6.80576 Z M 87.7963,6.03257 93.7107,7.0425 93.374,9.01397 87.4596,8.00403 Z m 7.8858,1.34658 4.2033,0.71774 1.7326,0.35546 -0.401,1.95925 -1.7172,-0.3522 0.0326,0.0062 -4.1869,-0.71499 z m 7.8959,1.47505 5.877,1.2056 -0.402,1.9592 -5.877,-1.2056 z m 7.836,1.6074 3.057,0.6269 2.834,0.6896 -0.473,1.9433 -2.817,-0.6853 0.036,0.0079 -3.038,-0.6232 z m 7.834,1.7894 5.83,1.4186 -0.473,1.9433 -5.83,-1.4186 z m 7.773,1.8915 1.085,0.264 4.733,1.3611 -0.553,1.9221 -4.713,-1.3554 0.04,0.0106 -1.065,-0.2591 z m 7.74,2.1779 5.766,1.6583 -0.553,1.9221 -5.766,-1.6583 z m 7.707,2.3135 5.679,1.9375 -0.646,1.8929 -5.679,-1.9375 z m 7.572,2.5833 1.951,0.6658 3.7,1.5162 -0.759,1.8506 -3.672,-1.5048 0.057,0.0211 -1.923,-0.656 z m 7.501,2.9405 4.424,1.8128 1.151,0.5493 -0.861,1.8051 -1.126,-0.5372 0.051,0.0228 -4.397,-1.8022 z m 7.38,3.2234 1.496,0.7138 3.871,2.0659 -0.942,1.7644 -3.85,-2.0553 0.04,0.0204 -1.476,-0.7041 z m 7.13,3.8317 2.082,1.2578 2.982,2.0726 -1.142,1.6423 -2.956,-2.0544 0.054,0.0348 -2.054,-1.2413 z m 6.687,4.6258 1.439,1.1758 2.398,2.378 0.577,0.936 -1.703,1.0494 -0.514,-0.8346 0.147,0.1853 -2.279,-2.2602 0.072,0.0643 -1.402,-1.1454 z m 5.463,6.1923 0.25,0.4051 -1.703,1.0494 -0.249,-0.405 z m 2.666,-1.7349 -0.904,8.8984 -6.576,-6.0625 z"
+       transform="matrix(1,0,0,-1,199,337.194)"
+       id="path25" />
+    <path
+       d="M 0.0156214,-0.999878 6.01489,-0.90615 5.98365,1.09361 -0.0156214,0.999878 Z M 8.01465,-0.874907 14.0139,-0.781179 13.9827,1.21858 7.9834,1.12485 Z m 7.99905,0.124971 5.9992,0.093728 -0.0312,1.999758 -5.9993,-0.09373 z m 8.0288,0.139661 5.9937,0.275105 -0.0917,1.9979 -5.9937,-0.27511 z m 7.9916,0.366807 5.9937,0.2751062 L 37.9361,2.02953 31.9424,1.75443 Z M 40.0257,0.12334 46.0194,0.398446 45.9277,2.39634 39.934,2.12124 Z m 8.0188,0.399862 5.9831,0.450096 -0.15,1.994362 -5.9831,-0.45009 z M 56.022,1.12333 62.0051,1.57343 61.855,3.56779 55.872,3.1177 Z m 7.9774,0.60013 5.9792,0.4498 0.0326,0.0034 -0.2075,1.98921 -0.0182,-0.00191 0.0287,0.00258 -5.9648,-0.44872 z M 72.0004,2.3841 77.968,3.00644 77.7606,4.99565 71.793,4.37332 Z m 7.9569,0.82979 5.9676,0.62233 -0.2074,1.98922 -5.9677,-0.62234 z m 7.9568,0.82978 4.5303,0.47244 1.4612,0.1955 -0.2652,1.98233 -1.4468,-0.19356 0.0289,0.00344 -4.5158,-0.47094 z m 7.9738,0.93315 5.9471,0.79566 -0.265,1.98233 -5.9473,-0.79565 z m 7.9291,1.06087 5.947,0.79565 -0.265,1.98234 -5.947,-0.79565 z m 7.93,1.06087 2.427,0.32477 3.534,0.58152 -0.325,1.97346 -3.519,-0.57908 0.03,0.00444 -2.413,-0.32277 z m 7.934,1.23107 5.92,0.97434 -0.324,1.97343 -5.921,-0.9743 z m 7.894,1.29912 5.92,0.97435 -0.325,1.9734 -5.92,-0.9743 z m 7.922,1.32085 5.886,1.1635 -0.387,1.9621 -5.887,-1.1636 z m 7.848,1.5514 5.887,1.1636 -0.388,1.962 -5.886,-1.1636 z m 7.849,1.5514 3.498,0.6916 2.404,0.5638 -0.457,1.9472 -2.387,-0.5598 0.035,0.0074 -3.481,-0.6881 z m 7.849,1.7121 5.842,1.3699 -0.457,1.9472 -5.842,-1.37 z m 7.789,1.8266 5.841,1.37 -0.456,1.9472 -5.842,-1.37 z m 7.806,1.8786 5.798,1.5413 -0.513,1.9329 -5.799,-1.5414 z m 7.748,2.0737 5.764,1.6661 -0.555,1.9214 -5.764,-1.6662 z m 7.708,2.2287 5.723,1.8017 -0.6,1.9077 -5.723,-1.8017 z m 7.631,2.4022 0.212,0.0667 5.489,1.8864 -0.65,1.8914 -5.477,-1.8821 0.025,0.0081 -0.199,-0.0628 z m 7.592,2.6032 0.055,0.0187 5.588,2.1046 -0.705,1.8716 -5.574,-2.0994 0.027,0.0099 -0.041,-0.014 z m 7.539,2.8566 5.542,2.2986 -0.766,1.8474 -5.542,-2.2986 z m 7.401,3.1331 4.585,2.1085 0.887,0.4562 -0.915,1.7785 -0.867,-0.4461 0.04,0.0193 -4.566,-2.0993 z m 7.251,3.4796 2.806,1.4437 2.503,1.4574 -1.007,1.7284 -2.48,-1.4443 0.046,0.025 -2.783,-1.4317 z m 7.037,3.9076 0.695,0.4048 4.359,2.9197 0.07,0.055 -1.237,1.5713 -0.04,-0.0312 0.062,0.0452 -4.301,-2.8808 0.054,0.0333 -0.668,-0.389 z m 6.695,4.617 2.13,1.677 2.447,2.3395 -1.382,1.4456 -2.413,-2.3064 0.073,0.0628 -2.092,-1.6473 z m 6.009,5.5752 1.803,2.1966 1.687,2.8491 -1.721,1.0191 -1.648,-2.7833 0.087,0.1248 -1.754,-2.1376 z m 4.288,7.0798 0.519,1.4444 0.388,3.1989 -0.075,1.6336 -1.998,-0.0921 0.072,-1.5501 0.006,0.1665 -0.364,-3.0041 0.051,0.218 -0.481,-1.3383 z m 0.74,8.2748 -0.276,5.9936 -1.998,-0.092 0.276,-5.9937 z m -0.368,7.9915 -0.021,0.4617 -0.75,5.5753 -1.982,-0.2665 0.744,-5.5319 -0.008,0.0872 0.019,-0.4179 z m -1.038,8.0192 -0.552,4.1104 -0.423,1.8921 -1.952,-0.4361 0.413,-1.85 -0.015,0.0848 0.547,-4.0678 z m -1.411,7.9544 -1.308,5.8556 -1.952,-0.4361 1.308,-5.8556 z m -1.815,7.8602 -1.268,4.2755 -0.529,1.5 -1.886,-0.664 0.52,-1.477 -0.016,0.048 1.262,-4.2515 z m -2.461,7.6625 -0.475,1.35 -1.776,4.269 -1.847,-0.768 1.766,-4.244 -0.02,0.053 0.466,-1.325 z m -3.159,7.473 -1.084,2.197 -1.85,3.12 -1.72,-1.02 1.83,-3.087 -0.036,0.067 1.067,-2.162 z m -4.134,7.032 -1.238,1.698 -3.124,2.632 -1.289,-1.53 3.032,-2.554 -0.163,0.176 1.166,-1.6 z m -2.038,6.56 -8.945,-0.04 5.399,-7.131 z"
+       transform="matrix(1,0,0,-1,199,337.214)"
+       id="path26" />
+    <rect
+       x="518"
+       y="206"
+       width="129"
+       height="164"
+       stroke="#042433"
+       stroke-width="2"
+       stroke-miterlimit="8"
+       fill="#e8e8e8"
+       id="rect26" />
+    <rect
+       x="533"
+       y="231"
+       width="103"
+       height="71"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#d9f2d0"
+       id="rect27" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(569.617,254)"
+       id="text27">High</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(555.863,270)"
+       id="text28">precision</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(562.863,286)"
+       id="text29">weight</text>
+    <rect
+       x="533"
+       y="313"
+       width="103"
+       height="48"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#ffffff"
+       id="rect29" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(550.28,333)"
+       id="text30">FP8 scaling</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(561.447,349)"
+       id="text31">factors</text>
+    <rect
+       x="735"
+       y="104"
+       width="103"
+       height="71"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#d9f2d0"
+       id="rect31" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(772.407,127)"
+       id="text32">High</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(758.653,143)"
+       id="text33">precision</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(770.573,159)"
+       id="text34">input</text>
+    <rect
+       x="735"
+       y="231"
+       width="103"
+       height="70"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#c1e5f5"
+       id="rect34" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(772.407,254)"
+       id="text35">High</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(758.653,270)"
+       id="text36">precision</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       transform="translate(766.073,286)"
+       id="text37">GEMM</text>
+    <path
+       d="M 0.00641402,-0.999979 93.1192,-0.402739 93.1064,1.59722 -0.00641402,0.999979 Z M 91.8051,-3.41123 99.7793,0.64 91.7538,4.5886 Z"
+       transform="matrix(1,0,0,-1,636,266.64)"
+       id="path37" />
+    <path
+       d="m 788,175 v 49.395 h -2 V 175 Z m 3,48.061 -4,8 -4,-8 z"
+       id="path38" />
+    <path
+       d="m 788.277,301.127 -0.235,1.83 -0.725,1.912 -1.157,1.852 -0.337,0.389 -1.512,-1.309 0.286,-0.33 -0.092,0.124 1.064,-1.702 -0.087,0.175 0.649,-1.71 -0.057,0.228 0.219,-1.713 z m -3.865,7.565 -1.743,1.579 -2.308,1.723 -0.836,0.493 -1.017,-1.722 0.789,-0.465 -0.09,0.059 2.228,-1.663 -0.073,0.061 1.707,-1.547 z m -6.609,4.813 -3.055,1.804 -2.319,1.069 -0.837,-1.817 2.274,-1.047 -0.091,0.047 3.011,-1.778 z m -7.191,3.709 -2.795,1.287 -2.806,1.05 -0.701,-1.873 2.772,-1.037 -0.068,0.028 2.762,-1.272 z m -7.474,3.039 -3.452,1.291 -2.263,0.706 -0.595,-1.91 2.237,-0.697 -0.053,0.019 3.425,-1.282 z m -7.625,2.592 -5.053,1.575 -0.727,0.191 -0.509,-1.935 0.706,-0.185 -0.044,0.013 5.032,-1.568 z m -7.715,2.274 -5.803,1.524 -0.508,-1.934 5.803,-1.524 z m -7.776,2.034 -5.857,1.301 -0.434,-1.952 5.857,-1.302 z m -7.81,1.735 -3.065,0.682 -2.844,0.533 -0.368,-1.966 2.827,-0.53 -0.033,0.007 3.049,-0.678 z m -7.875,1.583 -5.897,1.105 -0.368,-1.966 5.897,-1.105 z m -7.897,1.453 -5.929,0.925 -0.308,-1.976 5.929,-0.925 z m -7.905,1.233 -3.789,0.591 -2.176,0.276 -0.252,-1.984 2.163,-0.274 -0.029,0.004 3.775,-0.589 z m -7.949,1.118 -5.952,0.755 -0.252,-1.984 5.952,-0.755 z m -7.937,1.007 -0.987,0.125 -5.008,0.495 -0.197,-1.99 4.995,-0.494 -0.028,0.003 0.974,-0.123 z m -7.985,0.817 -5.971,0.59 -0.197,-1.991 5.971,-0.59 z m -7.992,0.749 -5.985,0.427 -0.142,-1.995 5.985,-0.427 z m -7.98,0.569 -4.417,0.315 -1.598,0.069 -0.087,-1.998 1.585,-0.069 -0.028,0.002 4.403,-0.314 z m -8.013,0.471 -5.994,0.261 -0.087,-1.998 5.994,-0.261 z m -7.992,0.348 -2.493,0.109 -3.533,0.052 -0.03,-2 3.519,-0.052 -0.029,10e-4 2.479,-0.108 z m -8.026,0.19 -1.98,0.03 -0.03,-2 1.98,-0.029 z m -0.603,3.01 -8.058,-3.881 7.94,-4.118 z"
+       id="path39" />
+    <path
+       d="M 479,50 V 393.312"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-miterlimit="8"
+       fill="none"
+       fill-rule="evenodd"
+       id="path40" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="700"
+       font-size="22px"
+       transform="translate(105.552,72)"
+       id="text40">FP8 with initial scaling factors</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="700"
+       font-size="22px"
+       id="text41"
+       x="641.10864"
+       y="71.334938">Calibration</text>
+  </g>
+</svg>
