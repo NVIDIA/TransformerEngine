@@ -207,10 +207,10 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
-    q_orig = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
-    k_orig = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
-    v_orig = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
-    dout_orig = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
+    q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    dout_orig = torch.clamp(torch.randn(attn_output_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     if scaling_mode == "delayed":
         qkv_quantizer = Float8Quantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
