@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
 
+
 @torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
@@ -36,6 +37,7 @@ def _compute_dynamic_range_bottom(tensor):
         amin = torch.tensor(1, device=tensor.device).to(torch.float)
     return torch.log2(amin)
 
+
 @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size):
     """Max blockwise dynamic range (log2 max/min_nonzero).
@@ -44,7 +46,7 @@ def compute_max_blockwise_dynamic_range(tensor, block_size):
     """
     total_numel = tensor.numel()
     assert (
-        total_numel % (block_size ** dims) == 0
+        total_numel % (block_size**dims) == 0
     ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
     assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
 
@@ -361,8 +363,9 @@ def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int):
     DEPENDENCIES[stat_name] = {stat_name}
 
     STATS[stat_name] = (
-        lambda x, aux_dict, _block_size=block_size, _dims=dims:
-            compute_max_blockwise_dynamic_range(x, _block_size, _dims),
+        lambda x, aux_dict, _block_size=block_size, _dims=dims: compute_max_blockwise_dynamic_range(
+            x, _block_size, _dims
+        ),
         lambda buffers: max(_get(buffers, stat_name)),
     )
 

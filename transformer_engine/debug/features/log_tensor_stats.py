@@ -48,8 +48,8 @@ class LogTensorStats(BaseLogTensorStats):
             - l2_norm
             - cur_amax – maximal absolute value of a tensor,
             - dynamic_range – equal to `torch.log2(amax) - torch.log2(amin)`
-            - max_blockwise_dynamic_range: 
-                Computes the maximum dynamic range (log2(max) - log2(min)) across all blocks of size block_size within the tensor, 
+            - max_blockwise_dynamic_range:
+                Computes the maximum dynamic range (log2(max) - log2(min)) across all blocks of size block_size within the tensor,
                 where block_size is an integer specifying the block size.
                 For dim=1 there are block_size consecutive elements in the block, for dim=2 the block is block_size x block_size elements tile.
                 - block_size: int, default = 32
@@ -104,7 +104,7 @@ class LogTensorStats(BaseLogTensorStats):
             raise NotImplementedError("Max blockwise dynamic range is not supported for dict stats")
         return stat in BaseLogTensorStats._get_supported_stats_list(None) | {
             "cur_amax",
-            "dynamic_range"
+            "dynamic_range",
         }
 
     def parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict]):
@@ -115,7 +115,9 @@ class LogTensorStats(BaseLogTensorStats):
                 block_size = stat["block_size"]
                 dims = stat["dims"]
                 add_max_blockwise_dynamic_range_stats(block_size, dims)
-                parsed_stats.append(f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}")
+                parsed_stats.append(
+                    f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"
+                )
             else:
                 parsed_stats.append(stat)
         return parsed_stats
