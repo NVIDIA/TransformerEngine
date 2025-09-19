@@ -570,7 +570,7 @@ class DebugQuantizer(Quantizer):
         tensors = torch.split(tensor, m_splits)
         output = []
         for tensor, quantizer in zip(tensors, quantizers):
-            output.append(quantizer(tensor, dtype=activation_dtype))
+            output.append(quantizer.quantize(tensor, dtype=activation_dtype))
         return output
 
 
