@@ -47,9 +47,9 @@ class LogTensorStats(BaseLogTensorStats):
             - l1_norm
             - l2_norm
             - cur_amax – maximal absolute value of a tensor,
-            - dynamic_range – equal to `torch.log2(amax) - torch.log2(amin)`
-            - max_blockwise_dynamic_range: Computes the maximum dynamic range (log2(max) - log2(min)) across all blocks of size block_size within the tensor, where block_size is an integer specifying the block size. For dim=1 there are block_size consecutive elements in the block, for dim=2 the block is block_size x block_size elements tile.
-
+            - dynamic_range – equal to `torch.log2(amax) - torch.log2(nonzero_amin)`
+            - max_blockwise_dynamic_range – Computes the maximum dynamic range `log2(amax) - log2(nonzero_amin)` across all blocks of size block_size within the tensor, where block_size is an integer specifying the block size. For `dim=1` there are block_size consecutive elements in the block, for `dim=2` the block is block_size x block_size elements tile.
+                
                 - block_size: int, default = 32
                 - dims: int, default = 1, allowed values are 1 and 2
 
