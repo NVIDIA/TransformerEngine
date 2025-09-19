@@ -215,8 +215,8 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
     nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                             start_positions_cu.data(), input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank,
-                             max_s, b, h, d, d2, stride_t,
+                             start_positions_cu.data(), input_grads_cu.data(), qkv_format,
+                             interleaved, cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
                              /*stride_b=*/0, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
     return input_grads;
@@ -253,9 +253,9 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 
   auto cu_seqlens_cu = TensorWrapper();  // empty cu_seqlens tensor
   nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                           start_positions_cu.data(), input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank, s, b,
-                           h, d, d2, stride_s, stride_b, stride_h, stride_d,
-                           at::cuda::getCurrentCUDAStream());
+                           start_positions_cu.data(), input_grads_cu.data(), qkv_format,
+                           interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
+                           stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }

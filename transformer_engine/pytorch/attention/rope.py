@@ -418,8 +418,9 @@ def apply_rotary_pos_emb(
                 _apply_rotary_pos_emb_base(
                     x.unsqueeze(1),
                     _get_freqs_on_this_cp_rank(
-                        freqs[start_positions[idx]:] \
-                            if start_positions is not None else freqs, # offset the freqs
+                        (
+                            freqs[start_positions[idx] :] if start_positions is not None else freqs
+                        ),  # offset the freqs
                         x.size(0),
                         cp_size,
                         cp_rank,
