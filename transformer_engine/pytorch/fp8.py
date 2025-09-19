@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    CustomRecipe,
 )
 
 from .constants import dist_group_type
@@ -837,6 +838,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif isinstance(recipe, CustomRecipe):
+            cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1084,3 +1087,56 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class CustomRecipeState(RecipeState):
+    """State for CustomRecipe: produce quantizers per tensor."""
+
+    recipe: CustomRecipe
+    mode: str
+    num_quantizers: int
+    device: Optional[torch.device]
+
+    def __init__(
+        self,
+        recipe: CustomRecipe,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+        if getattr(recipe, "qfactory", None) is None:
+            raise ValueError("CustomRecipe requires `qfactory`.")
+
+    def make_quantizers(self) -> list:
+        qfactory = self.recipe.qfactory
+        out = []
+
+        # TODO(negvet): make_quantizers() should take roles from the operation
+        # Hardcode linear-specific roles for now
+        roles: List[str]
+        if self.mode == "forward":
+            roles = [
+                ("linear_input", "linear_weight", "linear_output")[i % 3]
+                for i in range(self.num_quantizers)
+            ]
+        elif self.mode == "backward":
+            roles = [
+                ("linear_grad_output", "linear_grad_input")[i % 2]
+                for i in range(self.num_quantizers)
+            ]
+        else:
+            roles = ["unknown"] * self.num_quantizers
+
+        for i in range(self.num_quantizers):
+            # Get quantizer from the user defined factory
+            quantizer = qfactory(roles[i])
+            out.append(quantizer)
+        return out
