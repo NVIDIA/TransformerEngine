@@ -116,7 +116,6 @@ def general_gemm(
         accumulate,
         use_split_accumulator,
     )
-
     kwargs = {
         "comm_overlap": ub,
         "comm_type": ub_type,
@@ -165,6 +164,7 @@ def general_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     gelu_input = empty_tensors
+    out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
     if grad and use_bias:
@@ -173,9 +173,7 @@ def general_grouped_gemm(
         ]
     else:
         grad_bias = empty_tensors
-
     bias = bias if use_bias else empty_tensors
-
     if use_bias:
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
@@ -191,9 +189,8 @@ def general_grouped_gemm(
                 size = m_splits[i]
                 out[i] = out_init[start_idx : start_idx + size]
                 start_idx += size
-        out_bias = []
         for i in range(num_gemms):
-            outs = general_gemm(
+            general_gemm(
                 A[i],
                 B[i],
                 workspaces[0],
@@ -206,11 +203,10 @@ def general_grouped_gemm(
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
             )
-            out_bias.append(outs[1])
         if single_output:
             out = out_init
 
-        return out, out_bias, None
+        return out, None, None
 
     if gelu:
         gelu_input = [
@@ -218,7 +214,6 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     bias = tex.te_general_grouped_gemm(
         A,
