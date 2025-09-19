@@ -21,7 +21,6 @@
 #include <cstdint>
 #include <limits>
 
-#include "transformer_engine/transformer_engine.h"
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
 #include "../util/vectorized_pointwise.h"
@@ -29,6 +28,7 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "transformer_engine/activation.h"
+#include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
 
 namespace transformer_engine {
@@ -338,9 +338,9 @@ void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) 
 #if CUDA_VERSION >= 12080
 template <typename OType>
 __global__ void __launch_bounds__(512)
-dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
-                      const float *const tensor_amax, const size_t N, const size_t M,
-                      const size_t scale_stride) {
+    dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
+                          const float *const tensor_amax, const size_t N, const size_t M,
+                          const size_t scale_stride) {
   const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t x = thread_idx % M;
   const size_t y = thread_idx / M;
@@ -350,8 +350,8 @@ dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *con
     fp4e2m1x4 small_vec[4];
   };
   using OVec = Vec<OType, 4>;
-  const uint64_t *const input_vectorized = reinterpret_cast<const uint64_t*>(input);
-  OVec *output_vec = reinterpret_cast<OVec*>(output);
+  const uint64_t *const input_vectorized = reinterpret_cast<const uint64_t *>(input);
+  OVec *output_vec = reinterpret_cast<OVec *>(output);
 
   const size_t my_index = x + y * M;
   const size_t my_scale_index = x + y * scale_stride;
@@ -388,7 +388,7 @@ void fp4_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   const size_t M = input.flat_last_dim();
 
   NVTE_CHECK(M % FP4_BLOCK_SIZE == 0, "Last dimension of FP4 tensors needs to be divisible by ",
-                                      FP4_BLOCK_SIZE, ", but got ", input.data.shape, ".");
+             FP4_BLOCK_SIZE, ", but got ", input.data.shape, ".");
 
   const size_t Mread = M / FP4_BLOCK_SIZE;
   const size_t total = N * Mread;
@@ -399,12 +399,10 @@ void fp4_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
       output->data.dtype, OType,
 
       dequantize_fp4_kernel<<<blocks, threads, 0, stream>>>(
-        input.data.dptr,
-        reinterpret_cast<OType*>(output->data.dptr),
-        reinterpret_cast<fp8e4m3*>(input.scale_inv.dptr),
-        reinterpret_cast<float*>(input.amax.dptr),
-        N, Mread, input.scale_inv.shape.back());
-  );  // NOLINT(*)
+          input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
+          reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
+          reinterpret_cast<float *>(input.amax.dptr), N, Mread,
+          input.scale_inv.shape.back()););  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");

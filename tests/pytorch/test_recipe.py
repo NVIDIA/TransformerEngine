@@ -501,7 +501,9 @@ class TestFP8Recipe:
                 else:
                     y = module(x)
 
+
 fp4_available, reason_for_no_fp4 = FP8GlobalStateManager.is_nvfp4_available()
+
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
