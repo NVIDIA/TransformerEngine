@@ -165,9 +165,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
             byte_shape = list(self._rowwise_data.size(*args, **kwargs))
             return byte_shape[:-1] + [byte_shape[-1] * 2]
         if self._columnwise_data is not None:
-            warnings.warn(
-                "Attempting to get shape of NVFP4 tensor with only column-wise data."
-            )
+            warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
             byte_shape = list(self._columnwise_data.size(*args, **kwargs))
             return byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
         raise RuntimeError("Attempted to get shape of NVFP4 tensor with no data")
