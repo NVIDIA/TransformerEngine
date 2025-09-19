@@ -1179,6 +1179,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated(const Tensor &input, Tensor *output, ParamOP p, cudaStream_t stream) {
+  CheckInputTensor(input, "gated_act_input");
   CheckOutputTensor(*output, "gated_act_output");
   NVTE_CHECK(input.flat_last_dim() % 2 == 0,
              "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
