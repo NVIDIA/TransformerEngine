@@ -358,7 +358,7 @@ def apply_rotary_pos_emb(
         Training:
             qkv_formats:            "thd", "bshd", "sbhd"
             context parallel:       yes
-            start_positions:        no
+            start_positions:        yes
             interleaving:           yes
         Inference:
             qkv_formats:            "thd", "bshd", "sbhd"

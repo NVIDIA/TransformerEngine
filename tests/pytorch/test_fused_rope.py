@@ -226,12 +226,14 @@ def test_fused_rope_thd(
 @pytest.mark.parametrize("start_positions", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [128,256])
+@pytest.mark.parametrize("rotary_percent", [1.0])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad])
 @pytest.mark.parametrize("cp_size", [2])
 @pytest.mark.parametrize("interleaved", [False, True])
 def test_unfused_rope_thd_vs_bshd(
     dtype: torch.dtype,
     hidden_size: int,
+    rotary_percent: float,
     loss_func: Callable,
     cp_size: int,
     interleaved: bool,
@@ -271,9 +273,8 @@ def test_unfused_rope_thd_vs_bshd(
     sbhd = sbhd.to(dtype=dtype, device=device)
     sbhd.requires_grad = True
 
-    # rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
-    # emb = rotary_pos_emb(max_seqlen)
-    emb = torch.randn(max_seqlen, 1, 1, hidden_size).cuda()
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
+    emb = rotary_pos_emb(max_seqlen)
     assert emb.is_contiguous()
 
     start_positions = cu_seqlens[:-1] if start_positions else None
@@ -296,7 +297,6 @@ def test_unfused_rope_thd_vs_bshd(
         grad_unfused_bshd = bshd.grad.detach().clone()
         bshd.grad = None
 
-        # assert torch.allclose(sbhd.transpose(1, 0), bshd)
         # unfused sbhd
         output_unfused_sbhd = apply_rotary_pos_emb(
             sbhd.float(),
