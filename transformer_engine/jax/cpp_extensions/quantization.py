@@ -573,7 +573,8 @@ class AmaxCalculationPrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
 
-        out_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+        out_shape = (1,) * len(x_aval.shape)
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.float32)
         return out_aval
 
     @staticmethod
