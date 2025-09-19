@@ -11,6 +11,7 @@ import warnings
 import logging
 
 import torch
+from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
@@ -168,6 +169,17 @@ class DotProductAttention(TransformerEngineBaseModule):
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
                 `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 softmax type as described in this paper:
+                 `Efficient Streaming Language Models with Attention Sinks
+                 <https://arxiv.org/pdf/2309.17453v3>`_.
+                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+                 where alpha is a learnable parameter in shape [h].
+                 'off-by-one' and 'learnable' softmax types are also called sink attention
+                 ('zero sink' and 'learnable sink').
 
     Parallelism parameters
     ----------------------
@@ -223,6 +235,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_stream: torch.cuda.Stream = None,
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -307,6 +320,20 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
 
+        self.softmax_type = softmax_type
+        if self.softmax_type == "vanilla":
+            self.softmax_offset = None
+        if self.softmax_type == "off-by-one":
+            self.softmax_offset = torch.zeros(
+                self.num_attention_heads // self.tp_size, device="cuda"
+            )
+        if self.softmax_type == "learnable":
+            self.register_parameter(
+                "softmax_offset",
+                Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
+                get_rng_state_tracker=get_rng_state_tracker,
+            )
+
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
@@ -328,6 +355,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             layer_number=layer_number,
             deterministic=self.deterministic,
             **attn_kwargs,
+            softmax_type=self.softmax_type,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -335,6 +363,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_type=attention_type,
             **attn_kwargs,
             layer_number=layer_number,
+            softmax_type=self.softmax_type,
         )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
@@ -634,6 +663,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
+            allow_different_data_and_param_types=self.softmax_type != "vanilla",
         ) as query_layer:
             # checks for RNG
             if self.rng_states_tracker is not None and is_graph_capturing():
@@ -922,6 +952,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss} shapes"
 
+            # check if there is padding between sequences when qkv_format='thd'
             if pad_between_seqs is None:
                 if qkv_format == "thd":
                     pad_between_seqs = (
@@ -957,11 +988,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
+                cp_comm_type=self.cp_comm_type,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
                 inference_params=inference_params,
+                softmax_type=self.softmax_type,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1022,6 +1055,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
+            softmax_offset = (
+                self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
+                if self.softmax_offset is not None
+                else None
+            )
+
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
@@ -1071,7 +1110,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bias_dtype=query_layer.dtype,
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
-                # checkpoint_core_attention=False
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.fused_attention,
@@ -1101,6 +1139,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         pad_between_seqs=pad_between_seqs,
                         inference_params=inference_params,
+                        softmax_offset=softmax_offset,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1129,6 +1168,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
+                    softmax_offset=softmax_offset,
                 )
 
             from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
@@ -1157,6 +1197,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
                         inference_params=inference_params,
+                        softmax_offset=softmax_offset,
                     )
                 return self.unfused_attention(
                     _alibi_cache,
@@ -1173,5 +1214,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
                     inference_params=inference_params,
+                    softmax_offset=softmax_offset,
                 )
             return None
