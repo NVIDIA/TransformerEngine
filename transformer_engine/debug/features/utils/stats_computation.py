@@ -58,8 +58,11 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
     else:
         dim_a = tensor.shape[-2] // block_size
         dim_b = tensor.shape[-1] // block_size
-        tensor = tensor.reshape(-1, dim_a, block_size, dim_b, block_size).\
-            permute(0, 1, 3, 2, 4).reshape(-1, block_size, block_size)
+        tensor = (
+            tensor.reshape(-1, dim_a, block_size, dim_b, block_size)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(-1, block_size, block_size)
+        )
         per_block_amax = tensor.amax(dim=(1, 2))
         per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
 
@@ -68,7 +71,6 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
     if not torch.any(nonzero_blocks):
         # If all blocks are zero, return 0
         return torch.zeros((), device=tensor.device, dtype=torch.float32)
-    
 
     return (torch.log2(per_block_amax) - torch.log2(per_block_amin)).max()
 

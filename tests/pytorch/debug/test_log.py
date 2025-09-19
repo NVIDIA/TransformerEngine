@@ -257,7 +257,6 @@ def test_log_stats_numerics(feature_dirs):
 
         output = read_log(log_dir)
 
-    
     for line in output.splitlines():
         if "max_blockwise_dynamic_range_block_size_4_dims_1" in line:
             max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
