@@ -91,15 +91,15 @@ e8m0_t to_e8m0(IType amax) {
 
 
 inline bool is_cast_only_enabled() {
-    static bool enabled = [](){
-        const char* env = std::getenv("ENABLE_CAST_ONLY");
-        return env != nullptr && (env[0] == '1');
-    }();
-    return enabled;
+    // static bool enabled = [](){
+    //     const char* env = std::getenv("ENABLE_CAST_ONLY");
+    //     return env != nullptr && (env[0] == '1');
+    // }();
+    // return enabled;
 
-    // // FIXME: when finish debugging, remove this
-    // const char* env = std::getenv("ENABLE_CAST_ONLY");
-    // return env != nullptr && (env[0] == '1');
+    // FIXME: when finish debugging, remove this
+    const char* env = std::getenv("ENABLE_CAST_ONLY");
+    return env != nullptr && (env[0] == '1');
 }
 
 

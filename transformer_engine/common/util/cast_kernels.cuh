@@ -1111,7 +1111,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 break;
               }
               case ScalingType::COLWISE: {
-                NVTE_ERROR("Colwise scaling not implemented.");
+                NVTE_WARN("Colwise scaling will fallback to original kernel.");
                 break;
               }
               case ScalingType::BIDIMENSIONAL: {
