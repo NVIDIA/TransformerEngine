@@ -40,6 +40,7 @@ def layernorm_mlp(
     norm_type: str,
     zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
+    batch_sequence_transpose: bool = False,
     norm_input_axes: Tuple[str, ...] = None,
     dot_1_input_axes: Tuple[str, ...] = None,
     dot_2_input_axes: Tuple[str, ...] = None,
@@ -75,6 +76,7 @@ def layernorm_mlp(
         norm_type: Type of normalization ("layernorm" or "rmsnorm")
         zero_centered_gamma: Whether to use zero-centered gamma for normalization
         epsilon: Small constant for numerical stability in normalization
+        batch_sequence_transpose: Whether to transpose the batch and sequence dimensions
         norm_input_axes: Logical axes for sharding the layernorm input
         dot_1_input_axes: Logical axes for sharding the first matrix multiplication
         dot_2_input_axes: Logical axes for sharding the second matrix multiplication
@@ -126,6 +128,7 @@ def layernorm_mlp(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        batch_sequence_transpose,
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
@@ -140,7 +143,7 @@ def layernorm_mlp(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -152,6 +155,7 @@ def _layernorm_mlp(
     norm_type: str,
     zero_centered_gamma: bool,
     epsilon: float,
+    batch_sequence_transpose: bool,
     norm_input_axes: Tuple[str, ...],
     dot_1_input_axes: Tuple[str, ...],
     dot_2_input_axes: Tuple[str, ...],
@@ -180,6 +184,7 @@ def _layernorm_mlp(
         norm_type: Type of normalization
         zero_centered_gamma: Whether to use zero-centered gamma
         epsilon: Small constant for numerical stability
+        batch_sequence_transpose: Whether to transpose the batch and sequence dimensions
         norm_input_axes: Logical axes for layernorm sharding
         dot_1_input_axes: Logical axes for first matrix multiplication sharding
         dot_2_input_axes: Logical axes for second matrix multiplication sharding
@@ -205,6 +210,7 @@ def _layernorm_mlp(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        batch_sequence_transpose,
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
@@ -230,6 +236,7 @@ def _layernorm_mlp_fwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    batch_sequence_transpose,
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
@@ -303,6 +310,7 @@ def _layernorm_mlp_fwd_rule(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
         collective_op=collective_op_set_1.forward,
@@ -342,6 +350,7 @@ def _layernorm_mlp_fwd_rule(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
         collective_op=collective_op_set_2.forward,
@@ -383,6 +392,7 @@ def _layernorm_mlp_bwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    batch_sequence_transpose,
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
@@ -459,6 +469,7 @@ def _layernorm_mlp_bwd_rule(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel_2,
         contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
+        transpose_batch_sequence=batch_sequence_transpose,
         collective_op=collective_op_set_2.backward,
     )
 
@@ -474,6 +485,7 @@ def _layernorm_mlp_bwd_rule(
         casted_act_out,
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -500,6 +512,7 @@ def _layernorm_mlp_bwd_rule(
         casted_dact_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1,
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
+        transpose_batch_sequence=batch_sequence_transpose,
         collective_op=collective_op_set_1.backward,
     )
 
@@ -511,6 +524,7 @@ def _layernorm_mlp_bwd_rule(
         casted_ln_out,
         casted_dact_out.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
