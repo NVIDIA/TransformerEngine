@@ -558,12 +558,12 @@ class DebugQuantizer(Quantizer):
 
     @classmethod
     def multi_tensor_quantize(
-        cls, tensors: List[torch.Tensor], quantizers: List[Quantizer], m_splits: List[int], activation_dtype: torch.dtype
+        cls, tensor: torch.Tensor, quantizers: List[Quantizer], m_splits: List[int], activation_dtype: torch.dtype
     ) -> List[DebugQuantizedTensor]:
         """
-        Quantizes a list of tensors using a list of quantizers.
+        Splits a tensor into a list of tensors and quantizes each tensor using a list of quantizers.
         """
-        tensors = torch.split(tensors, m_splits)
+        tensors = torch.split(tensor, m_splits)
         output = []
         for tensor, quantizer in zip(tensors, quantizers):
             output.append(quantizer(tensor, dtype=activation_dtype))

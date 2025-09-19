@@ -90,6 +90,7 @@ class _GroupedLinear(torch.autograd.Function):
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -133,7 +134,7 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
-                torch.split(cast_if_needed(inp_view, activation_dtype), m_splits), input_quantizers
+                inp_view, input_quantizers, m_splits, activation_dtype
             )
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
@@ -163,7 +164,7 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
-
+        # Initialize output tensor
         out = torch.empty(
             [sum(m_splits), weights_fp8[0].size(0)],
             dtype=activation_dtype,
@@ -176,6 +177,7 @@ class _GroupedLinear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
         # Perform GEMM
         general_grouped_gemm(
             weights_fp8,
@@ -335,8 +337,6 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.m_splits,
                 )
 
-
-
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
@@ -407,15 +407,14 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if ctx.fp8 or ctx.debug:
-                        if not ctx.debug:
-                            inputmats = tex.split_quantize(
-                                inp_view, ctx.m_splits, ctx.input_quantizers
-                            )
-                        else:
-                            inputmats = DebugQuantizer.multi_tensor_quantize(
-                                inputmats, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
-                            )
+                    if ctx.fp8 and not ctx.debug:
+                        inputmats = tex.split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers
+                        )
+                    elif ctx.debug:
+                        inputmats = DebugQuantizer.multi_tensor_quantize(
+                            inp_view, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
+                        )
                     else:
                         inputmats = torch.split(
                             cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
