@@ -174,7 +174,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       bool dgate_elt = true;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
-        dgate_elt = gate_elt < p.limit && gate_elt > -p.limit;  // Derivative of clamp
+        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
         gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1;
       }
 
@@ -188,7 +188,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           const float x = min(act_elt, p.limit);
           const float s = sigmoidf(p.alpha * x);
           act_x = x * s;
-          if (x < p.limit) {
+          if (x <= p.limit) {
             dact_x = s + s * (1 - s) * p.alpha * x;
           } else {
             dact_x = 0.0f;
@@ -495,7 +495,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         bool dgate_elt = true;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
           // In case of GPT OSS, clamp the activation and gate values
-          dgate_elt = gate_elt < p.limit && gate_elt > -p.limit;  // Derivative of clamp
+          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
           gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
         }
         if constexpr (IS_DGATED) {
@@ -507,7 +507,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const float x = min(act_elt, p.limit);
             const float s = sigmoidf(p.alpha * x);
             act_x = x * s;
-            dact_x = x < p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+            dact_x = x <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
           } else {
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
@@ -750,7 +750,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float dgate_elt = true;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
               // In case of GPT OSS, clamp the activation and gate values
-              dgate_elt = gate_elt < p.limit && gate_elt > -p.limit;  // Derivative of clamp
+              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
               gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
             }
             if constexpr (IS_DGATED) {
@@ -762,7 +762,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 const float x = min(act_elt, p.limit);
                 const float s = sigmoidf(p.alpha * x);
                 act_x = x * s;
-                dact_x = x < p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+                dact_x = x <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
               } else {
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);
