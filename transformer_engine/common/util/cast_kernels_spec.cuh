@@ -714,7 +714,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = reinterpret_cast<char*>(align_to((intptr_t)smem, CastTraits::smem_alignment));
+    char *smemAligned = reinterpret_cast<char*>(align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
 
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
@@ -1266,7 +1266,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = reinterpret_cast<char*>(align_to((intptr_t)smem, CastTraits::smem_alignment));
+    char *smemAligned = reinterpret_cast<char*>(align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
 
