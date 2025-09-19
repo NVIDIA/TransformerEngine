@@ -765,8 +765,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                                produced)
         """
         debug = self.is_debug_iter()
-        if debug and self.wgrad_store.delay_wgrad_compute():
-            raise RuntimeError("Delayed wgrad compute is not supported in debug mode.")
 
         assert not isinstance(
             inp, QuantizedTensorBase

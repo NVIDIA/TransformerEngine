@@ -1503,6 +1503,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
         self.debug_last_iteration = TEDebugState.get_iteration()
+
+        if self.wgrad_store is not None:
+            if debug and self.wgrad_store.delay_wgrad_compute():
+                raise RuntimeError("Delayed wgrad compute is not supported in debug mode.")
         return debug
 
     def no_debug_features_active(self, quantizers):
