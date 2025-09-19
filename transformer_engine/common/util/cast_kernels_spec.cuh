@@ -15,6 +15,7 @@
 #include <cuda/ptx>
 #include "swizzle.cuh"
 #include "state_counter.cuh"
+#include "ptx.cuh"
 
 namespace transformer_engine {
 namespace mxfp8_kernel {
@@ -680,7 +681,10 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                         + smem_rowwise_scale + smem_colwise_reduce);
 };
 
-#define ALIGN_TO(x, align) (((x) + (align) - 1) & ~((align) - 1))
+__device__ __forceinline__
+intptr_t align_to(intptr_t x, intptr_t align) {
+    return (x + align - 1) & ~((align) - 1);
+}
 
 // 32x32
 template <typename CastTraits,
@@ -710,7 +714,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = reinterpret_cast<char*>(ALIGN_TO((intptr_t)smem, CastTraits::smem_alignment));
+    char *smemAligned = reinterpret_cast<char*>(align_to((intptr_t)smem, CastTraits::smem_alignment));
 
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
@@ -1262,7 +1266,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = reinterpret_cast<char*>(ALIGN_TO((intptr_t)smem, CastTraits::smem_alignment));
+    char *smemAligned = reinterpret_cast<char*>(align_to((intptr_t)smem, CastTraits::smem_alignment));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
 
