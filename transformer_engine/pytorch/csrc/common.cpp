@@ -305,4 +305,20 @@ size_t roundup(const size_t value, const size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
+void philox_unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
+                                 arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
+                                 at::cuda::getCurrentCUDAStream());
+  });
+}
+
+// extract PhiloxCudaState from CUDA random number generator
+at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl *gen, size_t elts_per_thread) {
+  at::PhiloxCudaState philox_args;
+  std::lock_guard<std::mutex> lock(gen->mutex_);
+  philox_args = gen->philox_cuda_state(elts_per_thread);
+  return philox_args;
+}
+
 }  // namespace transformer_engine::pytorch

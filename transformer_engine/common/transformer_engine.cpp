@@ -692,11 +692,8 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
       std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
       break;
-    case kNVTEQuantizationConfigRNGSeed:
-      std::memcpy(&config_.rng_seed, buf, attr_size);
-      break;
-    case kNVTEQuantizationConfigRNGSequence:
-      std::memcpy(&config_.rng_sequence, buf, attr_size);
+    case kNVTEQuantizationConfigRNGState:
+      std::memcpy(&config_.rng_state, buf, attr_size);
       break;
     case kNVTEQuantizationConfigNVFP42DQuantization:
       std::memcpy(&config_.nvfp4_2d_quantization, buf, attr_size);

@@ -147,8 +147,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             TSFC    * SFC,
             TiledMMA mma,
             float const* global_amax,
-            size_t rng_seed,
-            size_t rng_sequence)
+            const size_t* rng_state)
 {
   using namespace cute;
   using X = Underscore;
@@ -172,6 +171,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   static constexpr int VectorSize = 16;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
   // Preconditions
   CUTE_STATIC_ASSERT(is_static<ASmemLayout>::value);
   CUTE_STATIC_ASSERT(is_static<BSmemLayout>::value);
@@ -544,8 +545,7 @@ rht_gemm_ntt_w_sfc(int m, int n,
         TC      * C,
         TSFC    * SFC,
         float const* global_amax,
-        size_t rng_seed,
-        size_t rng_sequence,
+        const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
         int k_tile_size = 2048)
@@ -664,7 +664,7 @@ rht_gemm_ntt_w_sfc(int m, int n,
        C, dC, sC,
        SFC,
        mma, global_amax,
-       rng_seed, rng_sequence);
+       rng_state);
 }
 
 // this function is used to wrap the rht_gemm_ntt_w_sfc function
@@ -677,8 +677,7 @@ rht_gemm_ttt_wrapper(int m, int n,
         TC      * C,
         TSFC    * SFC,
         float const* global_amax,
-        size_t rng_seed,
-        size_t rng_sequence,
+        const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
         int k_tile_size = 1024)
@@ -697,7 +696,7 @@ rht_gemm_ttt_wrapper(int m, int n,
     n, m,
     A, B, C,
     SFC, global_amax,
-    rng_seed, rng_sequence,
+    rng_state,
     sm_count, stream,
     k_tile_size);
 }
@@ -727,8 +726,16 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
 
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
-  const size_t rng_seed = quant_config.rng_seed;
-  const size_t rng_sequence = quant_config.rng_sequence;
+  const size_t *rng_state = nullptr;
+  if (quant_config.rng_state != nullptr) {
+    Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
+    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+               "Shape of the RNG state should be [2], but got ",
+               rng_state_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t*>(rng_state_tensor.data.dptr);
+  }
 
   // Template arguments
   using TA = cute::bfloat16_t;
@@ -806,8 +813,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
           /*C=*/reinterpret_cast<TC *>(output_t.dptr),
           /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
           /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-          /*rng_seed=*/rng_seed,
-          /*rng_sequence=*/rng_sequence,
+          /*rng_state=*/rng_state,
           /*sm_count=*/sm_count,
           /*stream=*/stream,
           /*k_tile_size=*/k_tile_size););

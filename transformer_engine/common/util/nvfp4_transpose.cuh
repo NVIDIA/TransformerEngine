@@ -347,8 +347,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
                            const float *noop, const float *const amax_rowwise_ptr,
                            const float *const amax_colwise_ptr, const size_t rows,
                            const size_t cols, const size_t scale_stride,
-                           const size_t scale_stride_t, const size_t rng_seed,
-                           const size_t rng_sequence) {
+                           const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -362,6 +361,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
   }
 
   const size_t rng_offest = threadIdx.x;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
   RNG rng(rng_seed, rng_sequence, rng_offest);  // seed, sequence, offset
   curanddx::uniform_bits dist;
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
@@ -857,8 +858,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
                               const float *noop, const float *const amax_rowwise_ptr,
                               const float *const amax_colwise_ptr, const size_t rows,
                               const size_t cols, const size_t scale_stride,
-                              const size_t scale_stride_t, const size_t rng_seed,
-                              const size_t rng_sequence) {
+                              const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -871,6 +871,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
   }
   const size_t rng_offest = threadIdx.x;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
   RNG rng(rng_seed, rng_sequence, rng_offest);  // seed, sequence, offset
   curanddx::uniform_bits dist;
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
@@ -1440,8 +1442,17 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
   const float *const amax_colwise_ptr =
       reinterpret_cast<const float *>(output->columnwise_amax.dptr);
 
-  const size_t rng_seed = (quant_config != nullptr) ? quant_config->rng_seed : 0;
-  const size_t rng_sequence = (quant_config != nullptr) ? quant_config->rng_sequence : 0;
+  const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
+  const size_t *rng_state = nullptr;
+  if (rng_state_tensor != nullptr) {
+    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_te_tensor.data.shape == std::vector<size_t>{2},
+               "Shape of the RNG state should be [2], but got ",
+               rng_state_te_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
+  }
 
   using IType = bf16;
 
@@ -1492,7 +1503,7 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
         kernel<<<grid, block_size, dshmem_size, stream>>>(
             tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
             scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-            scale_stride, scale_stride_transpose, rng_seed, rng_sequence);
+            scale_stride, scale_stride_transpose, rng_state);
       }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);

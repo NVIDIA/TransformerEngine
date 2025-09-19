@@ -2108,7 +2108,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),                             \
       /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,             \
       /*swizzled_scale=*/false, /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,  \
-      /*rng_seed=*/quant_config_cpp.rng_seed, /*rng_sequence=*/quant_config_cpp.rng_sequence,      \
+      /*rng_state=*/quant_config_cpp.rng_state,                                                    \
       /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,                              \
       /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
 

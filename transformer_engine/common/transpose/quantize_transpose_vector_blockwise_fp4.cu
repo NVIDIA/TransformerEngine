@@ -287,8 +287,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     OType* const output_t, ScaleType* const tile_scales_inv_c, ScaleType* const tile_scales_inv_t,
     const size_t row_length, const size_t num_rows, const size_t scale_stride_x,
     const size_t scale_stride_y, const size_t scale_t_stride_x, const size_t scale_t_stride_y,
-    const size_t kScaleBlockDim, const float epsilon, const size_t rng_seed,
-    const size_t rng_sequence, const float* noop_ptr) {
+    const size_t kScaleBlockDim, const float epsilon, const size_t *rng_state,
+    const float* noop_ptr) {
   constexpr int kNVecContainer = kNVecOut / kNFP4PerContainer;
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecContainer>;
@@ -304,6 +304,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   const size_t block_idx_x = blockIdx.x;
   const size_t block_idx_y = blockIdx.y;
   const size_t rng_offest = threadIdx.x;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
   RNG rng(rng_seed, rng_sequence, rng_offest);  // seed, sequence, offset
   curanddx::uniform_bits dist;
   uint4 random_uint4 = kApplyStochasticRounding ? dist.generate4(rng) : uint4{0, 0, 0, 0};
@@ -672,8 +674,8 @@ void quantize_transpose_vector_blockwise_fp4(
     const SimpleTensor& input, const SimpleTensor& global_amax, SimpleTensor& scale_inv,
     SimpleTensor& scale_inv_t, SimpleTensor& output, SimpleTensor& output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
-    const bool swizzled_scale, const bool use_stochastic_rounding, const size_t rng_seed,
-    const size_t rng_sequence, const bool use_2d_quantization, const SimpleTensor& noop_tensor,
+    const bool swizzled_scale, const bool use_stochastic_rounding, const NVTETensor rng_state_tensor,
+    const bool use_2d_quantization, const SimpleTensor& noop_tensor,
     cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
 #if CUDA_VERSION >= 12080
@@ -727,6 +729,18 @@ void quantize_transpose_vector_blockwise_fp4(
   // noop tensor for cuda graph
   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
+  const size_t *rng_state = nullptr;
+  if (rng_state_tensor != nullptr) {
+    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_te_tensor.data.shape == std::vector<size_t>{2},
+               "Shape of the RNG state should be [2], but got ",
+               rng_state_te_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
+  }
+
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
 
@@ -778,8 +792,8 @@ void quantize_transpose_vector_blockwise_fp4(
                                       reinterpret_cast<ScaleType*>(scale_inv.dptr),
                                       reinterpret_cast<ScaleType*>(scale_inv_t.dptr), row_length,
                                       num_rows, scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                      scale_t_stride_y, kScaleBlockDim, epsilon, rng_seed,
-                                      rng_sequence, noop_ptr);)  // kIs2DBlockScaling
+                                      scale_t_stride_y, kScaleBlockDim, epsilon, rng_state,
+                                      noop_ptr);)  // kIs2DBlockScaling
                               )                                  // kApplyStochasticRounding
                           )                                      // kSwizzledScale
                       )                                          // kAligned
