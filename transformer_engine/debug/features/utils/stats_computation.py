@@ -26,6 +26,7 @@ def _compute_dynamic_range_top(tensor):
     return torch.log2(amax)
 
 
+@torch.compile
 def _compute_dynamic_range_bottom(tensor):
     """Computes the log2 of the amin of the tensor"""
     tensor_abs = tensor.abs()
@@ -37,6 +38,51 @@ def _compute_dynamic_range_bottom(tensor):
     return torch.log2(amin)
 
 
+@torch.compile
+def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
+    """
+    Max blockwise dynamic range (log2 max/min_nonzero).
+    Returns 0 if all blocks are zeros.
+    Otherwise computes dynamic range over non-zero blocks.
+
+    For dims = 1 blocks contain block_size consecutive elements,
+    for dims = 2 blocks contain block_size x block_size elements.
+    """
+    total_numel = tensor.numel()
+    assert (
+        total_numel % (block_size**dims) == 0
+    ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
+
+    tensor = tensor.abs().float()
+    if dims == 1:
+        tensor = tensor.reshape(-1, block_size)
+        per_block_amax = tensor.amax(dim=1)
+        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
+    else:
+        # We want to have tensor of shape [nr_blocks, block_size, block_size],
+        # where each block is a block_size x block_size tile of the original tensor.
+        dim_x = tensor.shape[-2] // block_size
+        dim_y = tensor.shape[-1] // block_size
+        tensor = (
+            tensor.reshape(-1, dim_x, block_size, dim_y, block_size)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(-1, block_size, block_size)
+        )
+        per_block_amax = tensor.amax(dim=(1, 2))
+        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
+
+    # Identify blocks that contain any non-zero element
+    nonzero_blocks = per_block_amax != 0
+    dynamic_range_per_block = torch.where(
+        nonzero_blocks,
+        torch.log2(per_block_amax) - torch.log2(per_block_amin),
+        torch.zeros_like(per_block_amax, dtype=torch.float32),
+    )
+    return dynamic_range_per_block.max()
+
+
+@torch.compile
 def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
     mean = torch.sum(sums) / torch.sum(numels)
@@ -45,6 +91,7 @@ def compute_variance(variances, numels, sums):
     return var
 
 
+@torch.compile
 def compute_std(variances, numels, sums):
     """Computates standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
@@ -314,6 +361,23 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
     DEPENDENCIES[stat_err] = {stat_err}
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
+
+
+def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int):
+    """Register max_blockwise_X_dynamic_range stats for the recipe."""
+    stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"
+    if stat_name in stats_to_num:
+        return  # already registered
+    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
+    stats_to_num[stat_name] = len(stats_to_num)
+    DEPENDENCIES[stat_name] = {stat_name}
+
+    STATS[stat_name] = (
+        lambda x, aux_dict, _block_size=block_size, _dims=dims: compute_max_blockwise_dynamic_range(
+            x, _block_size, _dims
+        ),
+        lambda buffers: max(_get(buffers, stat_name)),
+    )
 
 
 for _columnwise in [True, False]:
