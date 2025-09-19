@@ -229,17 +229,18 @@ log:
       end_step: 10
 """
 
-
 def test_log_stats_numerics(feature_dirs):
+    """ Check corectness of dynamic range and max blockwise dynamic range stats """
     stats = ["dynamic_range", "max_blockwise_4_dynamic_range"]
     log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
 
     with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
-
+        # There is 1024 x 1024 tensor with very small epsilon values in almost all elements,
+        # one row of large value A and three rows of large value B.
         epsilon = 1e-10
-        tensor = torch.zeros(1024, 1024).cuda() + epsilon
         A = 1000
         B = 50
+        tensor = torch.zeros(1024, 1024).cuda() + epsilon
         tensor[0, :] = A
         tensor[1:4, :] = B
 
@@ -322,7 +323,3 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
     debug_api.end_debug()
     TEDebugState._reset()
-
-
-def test_max_blockwise_dynamic_range(feature_dirs):
-    pass

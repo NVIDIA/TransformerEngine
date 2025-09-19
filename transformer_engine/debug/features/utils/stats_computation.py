@@ -40,9 +40,13 @@ def _compute_dynamic_range_bottom(tensor):
 
 @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
-    """Max blockwise dynamic range (log2 max/min_nonzero).
-    Returns 0 if all blocks are zeros.
-    Otherwise computes dynamic range over non-zero blocks.
+    """
+        Max blockwise dynamic range (log2 max/min_nonzero).
+        Returns 0 if all blocks are zeros.
+        Otherwise computes dynamic range over non-zero blocks.
+
+        For dims = 1 blocks contain block_size consecutive elements,
+        for dims = 2 blocks contain block_size x block_size elements.
     """
     total_numel = tensor.numel()
     assert (
@@ -56,10 +60,12 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
         per_block_amax = tensor.amax(dim=1)
         per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
     else:
-        dim_a = tensor.shape[-2] // block_size
-        dim_b = tensor.shape[-1] // block_size
+        # We want to have tensor of shape [nr_blocks, block_size, block_size],
+        # where each block is a block_size x block_size tile of the original tensor.
+        dim_x = tensor.shape[-2] // block_size
+        dim_y = tensor.shape[-1] // block_size
         tensor = (
-            tensor.reshape(-1, dim_a, block_size, dim_b, block_size)
+            tensor.reshape(-1, dim_x, block_size, dim_y, block_size)
             .permute(0, 1, 3, 2, 4)
             .reshape(-1, block_size, block_size)
         )
@@ -68,11 +74,12 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
 
     # Identify blocks that contain any non-zero element
     nonzero_blocks = per_block_amax != 0
-    if not torch.any(nonzero_blocks):
-        # If all blocks are zero, return 0
-        return torch.zeros((), device=tensor.device, dtype=torch.float32)
-
-    return (torch.log2(per_block_amax) - torch.log2(per_block_amin)).max()
+    dynamic_range_per_block = torch.where(
+        nonzero_blocks,
+        torch.log2(per_block_amax) - torch.log2(per_block_amin),
+        torch.zeros_like(per_block_amax, dtype=torch.float32),
+    )
+    return dynamic_range_per_block.max()
 
 
 @torch.compile
