@@ -99,7 +99,6 @@ enum class JAXX_Collective_Op : int64_t {
   REDUCE_SCATTER = 2,
 };
 
-// We seem to not need this function yet
 static CommOverlapType get_nvte_collective_op(const JAXX_Collective_Op &op) {
   switch (op) {
     case JAXX_Collective_Op::ALL_GATHER:

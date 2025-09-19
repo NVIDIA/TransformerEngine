@@ -22,6 +22,8 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    initialize_cgemm_communicator,
+    get_cgemm_num_max_streams,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -51,10 +53,10 @@ from ..sharding import (
 
 
 __all__ = [
-    "CollectiveGemmConfig",
-    "CollectiveGemmConfigSet",
     "CollectiveOp",
-    "noop_cgemm_config_set",
+    "CollectiveOpSet",
+    "collective_gemm_bootstrap",
+    "noop_collective_op_set",
     "gemm",
     "grouped_gemm",
     "gemm_uses_jax_dot",
@@ -165,6 +167,114 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     return lhs_q, rhs_q
 
 
+def collective_gemm_bootstrap(
+    num_total_devices,
+    num_devices_per_process,
+    process_id,
+    tensor_parallel_size,
+    num_max_streams=3,
+    compute_stream_priority=0,
+    communication_stream_priority=0,
+    num_sm_for_communication=2,
+    use_ce=True,
+    aggregate_all_gather=False,
+):
+    """Initialize NCCL communicators for Collective GEMM operations.
+
+    This function sets up the distributed communication infrastructure needed for
+    tensor parallel collective GEMM operations. It supports two main scenarios:
+
+    1. **Multi-device per process**: TP domain = single process
+       - Each process manages multiple GPUs (num_devices_per_process > 1)
+       - TP group consists of GPUs within the same process
+       - Example: 2 processes × 4 GPUs each = 8 total ranks, tp_size=4
+
+    2. **Single device per process**: TP domain spans multiple processes
+       - Each process manages one GPU (num_devices_per_process = 1)
+       - TP group spans across multiple processes
+       - Example: 8 processes × 1 GPU each = 8 total ranks, tp_size=4
+
+    Args:
+        num_total_devices (int): Total number of ranks across all processes.
+            Must be divisible by num_devices_per_process.
+        num_devices_per_process (int): Number of GPUs per process.
+            - For multi-device: equals tp_size (e.g., 4 GPUs per process)
+            - For single-device: equals 1 (1 GPU per process)
+        process_id (int): Process identifier (0-based).
+            Must be in range [0, num_total_devices // num_devices_per_process).
+        tensor_parallel_size (int): Size of tensor parallel groups.
+            Must divide num_total_devices evenly.
+        num_max_streams (int, optional): Maximum number of CUDA streams for overlap.
+            Higher values enable more parallelism but use more GPU resources. Default: 3.
+        compute_stream_priority (int, optional): Priority for GEMM computation streams.
+            Lower values = higher priority. Range: 0 (highest) to 3 (lowest). Default: 0.
+        communication_stream_priority (int, optional): Priority for NCCL communication streams.
+            Lower values = higher priority. Range: 0 (highest) to 3 (lowest). Default: 0.
+        num_sm_for_communication (int, optional): Number of streaming multiprocessors
+            reserved for communication operations. Default: 2.
+        use_ce (bool, optional): Enable CUDA copy engines for memory transfers.
+            Can improve performance by offloading memory operations. Default: True.
+        aggregate_all_gather (bool, optional): Aggregate multiple small all-gather operations
+            into larger ones for better efficiency. Default: False.
+
+    Raises:
+        AssertionError: If num_total_devices is not divisible by num_devices_per_process,
+            or if process_id is out of valid range.
+        AssertionError: If num_devices_per_process is not 1 (Temporary: only single device per process is supported for now)
+        RuntimeError: If NCCL initialization fails or if configuration
+            is invalid (e.g., insufficient GPUs).
+
+    Example:
+        # Basic initialization (single device per process)
+        collective_gemm_bootstrap(
+            num_total_devices=8,
+            num_devices_per_process=1,
+            process_id=0,
+            tensor_parallel_size=4
+        )
+
+        # Advanced configuration with custom performance settings
+        collective_gemm_bootstrap(
+            num_total_devices=8,
+            num_devices_per_process=1,
+            process_id=0,
+            tensor_parallel_size=4,
+            num_max_streams=5,                    # More parallelism
+            compute_stream_priority=1,            # Lower compute priority
+            communication_stream_priority=0,      # Higher comm priority
+            num_sm_for_communication=4,           # More SMs for communication
+            use_ce=True,                         # Enable copy engines
+            aggregate_all_gather=True            # Aggregate small operations
+        )
+
+    Note:
+        This function must be called after JAX distributed initialization
+        and before any collective GEMM operations. Each process should call
+        this function with its own unique process_id.
+    """
+
+    assert (
+        num_devices_per_process == 1 and jax.local_device_count() == 1
+    ), "Only single device per process is supported at the moment!"
+    assert num_total_devices % num_devices_per_process == 0, (
+        f"Invalid num_total_devices={num_total_devices},"
+        f" num_devices_per_process={num_devices_per_process}"
+    )
+    assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
+    initialize_cgemm_communicator(
+        num_total_devices,
+        num_devices_per_process,
+        process_id,
+        tensor_parallel_size,
+        num_max_streams,
+        compute_stream_priority,
+        communication_stream_priority,
+        num_sm_for_communication,
+        use_ce,
+        aggregate_all_gather,
+    )
+
+
 class CollectiveOp(Enum):
     "Enum for Collective Type in Collective GEMM"
 
@@ -189,118 +299,27 @@ class CollectiveOp(Enum):
 
 
 @dataclass(frozen=True)
-class CollectiveGemmConfig:
+class CollectiveOpSet:
     """
-    Configuration object that carries collective GEMM configuration
+    A set of CollectiveOp objects that provide complementary collective GEMM configurations for the Forward and Backward passes through Dense-layers.
     """
 
-    collective_op: CollectiveOp
-    num_max_streams: int
-    lowering_cgemm_attrs: dict
-
-    def __hash__(self):
-        return hash(tuple(self.lowering_cgemm_attrs.items()))
+    forward: CollectiveOp
+    backward: CollectiveOp
 
     @staticmethod
-    def create(
-        collective_op: CollectiveOp,
-        num_max_streams: int = 3,
-        gemm_priority: int = 0,
-        comm_priority: int = 0,
-        num_comm_sm: int = None,
-        use_ce: bool = True,
-        aggregate_ag: bool = False,
-    ):
-        """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
-
-        tp_size = tpsp_axis_size() if not collective_op.is_none else 1
-        num_comm_sm = num_comm_sm or 2
-
-        # Create the communication plan
-        lowering_cgemm_attrs = {
-            "collective_op": int(collective_op.value),
-            "tp_size": int(tp_size),
-            "num_max_streams": int(num_max_streams),
-            "gemm_priority": int(gemm_priority),
-            "comm_priority": int(comm_priority),
-            "num_comm_sm": int(num_comm_sm),
-            "use_ce": use_ce,
-            "aggregate_ag": aggregate_ag,
-        }
-
-        # Create the instance
-        instance = CollectiveGemmConfig(
-            collective_op=collective_op,
-            num_max_streams=num_max_streams,
-            lowering_cgemm_attrs=lowering_cgemm_attrs,
-        )
-
-        return instance
-
-    def __post_init__(self):
-        """Validate the configuration after initialization."""
-        if not self.collective_op.is_none:
-            assert tpsp_axis_size() > 1, (
-                "Communication + GEMM overlap requires a valid TP axis size. Got TP axis size"
-                f" {tpsp_axis_size()}."
-            )
-            assert (
-                tpsp_axis_size() % 2 == 0
-            ), f"Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
-
-
-@dataclass(frozen=True)
-class CollectiveGemmConfigSet:
-    """
-    A set of CollectiveGemmConfig objects that provide complementary collective GEMM configurations for the Forward and Backward passes through Dense-layers.
-    """
-
-    forward: CollectiveGemmConfig
-    backward: CollectiveGemmConfig
-
-    @staticmethod
-    def create(
-        forward_collective_op: CollectiveOp,
-        num_max_streams: int = 3,
-        gemm_priority: int = 0,
-        comm_priority: int = 0,
-        num_comm_sm: int = None,
-        use_ce: bool = True,
-        aggregate_ag: bool = False,
-    ):
-        """Create a set of CollectiveGemmConfig"""
+    def create(forward_collective_op: CollectiveOp):
+        """Create a set of CollectiveOp for forward and backward passes"""
         if forward_collective_op.is_all_gather:
             backward_collective_op = CollectiveOp.REDUCE_SCATTER
         elif forward_collective_op.is_reduce_scatter:
             backward_collective_op = CollectiveOp.ALL_GATHER
         else:
             backward_collective_op = CollectiveOp.NONE
-
-        forward = CollectiveGemmConfig.create(
-            forward_collective_op,
-            num_max_streams,
-            gemm_priority,
-            comm_priority,
-            num_comm_sm,
-            use_ce,
-            aggregate_ag,
-        )
-
-        backward = CollectiveGemmConfig.create(
-            backward_collective_op,
-            num_max_streams,
-            gemm_priority,
-            comm_priority,
-            num_comm_sm,
-            use_ce,
-            aggregate_ag,
-        )
-        return CollectiveGemmConfigSet(forward=forward, backward=backward)
+        return CollectiveOpSet(forward=forward_collective_op, backward=backward_collective_op)
 
 
-noop_cgemm_config = CollectiveGemmConfig.create(collective_op=CollectiveOp.NONE)
-
-noop_cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.NONE)
+noop_collective_op_set = CollectiveOpSet.create(forward_collective_op=CollectiveOp.NONE)
 
 
 @partial(jax.jit, static_argnums=(1, 2))
@@ -347,7 +366,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
     ):
         del use_split_accumulator, transpose_batch_sequence
 
@@ -420,10 +439,10 @@ class GemmPrimitive(BasePrimitive):
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         # Adjust output shape for comm+GEMM overlap
-        if not cgemm_config.collective_op.is_none and not is_outer:  # Inner abstract
+        if not collective_op.is_none and not is_outer:  # Inner abstract
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             overlap_out_shape = list(out_shape).copy()
-            if cgemm_config.collective_op.is_all_gather:
+            if collective_op.is_all_gather:
                 overlap_out_shape[1] *= tpsp_axis_size()
             else:  # RS
                 overlap_out_shape[sequence_dim] = (
@@ -473,8 +492,8 @@ class GemmPrimitive(BasePrimitive):
 
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
-        if not cgemm_config.collective_op.is_none:
-            workspace_size *= cgemm_config.num_max_streams
+        if not collective_op.is_none:
+            workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -506,7 +525,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
     ):
         del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
 
@@ -527,6 +546,7 @@ class GemmPrimitive(BasePrimitive):
             "fuse_gelu": fuse_gelu,
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
+            "collective_op": int(collective_op.value),
         }
 
         operand_output_aliases = {}
@@ -538,7 +558,7 @@ class GemmPrimitive(BasePrimitive):
         return jax.ffi.ffi_lowering(
             GemmPrimitive.name,
             operand_output_aliases=operand_output_aliases,
-        )(ctx, *args, **kwargs, cgemm_config=cgemm_config.lowering_cgemm_attrs)
+        )(ctx, *args, **kwargs)
 
     @staticmethod
     def impl(
@@ -558,7 +578,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
     ):
         if scaling_mode.is_1d_block_scaling():
             lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
@@ -579,12 +599,21 @@ class GemmPrimitive(BasePrimitive):
 
         # Alter lhs blocks so that CGEMM RS outputs correctly
         if (
-            cgemm_config.collective_op.is_reduce_scatter
+            collective_op.is_reduce_scatter
             and not transpose_batch_sequence
             and not is_outer
+            and not lhs.shape[0] == 1
         ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+                f"Original_shape[0]={original_shape[0]} is not divisible by"
+                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            )
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+                f"Original_shape[1]={original_shape[1]} is not divisible by"
+                f" tpsp_axis_size()={tpsp_axis_size()}"
+            )
             reshaped = lhs.reshape(
                 dp_or_fsdp_axis_size(),
                 int(original_shape[0] / dp_or_fsdp_axis_size()),
@@ -609,19 +638,28 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
-            cgemm_config=cgemm_config,
+            collective_op=collective_op,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=is_outer,
         )
         # Alter output blocks for CGEMM AG
         if (
-            cgemm_config.collective_op.is_all_gather
+            collective_op.is_all_gather
             and not transpose_batch_sequence
             and not is_outer
+            and not output.shape[0] == 1
         ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+                f"Original_shape[0]={original_shape[0]} is not divisible by"
+                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            )
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+                f"Original_shape[1]={original_shape[1]} is not divisible by"
+                f" tpsp_axis_size()={tpsp_axis_size()}"
+            )
             reshaped = output.reshape(
                 tpsp_axis_size(),
                 dp_or_fsdp_axis_size(),
@@ -649,6 +687,10 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
+        collective_op,
     ):
         return GemmPrimitive.impl(
             lhs,
@@ -664,6 +706,10 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu,
             grad,
             use_split_accumulator,
+            transpose_batch_sequence,
+            sequence_dim,
+            is_outer,
+            collective_op,
         )
 
     @staticmethod
@@ -677,7 +723,7 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        cgemm_config,
+        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
@@ -716,7 +762,10 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                cgemm_config=cgemm_config,
+                collective_op=collective_op,
+                transpose_batch_sequence=transpose_batch_sequence,
+                sequence_dim=sequence_dim,
+                is_outer=is_outer,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -726,7 +775,7 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         contracting_dims,
         transpose_batch_sequence,
-        cgemm_config,
+        collective_op,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -756,7 +805,7 @@ class GemmPrimitive(BasePrimitive):
 
         # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
         # We only do CollectiveGemm AG on the x or dY thus they always the LHS and have sequence dim
-        if cgemm_config.collective_op.is_all_gather:
+        if collective_op.is_all_gather:
             try:
                 tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
             except ValueError as exc:
@@ -772,7 +821,7 @@ class GemmPrimitive(BasePrimitive):
                 f" transpose_batch_sequence={transpose_batch_sequence}."
             )
 
-        elif cgemm_config.collective_op.is_reduce_scatter:
+        elif collective_op.is_reduce_scatter:
             assert reduce_spec == gsr.tpsp_resource, (
                 "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
                 f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
@@ -783,7 +832,7 @@ class GemmPrimitive(BasePrimitive):
             # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             # Only do AG Sequence dim if not Overlap
-            if cgemm_config.collective_op.is_all_gather:
+            if collective_op.is_all_gather:
                 rhs_cspecs = tuple(
                     s if s in (reduce_spec, gsr.tpsp_resource) else None for s in rhs_cspecs
                 )
@@ -809,7 +858,7 @@ class GemmPrimitive(BasePrimitive):
             )
 
         # Only do AG Sequence dim if not Overlap
-        if not cgemm_config.collective_op.is_all_gather:
+        if not collective_op.is_all_gather:
             # Non-contracting dims of LHS to be gathered along the SP axis.
             # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
             # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
@@ -820,12 +869,12 @@ class GemmPrimitive(BasePrimitive):
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
         # Only do AG Sequence dim if not Overlap RS
-        if cgemm_config.collective_op.is_all_gather:
+        if collective_op.is_all_gather:
             assert sequence_dim <= len(
                 lhs_non_cspecs
             ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
             out_specs = out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
-        elif cgemm_config.collective_op.is_reduce_scatter:
+        elif collective_op.is_reduce_scatter:
             assert sequence_dim <= len(
                 lhs_non_cspecs
             ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
@@ -847,7 +896,7 @@ class GemmPrimitive(BasePrimitive):
         bias_specs = tuple(list(rhs_non_cspecs).copy())
         gelu_specs = tuple(list(out_specs).copy())
 
-        if not cgemm_config.collective_op.is_none:
+        if not collective_op.is_none:
             assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
 
         return (
@@ -869,7 +918,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
         mesh,
         arg_infos,
         result_infos,
@@ -886,7 +935,7 @@ class GemmPrimitive(BasePrimitive):
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
             GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config
+                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
             )
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
@@ -915,7 +964,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
         mesh,
         arg_infos,
         result_infos,
@@ -928,7 +977,10 @@ class GemmPrimitive(BasePrimitive):
             reduce_spec,
             inferred_sequence_dim,
         ) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config
+            arg_infos,
+            contracting_dims,
+            transpose_batch_sequence,
+            collective_op,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
@@ -983,10 +1035,10 @@ class GemmPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=inferred_sequence_dim,
                 is_outer=False,
-                cgemm_config=cgemm_config,
+                collective_op=collective_op,
             )
 
-            if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
+            if reduce_spec is not None and not collective_op.is_reduce_scatter:
                 if is_all_reduce_in_float32():  # For unittest only
                     outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(
                         out_dtype
@@ -1010,15 +1062,15 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        cgemm_config,
+        collective_op,
         mesh,
         operand_types,
         result_types,
     ):
         del out_dtype, grad, use_split_accumulator
-        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, cgemm_config
+        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer
 
-        if cgemm_config is not None:
+        if not collective_op.is_none:
             raise NotImplementedError(
                 "CollectiveGEMM with Shardy propagation is not supported yet! Please turn off"
                 " Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false"
@@ -1110,7 +1162,7 @@ def _te_gemm(
     grad: bool = False,
     use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
     transpose_batch_sequence: bool = False,
-    cgemm_config: CollectiveGemmConfig = noop_cgemm_config,
+    collective_op: CollectiveOp = CollectiveOp.NONE,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -1182,7 +1234,7 @@ def _te_gemm(
         transpose_batch_sequence=transpose_batch_sequence,
         sequence_dim=-1,
         is_outer=True,
-        cgemm_config=cgemm_config,
+        collective_op=collective_op,
     )
 
 
@@ -1501,7 +1553,7 @@ def gemm(
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     transpose_batch_sequence: bool = False,
-    cgemm_config: CollectiveGemmConfig = noop_cgemm_config,
+    collective_op: CollectiveOp = CollectiveOp.NONE,
     **kwargs,
 ) -> Tuple[jnp.ndarray, ...]:
     r"""General matrix multiplication with optional quantization.
@@ -1538,8 +1590,8 @@ def gemm(
         the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
-    cgemm_config: CollectiveGemmConfig, default = noop_cgemm_config
-        Helper object that manages comm+GEMM overlap options.
+    collective_op: CollectiveOp, default = CollectiveOp.NONE
+        Collective operation type for collective GEMM.
 
     Returns
     -------
@@ -1583,7 +1635,7 @@ def gemm(
             "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
             "GEMM primitive is disabled."
         )
-        assert cgemm_config.collective_op.is_none, "JAX GEMM does not support collective GEMM"
+        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
         return _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
 
     outputs = _te_gemm(
@@ -1593,7 +1645,7 @@ def gemm(
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
         transpose_batch_sequence=transpose_batch_sequence,
-        cgemm_config=cgemm_config,
+        collective_op=collective_op,
         **kwargs,
     )
 

@@ -12,10 +12,13 @@
 #include <tuple>
 
 #include "../extensions.h"
+#include "cgemm_helper.h"
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
+#include "cuda_runtime.h"
+#include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 
@@ -69,51 +72,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-//TODO: Move these there to TE/Common
-class CollectiveGemmPlanRegistry {
- public:
-  static CollectiveGemmPlanRegistry &getInstance() {
-    static thread_local CollectiveGemmPlanRegistry instance;
-    return instance;
-  }
-
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                CollectiveGemmConfig cgemm_config) {
-    int64_t plan_id = 0;
-    hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
-                 static_cast<int>(cgemm_config.collective_op), cgemm_config.tp_size,
-                 cgemm_config.num_max_streams, cgemm_config.gemm_priority,
-                 cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce,
-                 cgemm_config.aggregate_ag);
-
-    // Check if plan already exists
-    auto it = plan_map.find(plan_id);
-    if (it != plan_map.end()) {
-      return it->second.get();  // Return existing executor
-    }
-
-    // Create new plan
-    std::unique_ptr<CommOverlapCore> executor;
-    executor = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, cgemm_config.tp_size,
-        get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
-        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
-        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
-        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
-
-    CommOverlapCore *executor_ptr = executor.get();
-    plan_map[plan_id] = std::move(executor);
-    return executor_ptr;
-  }
-
- private:
-  CollectiveGemmPlanRegistry() {}
-  CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
-  CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
-
-  std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_map;
-};
-
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
                                  Buffer_Type gelu_input, Result_Type output, Result_Type bias_grad,
@@ -121,12 +79,13 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                                  int64_t rhs_axis_boundary, bool lhs_transposed,
                                  bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                                 bool use_split_accumulator, CollectiveGemmConfig cgemm_config) {
-  // Init cublas handler
+                                 bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   nvte_cublas_handle_init();
 
+  auto &comm_handler = CommunicatorHandler::get();
+
   // Init UB buffer
-  if (cgemm_config.collective_op != JAXX_Collective_Op::NONE) {
+  if (collective_op != JAXX_Collective_Op::NONE) {
     std::vector<size_t> lhs_shape = {
         product(lhs.dimensions(), 0, lhs_axis_boundary),
         product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
@@ -139,16 +98,16 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
 
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+    if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
       buffer_shape[1] = lhs_shape[1];
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+    } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
     auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
-                                                                    cgemm_config);
+                                                                    collective_op);
   }
   return ffi_with_cuda_error_check();
 }
@@ -174,7 +133,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<CollectiveGemmConfig>("cgemm_config"));
+                                  .Attr<JAXX_Collective_Op>("collective_op"));
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -182,7 +141,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Result_Type workspace, JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
-                   CollectiveGemmConfig cgemm_config) {
+                   JAXX_Collective_Op collective_op) {
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
@@ -237,7 +196,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-  if (cgemm_config.collective_op == JAXX_Collective_Op::NONE) {
+
+  if (collective_op == JAXX_Collective_Op::NONE) {
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
     NVTE_CHECK(out_.numel() == output->element_count(),
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
@@ -250,19 +210,20 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   } else {
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
-    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+    auto &comm_handler = CommunicatorHandler::get();
+    if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
       buffer_shape[1] = lhs_shape[1];
-      out_shape[0] = out_shape[0] * cgemm_config.tp_size;
+      out_shape[0] = out_shape[0] * comm_handler.tp_size;
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+    } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
-      out_shape[0] = out_shape[0] / cgemm_config.tp_size;
+      out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
-        buffer_shape, buffer_dtype, cgemm_config);
-    if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+        buffer_shape, buffer_dtype, collective_op);
+    if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -277,7 +238,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                                  stream);
 
       // TODO: Don't we need to copy the output back to the original buffer?
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
+    } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
 
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -287,7 +248,6 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                  " elements ", to_string_like(output->dimensions()));
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
-
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
@@ -319,7 +279,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<CollectiveGemmConfig>("cgemm_config"),
+                                  .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,

@@ -502,10 +502,7 @@ void destroy_communicator(communicator *comm) {
 
 void destroy_communicator_mpi(communicator *comm) {
 #ifdef NVTE_UB_WITH_MPI
-  auto comm_ptr = static_cast<MPI_Comm>(comm->comm_intra);
-  if (comm_ptr != MPI_COMM_NULL) {
-    // MPI_Comm_free(&comm_ptr);    # TODO: this made the program crash
-  }
+  MPI_Comm_free(static_cast<MPI_Comm *>(&(comm->comm_intra)));
   destroy_communicator(comm);
 #else
   NVTE_ERROR(std::string("Communicator is not bootstrapped with MPI and ") +

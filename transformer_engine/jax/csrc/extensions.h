@@ -121,17 +121,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
-struct CollectiveGemmConfig {
-  JAXX_Collective_Op collective_op;
-  int64_t tp_size;
-  int64_t num_max_streams;
-  int64_t gemm_priority;
-  int64_t comm_priority;
-  int64_t num_comm_sm;
-  bool use_ce;
-  bool aggregate_ag;
-};
-
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
@@ -147,14 +136,5 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::CollectiveGemmConfig,
-    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
-    ::xla::ffi::StructMember<int64_t>("tp_size"),
-    ::xla::ffi::StructMember<int64_t>("num_max_streams"),
-    ::xla::ffi::StructMember<int64_t>("gemm_priority"),
-    ::xla::ffi::StructMember<int64_t>("comm_priority"),
-    ::xla::ffi::StructMember<int64_t>("num_comm_sm"), ::xla::ffi::StructMember<bool>("use_ce"),
-    ::xla::ffi::StructMember<bool>("aggregate_ag"));
 
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
