@@ -13,7 +13,6 @@
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
-
 #include <cuda_runtime.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
