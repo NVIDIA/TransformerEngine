@@ -97,21 +97,37 @@ class LogTensorStats(BaseLogTensorStats):
     """
 
     def _is_supported_stat(self, stat: str | Dict):
-        """Returns True if the stat is supported by this feature."""
+        """ Returns True if the stat is supported by this feature, False otherwise. """
         if isinstance(stat, dict):
             stat_name = list(stat.keys())[0]
-            assert stat_name == "max_blockwise_dynamic_range"
-            stat_dict = stat[stat_name]
-            assert set(stat_dict.keys()) == {"block_size", "dims"}
-            assert stat_dict["block_size"] > 0 and stat_dict["dims"] in [1, 2]
-            return True
+            if stat_name == "max_blockwise_dynamic_range":
+                stat_dict = stat[stat_name]
+                if not isinstance(stat_dict, dict):
+                    return False
+                # Ensure only supported keys are present
+                allowed_keys = {"block_size", "dims"}
+                if any(k not in allowed_keys for k in stat_dict.keys()):
+                    return False
+                block_size = stat_dict.get("block_size", 32)
+                dims = stat_dict.get("dims", 1)
+                # Type and value validation
+                if not isinstance(block_size, int) or not isinstance(dims, int):
+                    return False
+                if block_size > 0 and dims in [1, 2]:
+                    return True
+            return False
         return stat in BaseLogTensorStats._get_supported_stats_list(None) | {
             "cur_amax",
             "dynamic_range",
         }
 
-    def parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict]):
-        """Adds max_blockwise_X_dynamic_range stats for the recipe."""
+    def _parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict]) -> List[str]:
+        """
+            Adds all max_blockwise_dynamic_range stats to the stat computation logic.
+            Changes the types of the stats from Dict to str, for other stats nothing is changed.
+            For example, if the stats is [{"max_blockwise_dynamic_range": {"block_size": 32, "dims": 1}}],
+            it will be changed to ["max_blockwise_dynamic_range_block_size_32_dims_1"].
+        """
         parsed_stats = []
         for stat in stats:
             if isinstance(stat, dict):
@@ -182,7 +198,7 @@ class LogTensorStats(BaseLogTensorStats):
                 stat
             ), f"[NVTORCH INSPECT ERROR] Statistic {stat} is not supported."
 
-        stats = self.parse_max_blockwise_dynamic_range_stats(config["stats"])
+        stats = self._parse_max_blockwise_dynamic_range_stats(config["stats"])
 
         STATS_BUFFERS.try_add_buffer(
             layer_name=layer_name,
