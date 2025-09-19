@@ -107,6 +107,10 @@ size_t DIVUP(const size_t &x, const size_t &y){
   return (((x) + ((y)-1)) / (y));
 }
 
+size_t DIVUP_TO_MULTIPLE(const size_t &x, const size_t &y){
+  return DIVUP(x, y) * y;
+}
+
 struct scale_inv_meta {
   std::vector<size_t> shape;
   DType type;
@@ -143,21 +147,71 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    auto block_alignment = std::vector<size_t>{128ul, 4ul};
-    {
-      auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
-      alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(32)), alignment) * alignment;
-      ret_rowwise.shape = {scale_dim_0, scale_dim_1};
+    const size_t block_size_X_rowwise = 32;
+    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
+    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
+
+    const size_t block_size_Y_colwise = 32;
+    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
+    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
+    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
+
+    ret_rowwise.type = DType::kFloat8E8M0;
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    ret_colwise.type = DType::kFloat8E8M0;
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+
+    return {ret_rowwise, ret_colwise};
+  }
+  if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+    std::vector<size_t> shape_vec;
+    for (size_t i = 0; i < shape.ndim; ++i) {
+      shape_vec.push_back(shape.data[i]);
     }
-    {
-      auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(32)), alignment) * alignment;
-      alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
-      ret_colwise.shape = {scale_dim_0, scale_dim_1};
+    size_t first_dim = first_dimension(shape_vec);
+    size_t last_dim = last_dimension(shape_vec);
+
+    NVTE_CHECK(last_dim % 32 == 0);
+    NVTE_CHECK(first_dim % 32 == 0);
+
+    scale_inv_meta ret_rowwise, ret_colwise;
+
+    size_t scale_dim_Y = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X = DIVUP_TO_MULTIPLE(DIVUP(last_dim, 16lu), scale_tensor_alignment_X_rowwise);
+    ret_rowwise.shape = {scale_dim_Y, scale_dim_X};
+
+    size_t scale_dim_Y_t = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 16lu), scale_tensor_alignment_X_rowwise);
+    ret_colwise.shape = {scale_dim_Y_t, scale_dim_X_t};
+
+    ret_rowwise.type = DType::kFloat8E4M3;
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+    ret_colwise.type = DType::kFloat8E4M3;
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+
+    return {ret_rowwise, ret_colwise};
+  }
+  if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    std::vector<size_t> shape_vec;
+    for (size_t i = 0; i < shape.ndim; ++i) {
+      shape_vec.push_back(shape.data[i]);
     }
+    size_t first_dim = first_dimension(shape_vec);
+    size_t last_dim = last_dimension(shape_vec);
+
+    scale_inv_meta ret_rowwise, ret_colwise;
+
+    const size_t block_size_X_rowwise = 32;
+    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
+    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
+
+    const size_t block_size_Y_colwise = 32;
+    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
+    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
+    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
+
     ret_rowwise.type = DType::kFloat8E8M0;
     ret_colwise.type = DType::kFloat8E8M0;
     ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
@@ -176,13 +230,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret_rowwise, ret_colwise;
 
     {
-      auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(128)), 4) * 4;
+      size_t scale_dim_0 = DIVUP(first_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 128lu), 4) * 4;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(DIVUP(first_dim, static_cast<size_t>(128)), 4) * 4;
+      size_t scale_dim_0 = DIVUP(last_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(DIVUP(first_dim, 128lu), 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -202,13 +256,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret_rowwise, ret_colwise;
 
     {
-      auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(first_dim, 4) * 4;
+      size_t scale_dim_0 = DIVUP(last_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(first_dim, 4) * 4;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(last_dim, 4) * 4;
+      size_t scale_dim_0 = DIVUP(first_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(last_dim, 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -250,14 +304,15 @@ Tensor::Tensor(const std::string& name,
   NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING
+      || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // Transpose when tensor scaling
     columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
     for (size_t i = 0; i < shape.ndim - 1; ++i) {
       columnwise_shape_vec.emplace_back(shape.data[i]);
     }
   } else {
-    // Same shape for MX
+    // Same shape for MX and NVFP4
     for (size_t i = 0; i < shape.ndim; ++i) {
       columnwise_shape_vec.emplace_back(shape.data[i]);
     }
@@ -283,10 +338,13 @@ Tensor::Tensor(const std::string& name,
       std::fill_n(cpu_data_columnwise_.get(), total_size, 0);
     }
   }
-  tensor_.set_rowwise_data(dptr_rowwise, type, shape);
-  tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
 
-  if (isFp8Type(type)) {
+  const DType rowwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+  const DType colwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+  tensor_.set_rowwise_data(dptr_rowwise, rowwise_type, shape);
+  tensor_.set_columnwise_data(dptr_columnwise, colwise_type, columnwise_shape);
+
+  if (isFp8Type(type) || isFp4Type(type)) {
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
       cudaMemset(amax, 0, sizeof(float));
@@ -305,13 +363,19 @@ Tensor::Tensor(const std::string& name,
       }
       if (columnwise) {
         tensor_.set_columnwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
-                                         std::vector<size_t>{1});
+                                          std::vector<size_t>{1});
         columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
       }
     } else {
-      auto [rowwise_scale_meta, colwise_scale_meta] =
-          get_scales(normalized_shape, tensor_.scaling_mode());
+      if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+        // Used for NVFP4 second stage scaling
+        cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+        cudaMemset(scale, 0, sizeof(float));
+        scale_cpu_data_ = std::make_shared<float>(0);
+        tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+      }
+      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape, tensor_.scaling_mode());
       auto rowwise_scale_size = rowwise_scale_meta.bytes();
       auto columnwise_scale_size = colwise_scale_meta.bytes();
       auto scale_shape = rowwise_scale_meta.shape;
@@ -346,13 +410,16 @@ void Tensor::to_cpu() const {
                cudaMemcpyDeviceToHost);
   }
   if (columnwise_) {
+    const DType colwise_type = tensor_.dtype();
+
+    const size_t colwise_size = bytes(s, colwise_type);
     cudaMemcpy(cpu_data_columnwise_.get(),
-               tensor_.get_columnwise_data().data_ptr,
-               size,
-               cudaMemcpyDeviceToHost);
+                tensor_.get_columnwise_data().data_ptr,
+                colwise_size,
+                cudaMemcpyDeviceToHost);
   }
-  if (isFp8Type(dtype())) {
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+  if (isFp8Type(dtype()) || isFp4Type(dtype())) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(amax_cpu_data_.get(),
                   tensor_.amax(),
@@ -364,8 +431,7 @@ void Tensor::to_cpu() const {
                  sizeof(float),
                  cudaMemcpyDeviceToHost);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] =
-        get_scales(s, tensor_.scaling_mode());
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = rowwise_scale_meta.bytes();
       cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
@@ -394,15 +460,15 @@ void Tensor::from_cpu() const {
     cudaMemcpy(tensor_.get_columnwise_data().data_ptr, cpu_data_columnwise_.get(), size,
                cudaMemcpyHostToDevice);
   }
-  if (isFp8Type(dtype())) {
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+  if (isFp8Type(dtype()) || isFp4Type(dtype())) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+        || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING)) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
       }
       cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] =
-        get_scales(s, tensor_.scaling_mode());
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = rowwise_scale_meta.bytes();
       cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
@@ -419,7 +485,7 @@ void Tensor::from_cpu() const {
 }
 
 void Tensor::set_scale(float scale) {
-  if (isFp8Type(dtype())) {
+  if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       *scale_cpu_data_ = scale;
@@ -429,7 +495,7 @@ void Tensor::set_scale(float scale) {
 }
 
 void Tensor::set_scale_inv(float scale_inv) {
-  if (isFp8Type(dtype())) {
+  if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     if (rowwise_) {
       NVTE_CHECK(rowwise_scale_inv_cpu_data_);
     }
@@ -437,8 +503,7 @@ void Tensor::set_scale_inv(float scale_inv) {
       NVTE_CHECK(columnwise_scale_inv_cpu_data_);
     }
 
-    auto [rowwise_scale_meta, colwise_scale_meta] =
-        get_scales(tensor_.shape(), tensor_.scaling_mode());
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(tensor_.shape(), tensor_.scaling_mode());
     if (rowwise_) {
       auto num_scales = product(rowwise_scale_meta.shape);
       if (num_scales == 1) {
@@ -468,7 +533,8 @@ void Tensor::set_scale_inv(float scale_inv) {
 }
 
 void Tensor::shareFP8Meta(const Tensor &other) {
-  if (isFp8Type(dtype()) && isFp8Type(other.dtype())) {
+  if ((isFp8Type(dtype()) && isFp8Type(other.dtype()))
+      || isFp4Type(dtype()) && isFp4Type(other.dtype())) {
     auto new_tensor = TensorWrapper(other.tensor_.scaling_mode());
     auto my_rowwise_data = tensor_.get_rowwise_data();
     new_tensor.set_rowwise_data(my_rowwise_data.data_ptr, static_cast<DType>(my_rowwise_data.dtype),
@@ -681,12 +747,30 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
   }
 }
 
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                    const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                    size_t& mismatches_num, const size_t atol,
-                                    const double abs_tolerable_mismatches_limit,
-                                    const double rel_tolerable_mismatches_limit)
+template <typename T>
+struct CastToType;
+
+template <>
+struct CastToType<uint8_t> {
+  using type = int;
+};
+
+template <>
+struct CastToType<fp8e4m3> {
+  using type = float;
+};
+
+template <typename T>
+void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                             size_t& mismatches_num, const size_t atol,
+                             const double abs_tolerable_mismatches_limit,
+                             const double rel_tolerable_mismatches_limit)
 {
+  using UpcastType = typename CastToType<T>::type;
+  auto [atol_fp8e4m3, rtol_fp8e4m3] = getTolerances(DType::kFloat8E4M3);
+
+
   const size_t N = row_blocks * col_blocks;
   const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
                                                      std::floor(N * rel_tolerable_mismatches_limit));
@@ -696,11 +780,31 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int idx = i * stride + j;
-      const int test_val = static_cast<int>(test[idx]);
-      const int ref_val = static_cast<int>(ref[idx]);
-      const int abs_delta = std::abs(test_val - ref_val);
+      float t, r;
 
-      if (abs_delta > atol) {
+      bool assertion = false;
+
+      if (std::is_same<T, uint8_t>::value) {
+        t = static_cast<float>(test[idx]);
+        r = static_cast<float>(ref[idx]);
+        assertion = std::abs(t - r) > atol;
+      } else {
+        t = static_cast<float>(*reinterpret_cast<const fp8e4m3*>(&test[idx]));
+        r = static_cast<float>(*reinterpret_cast<const fp8e4m3*>(&ref[idx]));
+        const bool mismatch = (fabs(t - r) > atol_fp8e4m3)
+                              && (r == 0 || fabs((t - r) / r) > rtol_fp8e4m3);
+        if (mismatch) {
+          /* Check if it is just a failure of round to nearest choosing different
+            side of the real value */
+          const double mean = (t + r) / 2;
+          const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
+          const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+          const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
+          const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+          assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+        }
+      }
+      if (assertion) {
         mismatches_num++;
         mismatch_indices.push_back(idx);
       }
@@ -708,8 +812,8 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
         std::cout << "Error in " << name << std::endl;
         for (const int index : mismatch_indices) {
           std::cout << "Mismatch at (" << index << "):"
-                    << static_cast<int>(test[index]) << " vs "
-                    << static_cast<int>(ref[index]) << std::endl;
+                    << static_cast<UpcastType>(test[index]) << " vs "
+                    << static_cast<UpcastType>(ref[index]) << std::endl;
         }
         GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
                      << tolerable_mismatches_limit << ".";
@@ -717,6 +821,22 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
     }
   }
 }
+
+// Instantiate templates
+template
+void compare_scaling_factors<uint8_t>(const std::string &name, const uint8_t *test, const uint8_t *ref,
+                                      const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                      size_t& mismatches_num, const size_t atol,
+                                      const double abs_tolerable_mismatches_limit,
+                                      const double rel_tolerable_mismatches_limit);
+
+template
+void compare_scaling_factors<fp8e4m3>(const std::string &name, const fp8e4m3 *test, const fp8e4m3 *ref,
+                                      const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                      size_t& mismatches_num, const size_t atol,
+                                      const double abs_tolerable_mismatches_limit,
+                                      const double rel_tolerable_mismatches_limit);
+
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
@@ -873,6 +993,10 @@ bool isFp8Type(DType type) {
   return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
 }
 
+bool isFp4Type(DType type) {
+  return type == DType::kFloat4E2M1;
+}
+
 int32_t getDeviceComputeCapability() {
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
@@ -894,7 +1018,8 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                             const size_t cols,
                                             const size_t block_size_rows,
                                             const size_t block_size_cols) {
-    const bool is_rowwise = (block_size_rows == 1) && (block_size_cols == 32);
+    const bool is_rowwise = (block_size_rows == 1)
+                            && ((block_size_cols == 32) || (block_size_cols == 16));
 
     const size_t alignment_Y = is_rowwise
                                ? scale_tensor_alignment_Y_rowwise

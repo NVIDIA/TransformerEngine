@@ -87,9 +87,19 @@ model_configs = {
     "large": ModelConfig(2, 128, 4, 128, num_layers=1),
 }
 
+
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -379,6 +389,8 @@ def test_sanity_layernorm_linear(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -407,6 +419,8 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -437,6 +451,8 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
     with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -476,6 +492,8 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4():
+            pytest.skip("NVFP4 not supported for grouped linear")
 
     use_fp8 = fp8_recipe is not None
     with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -526,6 +544,8 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -568,6 +588,8 @@ def test_sanity_gpt(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -629,6 +651,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, normalization):
             pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -683,6 +707,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, normalization):
             pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -734,6 +760,8 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -764,6 +792,8 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -798,6 +828,8 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -832,6 +864,8 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)

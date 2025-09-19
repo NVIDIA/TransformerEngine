@@ -25,7 +25,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, WeightGradStore
+from ._common import noop_cat, WeightGradStore, get_module_quantizers
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
@@ -65,6 +65,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.utils import is_experimental
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
@@ -151,6 +152,9 @@ class _Linear(torch.autograd.Function):
             ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.AG
 
+        # experimental recipe check
+        experimental = is_experimental(input_quantizer) or is_experimental(weight_quantizer)
+
         # ------------------------------------------------------
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -172,7 +176,7 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                if not isinstance(inputmat, QuantizedTensorBase):
+                if not isinstance(inputmat, QuantizedTensorBase) and not experimental:
                     own_quantized_input = True
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                     if isinstance(
@@ -442,6 +446,7 @@ class _Linear(torch.autograd.Function):
                     ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
+            ctx.experimental = experimental
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
@@ -609,7 +614,7 @@ class _Linear(torch.autograd.Function):
                     if isinstance(inputmat, QuantizedTensorBase):
                         # Input tensor is already quantized
                         pass
-                    elif ctx.debug:
+                    elif ctx.debug or ctx.experimental:
                         # Debug quantizer will be applied immediately before wgrad GEMM
                         pass
                     else:
@@ -698,6 +703,7 @@ class _Linear(torch.autograd.Function):
 
                 # dgrad GEMM
                 # Note: dx = dy * w
+
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_fp8,
@@ -1326,6 +1332,8 @@ class Linear(TransformerEngineBaseModule):
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
         elif recipe.float8_block_scaling():
             self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
+        elif recipe.nvfp4():
+            self._customize_quantizers_nvfp4(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
     def reset_parameters(self, defer_init=False):
@@ -1410,12 +1418,7 @@ class Linear(TransformerEngineBaseModule):
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = (
-                self._get_quantizers(fp8_output, fp8_grad)
-                if not debug
-                else self._get_debug_quantizers(fp8_output, fp8_grad)
-            )
-
+            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False
@@ -1646,6 +1649,28 @@ class Linear(TransformerEngineBaseModule):
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             # parallel related
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # customize grad_output_quantizer with amax reduction TP group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
+
+    def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on current scaling recipe + linear."""
+        assert recipe.nvfp4(), "Incorrect recipe."
+        if fwd:
+            if self.sequence_parallel and self.parallel_mode == "column":
+                # customize input_quantizer with amax reduction TP group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_group = self.tp_group
+        else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # customize grad_output_quantizer with amax reduction TP group
                 self.quantizers["scaling_bwd"][

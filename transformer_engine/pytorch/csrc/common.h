@@ -31,6 +31,7 @@
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/hadamard_transform.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
@@ -263,6 +264,40 @@ class MXFP8Quantizer : public Quantizer {
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+};
+
+class NVFP4Quantizer : public Quantizer {
+ public:
+  // fp4 dtype
+  DType dtype;
+  // amax reduction for low precision FP4 AG
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  // random hadamard transform
+  bool with_rht;
+  bool with_post_rht_amax;
+  // 2D block scaling
+  bool with_2d_quantization;
+  bool stochastic_rounding;
+
+  int rht_matrix_random_sign_mask_t;
+  at::Tensor rht_matrix;
+
+  explicit NVFP4Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_NVFP4_1D_SCALING; }
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
