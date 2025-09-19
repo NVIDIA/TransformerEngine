@@ -206,7 +206,7 @@ def general_grouped_gemm(
         if single_output:
             out = out_init
 
-        return out, None, None
+        return out, bias, None
 
     if gelu:
         gelu_input = [

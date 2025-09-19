@@ -326,6 +326,9 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.grad_output_quantizers,
                     )
             elif ctx.debug:
+                grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+                for i in range(ctx.num_gemms):
+                    grad_biases[i] = grad_output_mats[i].sum(dim=0)
                 grad_output = DebugQuantizer.multi_tensor_quantize(
                     grad_output_view, ctx.grad_output_quantizers, ctx.m_splits, ctx.activation_dtype
                 )
