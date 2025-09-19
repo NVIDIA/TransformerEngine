@@ -3171,14 +3171,20 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if isinstance(out_, Float8Tensor):
                 out_fp8 = out_
                 out_ = out_._data
-                if is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16):
+                if is_bwd_fp8 and not (
+                    fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
+                ):
                     out_part = out_fp8
                 else:
                     out_part = out_fp8.dequantize(dtype=fwd_nominal_dtype)
             else:
                 out_f16 = out_
                 out_part = out_
-                if fp8 and is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16):
+                if (
+                    fp8
+                    and is_bwd_fp8
+                    and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
+                ):
                     out_part = O_quantizer(out_)
         else:
             fa_forward_args_thd = get_fa_args(
@@ -3474,9 +3480,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if ctx.fp8:
             if ctx.fp8_recipe.float8_current_scaling() and ctx.is_input_fp8:
-                dq, dk, dv = combine_and_quantize(
-                    qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
-                )
+                dq, dk, dv = combine_and_quantize(qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
             if ctx.fp8_recipe.delayed():
                 dq, dk, dv = [
                     Float8Tensor.make_like(x, data=y, dtype=bwd_nominal_dtype)
@@ -3709,7 +3713,16 @@ def attn_forward_func_with_cp(
         args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers, use_flash_attn_3, fp8_output]
+        args += [
+            window_size,
+            fp8,
+            fp8_meta,
+            cp_group,
+            cp_stream,
+            quantizers,
+            use_flash_attn_3,
+            fp8_output,
+        ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
