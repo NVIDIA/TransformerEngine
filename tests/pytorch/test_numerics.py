@@ -1248,7 +1248,7 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
-    
+
     config = model_configs[model]
 
     te_linear_ref = Linear(
