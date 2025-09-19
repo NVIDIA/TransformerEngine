@@ -223,9 +223,10 @@ def test_fused_rope_thd(
         torch.testing.assert_close(grad_fused, grad_unfused)
         assert output_fused.is_contiguous()
 
+
 @pytest.mark.parametrize("start_positions", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [128,256])
+@pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad])
 @pytest.mark.parametrize("cp_size", [2])
 @pytest.mark.parametrize("interleaved", [False, True])
@@ -247,11 +248,11 @@ def test_unfused_rope_thd_vs_bshd(
 
     # NOTE: dtype=torch.int32 is important, otherwise the cumsum will be in int64 and
     # that causes unexpected issues.
-    seq_lens = torch.tensor([seqlen for _ in range(batch_size)], dtype = torch.int32)
+    seq_lens = torch.tensor([seqlen for _ in range(batch_size)], dtype=torch.int32)
 
-    cu_seqlens = torch.cumsum(
-        torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens]), dim=0
-    ).to(device=device, dtype=torch.int32)
+    cu_seqlens = torch.cumsum(torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens]), dim=0).to(
+        device=device, dtype=torch.int32
+    )
 
     # Create a tensor in THD format
     thd = torch.rand(
@@ -333,14 +334,24 @@ def test_unfused_rope_thd_vs_bshd(
         grad_unfused_thd = thd.grad.detach().clone()
         thd.grad = None
 
-        torch.testing.assert_close(output_unfused_bshd.reshape(*output_unfused_thd.shape), output_unfused_thd)
-        torch.testing.assert_close(output_unfused_sbhd.transpose(1, 0).reshape(*output_unfused_thd.shape), output_unfused_thd)
-        torch.testing.assert_close(grad_unfused_bshd.reshape(*grad_unfused_thd.shape), grad_unfused_thd)
-        torch.testing.assert_close(grad_unfused_sbhd.transpose(1, 0).reshape(*grad_unfused_thd.shape), grad_unfused_thd)
+        torch.testing.assert_close(
+            output_unfused_bshd.reshape(*output_unfused_thd.shape), output_unfused_thd
+        )
+        torch.testing.assert_close(
+            output_unfused_sbhd.transpose(1, 0).reshape(*output_unfused_thd.shape),
+            output_unfused_thd,
+        )
+        torch.testing.assert_close(
+            grad_unfused_bshd.reshape(*grad_unfused_thd.shape), grad_unfused_thd
+        )
+        torch.testing.assert_close(
+            grad_unfused_sbhd.transpose(1, 0).reshape(*grad_unfused_thd.shape), grad_unfused_thd
+        )
 
         assert output_unfused_thd.is_contiguous()
         assert output_unfused_bshd.is_contiguous()
         assert output_unfused_sbhd.is_contiguous()
+
 
 @pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
