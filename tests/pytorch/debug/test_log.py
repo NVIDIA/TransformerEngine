@@ -215,9 +215,14 @@ log:
   transformer_engine:
     LogTensorStats:
       enabled: True
-      stats: [
-        {stats}
-      ]
+      stats: 
+        - dynamic_range
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 1
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 2
       tensors: [activation, gradient, weight]
       freq: 2
       start_step: 0
@@ -250,10 +255,14 @@ def test_log_stats_numerics(feature_dirs):
         output = read_log(log_dir)
 
     for line in output.splitlines():
-        if "max_blockwise_4_dynamic_range" in line:
-            max_blockwise_4_dynamic_range = float(line.split("value=")[1])
+        if "max_blockwise_dynamic_range_block_size_4_dims_1" in line:
+            max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
             expected = 0
-            assert max_blockwise_4_dynamic_range == pytest.approx(expected, abs=1e-4)
+            assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(expected, abs=1e-4)
+        elif "max_blockwise_dynamic_range_block_size_4_dims_2" in line:
+            max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
+            expected = 0
+            assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(expected, abs=1e-4)
         elif "dynamic_range" in line:
             dynamic_range = float(line.split("value=")[1])
             expected = math.log2(1000) - math.log2(epsilon)

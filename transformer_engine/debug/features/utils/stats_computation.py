@@ -12,8 +12,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
 
-
-# @torch.compile
+@torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
@@ -26,6 +25,7 @@ def _compute_dynamic_range_top(tensor):
     return torch.log2(amax)
 
 
+@torch.compile
 def _compute_dynamic_range_bottom(tensor):
     """Computes the log2 of the amin of the tensor"""
     tensor_abs = tensor.abs()
@@ -36,7 +36,6 @@ def _compute_dynamic_range_bottom(tensor):
         amin = torch.tensor(1, device=tensor.device).to(torch.float)
     return torch.log2(amin)
 
-
 @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size):
     """Max blockwise dynamic range (log2 max/min_nonzero).
@@ -45,17 +44,21 @@ def compute_max_blockwise_dynamic_range(tensor, block_size):
     """
     total_numel = tensor.numel()
     assert (
-        total_numel % block_size == 0
+        total_numel % (block_size ** dims) == 0
     ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
 
-    abs_vals = tensor.reshape(-1, block_size).abs().float()
-    per_block_amax = abs_vals.amax(dim=1)
+    tensor = tensor.abs().float()
+    if dims == 1:
+        per_block_amax = tensor.reshape(-1, block_size).amax(dim=1)
+    else:
+        per_block_amax = tensor.reshape(-1, block_size, block_size).amax(dim=(1, 2))
 
     # Identify blocks that contain any non-zero element
     nonzero_blocks = per_block_amax != 0
     if not torch.any(nonzero_blocks):
         # If all blocks are zero, return 0
-        return torch.zeros((), device=tensor.device, dtype=abs_vals.dtype)
+        return torch.zeros((), device=tensor.device, dtype=torch.float32)
 
     # Compute smallest non-zero magnitude per block
     per_block_amin_nz = abs_vals.masked_fill(abs_vals == 0, float("inf")).amin(dim=1)
@@ -67,6 +70,7 @@ def compute_max_blockwise_dynamic_range(tensor, block_size):
     return (torch.log2(amax_nz) - torch.log2(amin_nz)).max()
 
 
+@torch.compile
 def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
     mean = torch.sum(sums) / torch.sum(numels)
@@ -75,6 +79,7 @@ def compute_variance(variances, numels, sums):
     return var
 
 
+@torch.compile
 def compute_std(variances, numels, sums):
     """Computates standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
@@ -346,16 +351,18 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
 
-def add_max_blockwise_dynamic_range_stats(block_size: int):
+def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int):
     """Register max_blockwise_X_dynamic_range stats for the recipe."""
-    stat_name = f"max_blockwise_{block_size}_dynamic_range"
+    stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"
     if stat_name in stats_to_num:
         return  # already registered
+    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
     stats_to_num[stat_name] = len(stats_to_num)
     DEPENDENCIES[stat_name] = {stat_name}
 
     STATS[stat_name] = (
-        lambda x, aux_dict: compute_max_blockwise_dynamic_range(x, block_size),
+        lambda x, aux_dict, _block_size=block_size, _dims=dims:
+            compute_max_blockwise_dynamic_range(x, _block_size, _dims),
         lambda buffers: max(_get(buffers, stat_name)),
     )
 
