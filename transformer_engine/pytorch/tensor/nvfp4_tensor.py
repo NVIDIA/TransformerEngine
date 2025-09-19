@@ -711,14 +711,28 @@ class _ViewFunc(torch.autograd.Function):
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
             )
 
-        # Construct new tensor if shape is provided
+        # Reshape data
         new_rowwise_data = None
         new_columnwise_data = None
         if tensor._rowwise_data is not None:
-            new_rowwise_data = tensor._rowwise_data.view(*shape)
+            if shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent row-wise data for NVFP4 tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = list(shape[:-1]) + [shape[-1] // 2]
+            new_rowwise_data = tensor._rowwise_data.view(byte_shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
-            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+            columnwise_shape = (shape[-1], math.prod(shape[:-1]))
+            if columnwise_shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent column-wise data for NVFP4 tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = (columnwise_shape[0], columnwise_shape[1] // 2)
+            new_columnwise_data = tensor._columnwise_data.view(byte_shape)
+
+        # Construct tensor
         return NVFP4Tensor(
             shape,
             tensor.dtype,
@@ -741,17 +755,29 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         if isinstance(grad, NVFP4Tensor):
-            new_data = (
-                grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
-            )
+            new_rowwise_data = None
+            new_columnwise_data = None
+            if grad._rowwise_data is not None:
+                if ctx.shape[-1] % 2 != 0:
+                    raise ValueError(
+                        "Cannot represent row-wise data for NVFP4 tensor "
+                        f"with shape={ctx.shape} as byte array."
+                    )
+                byte_shape = list(ctx.shape[:-1]) + [ctx.shape[-1] // 2]
+                new_rowwise_data = grad._rowwise_data.view(byte_shape)
             if grad._columnwise_data is not None:
-                new_columnwise_data = grad._columnwise_data.view(ctx.shape[-1], -1)
-            else:
-                new_columnwise_data = None
+                columnwise_shape = (ctx.shape[-1], math.prod(ctx.shape[:-1]))
+                if columnwise_shape[-1] % 2 != 0:
+                    raise ValueError(
+                        "Cannot represent column-wise data for NVFP4 tensor "
+                        f"with shape={ctx.shape} as byte array."
+                    )
+                byte_shape = (columnwise_shape[0], columnwise_shape[1] // 2)
+                new_columnwise_data = grad._columnwise_data.view(byte_shape)
             dgrad = NVFP4Tensor(
                 ctx.shape,
                 grad.dtype,
-                rowwise_data=new_data,
+                rowwise_data=new_rowwise_data,
                 rowwise_scale_inv=grad._rowwise_scale_inv,
                 columnwise_data=new_columnwise_data,
                 columnwise_scale_inv=grad._columnwise_scale_inv,
@@ -803,15 +829,28 @@ class _ReshapeFunc(torch.autograd.Function):
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
             )
 
-        # Construct new tensor if shape is provided
+        # Reshape data
         new_rowwise_data = None
         new_columnwise_data = None
         if tensor._rowwise_data is not None:
-            new_rowwise_data = tensor._rowwise_data.reshape(*shape)
+            if shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent row-wise data for NVFP4 tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = list(shape[:-1]) + [shape[-1] // 2]
+            new_rowwise_data = tensor._rowwise_data.reshape(byte_shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
-            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+            columnwise_shape = (shape[-1], math.prod(shape[:-1]))
+            if columnwise_shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent column-wise data for NVFP4 tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = (columnwise_shape[0], columnwise_shape[1] // 2)
+            new_columnwise_data = tensor._columnwise_data.reshape(byte_shape)
 
+        # Construct tensor
         return NVFP4Tensor(
             shape,
             tensor.dtype,
@@ -837,10 +876,22 @@ class _ReshapeFunc(torch.autograd.Function):
             new_rowwise_data = None
             new_columnwise_data = None
             if grad._rowwise_data is not None:
-                new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
+                if ctx.shape[-1] % 2 != 0:
+                    raise ValueError(
+                        "Cannot represent row-wise data for NVFP4 tensor "
+                        f"with shape={ctx.shape} as byte array."
+                    )
+                byte_shape = list(ctx.shape[:-1]) + [ctx.shape[-1] // 2]
+                new_rowwise_data = grad._rowwise_data.reshape(byte_shape)
             if grad._columnwise_data is not None:
-                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
-                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
+                columnwise_shape = (ctx.shape[-1], math.prod(ctx.shape[:-1]))
+                if columnwise_shape[-1] % 2 != 0:
+                    raise ValueError(
+                        "Cannot represent column-wise data for NVFP4 tensor "
+                        f"with shape={ctx.shape} as byte array."
+                    )
+                byte_shape = (columnwise_shape[0], columnwise_shape[1] // 2)
+                new_columnwise_data = grad._columnwise_data.reshape(byte_shape)
             dgrad = NVFP4Tensor(
                 ctx.shape,
                 grad.dtype,

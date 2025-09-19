@@ -1146,74 +1146,45 @@ class NVFP4BlockScalingRecipeState(RecipeState):
     def make_quantizers(self) -> list:
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
-        if self.mode == "forward":
-            # The index convention (coming from base.py set_meta_tensor)
-            # is somewhat awkward, and doesn't play nicely with QuantizeOp,
-            # which is not associated with a GEMM.
-            assert self.num_quantizers % 3 == 0  # x, w, output per gemm
-            return list(
-                itertools.chain.from_iterable(
-                    [
-                        [
-                            NVFP4Quantizer(
-                                fp4_dtype=self.dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                with_rht=self.recipe.fp4_quant_fwd_inp.random_hadamard_transform,
-                                with_post_rht_amax=self.recipe.fp4_quant_fwd_inp.random_hadamard_transform,
-                                with_2d_quantization=self.recipe.fp4_quant_fwd_inp.fp4_2d_quantization,
-                                stochastic_rounding=self.recipe.fp4_quant_fwd_inp.stochastic_rounding,
-                            ),
-                            NVFP4Quantizer(
-                                fp4_dtype=self.dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                with_rht=self.recipe.fp4_quant_fwd_weight.random_hadamard_transform,
-                                with_post_rht_amax=self.recipe.fp4_quant_fwd_weight.random_hadamard_transform,
-                                with_2d_quantization=self.recipe.fp4_quant_fwd_weight.fp4_2d_quantization,
-                                stochastic_rounding=self.recipe.fp4_quant_fwd_weight.stochastic_rounding,
-                            ),
-                            NVFP4Quantizer(
-                                fp4_dtype=self.dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                with_rht=self.recipe.fp4_quant_fwd_inp.random_hadamard_transform,
-                                with_post_rht_amax=self.recipe.fp4_quant_fwd_inp.random_hadamard_transform,
-                                with_2d_quantization=self.recipe.fp4_quant_fwd_inp.fp4_2d_quantization,
-                                stochastic_rounding=self.recipe.fp4_quant_fwd_inp.stochastic_rounding,
-                            ),
-                        ]
-                        for _ in range(self.num_quantizers // 3)
-                    ]
-                )
-            )
+        # The index convention (coming from base.py set_meta_tensor)
+        # is somewhat awkward. It assumes forward quantizers are
+        # ordered [input, weight, output, ...] and backward quantizers
+        # are ordered [grad_output, grad_input, ...]. This doesn't
+        # play nicely with fusible ops: Linear op doesn't own output
+        # or grad input quantizers, Quantize op only owns input and
+        # grad output quantizers.
 
-        assert self.mode == "backward", f"Unexpected mode {self.mode}"
-        assert self.num_quantizers % 2 == 0  # grad_output and grad_input per gemm
-        return list(
-            itertools.chain.from_iterable(
-                [
-                    [
-                        NVFP4Quantizer(
-                            fp4_dtype=self.dtype,
-                            rowwise=True,
-                            columnwise=True,
-                            with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                            with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                            with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
-                            stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
-                        ),
-                        NVFP4Quantizer(
-                            fp4_dtype=self.dtype,
-                            rowwise=True,
-                            columnwise=True,
-                            with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                            with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                            with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
-                            stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
-                        ),
-                    ]
-                    for _ in range(self.num_quantizers // 2)
-                ]
-            )
-        )
+        if self.mode == "forward":
+
+            def _make_quantizer(idx: int) -> NVFP4Quantizer:
+                qparams = (
+                    self.recipe.fp4_quant_fwd_weight if idx % 3 == 2
+                    else self.recipe.fp4_quant_fwd_inp
+                )
+                return NVFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_rht=qparams.random_hadamard_transform,
+                    with_post_rht_amax=qparams.random_hadamard_transform,
+                    with_2d_quantization=qparams.fp4_2d_quantization,
+                    stochastic_rounding=qparams.stochastic_rounding,
+                )
+
+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
+
+        if self.mode == "backward":
+            return [
+                NVFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
+                    with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
+                    with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
+                    stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
+                )
+                for _ in range(self.num_quantizers)
+            ]
+
+        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
