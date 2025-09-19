@@ -22,13 +22,15 @@ from transformer_engine_jax import get_num_compute_streams
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 from ..quantize import (
+    AbstractBaseTensor,
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor2x,
     GroupedScaledTensor1x,
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
-    QuantizeConfig,
+    get_quantize_config,
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
@@ -150,6 +152,21 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     return lhs_q, rhs_q
 
 
+@partial(jax.jit, static_argnums=(1, 2))
+def swizzled_scale(scale_inv, flatten_axis, is_colwise):
+    "Swizzle scale_inv via JAX transpose ops"
+    original_shape = scale_inv.shape
+    shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
+    if is_colwise:
+        scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
+        cols, rows = shape_2d
+    else:
+        rows, cols = shape_2d
+    reshape = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
+    swizzled = jnp.transpose(reshape, (0, 3, 2, 1, 4))
+    return swizzled.reshape(original_shape)
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM
@@ -228,6 +245,11 @@ class GemmPrimitive(BasePrimitive):
                     "require non-transposed LHS and transposed RHS operands "
                     "(`contracting_dims=((-1, ), (-1, ))`)."
                 )
+        else:
+            assert lhs.dtype == rhs.dtype, (
+                "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
+                f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
+            )
 
         # Determine output shape and dtype
         assert (
@@ -279,28 +301,18 @@ class GemmPrimitive(BasePrimitive):
                 )
         pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
 
-        # Need extra workspace for swizzled scale factors
-        lhs_swizzle_size = 0
-        rhs_swizzle_size = 0
-        swizzle_dtype = jnp.uint8
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            lhs_swizzle_size = lhs_scale_inv.size
-            rhs_swizzle_size = rhs_scale_inv.size
-        lhs_swizzle = jax.core.ShapedArray(shape=(lhs_swizzle_size,), dtype=swizzle_dtype)
-        rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size,), dtype=swizzle_dtype)
-
         # Declare cuBLAS workspace
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size = get_cublas_workspace_size_bytes() + 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
+        return output, bias_grad, pre_gelu_out, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         outputs = GemmPrimitive.abstract(*args, **kwargs)
-        return outputs[:-3]  # discard workspace arrays
+        return outputs[:-1]  # discard workspace array
 
     @staticmethod
     def lowering(
@@ -367,24 +379,22 @@ class GemmPrimitive(BasePrimitive):
         grad,
         use_split_accumulator,
     ):
-        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-        lhs_transposed, rhs_transposed = _get_gemm_layout(
-            (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
-        )
-        lhs_scale_inv = apply_padding_to_scale_inv(
-            lhs_scale_inv,
-            scaling_mode,
-            lhs.shape,
-            is_colwise=lhs_transposed,
-            flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-        )
-        rhs_scale_inv = apply_padding_to_scale_inv(
-            rhs_scale_inv,
-            scaling_mode,
-            rhs.shape,
-            is_colwise=not rhs_transposed,
-            flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-        )
+        if scaling_mode.is_1d_block_scaling():
+            lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
+            lhs_transposed, rhs_transposed = _get_gemm_layout(
+                (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
+            )
+            lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
+            rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
+
+            lhs_scale_inv = apply_padding_to_scale_inv(
+                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
+            )
+            rhs_scale_inv = apply_padding_to_scale_inv(
+                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+            )
+            lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
+            rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -401,7 +411,39 @@ class GemmPrimitive(BasePrimitive):
             grad=grad,
             use_split_accumulator=use_split_accumulator,
         )
-        return outputs[:-3]  # discard workspace arrays
+        return outputs[:-1]  # discard workspace array
+
+    @staticmethod
+    def outer_impl(
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+        use_split_accumulator,
+    ):
+        return GemmPrimitive.impl(
+            lhs,
+            lhs_scale_inv,
+            rhs,
+            rhs_scale_inv,
+            bias,
+            gelu_input,
+            out_dtype,
+            contracting_dims,
+            scaling_mode,
+            fuse_bias,
+            fuse_gelu,
+            grad,
+            use_split_accumulator,
+        )
 
     @staticmethod
     def batcher(
@@ -754,7 +796,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
-    use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
+    use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -1107,7 +1149,7 @@ def _jax_gemm(
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                 jax.lax.Precision.HIGHEST
-                if QuantizeConfig.FP8_2X_ACC_FPROP
+                if get_quantize_config().FP8_2X_ACC_FPROP
                 else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
@@ -1134,8 +1176,8 @@ def _jax_gemm(
 
 
 def gemm(
-    lhs: Union[jnp.ndarray, ScaledTensor],
-    rhs: Union[jnp.ndarray, ScaledTensor],
+    lhs: Union[jnp.ndarray, AbstractBaseTensor],
+    rhs: Union[jnp.ndarray, AbstractBaseTensor],
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
@@ -1191,6 +1233,11 @@ def gemm(
         compute the GeLU contribution to the gradient. Only supported with TE's custom call to
         cuBLAS GEMM.
     """
+    if isinstance(lhs, NoScaleTensor):
+        lhs = lhs.data
+    if isinstance(rhs, NoScaleTensor):
+        rhs = rhs.data
+
     # Try to get LHS and RHS quantizers from a quantizer set for backward compatibility
     if lhs_quantizer is None or rhs_quantizer is None:
         quantizer_set = kwargs.get("quantizer_set", None)

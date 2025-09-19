@@ -173,10 +173,10 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
         if ub_overlap_rs_fprop:
-            ub_obj = get_ub(ub_name + "_fprop")
+            ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.RS
         elif ub_overlap_ag_fprop:
-            ub_obj = get_ub(ub_name + "_fprop")
+            ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.AG
 
         # Configure quantizer for norm output
@@ -353,8 +353,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Deallocate GEMM input tensor if no longer needed
         if not weight.requires_grad and not return_layernorm_output:
-            ln_out = ln_out_total = None
             clear_tensor_data(ln_out, ln_out_total)
+            ln_out = ln_out_total = None
+        elif with_input_all_gather and not return_layernorm_output_gathered:
+            clear_tensor_data(ln_out_total)
+            ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
@@ -575,23 +578,23 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_shape = [reduce(multiply_op, ctx.inp_shape[:-1]), ctx.inp_shape[-1]]
             if ctx.ub_overlap_ag:
                 # Overlap grad_output all-gather with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.AG
             elif ctx.ub_overlap_rs_dgrad:
                 # Overlap dgrad reduce-scatter with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.RS
             else:
                 if ctx.ub_bulk_dgrad:
                     # Overlap inputmat all-gather with dgrad compute
-                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                     ub_obj_dgrad = ctx.ub_obj_gradout
                     ub_type_dgrad = tex.CommOverlapType.AG
                 if ctx.ub_bulk_wgrad:
                     # Overlap dgrad reduce-scatter with wgrad compute
-                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad")
+                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
                     ub_type_wgrad = tex.CommOverlapType.RS
 
             # --------------------------------------------------
@@ -769,7 +772,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
 
                     # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
-                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad")
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
 
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -891,9 +894,19 @@ class _LayerNormLinear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor if permitted
-                    if not ctx.return_layernorm_output:
+                    # Deallocate input tensors if permitted
+                    if not ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
+                        # Input tensors have not been exposed externally
+                        clear_tensor_data(ln_out)
+                    elif ctx.ln_out_needs_gather and ctx.return_layernorm_output_gathered:
+                        # Non-gathered input has not been exposed externally
+                        clear_tensor_data(ln_out)
+                    if ctx.ln_out_needs_gather:
+                        # Gathered input is internal
                         clear_tensor_data(ln_out_total)
+                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                        # Gathered grad output tensor is internal
+                        clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad:
@@ -1169,7 +1182,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.return_layernorm_output_gathered = return_layernorm_output_gathered
+        self.return_layernorm_output_gathered = (
+            return_layernorm_output_gathered if return_layernorm_output else False
+        )
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
 
@@ -1492,10 +1507,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         if self.ub_overlap_rs_fprop:
-            if get_ub(self.ub_name + "_fprop").is_fp8_ubuf():
+            if get_ub(
+                self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()
+            ).is_fp8_ubuf():
                 fp8_output = True
         if self.ub_overlap_rs_dgrad:
-            if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
+            if get_ub(
+                self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()
+            ).is_fp8_ubuf():
                 fp8_grad = True
 
         with torch.cuda.device(
@@ -1763,7 +1782,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
