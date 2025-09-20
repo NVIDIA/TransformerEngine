@@ -528,6 +528,11 @@ def test_fp4_dequantize(dtype, M, N):
     starting_tensor = q(a)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
-    assert torch.all(new_tensor._rowwise_data == starting_tensor._rowwise_data).item()
+    torch.testing.assert_close(
+        new_tensor._rowwise_data,
+        starting_tensor._rowwise_data,
+        rtol=0,
+        atol=0,
+    )
     new_dequantized_tensor = new_tensor.dequantize()
     torch.testing.assert_close(dequantized_tensor, new_dequantized_tensor)
