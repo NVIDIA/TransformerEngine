@@ -155,7 +155,13 @@ def make_reference_and_test_tensors(
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
     elif quantization == "nvfp4":
-        test = NVFP4Quantizer()(test)
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
     if isinstance(test, QuantizedTensor) and not test_is_quantized:
@@ -1473,8 +1479,11 @@ class TestBasicOps:
 
         # Check results
         tols = dtype_tols(dtype)
-        if with_quantization:
-            tols = dtype_tols(x1_test._fp8_dtype)
+        if in_place:
+            if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
+                tols = dtype_tols(x1_test._fp8_dtype)
+            elif quantization == "nvfp4":
+                tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
         dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
