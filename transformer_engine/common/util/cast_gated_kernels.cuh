@@ -188,7 +188,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           const float x = min(act_elt, p.limit);
           const float s = sigmoidf(p.alpha * x);
           act_x = x * s;
-          if (x <= p.limit) {
+          if (act_elt <= p.limit) {
             dact_x = s + s * (1 - s) * p.alpha * x;
           } else {
             dact_x = 0.0f;
@@ -203,7 +203,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             dact_x = DActOP(x, p);
           }
         }
-
         float after_dact = dact_x * grad_elt * gate_elt;
         float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
 
@@ -507,7 +506,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const float x = min(act_elt, p.limit);
             const float s = sigmoidf(p.alpha * x);
             act_x = x * s;
-            dact_x = x <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+            dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
           } else {
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
@@ -762,7 +761,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 const float x = min(act_elt, p.limit);
                 const float s = sigmoidf(p.alpha * x);
                 act_x = x * s;
-                dact_x = x <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+                dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
               } else {
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);
