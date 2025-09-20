@@ -25,7 +25,7 @@ from ...utils import _empty_tensor
 def _fp4_e2m1_vals(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Values representable in FP4 E2M1 format"""
     return torch.tensor(
-        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
         device=device,
         dtype=dtype,
     )
@@ -62,18 +62,18 @@ class _FromNVFP4Func(torch.autograd.Function):
             ).reshape(shape)
             data = data.contiguous()
 
-            # Convert FP8E8M0 block scales to FP32
+            # Convert FP8E4M3 block scales to FP32
             block_scales = tensor._rowwise_scale_inv
             block_scales = block_scales.reshape(-1, block_scales.size(-1))
             block_scales = block_scales[:math.prod(shape[:-1]), :shape[-1] // 16]
-            block_scales = torch.exp2(block_scales.view(torch.int8).to(torch.float32))
+            block_scales = block_scales.view(torch.float8_e4m3fn).to(torch.float32)
 
             # Convert amax to FP32 tensor scale
             tensor_scale = tensor._amax_rowwise / (6.0 * 448.0)  # Scale by FP4E2M1 and FP8E4M3 max
 
             # Apply scales
             block_data = data.view(-1, 16)
-            block_data *= block_scales.reshape(-1, 1) * tensor_scale.view(())
+            block_data *= tensor_scale.view(()) / block_scales.reshape(-1, 1)
 
             return data.to(dtype)
 

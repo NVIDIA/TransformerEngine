@@ -497,27 +497,15 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
         # View op
         if func == aten.view.default:
             tensor = args[0]
-            data = tensor._rowwise_data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
-            return NVFP4Tensor(
-                shape=out_shape,
-                dtype=tensor.dtype,
-                fp4_dtype=tensor._fp4_dtype,
-                rowwise_data=out_data,
-                rowwise_scale_inv=tensor._rowwise_scale_inv,
-                columnwise_data=tensor._columnwise_data,
-                columnwise_scale_inv=tensor._columnwise_scale_inv,
-                amax_rowwise=tensor._amax_rowwise,
-                amax_columnwise=tensor._amax_columnwise,
-                quantizer=tensor._quantizer,
-                requires_grad=False,
-            )
+            shape = args[1]
+            if len(args) != 2:
+                raise RuntimeError(
+                    "Unexpected args for view op (expected 2 args, got {len(args)})"
+                )
+            if shape == tensor.size():
+                return tensor.detach()
+            else:
+                return tensor.view(shape)
 
         # NVFP4 dequantize not supported. Add manual support for needed funcs.
         if func in (aten.empty_like.default, aten.zero_.default):
@@ -689,7 +677,9 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        ctx.shape = tensor.shape
+        cur_shape = tensor.shape
+        if ctx is not None:
+            ctx.shape = cur_shape
         if shape is None:
             return tensor
 
@@ -700,12 +690,12 @@ class _ViewFunc(torch.autograd.Function):
             shape = shape[0]
         if -1 in shape:
             shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
             for i, d in enumerate(shape):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        if shape[-1] != ctx.shape[-1]:
+        if shape[-1] != cur_shape[-1]:
             raise RuntimeError(
                 "NVFP4Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
