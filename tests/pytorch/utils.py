@@ -72,6 +72,8 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 
     # Transformer Engine dtypes
     if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat4E2M1:
+            return dict(rtol=0.25, atol=0.0625)  # FP8E5M2 tols
         dtype = {
             tex.DType.kByte: torch.uint8,
             tex.DType.kInt32: torch.int32,
@@ -117,6 +119,12 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling()
+    if name == "nvfp4":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+        )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 

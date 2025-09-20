@@ -213,6 +213,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
+  // Construct GEMM config
+  transformer_engine::MatmulConfigWrapper config;
+  if (grad) {
+    config.set_dbias_tensor(bias_tensor.data());
+    config.set_with_dgelu_epilogue(gelu);
+  } else {
+    config.set_bias_tensor(bias_tensor.data());
+    config.set_with_gelu_epilogue(gelu);
+  }
+  config.set_epilogue_aux_tensor(te_pre_gelu_out.data());
+  config.set_use_split_accumulator(use_split_accumulator);
+  config.set_sm_count(num_math_sms);
+
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
   auto main_stream = at::cuda::getCurrentCUDAStream();
@@ -276,10 +289,9 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), out_tensor.data(),
-                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
-                                te_workspace.data(), alpha, *beta, use_split_accumulator,
-                                num_math_sms, main_stream);
+        nvte_cublas_gemm_v2(transa, transb, alpha, A_tensor.data(), B_tensor.data(), *beta,
+                            out_tensor.data(), out_tensor.data(), te_workspace.data(), config,
+                            main_stream);
       });
     }
   } else {

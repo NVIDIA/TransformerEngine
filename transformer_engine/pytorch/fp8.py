@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    NVFP4BlockScaling,
 )
 
 from .constants import dist_group_type
@@ -51,6 +52,13 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
+
+
+def check_nvfp4_support() -> Tuple[bool, str]:
+    """Return if nvfp4 support is available"""
+    if get_device_compute_capability() >= (10, 0):  # blackwell and above
+        return True, ""
+    return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
 
 
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
@@ -105,6 +113,13 @@ def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType
     return tex.DType.kFloat8E5M2
 
 
+def get_fp4_te_dtype(fp4_recipe: Recipe) -> tex.DType:
+    """Get fp4 data type according to recipe and tensor"""
+    if fp4_recipe.fp4_format == Format.E2M1:
+        return tex.DType.kFloat4E2M1
+    raise ValueError(f"Unsupported FP4 format: {fp4_recipe.fp4_format}")
+
+
 def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
@@ -142,6 +157,8 @@ class FP8GlobalStateManager:
     reason_for_no_mxfp8 = ""
     fp8_block_scaling_available = None
     reason_for_no_fp8_block_scaling = None
+    nvfp4_available = None
+    reason_for_no_nvfp4 = ""
 
     @classmethod
     def reset(cls) -> None:
@@ -204,6 +221,13 @@ class FP8GlobalStateManager:
                 check_fp8_block_scaling_support()
             )
         return cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling
+
+    @classmethod
+    def is_nvfp4_available(cls) -> Tuple[bool, str]:
+        """Return if NVFP4 support is available."""
+        if cls.nvfp4_available is None:
+            cls.nvfp4_available, cls.reason_for_no_nvfp4 = check_nvfp4_support()
+        return cls.nvfp4_available, cls.reason_for_no_nvfp4
 
     @staticmethod
     def get_meta_tensor_key(forward: bool = True) -> str:
@@ -481,6 +505,9 @@ class FP8GlobalStateManager:
             if isinstance(fp8_recipe, Float8BlockScaling):
                 fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
                 assert fp8_block_available, reason_for_no_fp8_block
+            if isinstance(fp8_recipe, NVFP4BlockScaling):
+                nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
+                assert nvfp4_available, reason_for_no_nvfp4
 
     @classmethod
     def fp8_autocast_exit(cls, enabled: bool, _graph: bool) -> None:
@@ -837,6 +864,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif recipe.nvfp4():
+            cls = NVFP4BlockScalingRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1084,3 +1113,79 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class NVFP4BlockScalingRecipeState(RecipeState):
+    """Configuration for NVFP4 quantization.
+
+    NVFP4 quantization does not require state.
+
+    """
+
+    recipe: NVFP4BlockScaling
+    mode: str
+    dtype: tex.DType
+
+    def __init__(
+        self,
+        recipe: NVFP4BlockScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        self.dtype = get_fp4_te_dtype(recipe)
+
+        # Allocate buffers
+        if device is None:
+            device = torch.device("cuda")
+
+    def make_quantizers(self) -> list:
+        from .tensor.nvfp4_tensor import NVFP4Quantizer
+
+        # The index convention (coming from base.py set_meta_tensor)
+        # is somewhat awkward. It assumes forward quantizers are
+        # ordered [input, weight, output, ...] and backward quantizers
+        # are ordered [grad_output, grad_input, ...]. This doesn't
+        # play nicely with fusible ops: Linear op doesn't own output
+        # or grad input quantizers, Quantize op only owns input and
+        # grad output quantizers.
+
+        if self.mode == "forward":
+
+            def _make_quantizer(idx: int) -> NVFP4Quantizer:
+                qparams = (
+                    self.recipe.fp4_quant_fwd_weight
+                    if idx % 3 == 1
+                    else self.recipe.fp4_quant_fwd_inp
+                )
+                return NVFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_rht=qparams.random_hadamard_transform,
+                    with_post_rht_amax=qparams.random_hadamard_transform,
+                    with_2d_quantization=qparams.fp4_2d_quantization,
+                    stochastic_rounding=qparams.stochastic_rounding,
+                )
+
+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
+
+        if self.mode == "backward":
+            return [
+                NVFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
+                    with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
+                    with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
+                    stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
+                )
+                for _ in range(self.num_quantizers)
+            ]
+
+        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")

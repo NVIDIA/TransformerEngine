@@ -27,6 +27,7 @@ from ..fp8 import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -39,6 +40,7 @@ from ..distributed import (
 from ..constants import dist_group_type
 from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
@@ -757,6 +759,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
+            if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -1215,15 +1219,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, Float8BlockQuantizer):
+                # TODO(ksivaman): Re-add fusion once kernel is available.
+                if isinstance(quantizer, (Float8BlockQuantizer, NVFP4Quantizer)):
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(
-            grad_output,
-            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
-        ):
+        if not isinstance(grad_output, QuantizedTensorBase):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
