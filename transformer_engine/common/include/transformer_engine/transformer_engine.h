@@ -439,6 +439,15 @@ inline bool is_fp8_dtype(const DType t) {
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
+/*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
+ *
+ * Return true if TE datatype is high precision
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_high_precision_dtype(const DType t) {
+  return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
+}
+
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
  */

@@ -334,6 +334,8 @@ using fp8e8m0 = __nv_fp8_e8m0;
 #endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif
 using e8m0_t = uint8_t;
 
