@@ -62,7 +62,7 @@ class _FromNVFP4Func(torch.autograd.Function):
             # Convert FP8E4M3 block scales to FP32
             block_scales = tensor._rowwise_scale_inv
             block_scales = block_scales.reshape(-1, block_scales.size(-1))
-            block_scales = block_scales[:math.prod(shape[:-1]), :shape[-1] // 16]
+            block_scales = block_scales[: math.prod(shape[:-1]), : shape[-1] // 16]
             block_scales = block_scales.view(torch.float8_e4m3fn).to(torch.float32)
 
             # Convert amax to FP32 tensor scale
@@ -75,9 +75,7 @@ class _FromNVFP4Func(torch.autograd.Function):
             return data.to(dtype)
 
         if tensor._columnwise_data is not None:
-            raise NotImplementedError(
-                "Dequantizing column-wise NVFP4 data is not implemented yet!"
-            )
+            raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
         raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
 
     @staticmethod

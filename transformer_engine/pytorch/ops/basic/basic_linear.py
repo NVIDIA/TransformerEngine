@@ -949,7 +949,6 @@ class BasicLinear(BasicOperation):
                     grad_output_quantizer.with_amax_reduction = True
                     grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
-
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")

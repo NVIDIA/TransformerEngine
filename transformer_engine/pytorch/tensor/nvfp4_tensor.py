@@ -499,9 +499,7 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
             tensor = args[0]
             shape = args[1]
             if len(args) != 2:
-                raise RuntimeError(
-                    "Unexpected args for view op (expected 2 args, got {len(args)})"
-                )
+                raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
             if shape == tensor.size():
                 return tensor.detach()
             else:
