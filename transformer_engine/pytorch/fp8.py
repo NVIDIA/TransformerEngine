@@ -1159,7 +1159,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             def _make_quantizer(idx: int) -> NVFP4Quantizer:
                 qparams = (
                     self.recipe.fp4_quant_fwd_weight
-                    if idx % 3 == 2
+                    if idx % 3 == 1
                     else self.recipe.fp4_quant_fwd_inp
                 )
                 return NVFP4Quantizer(

@@ -926,6 +926,7 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
+            # Recipe-specific configuration
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if recipe.float8_current_scaling():
                 input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
@@ -940,6 +941,14 @@ class BasicLinear(BasicOperation):
                 if self.sequence_parallel and self.tensor_parallel_mode == "row":
                     grad_output_quantizer.with_amax_reduction = True
                     grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+            if recipe.nvfp4():
+                if self.sequence_parallel and self.tensor_parallel_mode == "column":
+                    input_quantizer.with_amax_reduction = True
+                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                if self.sequence_parallel and self.tensor_parallel_mode == "row":
+                    grad_output_quantizer.with_amax_reduction = True
+                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():

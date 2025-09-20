@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
+import functools
 import math
 from typing import Optional, Dict, Any, Tuple
 import warnings
@@ -20,6 +21,16 @@ from ..quantized_tensor import Quantizer
 from ...utils import _empty_tensor
 
 
+@functools.lru_cache(maxsize=None)
+def _fp4_e2m1_vals(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Values representable in FP4 E2M1 format"""
+    return torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device=device,
+        dtype=dtype,
+    )
+
+
 class _FromNVFP4Func(torch.autograd.Function):
     """Cast from NVFP4 to other dtype"""
 
@@ -30,14 +41,47 @@ class _FromNVFP4Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        dtype = torch_to_transformer_engine_dtype[dtype]
 
-        # Make sure FP8 data is in expected format
+        # Dequantize row-wise data
         if tensor._rowwise_data is not None:
-            # TODO(zhongbo): Implement this
-            raise NotImplementedError("Casting back from the rowwise not implemented yet!")
+            # TODO(ptredak): Use NVFP4 dequantize kernel once available
             # return tex.dequantize(tensor, dtype)
-        raise NotImplementedError("Casting back from the transpose not implemented yet!")
+
+            # Tensor properties
+            shape = list(tensor._rowwise_data.size())
+            shape[-1] *= 2
+            device = tensor._rowwise_data.device
+
+            # Convert FP4E2M1 values to FP32
+            data = tensor._rowwise_data.view(torch.uint8)
+            data = torch.cat((data & 0x0F, data >> 4), dim=-1)
+            data = torch.index_select(
+                _fp4_e2m1_vals(device, dtype=torch.float32),
+                0,
+                data.reshape(-1).to(torch.int32),
+            ).reshape(shape)
+            data = data.contiguous()
+
+            # Convert FP8E8M0 block scales to FP32
+            block_scales = tensor._rowwise_scale_inv
+            block_scales = block_scales.reshape(-1, block_scales.size(-1))
+            block_scales = block_scales[:math.prod(shape[:-1]), :shape[-1] // 16]
+            block_scales = torch.exp2(block_scales.view(torch.int8).to(torch.float32))
+
+            # Convert amax to FP32 tensor scale
+            tensor_scale = tensor._amax_rowwise / (6.0 * 448.0)  # Scale by FP4E2M1 and FP8E4M3 max
+
+            # Apply scales
+            block_data = data.view(-1, 16)
+            block_data *= block_scales.reshape(-1, 1) * tensor_scale.view(())
+
+            return data.to(dtype)
+
+        # Dequantize column-wise data
+        if tensor._columnwise_data is not None:
+            raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
+
+        raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
 
     @staticmethod
     def backward(
@@ -171,6 +215,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         raise RuntimeError("Attempted to get shape of NVFP4 tensor with no data")
 
     def view(self, shape: torch.Size):
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if view not needed
         cur_shape = self.size()
@@ -184,7 +229,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
             shape = shape[0]
         if -1 in shape:
             shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
             for i, d in enumerate(shape):
                 if d == -1:
                     shape[i] = d_inferred
@@ -192,7 +237,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         if shape[-1] != cur_shape[-1]:
             raise RuntimeError(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(cur_shape)} to {tuple(shape)})"
             )
 
         # Reshape data
