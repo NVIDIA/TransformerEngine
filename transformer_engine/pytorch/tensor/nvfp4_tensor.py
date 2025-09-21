@@ -502,8 +502,7 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
                 raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
             if shape == tensor.size():
                 return tensor.detach()
-            else:
-                return tensor.view(shape)
+            return tensor.view(shape)
 
         # NVFP4 dequantize not supported. Add manual support for needed funcs.
         if func in (aten.empty_like.default, aten.zero_.default):

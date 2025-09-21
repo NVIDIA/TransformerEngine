@@ -13,11 +13,11 @@ import warnings
 
 import torch
 
-import transformer_engine_torch as tex
+#import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from ..quantized_tensor import QuantizedTensorBase
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+#from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ..quantized_tensor import Quantizer
 from ...utils import _empty_tensor
 
