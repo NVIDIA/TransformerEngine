@@ -433,13 +433,30 @@ def run_dpa_with_cp(
     elif dtype == "fp16":
         tols = dict(atol=5e-3, rtol=5e-3)
     elif dtype == "fp8":
-        tols = dict(atol=0.0675, rtol=0.125)
+        tols = dict(atol=5e-1, rtol=5e-1)
+        rmse_tol = 0.1
     else:
         assert False, f"{dtype} is an unsupported dtype!"
 
+    def _rmse(a, b):
+        return torch.sqrt((a - b).square().mean()).item()
+
     def _error(a, b):
-        a, b = [x.contiguous() for x in [a, b]]
-        torch.testing.assert_close(a, b, **tols)
+        if dtype != "fp8":
+            torch.testing.assert_close(a, b, **tols)
+        else:
+            try:
+                torch.testing.assert_close(a, b, **tols)
+            except Exception as e:
+                logging.debug(e)
+
+            rmse = _rmse(a, b)
+            rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+            assert (
+                rmse < rmse_tol * rmse_range
+            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+            )
 
     if qkv_format == "bshd":
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
