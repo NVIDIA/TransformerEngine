@@ -436,7 +436,7 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
-  };
+  }
 }
 
 }  // namespace detail
