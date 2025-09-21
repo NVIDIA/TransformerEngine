@@ -1119,7 +1119,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_meta.get("local_recipes", None) is not None:
+        if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
 
         (
@@ -3106,7 +3106,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_meta.get("local_recipes", None) is not None:
+        if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
         fwd_nominal_dtype = q.dtype
         fused_attn_backend = None

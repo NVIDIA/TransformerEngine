@@ -346,7 +346,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_meta.get("local_recipes", None) is not None:
+            if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
@@ -1048,7 +1048,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_meta.get("local_recipes", None) is not None:
+        if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
 
         # input types are inferred from the real data while output types are controlled by fp8_output
@@ -1722,7 +1722,7 @@ class FusedAttention(torch.nn.Module):
 
         if fp8:
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_meta.get("local_recipes", None) is not None:
+            if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
             assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
                 f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
