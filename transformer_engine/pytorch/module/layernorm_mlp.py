@@ -925,7 +925,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
-                    "accumulate": accumulate_wgrad_into_param_main_grad if not hasattr(fc1_weight, "__fsdp_param__") else False,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not hasattr(fc1_weight, "__fsdp_param__")
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
@@ -1163,7 +1167,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
-                    "accumulate": accumulate_wgrad_into_param_main_grad if not hasattr(fc2_weight,"__fsdp_param__") else False,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not hasattr(fc2_weight, "__fsdp_param__")
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
