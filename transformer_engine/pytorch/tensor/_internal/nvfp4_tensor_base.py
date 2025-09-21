@@ -55,7 +55,7 @@ class _FromNVFP4Func(torch.autograd.Function):
 
             # Convert FP4E2M1 values to FP32
             data = tensor._rowwise_data.view(torch.uint8).to(torch.int32)
-            data = torch.cat((data & 0x0F, data >> 4), dim=-1)
+            data = torch.stack((data & 0x0F, data >> 4), dim=-1).reshape(shape)
             data = _fp4_e2m1_vals(device, dtype=torch.float32)[data]
             data = data.to(torch.float32).contiguous()
 
