@@ -12,6 +12,7 @@ import logging
 
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -58,7 +59,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-import transformer_engine_torch as tex
 
 
 # Setup Attention Logging
