@@ -419,25 +419,6 @@ class NVFP4BlockScaling(Recipe):
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
 
-    # Quantization params
-    # Note: RHT is currently only applied to column-wise usage so that
-    # it can be used for wgrad GEMM.
-    fp4_quant_fwd_inp = QParams(
-        random_hadamard_transform=not disable_rht,
-        stochastic_rounding=False,
-        fp4_2d_quantization=False,
-    )
-    fp4_quant_fwd_weight = QParams(
-        random_hadamard_transform=False,
-        stochastic_rounding=False,
-        fp4_2d_quantization=not disable_2d_quantization,
-    )
-    fp4_quant_bwd_grad = QParams(
-        random_hadamard_transform=not disable_rht,
-        stochastic_rounding=not disable_stochastic_rounding,
-        fp4_2d_quantization=False,
-    )
-
     # Not applying quantization to attention for now
     fp8_dpa: bool = False
     fp8_mha: bool = False
@@ -445,6 +426,25 @@ class NVFP4BlockScaling(Recipe):
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+
+        # Quantization params
+        # Note: RHT is currently only applied to column-wise usage so that
+        # it can be used for wgrad GEMM.
+        self.fp4_quant_fwd_inp = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=False,
+            fp4_2d_quantization=False,
+        )
+        self.fp4_quant_fwd_weight = QParams(
+            random_hadamard_transform=False,
+            stochastic_rounding=False,
+            fp4_2d_quantization=not self.disable_2d_quantization,
+        )
+        self.fp4_quant_bwd_grad = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=not self.disable_stochastic_rounding,
+            fp4_2d_quantization=False,
+        )
 
     def __repr__(self) -> str:
         return (

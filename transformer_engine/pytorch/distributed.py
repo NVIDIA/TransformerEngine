@@ -1315,17 +1315,8 @@ def _all_gather_nvfp4(
 
     world_size = get_distributed_world_size(process_group)
 
-    # Construct unpacked output shape because the quanitizer will pack 2 elements in 1 byte.
-    # If `out_shape` wasn't provided externally, then we always need to unpack manually as
-    # we use a packed `in_shape` to construct `out_shape`. If `out_shape` was provided in arg
-    # then we can infer whether or not to unpack based on if the input is quantized or not.
-    unpack_out_shape = out_shape is None or isinstance(inp, NVFP4TensorBase)
-
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
-
-    if unpack_out_shape:
-        out_shape = out_shape[:-1] + [out_shape[-1] * 2]
 
     # For cases where inp has dimensions that cannot be quantized,
     # we gather in high precision followed by a cast to NVFP4.
