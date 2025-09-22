@@ -631,6 +631,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             raise RuntimeError(
                 "Cannot check if pinned for Float8Tensor with no data and no transpose."
             )
+        
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
@@ -645,10 +646,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                     else:
                         dst._create_transpose()
                 return dst
-        if func == torch.ops.aten.numel.default:
-            return (
-                args[0]._data.numel() if args[0]._data is not None else args[0]._transpose.numel()
-            )
+
         if func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

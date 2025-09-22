@@ -16,6 +16,7 @@ from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpu_offload_old_path as old_code_path
+from transformer_engine.pytorch.tensor.quantized_tensor import restore_from_saved, prepare_for_saving
 
 
 __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
@@ -44,15 +45,13 @@ def mark_not_offload(*tensors: torch.Tensor):
     if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
         return
 
+    tensor_obj, tensors = prepare_for_saving(*tensors)
+
     for tensor in tensors:
         if tensor is not None:
-            if hasattr(tensor, "get_data_tensors"):
-                data_tensors = tensor.get_data_tensors(scales=True)
-                for data_tensor in data_tensors:
-                    if data_tensor is not None:
-                        setattr(data_tensor, "_TE_do_not_offload", True)
-            else:
-                setattr(tensor, "_TE_do_not_offload", True)
+            setattr(tensor, "_TE_do_not_offload", True)
+    
+    restore_from_saved(tensor_obj, tensors)
 
 
 def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
@@ -75,12 +74,12 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         if offload_base_tensor:
             setattr(t, "offload_base_tensor", True)
 
+    tensors, tensor_obj = prepare_for_saving(tensors)
+
     for tensor in tensors:
-        if hasattr(tensor, "get_data_tensors"):
-            for data_tensor in tensor.get_data_tensors(scales=True):
-                _mark_tensor_for_offload(data_tensor)
-        else:
-            _mark_tensor_for_offload(tensor)
+        _mark_tensor_for_offload(tensor)
+
+    restore_from_saved(tensor_obj, tensors)
 
 
 @dataclass

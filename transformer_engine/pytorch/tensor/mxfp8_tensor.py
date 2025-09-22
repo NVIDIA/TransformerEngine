@@ -348,32 +348,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
-
-        if func == torch.ops.aten.copy_.default:
-            dst, src = args[0], args[1]
-            # Just copy FP8 attrs if copying between Float8Tensors
-            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
-                if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(src._rowwise_data, *args[2:])
-                if dst._rowwise_scale_inv is not None:
-                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv, *args[2:])
-                if dst._columnwise_data is not None:
-                    dst._columnwise_data.copy_(src._columnwise_data, *args[2:])
-                if dst._columnwise_scale_inv is not None:
-                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv, *args[2:])
-                return dst
-        if func == torch.ops.aten.numel.default:
-            return (
-                args[0]._rowwise_data.numel()
-                if args[0]._rowwise_data is not None
-                else args[0]._columnwise_data.numel()
-            )
-        if func == torch.ops.aten.is_pinned.default:
-            if args[0]._rowwise_data is not None:
-                return args[0]._rowwise_data.is_pinned()
-            if args[0]._columnwise_data is not None:
-                return args[0]._columnwise_data.is_pinned()
-            raise RuntimeError("Cannot check if pinned for MXFP8Tensor with no data.")
+            
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 

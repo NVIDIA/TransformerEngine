@@ -31,7 +31,7 @@ class QuantizedTensorBase:
     XTensorBase should contain all data members needed to
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
-    to behave like regular torch.Tensor (liek __torch_dispatch__)."""
+    to behave like regular torch.Tensor (like __torch_dispatch__)."""
 
     _quantizer: Optional[Quantizer]
 
@@ -446,6 +446,18 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
+            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor):
+                assert dst._quantizer == src._quantizer, \
+                    "Quantizers must be the same for copy_ of QuantizedTensor"
+                dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
+                src_tensors, src_tensor_obj = src.prepare_for_saving()
+                for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
+                    if dst_tensor is not None:
+                        dst_tensor.copy_(src_tensor, *args[2:], **kwargs)
+                dst.restore_from_saved(dst_tensor_obj, dst_tensors)
+                src.restore_from_saved(src_tensor_obj, src_tensors)
+                return
+
             if isinstance(dst, QuantizedTensor):
                 dst.quantize_(src)
             else:
@@ -475,6 +487,13 @@ class QuantizedTensor(torch.Tensor):
             )
             tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
             return out
+        
+        if func in (torch.ops.aten.numel.default, torch.ops.aten.is_pinned.default):
+            data_tensors = tensor.get_data_tensors()
+            for t in data_tensors:
+                if t is not None:
+                    return func(t)
+            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
