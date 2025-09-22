@@ -66,7 +66,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
-    cudnn_backend = false;  // cuDNN does not currently support amax output for non quantized output
+    NVTE_CHECK(!cudnn_backend,
+               "cuDNN does not currently support amax output for non quantized output");
   }
 
   bool gamma_in_weight_dtype = false;

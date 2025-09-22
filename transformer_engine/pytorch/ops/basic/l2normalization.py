@@ -10,10 +10,8 @@ import os
 
 import torch
 
-from ...utils import clear_tensor_data
 from ... import torch_version
-from .._common import maybe_dequantize
-from ..op import BasicOperation, OperationContext
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
@@ -22,6 +20,9 @@ from ...jit import (
     warmup_jit_l2normalization_all_dtypes,
 )
 from ...tensor import Quantizer
+from ...utils import clear_tensor_data
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize
 
 
 class L2Normalization(BasicOperation):
@@ -101,6 +102,8 @@ class L2Normalization(BasicOperation):
 
         # Save state for backward pass
         if requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y

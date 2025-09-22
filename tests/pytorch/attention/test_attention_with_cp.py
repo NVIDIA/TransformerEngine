@@ -36,6 +36,12 @@ model_configs_flash_attn = {
         2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
     ),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
+    "cp_3_0": ModelConfig(2, 4096, 12, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
+    "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
+    "cp_3_2": ModelConfig(
+        2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
+    ),  # MLA
+    "cp_3_3": ModelConfig(2, 4096, 12, 192, window_size=(512, 512), head_dim_v=128),  # MLA
 }
 
 
@@ -81,6 +87,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
+    if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently only support KV P2P!")
 
     subprocess.run(
         get_bash_arguments(
