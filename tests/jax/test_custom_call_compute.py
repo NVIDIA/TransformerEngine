@@ -291,7 +291,7 @@ class TestActivation:
         )
 
         act_params = (
-            ClampedSwigluParams(limit=1.0, alpha=1.702)
+            ClampedSwigluParams(limit=0.75, alpha=1.702)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
