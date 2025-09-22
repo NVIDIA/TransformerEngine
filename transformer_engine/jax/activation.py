@@ -18,7 +18,6 @@ from . import cpp_extensions as tex
 from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
-
 @dataclass(frozen=True)
 class ClampedSwigluParams:
     limit: float = 7.0
