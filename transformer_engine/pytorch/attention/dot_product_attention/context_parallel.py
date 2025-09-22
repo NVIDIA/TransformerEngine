@@ -951,7 +951,7 @@ def cp_p2p_bwd_fused_attn(
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_quantizer_per_step
 
-    dq, dk, dv, dbias = fused_attn_bwd(
+    dq, dk, dv, dbias, *_ = fused_attn_bwd(
         max_seqlen_q_,
         max_seqlen_kv_,
         cu_seqlens_q_per_step[cp_size - step - 1],
@@ -3475,7 +3475,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
                     out_part = out
                 dout_part = Float8Tensor.make_like(dout_fp8, data=dout, dtype=bwd_nominal_dtype)
-            dq, dk, dv, _ = fused_attn_bwd(
+            dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
                 cu_seqlens_q,

@@ -2042,7 +2042,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     if unfused_attn_supported:
         logging.debug("========== {:^25s} ==========".format("unfused fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
-        _error(
+        compare_and_assert(
             unfused_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "unfused_attn_fwd_fp8",
@@ -2050,11 +2050,12 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             atol,
             rtol,
             rmse_tol,
+            True,
         )
         if is_training:
             for i, _ in enumerate(fused_attn_bwd_f16):
                 logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-                _error(
+                compare_and_assert(
                     unfused_attn_bwd_fp8[i],
                     fused_attn_bwd_f16[i],
                     f"unfused_attn_bwd_fp8[{i}]",
@@ -2062,6 +2063,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                     atol,
                     rtol,
                     rmse_tol,
+                    True,
                 )
     if config.dropout_p != 0.0:
         # test cuDNN FP8 dropout

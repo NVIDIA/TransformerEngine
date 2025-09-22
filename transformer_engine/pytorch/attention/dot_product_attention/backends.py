@@ -1535,7 +1535,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dq,
             dk,
             dv,
-            dbias,
+            d_bias,
             None,
             None,
             None,
