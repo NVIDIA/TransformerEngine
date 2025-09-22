@@ -186,9 +186,14 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_colwise
 ) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
-    constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
-    using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
+    using IType = typename CastTraits::IType;
+    using OType = typename CastTraits::OType;
+    using inputUnitType = typename CastTraits::inputUnitType;
+    using outputUnitType = typename CastTraits::outputUnitType;
+
+    using IType2 = typename ptx::FPx2<IType>;
+    constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
+    using OType2 = typename ptx::FPx2<OType>;
 
     e8m0_t *sRowwiseScale = nullptr;
     if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
@@ -214,7 +219,7 @@ __global__ void cast_mxfp8_kernel(
             + (threadIdx.x % CastTraits::threadLayout::N);
     }
 
-    typename CastTraits::inputUnitType rInput[CastTraits::numStages][CastTraits::numUnitsPerChunk];
+    inputUnitType rInput[CastTraits::numStages][CastTraits::numUnitsPerChunk];
     // prologue
     #pragma unroll
     for (int32_t iter = 0; iter < CastTraits::numPrefetch; iter++) {
@@ -227,8 +232,8 @@ __global__ void cast_mxfp8_kernel(
 
         if (coords.y < rows && coords.x < cols) {
             int32_t offset = coords.y * cols + coords.x;
-            typename CastTraits::inputUnitType * input_units = 
-                reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+            inputUnitType * input_units = 
+                reinterpret_cast<inputUnitType *>(input + offset);
         
             #pragma unroll
             for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
@@ -250,8 +255,8 @@ __global__ void cast_mxfp8_kernel(
 
             if (coords.y < rows && coords.x < cols) {
                 int32_t offset = coords.y * cols + coords.x;
-                typename CastTraits::inputUnitType * input_units = 
-                    reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+                inputUnitType * input_units = 
+                    reinterpret_cast<inputUnitType *>(input + offset);
             
                 #pragma unroll
                 for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
@@ -267,14 +272,14 @@ __global__ void cast_mxfp8_kernel(
         coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
         if (coords.y >= rows || coords.x >= cols) { return; }
 
-        if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+        if constexpr (std::is_same_v<IType, float>) {
             float thread_amax = 0.f;
             IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
             #pragma unroll
             for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
                 ptx::abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
             }
-            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            e8m0_t biased_exponent = to_e8m0<OType>(thread_amax);
             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                 int32_t rowwise_scale_offset = 
                     rowwise_scale_smem_base_offset 
@@ -288,10 +293,10 @@ __global__ void cast_mxfp8_kernel(
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
             if constexpr (CastTraits::_use_cvt_4x) {
-                using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                using OType4 = ptx::FPx4<OType>;
+                using IType4 = ptx::FPx4<IType>;
                 IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
                 OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
                 #pragma unroll
@@ -311,8 +316,8 @@ __global__ void cast_mxfp8_kernel(
                     rOutput2[j] = out;
                 }
             }
-            typename CastTraits::outputUnitType * output_units = 
-                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            outputUnitType * output_units = 
+                reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
             #pragma unroll
             for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
                 output_units[j] = rOutput[j];
@@ -324,8 +329,8 @@ __global__ void cast_mxfp8_kernel(
             for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
                 ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
             }
-            typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
-            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
+            e8m0_t biased_exponent = to_e8m0<OType>(thread_amax);
             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                 int32_t rowwise_scale_offset = 
                     rowwise_scale_smem_base_offset 
@@ -340,10 +345,10 @@ __global__ void cast_mxfp8_kernel(
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
             
-            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
             if constexpr (CastTraits::_use_cvt_4x) {
-                using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                using OType4 = ptx::FPx4<OType>;
+                using IType4 = ptx::FPx4<IType>;
                 IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
                 OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
                 #pragma unroll
@@ -363,8 +368,8 @@ __global__ void cast_mxfp8_kernel(
                     rOutput2[i] = out;
                 }
             }
-            typename CastTraits::outputUnitType * output_units = 
-                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            outputUnitType * output_units = 
+                reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
             #pragma unroll
             for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
                 output_units[j] = rOutput[j];
@@ -383,14 +388,14 @@ __global__ void cast_mxfp8_kernel(
         coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
         if (coords.y >= rows || coords.x >= cols) { return; }
 
-        if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+        if constexpr (std::is_same_v<IType, float>) {
             float thread_amax = 0.f;
             IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
             #pragma unroll
             for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
                 ptx::abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
             }
-            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            e8m0_t biased_exponent = to_e8m0<OType>(thread_amax);
             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                 int32_t rowwise_scale_offset = 
                     rowwise_scale_smem_base_offset 
@@ -404,10 +409,10 @@ __global__ void cast_mxfp8_kernel(
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
             if constexpr (CastTraits::_use_cvt_4x) {
-                using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                using OType4 = ptx::FPx4<OType>;
+                using IType4 = ptx::FPx4<IType>;
                 IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
                 OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
                 #pragma unroll
@@ -427,8 +432,8 @@ __global__ void cast_mxfp8_kernel(
                     rOutput2[j] = out;
                 }
             }
-            typename CastTraits::outputUnitType * output_units = 
-                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            outputUnitType * output_units = 
+                reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
             #pragma unroll
             for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
                 output_units[j] = rOutput[j];
@@ -440,8 +445,8 @@ __global__ void cast_mxfp8_kernel(
             for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
                 ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
             }
-            typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
-            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
+            e8m0_t biased_exponent = to_e8m0<OType>(thread_amax);
             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                 int32_t rowwise_scale_offset = 
                     rowwise_scale_smem_base_offset 
@@ -456,10 +461,10 @@ __global__ void cast_mxfp8_kernel(
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
             
-            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
             if constexpr (CastTraits::_use_cvt_4x) {
-                using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                using OType4 = ptx::FPx4<OType>;
+                using IType4 = ptx::FPx4<IType>;
                 IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
                 OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
                 #pragma unroll
@@ -479,8 +484,8 @@ __global__ void cast_mxfp8_kernel(
                     rOutput2[i] = out;
                 }
             }
-            typename CastTraits::outputUnitType * output_units = 
-                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            outputUnitType * output_units = 
+                reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
             #pragma unroll
             for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
                 output_units[j] = rOutput[j];
@@ -703,9 +708,15 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_colwise
 ) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
-    using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
-    constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
+    using IType = typename CastTraits::IType;
+    using OType = typename CastTraits::OType;
+    using inputUnitType = typename CastTraits::inputUnitType;
+    using rowOutputUnitType = typename CastTraits::rowOutputUnitType;
+    using ColwiseReduceDataType = typename CastTraits::ColwiseReduceDataType;
+
+    using IType2 = typename ptx::FPx2<IType>;
+    using OType2 = typename ptx::FPx2<OType>;
+    constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
 
     int32_t warpId = threadIdx.y;
     int32_t leader = ptx::elect_one_sync();
@@ -716,35 +727,35 @@ __global__ void cast_mxfp8_kernel(
     extern __shared__ char smem[];
     char *smemAligned = reinterpret_cast<char*>(align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
 
-    typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
-    typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
+    IType *sInput = reinterpret_cast<IType *>(smemAligned);
+    inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
 
-    typename CastTraits::OType *sRowOutput = reinterpret_cast<typename CastTraits::OType *>(
+    OType *sRowOutput = reinterpret_cast<OType *>(
         sInput + CastTraits::blockIterDim::num * CastTraits::numStages
     );
-    typename CastTraits::rowOutputUnitType *sRowOutputUnit = 
-        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sRowOutput);
+    rowOutputUnitType *sRowOutputUnit = 
+        reinterpret_cast<rowOutputUnitType *>(sRowOutput);
 
-    typename CastTraits::OType *sColOutput = reinterpret_cast<typename CastTraits::OType *>(
+    OType *sColOutput = reinterpret_cast<OType *>(
         sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
     );
-    typename CastTraits::rowOutputUnitType *sColOutputUnit = 
-        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sColOutput);
+    rowOutputUnitType *sColOutputUnit = 
+        reinterpret_cast<rowOutputUnitType *>(sColOutput);
 
     e8m0_t *sRowwiseScale = nullptr;
-    typename CastTraits::ColwiseReduceDataType *sColwiseReduce = nullptr;
+    ColwiseReduceDataType *sColwiseReduce = nullptr;
     if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
         sRowwiseScale = reinterpret_cast<e8m0_t *>(
             sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
         );
         if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-            sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+            sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
                 sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t)
             );
             sColwiseReduce += warpId * 32;
         }
     } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-        sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+        sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
             sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
         );
         sColwiseReduce += warpId * 32;
@@ -800,7 +811,7 @@ __global__ void cast_mxfp8_kernel(
                     cuda_ptx::scope_cta,
                     cuda_ptx::space_shared,
                     &ldg_producer[write_state.index()],
-                    CastTraits::blockIterDim::num * sizeof(typename CastTraits::IType)
+                    CastTraits::blockIterDim::num * sizeof(IType)
                 );            
                 write_state++;
             }
@@ -951,10 +962,10 @@ __global__ void cast_mxfp8_kernel(
                         sColwiseReduce[threadIdx.x] = 0;
                     }
 
-                    typename CastTraits::IType rInput[CastTraits::rowChunkElems];
+                    IType rInput[CastTraits::rowChunkElems];
                     {
-                        typename CastTraits::inputUnitType *rInputUnit = 
-                            reinterpret_cast<typename CastTraits::inputUnitType *>(rInput);
+                        inputUnitType *rInputUnit = 
+                            reinterpret_cast<inputUnitType *>(rInput);
                         int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
                         #pragma unroll
                         for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
@@ -969,7 +980,7 @@ __global__ void cast_mxfp8_kernel(
                         );
                     }
 
-                    if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+                    if constexpr (std::is_same_v<IType, float>) {
 
                     } else {
                         static_assert(CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux,
@@ -1025,8 +1036,8 @@ __global__ void cast_mxfp8_kernel(
                             }
                         }
                         {
-                            typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
-                            e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
+                            IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
+                            e8m0_t row_biased_exponent = to_e8m0<OType>(row_amax);
                             row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
                             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                                 int32_t rowwise_scale_offset = 
@@ -1045,7 +1056,7 @@ __global__ void cast_mxfp8_kernel(
                         {
                             __syncwarp();
                             float col_amax = sColwiseReduce[threadIdx.x];
-                            e8m0_t col_biased_exponent = to_e8m0<typename CastTraits::OType>(col_amax);
+                            e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
                             float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
                             sColwiseReduce[threadIdx.x] = col_scale_inverse;
                             int32_t colwise_scale_offset = 
@@ -1057,13 +1068,13 @@ __global__ void cast_mxfp8_kernel(
                         }
                         // rowwise & colwise scaling
                         {
-                            typename CastTraits::rowOutputUnitType rRowOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
-                            typename CastTraits::rowOutputUnitType rColOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
+                            rowOutputUnitType rRowOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
+                            rowOutputUnitType rColOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
 
                             ptx::floatx2 row_scale_inverse_2{row_scale_inverse, row_scale_inverse};
                             if constexpr (CastTraits::_use_cvt_4x) {
-                                using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                                using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                                using OType4 = ptx::FPx4<OType>;
+                                using IType4 = ptx::FPx4<IType>;
 
                                 ptx::floatx4 col_scale_inverse_4[2];
                                 ptx::floatx4 *sColwiseScale4x = reinterpret_cast<ptx::floatx4 *>(sColwiseReduce);
@@ -1256,8 +1267,14 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_colwise
 ) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
-    using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
+    using IType = typename CastTraits::IType;
+    using OType = typename CastTraits::OType;
+    using inputUnitType = typename CastTraits::inputUnitType;
+    using rowOutputUnitType = typename CastTraits::rowOutputUnitType;
+    using ColwiseReduceDataType = typename CastTraits::ColwiseReduceDataType;
+
+    using IType2 = typename ptx::FPx2<IType>;
+    using OType2 = typename ptx::FPx2<OType>;
     
     int32_t warpId = threadIdx.y;
     int32_t leader = ptx::elect_one_sync();
@@ -1267,37 +1284,37 @@ __global__ void cast_mxfp8_kernel(
 
     extern __shared__ char smem[];
     char *smemAligned = reinterpret_cast<char*>(align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
-    typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
-    typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
+    IType *sInput = reinterpret_cast<IType *>(smemAligned);
+    inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
 
-    typename CastTraits::OType *sRowOutput = reinterpret_cast<typename CastTraits::OType *>(
+    OType *sRowOutput = reinterpret_cast<OType *>(
         sInput + CastTraits::blockIterDim::num * CastTraits::numStages
     );
-    typename CastTraits::rowOutputUnitType *sRowOutputUnit = 
-        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sRowOutput);
+    rowOutputUnitType *sRowOutputUnit = 
+        reinterpret_cast<rowOutputUnitType *>(sRowOutput);
 
     // colwise output will reuse input buffer
-    typename CastTraits::OType *sColOutput;
+    OType *sColOutput;
     e8m0_t *sRowwiseScale = nullptr;
-    typename CastTraits::ColwiseReduceDataType *sColwiseReduce = nullptr;
+    ColwiseReduceDataType *sColwiseReduce = nullptr;
     if constexpr (CastTraits::_reuse_input_out_smem) {
-        sColOutput = reinterpret_cast<typename CastTraits::OType *>(sInput);
+        sColOutput = reinterpret_cast<OType *>(sInput);
         if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
             sRowwiseScale = reinterpret_cast<e8m0_t *>(
                 sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
             if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-                sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+                sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
                     sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t)
                 );
             }
         } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-            sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+            sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
                 sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
         }
     } else {
-        sColOutput = reinterpret_cast<typename CastTraits::OType *>(
+        sColOutput = reinterpret_cast<OType *>(
             sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
         );
         if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
@@ -1305,18 +1322,18 @@ __global__ void cast_mxfp8_kernel(
                 sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
             if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-                sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+                sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
                     sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t)
                 );
             }
         } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-            sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+            sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
                 sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
         }
     }
-    typename CastTraits::rowOutputUnitType *sColOutputUnit = 
-        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sColOutput);
+    rowOutputUnitType *sColOutputUnit = 
+        reinterpret_cast<rowOutputUnitType *>(sColOutput);
 
     if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
         sColwiseReduce += warpId * 32;
@@ -1399,7 +1416,7 @@ __global__ void cast_mxfp8_kernel(
                 cuda_ptx::scope_cta,
                 cuda_ptx::space_shared,
                 &producer[iter],
-                CastTraits::blockIterDim::num * sizeof(typename CastTraits::IType)
+                CastTraits::blockIterDim::num * sizeof(IType)
             );
         }
     }
@@ -1432,7 +1449,7 @@ __global__ void cast_mxfp8_kernel(
                         cuda_ptx::scope_cta,
                         cuda_ptx::space_shared,
                         &producer[next_stage],
-                        CastTraits::blockIterDim::num * sizeof(typename CastTraits::IType)
+                        CastTraits::blockIterDim::num * sizeof(IType)
                     );
                 }
             }
@@ -1462,10 +1479,10 @@ __global__ void cast_mxfp8_kernel(
                 sColwiseReduce[threadIdx.x] = 0.0f;
             }
 
-            typename CastTraits::IType rInput[CastTraits::rowChunkElems];
+            IType rInput[CastTraits::rowChunkElems];
             {
-                typename CastTraits::inputUnitType *rInputUnit = 
-                    reinterpret_cast<typename CastTraits::inputUnitType *>(rInput);
+                inputUnitType *rInputUnit = 
+                    reinterpret_cast<inputUnitType *>(rInput);
                 int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
                 #pragma unroll
                 for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
@@ -1473,7 +1490,7 @@ __global__ void cast_mxfp8_kernel(
                 }
             }
             
-            if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+            if constexpr (std::is_same_v<IType, float>) {
                 if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom ||
                               CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
 
@@ -1495,7 +1512,7 @@ __global__ void cast_mxfp8_kernel(
                         ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
 
                         float2 values;
-                        if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                        if constexpr (std::is_same_v<IType, fp16>) {
                               asm volatile (
                                 "{\n\t"
                                 ".reg.b16 val1;\n"
@@ -1507,7 +1524,7 @@ __global__ void cast_mxfp8_kernel(
                                 : "=f"(values.x), "=f"(values.y)
                                 : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
                             );
-                        } else if constexpr (std::is_same_v<typename CastTraits::IType, bf16>) {
+                        } else if constexpr (std::is_same_v<IType, bf16>) {
                             asm volatile (
                                 "{\n\t"
                                 "prmt.b32 %1, 0x0, %2, 0x7632;\n"
@@ -1557,8 +1574,8 @@ __global__ void cast_mxfp8_kernel(
                     }
 
                     {
-                        typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
-                        e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
+                        IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
+                        e8m0_t row_biased_exponent = to_e8m0<OType>(row_amax);
                         row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
                         if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                             int32_t rowwise_scale_offset = 
@@ -1577,7 +1594,7 @@ __global__ void cast_mxfp8_kernel(
                     {
                         __syncwarp();
                         float col_amax = sColwiseReduce[threadIdx.x];
-                        e8m0_t col_biased_exponent = to_e8m0<typename CastTraits::OType>(col_amax);
+                        e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
                         float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
                         sColwiseReduce[threadIdx.x] = col_scale_inverse;
                         int32_t colwise_scale_offset = 
@@ -1590,13 +1607,13 @@ __global__ void cast_mxfp8_kernel(
                 }
                 // row & colwise
                 {
-                    typename CastTraits::rowOutputUnitType rRowOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
-                    typename CastTraits::rowOutputUnitType rColOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
+                    rowOutputUnitType rRowOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
+                    rowOutputUnitType rColOutputUnit[CastTraits::rowNumOutUnitsPerChunk];
 
                     ptx::floatx2 row_scale_inverse_2{row_scale_inverse, row_scale_inverse};
                     if constexpr (CastTraits::_use_cvt_4x) {
-                        using OType4 = ptx::FPx4<typename CastTraits::OType>;
-                        using IType4 = ptx::FPx4<typename CastTraits::IType>;
+                        using OType4 = ptx::FPx4<OType>;
+                        using IType4 = ptx::FPx4<IType>;
 
                         ptx::floatx4 col_scale_inverse_4[2];
                         ptx::floatx4 *sColwiseScale4x = reinterpret_cast<ptx::floatx4 *>(sColwiseReduce);
