@@ -2049,6 +2049,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
+            activation_params=self.mlp_activation_params,
             intermediate_dropout_rng_name=self.dropout_rng_name,
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_hidden_dropout_dims=self.intermediate_dropout_dims,

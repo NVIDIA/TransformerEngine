@@ -48,6 +48,8 @@ def activation(
         x: Input tensor to apply activations to
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer for quantizing the output
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Activated output tensor
@@ -58,7 +60,7 @@ def activation(
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(1, 3))
-def _activation(x, activation_type, quantizer, act_params=None):
+def _activation(x, activation_type, quantizer, act_params):
     """Internal implementation of activation with custom VJP.
 
     This function implements the core activation logic with support for
@@ -68,6 +70,8 @@ def _activation(x, activation_type, quantizer, act_params=None):
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Activated tensor
@@ -83,6 +87,8 @@ def _activation_fwd_rule(x, activation_type, quantizer, act_params):
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Tuple of (output, context) for backward pass
@@ -98,6 +104,8 @@ def _activation_bwd_rule(activation_type, act_params, ctx, g):
 
     Args:
         activation_type: Sequence of activation functions
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
         ctx: Context from forward pass
         g: Gradient from upstream
 
