@@ -18,10 +18,7 @@ from utils import (
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
-from transformer_engine.jax.cpp_extensions.activation import (
-    _jax_act_lu,
-    _jax_quantize_dact_dbias
-)
+from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
 from transformer_engine.jax.cpp_extensions.normalization import (
     _jax_layernorm,
     _jax_rmsnorm,

@@ -62,7 +62,6 @@ ActivationEnum = {
 }
 
 
-
 def _convert_to_activation_function(fn_or_string, act_params: Optional[ClampedSwigluParams] = None):
     """Convert a string to an activation function."""
     if fn_or_string == "linear":
