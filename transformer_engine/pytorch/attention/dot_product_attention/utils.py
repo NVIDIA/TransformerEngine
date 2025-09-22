@@ -25,6 +25,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    SoftmaxType,
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -215,6 +216,8 @@ class AttentionParams:
         Attention dropout.
     context_parallel: bool, default = `False`
         Whether context parallelism is used or not.
+    cp_comm_type: str, default = "p2p"
+        The communication type of context parallelism.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
     is_training: bool, default = `True`
@@ -225,6 +228,8 @@ class AttentionParams:
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`
         Inference-related parameters. See InferenceParams for details.
+    softmax_type: str, default = "vanilla"
+        The type of softmax operation. See DotProductAttention for details.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -246,11 +251,13 @@ class AttentionParams:
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
+    cp_comm_type: str = "p2p"
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
 
     def __eq__(self, other):
         """
@@ -317,11 +324,13 @@ def get_attention_backend(
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
+    cp_comm_type = attention_params.cp_comm_type
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
+    softmax_type = attention_params.softmax_type
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -576,6 +585,51 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention 3 for dropout")
         use_flash_attention_3 = False
 
+    # Filter: Softmax type
+    # context_parallel | softmax_type | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # no               | vanilla      | All
+    # no               | off-by-one   | FusedAttention, UnfusedDotProductAttention
+    # no               | learnable    | FusedAttention, UnfusedDotProductAttention
+    # yes              | vanilla      | FusedAttention, FlashAttention
+    # yes              | off-by-one   | FusedAttention
+    # yes              | learnable    | FusedAttention
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
+        use_flash_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+            )
+            use_unfused_attention = False
+        if qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type
+            )
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s and qkv_format = thd",
+                softmax_type,
+            )
+            use_unfused_attention = False
+        if context_parallel:
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type"
+                " = %s",
+                softmax_type,
+            )
+            use_unfused_attention = False
+            if cp_comm_type != "a2a":
+                logger.debug(
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                    " cp_comm_type = %s",
+                    softmax_type,
+                    cp_comm_type,
+                )
+                use_fused_attention = False
+
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
     # ----------------------------------------------------------------------------------------------------
@@ -817,6 +871,7 @@ def get_attention_backend(
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
             attention_dropout,
             num_heads,
             num_gqa_groups,
