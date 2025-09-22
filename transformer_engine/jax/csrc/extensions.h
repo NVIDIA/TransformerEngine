@@ -38,6 +38,11 @@ XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 namespace transformer_engine {
 namespace jax {
 
+struct ClampedSwigluConfig {
+    float limit;
+    float alpha;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
@@ -134,4 +139,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 }  // namespace jax
 }  // namespace transformer_engine
 
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::ClampedSwigluConfig,
+    ::xla::ffi::StructMember<float>("limit"),
+    ::xla::ffi::StructMember<float>("alpha"));
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_

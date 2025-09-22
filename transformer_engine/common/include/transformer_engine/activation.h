@@ -39,6 +39,7 @@ enum class NVTE_Activation_Type {
   QGEGLU,
   SRELU,
   SREGLU,
+  CLAMPED_SWIGLU,
 };
 
 /*! \brief Computes the GeLU activation of the input.

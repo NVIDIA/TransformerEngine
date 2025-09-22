@@ -1631,6 +1631,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     mlp_activations: Sequence[str], default = ('relu', )
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
+    mlp_activation_params: dict = None
+         This is only used when ('clamped_silu', 'clamped_linear') is in :attr:`mlp_activations`. At the moment
+        ClampedSwiglu is the only activation that requires parameters.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
         If set to False, the layer will not learn additive biases.
@@ -1751,6 +1754,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     mha_kernel_init: Initializer = None
     mlp_kernel_init: Initializer = None
     mlp_activations: Sequence[str] = ("relu",)
+    mlp_activation_params: dict = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     apply_residual_connection_post_layernorm: bool = False

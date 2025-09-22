@@ -16,12 +16,13 @@ from . import cpp_extensions as tex
 
 from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
-
+from .cpp_extensions.activation import ClampedSwigluParams
 
 def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
+    act_params: Optional[ClampedSwigluParams] = None,
 ) -> jnp.ndarray:
     """Apply activation functions to input tensor with optional quantization.
 
@@ -37,12 +38,12 @@ def activation(
         Activated output tensor
     """
     assert x.shape[-1] % len(activation_type) == 0
-    output = _activation(x, activation_type, quantizer)
+    output = _activation(x, activation_type, quantizer, act_params)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _activation(x, activation_type, quantizer):
+@partial(jax.custom_vjp, nondiff_argnums=(1, 3))
+def _activation(x, activation_type, quantizer, act_params=None):
     """Internal implementation of activation with custom VJP.
 
     This function implements the core activation logic with support for
@@ -56,11 +57,11 @@ def _activation(x, activation_type, quantizer):
     Returns:
         Activated tensor
     """
-    _output, _ = _activation_fwd_rule(x, activation_type, quantizer)
+    _output, _ = _activation_fwd_rule(x, activation_type, quantizer, act_params)
     return _output
 
 
-def _activation_fwd_rule(x, activation_type, quantizer):
+def _activation_fwd_rule(x, activation_type, quantizer, act_params):
     """Forward pass rule for activation function.
 
     Args:
@@ -71,13 +72,13 @@ def _activation_fwd_rule(x, activation_type, quantizer):
     Returns:
         Tuple of (output, context) for backward pass
     """
-    fwd_output = tex.act_lu(x, activation_type, quantizer)
+    fwd_output = tex.act_lu(x, activation_type, quantizer, act_params)
     # This is a no-op for higher-precision tensors
     fwd_output = fwd_output.dequantize()
     return fwd_output, (x, quantizer)
 
 
-def _activation_bwd_rule(activation_type, ctx, g):
+def _activation_bwd_rule(activation_type, act_params, ctx, g):
     """Backward pass rule for activation function.
 
     Args:
@@ -90,7 +91,7 @@ def _activation_bwd_rule(activation_type, ctx, g):
     """
     (x, _) = ctx
     assert x.dtype == g.dtype
-    dx = tex.dact_lu(g, x, activation_type)
+    dx = tex.dact_lu(g, x, activation_type, act_params=act_params)
     # No quantization is used in this VJP backward, so the output should
     # always be a NoScaleTensor
     assert isinstance(dx, NoScaleTensor)

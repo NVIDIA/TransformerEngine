@@ -18,7 +18,10 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Result_Type output_buf, Result_Type colwise_output_buf,
                     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                     Result_Type amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
-                    bool is_2x_int) {
+                    bool is_2x_int, ClampedSwigluConfig act_params) {
+  // parameters for clamped swiglu used in GPT OSS
+  auto swiglu_limit = act_params.limit;
+  auto swiglu_alpha = act_params.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
@@ -125,6 +128,9 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
     case NVTE_Activation_Type::SREGLU:
       nvte_sreglu(input_tensor.data(), output_tensor.data(), stream);
       break;
+    case NVTE_Activation_Type::CLAMPED_SWIGLU:
+      nvte_clamped_swiglu(input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha, stream);
+      break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
       break;
@@ -145,7 +151,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<int64_t>("act_enum")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"),
+                                  .Attr<bool>("is_2x")
+                                  .Attr<ClampedSwigluConfig>("act_params"), // Can generalize the config later if we have more activations that need params
                               FFI_CudaGraph_Traits);
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
@@ -216,7 +223,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                                   Result_Type amax_buf, Result_Type dbias_buf,
                                   Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
-                                  int64_t act_enum, bool is_2x, bool is_dbias) {
+                                  int64_t act_enum, bool is_2x, bool is_dbias, ClampedSwigluConfig act_params) {
+  // parameters for clamped swiglu used in GPT OSS
+  auto swiglu_limit = act_params.limit;
+  auto swiglu_alpha = act_params.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
@@ -383,6 +393,9 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
       case NVTE_Activation_Type::SREGLU:
         nvte_dsreglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
+      case NVTE_Activation_Type::CLAMPED_SWIGLU:
+        nvte_clamped_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha, stream);
+        break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");
         break;
@@ -408,7 +421,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler, DActLuDBiasQuantizeFFI
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("act_enum")
                                   .Attr<bool>("is_2x")
-                                  .Attr<bool>("is_dbias"),
+                                  .Attr<bool>("is_dbias")
+                                  .Attr<ClampedSwigluConfig>("act_params"),
                               FFI_CudaGraph_Traits);
 }  // namespace jax
 }  // namespace transformer_engine
