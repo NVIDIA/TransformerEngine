@@ -599,12 +599,12 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         colwise_var = f"{unique_var}_None"
         rowwise_var = f"{unique_var}_None"
         if not input_shape[-1] == 32:
-            input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
             rowwise_var = input_spec[-1] + "_compound"
+            input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
             blocksizes["blocksize_x"] = 32
         if not input_shape[flatten_axis - 1] == 32:
-            input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
             colwise_var = input_spec[flatten_axis - 1] + "_compound"
+            input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
             blocksizes["blocksize_y"] = 32
 
         # The rowwise and colwise scale tensors should be sharded the same way as the input.
