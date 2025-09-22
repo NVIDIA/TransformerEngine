@@ -7,11 +7,10 @@ import warnings
 import operator
 from functools import partial, cache, reduce
 from typing import Optional, Union
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
@@ -37,11 +36,6 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
