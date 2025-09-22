@@ -26,6 +26,7 @@ from utils import ModelConfig, compare_and_assert
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
+
 def generate_input_shapes(
     qkv_format: str,
     config: ModelConfig,
@@ -159,6 +160,7 @@ def get_tols(config, dtype):
         assert False, f"{dtype=} is not supported!"
 
     return atol, rtol, rmse_tol
+
 
 def run_dpa_with_cp(
     dtype="bf16",
