@@ -42,7 +42,7 @@ from transformer_engine.jax.quantize import (
     noop_quantizer_set,
 )
 from transformer_engine.jax.quantize import helper
-from transformer_engine.jax.activation import activation, ClampedSwigluParams
+from transformer_engine.jax.activation import activation, ActivationParams
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 
@@ -217,8 +217,9 @@ class TestActivation:
         value_n_grad_primitive_func = jit(
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
+        act_args = {"limit": 0.75, "alpha": 1.702} if activation_type == ("clamped_silu", "clamped_linear") else {}
         act_params = (
-            ClampedSwigluParams(limit=0.75, alpha=1.702)
+            ActivationParams.create(activation_type=activation_type, **act_args)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -252,8 +253,10 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
+        act_args = {"limit": 0.75, "alpha": 1.702} if activation_type == ("clamped_silu", "clamped_linear") else {}
+
         act_params = (
-            ClampedSwigluParams(limit=0.75, alpha=1.702)
+            ActivationParams.create(activation_type=activation_type, **act_args)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -289,9 +292,9 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=q_layout,
         )
-
+        act_args = {"limit": 0.75, "alpha": 1.702} if activation_type == ("clamped_silu", "clamped_linear") else {}
         act_params = (
-            ClampedSwigluParams(limit=0.75, alpha=1.702)
+            ActivationParams.create(activation_type=activation_type, **act_args)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -316,8 +319,9 @@ class TestActivation:
         quantizer = QuantizerFactory.create(
             scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
+        act_args = {"limit": 0.75, "alpha": 1.702} if activation_type == ("clamped_silu", "clamped_linear") else {}
         act_params = (
-            ClampedSwigluParams(limit=7.0, alpha=1.702)
+            ActivationParams.create(activation_type=activation_type, **act_args)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )

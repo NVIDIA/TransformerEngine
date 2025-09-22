@@ -32,12 +32,30 @@ class ClampedSwigluParams:
     def to_ffi_lowering_dict(self):
         return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
 
+@dataclass(frozen=True)
+class ActivationParams:
+    clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
+    # Add other activation-specific parameter fields here as needed in the future
+    @staticmethod
+    def create(activation_type, **kwargs):
+        """Factory method to create ActivationParams based on activation_type."""
+        if activation_type == ("clamped_silu", "clamped_linear") or activation_type == "clamped_silu" or activation_type == "clamped_linear":
+            return ActivationParams(ClampedSwigluParams(**kwargs))
+        else:
+            return ActivationParams()  # Default params for activations without parameters
+
+    def __hash__(self):
+        return hash((self.clamped_swiglu,))
+
+    def to_ffi_lowering_dict(self):
+        return {"clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict()}
+
 
 def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[ClampedSwigluParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ) -> jnp.ndarray:
     """Apply activation functions to input tensor with optional quantization.
 

@@ -36,7 +36,7 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
-from ..activation import ClampedSwigluParams
+from ..activation import ActivationParams
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -61,20 +61,23 @@ ActivationEnum = {
 }
 
 
-def _convert_to_activation_function(fn_or_string, act_params: Optional[ClampedSwigluParams] = None):
+def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
     """Convert a string to an activation function."""
     if fn_or_string == "linear":
         return lambda x: x
     if fn_or_string == "clamped_linear":
-        return lambda x: jnp.clip(x, min=-act_params.limit, max=act_params.limit) + 1
+        limit = act_params.clamped_swiglu.limit
+        return lambda x: jnp.clip(x, min=-limit, max=limit) + 1
     if fn_or_string == "quick_gelu":
         return lambda x: jax.nn.sigmoid(1.702 * x) * x
     if fn_or_string == "squared_relu":
         return lambda x: reduce(operator.mul, [jax.nn.relu(x), jax.nn.relu(x)])
     if fn_or_string == "clamped_silu":
+        limit = act_params.clamped_swiglu.limit
+        alpha = act_params.clamped_swiglu.alpha
         return lambda x: jax.nn.sigmoid(
-            act_params.alpha * jnp.minimum(x, act_params.limit)
-        ) * jnp.minimum(x, act_params.limit)
+            alpha * jnp.minimum(x, limit)
+        ) * jnp.minimum(x, limit)
     if isinstance(fn_or_string, str):
         return getattr(jax.nn, fn_or_string)
     if callable(fn_or_string):
@@ -960,18 +963,17 @@ class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
 
 
 def _jax_act_lu(
-    inputs, activation_type, quantizer=None, act_params: Optional[ClampedSwigluParams] = None
+    inputs, activation_type, quantizer=None, act_params: Optional[ActivationParams] = None
 ) -> Union[NoScaleTensor, ScaledTensor]:
     """
     JAX native activation implementation
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
+    act_params = act_params if act_params is not None else ActivationParams()
     act_len = len(activation_type)
     assert inputs.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {inputs.shape} and act_len {act_len}"
     )
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
     x = jnp.split(inputs, act_len, axis=-2)
     acts = []
     for idx, act_fn in enumerate(activation_type):
@@ -990,12 +992,12 @@ def _jax_quantize_dact_dbias(
     activation_type: Sequence[Union[str, Callable]],
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[ClampedSwigluParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ):
     """
     JAX implementation of dact_lu and dbias with optional quantization
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
+    act_params = act_params if act_params is not None else ActivationParams()
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
@@ -1030,7 +1032,7 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[ClampedSwigluParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -1052,7 +1054,7 @@ def act_lu(
         "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {x.shape} and act_len {act_len}"
     )
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
+    act_params = act_params if act_params is not None else ActivationParams()
     if not ActLuPrimitive.enabled():
         return _jax_act_lu(x, activation_type, quantizer, act_params)
 
@@ -1140,7 +1142,7 @@ def quantize_dact_dbias(
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[ClampedSwigluParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Compute gradients of activation and bias with optional quantization.
 
@@ -1157,7 +1159,7 @@ def quantize_dact_dbias(
         - The gradient of the activation with respect to the input.
         - The gradient of the activation with respect to the bias.
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
+    act_params = act_params if act_params is not None else ActivationParams()
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
@@ -1306,7 +1308,7 @@ def dact_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[ClampedSwigluParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1320,7 +1322,7 @@ def dact_lu(
     Returns:
         The gradient of the activation with respect to the input.
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams()
+    act_params = act_params if act_params is not None else ActivationParams()
     output, _ = quantize_dact_dbias(
         dz=dz,
         x=x,

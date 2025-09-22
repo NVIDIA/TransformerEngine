@@ -18,10 +18,10 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Result_Type output_buf, Result_Type colwise_output_buf,
                     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                     Result_Type amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
-                    bool is_2x_int, ClampedSwigluConfig act_params) {
+                    bool is_2x_int, ActivationConfig act_params) {
   // parameters for clamped swiglu used in GPT OSS
-  auto swiglu_limit = act_params.limit;
-  auto swiglu_alpha = act_params.alpha;
+  auto swiglu_limit = act_params.clamped_swiglu_config.limit;
+  auto swiglu_alpha = act_params.clamped_swiglu_config.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
@@ -154,7 +154,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int64_t>("act_enum")
         .Attr<JAXX_Scaling_Mode>("scaling_mode")
         .Attr<bool>("is_2x")
-        .Attr<ClampedSwigluConfig>(
+        .Attr<ActivationConfig>(
             "act_params"),  // Can generalize the config later if we have more activations that need params
     FFI_CudaGraph_Traits);
 
@@ -227,10 +227,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   Result_Type amax_buf, Result_Type dbias_buf,
                                   Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
                                   int64_t act_enum, bool is_2x, bool is_dbias,
-                                  ClampedSwigluConfig act_params) {
+                                  ActivationConfig act_params) {
   // parameters for clamped swiglu used in GPT OSS
-  auto swiglu_limit = act_params.limit;
-  auto swiglu_alpha = act_params.alpha;
+  auto swiglu_limit = act_params.clamped_swiglu_config.limit;
+  auto swiglu_alpha = act_params.clamped_swiglu_config.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
@@ -427,7 +427,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler, DActLuDBiasQuantizeFFI
                                   .Attr<int64_t>("act_enum")
                                   .Attr<bool>("is_2x")
                                   .Attr<bool>("is_dbias")
-                                  .Attr<ClampedSwigluConfig>("act_params"),
+                                  .Attr<ActivationConfig>("act_params"),
                               FFI_CudaGraph_Traits);
 }  // namespace jax
 }  // namespace transformer_engine
