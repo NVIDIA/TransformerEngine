@@ -33,6 +33,7 @@ class ClampedSwigluParams:
         return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
 
 
+
 def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
