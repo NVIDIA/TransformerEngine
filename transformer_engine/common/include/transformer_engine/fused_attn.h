@@ -125,7 +125,13 @@ enum NVTE_Mask_Type {
 };
 
 /*! \enum NVTE_Softmax_Type
- *  \brief Attention softmax types
+ *  \brief Attention softmax types as described in
+ *  Efficient Streaming Language Models with Attention Sinks (https://arxiv.org/pdf/2309.17453v3).
+ *  For a given attention score S = Q*K^T, different softmax types perform different operations on S,
+ *  NVTE_VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+ *  NVTE_OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+ *  NVTE_LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+ *  where alpha is a learnable parameter in shape [H].
  */
 enum NVTE_Softmax_Type {
   /*! Vanilla softmax */
