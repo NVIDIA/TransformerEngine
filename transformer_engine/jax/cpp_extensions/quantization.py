@@ -573,8 +573,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
 
-        out_shape = (1,) * len(x_aval.shape)
-        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.float32)
+        out_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         return out_aval
 
     @staticmethod
@@ -643,6 +642,17 @@ class AmaxCalculationPrimitive(BasePrimitive):
 
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         return mesh, sharded_impl, amax_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(amax_scope, mesh, value_types, result_types):
+        """
+        amax calcuation shardy_sharding_rule
+        """
+        del amax_scope, mesh, result_types
+        prefix = "..."
+        input_spec = [f"{prefix}_{i}" for i in range(len(value_types[0].shape))]
+        output_spec = f"{prefix}_amax"
+        return SdyShardingRule((input_spec,), (output_spec,))
 
 
 register_primitive(AmaxCalculationPrimitive, outer_only=True)
