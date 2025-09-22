@@ -5,11 +5,10 @@
 from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
@@ -37,10 +36,6 @@ from ..quantize import (
     ScalingMode,
 )
 
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
