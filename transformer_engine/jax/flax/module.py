@@ -961,8 +961,8 @@ class LayerNormMLP(TransformerEngineBase):
     bias_axes_1: Tuple[str, ...] = ("act", "mlp")
     bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = True
-    activations: Sequence[Union[str, Callable]] = (("relu",),)
-    activation_params: dict = (None,)
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    activation_params: dict = None
     intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()

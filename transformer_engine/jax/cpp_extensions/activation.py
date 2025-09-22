@@ -37,6 +37,7 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
+from ..activation import ClampedSwigluParams
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -60,26 +61,6 @@ ActivationEnum = {
     ("clamped_silu", "clamped_linear"): NVTE_Activation_Type.CLAMPED_SWIGLU,
 }
 
-
-@dataclass(frozen=True)
-class ClampedSwigluParams:
-    limit: float = 7.0
-    alpha: float = 1.702
-
-    @staticmethod
-    def create(limit: float = 7.0, alpha: float = 1.702):
-        return ClampedSwigluParams(limit=limit, alpha=alpha)
-
-    def __hash__(self):
-        return hash(self.limit)
-
-    def __eq__(self, value):
-        if not isinstance(value, ClampedSwigluParams):
-            return False
-        return self.limit == value.limit and self.alpha == value.alpha
-
-    def to_ffi_lowering_dict(self):
-        return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
 
 
 def _convert_to_activation_function(fn_or_string, act_params: Optional[ClampedSwigluParams] = None):
@@ -224,7 +205,6 @@ class ActLuPrimitive(BasePrimitive):
         """
         del is_outer
         assert ActLuPrimitive.inner_primitive is not None
-        import numpy as np
 
         out, colwise_out, scale_inv, colwise_scale_inv, updated_amax = (
             ActLuPrimitive.inner_primitive.bind(
@@ -277,7 +257,6 @@ class ActLuPrimitive(BasePrimitive):
         x, scale = batched_args
         x_bdim, scale_bdim = batch_dims
         amax_bdim = scale_bdim
-        import numpy as np
 
         out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim
         return (
@@ -668,8 +647,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p impl
         """
-        import numpy as np
-
         del is_outer
         assert BaseDActLuDBiasQuantizePrimitive.inner_primitive is not None
         (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
@@ -990,13 +967,13 @@ def _jax_act_lu(
     """
     JAX native activation implementation
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     act_len = len(activation_type)
     assert inputs.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {inputs.shape} and act_len {act_len}"
     )
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     x = jnp.split(inputs, act_len, axis=-2)
     acts = []
     for idx, act_fn in enumerate(activation_type):
@@ -1020,7 +997,7 @@ def _jax_quantize_dact_dbias(
     """
     JAX implementation of dact_lu and dbias with optional quantization
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
@@ -1077,7 +1054,7 @@ def act_lu(
         "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {x.shape} and act_len {act_len}"
     )
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     if not ActLuPrimitive.enabled():
         return _jax_act_lu(x, activation_type, quantizer, act_params)
 
@@ -1116,7 +1093,7 @@ def act_lu(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = act_lu(
-            x=x.astype(jnp.float32),
+            x=x,
             activation_type=activation_type,
             quantizer=None,
             act_params=act_params,
@@ -1182,7 +1159,7 @@ def quantize_dact_dbias(
         - The gradient of the activation with respect to the input.
         - The gradient of the activation with respect to the bias.
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
         "activation input should be replicated by act_len in the -2 axis, got input shape"
@@ -1345,7 +1322,7 @@ def dact_lu(
     Returns:
         The gradient of the activation with respect to the input.
     """
-    act_params = act_params if act_params is not None else ClampedSwigluParams.create()
+    act_params = act_params if act_params is not None else ClampedSwigluParams()
     output, _ = quantize_dact_dbias(
         dz=dz,
         x=x,

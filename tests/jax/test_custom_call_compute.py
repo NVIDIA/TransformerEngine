@@ -20,8 +20,7 @@ from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.cpp_extensions.activation import (
     _jax_act_lu,
-    _jax_quantize_dact_dbias,
-    ClampedSwigluParams,
+    _jax_quantize_dact_dbias
 )
 from transformer_engine.jax.cpp_extensions.normalization import (
     _jax_layernorm,
@@ -46,7 +45,7 @@ from transformer_engine.jax.quantize import (
     noop_quantizer_set,
 )
 from transformer_engine.jax.quantize import helper
-from transformer_engine.jax.activation import activation
+from transformer_engine.jax.activation import activation, ClampedSwigluParams
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 
@@ -222,7 +221,7 @@ class TestActivation:
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
         act_params = (
-            ClampedSwigluParams.create(limit=0.75, alpha=1.702)
+            ClampedSwigluParams(limit=0.75, alpha=1.702)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -257,7 +256,7 @@ class TestActivation:
             q_layout=QuantizeLayout.ROWWISE,
         )
         act_params = (
-            ClampedSwigluParams.create(limit=0.75, alpha=1.702)
+            ClampedSwigluParams(limit=0.75, alpha=1.702)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -295,7 +294,7 @@ class TestActivation:
         )
 
         act_params = (
-            ClampedSwigluParams.create(limit=1.0, alpha=1.702)
+            ClampedSwigluParams(limit=1.0, alpha=1.702)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
@@ -321,7 +320,7 @@ class TestActivation:
             scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
         act_params = (
-            ClampedSwigluParams.create(limit=7.0, alpha=1.702)
+            ClampedSwigluParams(limit=7.0, alpha=1.702)
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )

@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
+from .activation import ClampedSwigluParams
 from .layernorm import canonicalize_norm_type
 from .quantize import (
     with_sharding_constraint_by_logical_axes,
@@ -130,7 +131,7 @@ def layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
-        activation_params
+        activation_params,
         quantizer_sets,
     )
     return output
@@ -206,7 +207,7 @@ def _layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
-        activation_params
+        activation_params,
         quantizer_sets,
     )
     return output
@@ -317,7 +318,7 @@ def _layernorm_mlp_fwd_rule(
     casted_act_out = tex.act_lu(
         dot_1_output,
         activation_type,
-        act_params=tex.ClampedSwigluParams.create(**activation_params) if activation_params else None
+        act_params=ClampedSwigluParams(**activation_params) if activation_params else None
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
@@ -466,7 +467,7 @@ def _layernorm_mlp_bwd_rule(
         activation_type=activation_type,
         is_dbias=use_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
-        act_params=tex.ClampedSwigluParams.create(**activation_params) if activation_params else None
+        act_params=tex.ClampedSwigluParams(**activation_params) if activation_params else None
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim

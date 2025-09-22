@@ -8,15 +8,29 @@ This module provides optimized activation functions with quantization support.
 
 from typing import Sequence, Union, Callable, Optional
 from functools import partial
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 from . import cpp_extensions as tex
 
 from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
-from .cpp_extensions.activation import ClampedSwigluParams
+
+@dataclass(frozen=True)
+class ClampedSwigluParams:
+    limit: float = 7.0
+    alpha: float = 1.702
+    """Parameters for the Clamped SwiGLU activation function
+    used in GPT OSS."""
+
+    def __hash__(self):
+        return hash((self.limit, self.alpha))
+
+    def to_ffi_lowering_dict(self):
+        return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
+
 
 
 def activation(
