@@ -49,10 +49,13 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
     for dims = 2 blocks contain block_size x block_size elements.
     """
     total_numel = tensor.numel()
-    assert (
-        total_numel % (block_size**dims) == 0
-    ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
     assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
+
+    # torch.compile friendly code - standard ** power does not work with jit
+    total_block_size = block_size * block_size if dims == 2 else block_size
+    assert (
+        total_numel % total_block_size == 0
+    ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
 
     tensor = tensor.abs().float()
     if dims == 1:
