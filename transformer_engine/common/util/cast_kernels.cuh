@@ -22,10 +22,10 @@
 #include "../transpose/cast_transpose.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
+#include "cast_kernels_spec.cuh"
 #include "math.h"
 #include "ptx.cuh"
 #include "transformer_engine/transformer_engine.h"
-#include "cast_kernels_spec.cuh"
 
 namespace transformer_engine {
 
@@ -1082,31 +1082,21 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           output->dtype(), OType,
 
           if (spec::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()) {
-
             switch (scaling_type) {
               case ScalingType::ROWWISE: {
                 using traits = spec::CastTraits<IType, OType, true, false>;
                 auto kernel = spec::cast_mxfp8_kernel<traits>;
 
-                cudaFuncSetAttribute(
-                  kernel,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                  traits::smem);
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     traits::smem);
 
-                dim3 block(traits::threadLayout::num,
-                           traits::warpLayout::N,
-                           traits::warpLayout::M);
+                dim3 block(traits::threadLayout::num, traits::warpLayout::N, traits::warpLayout::M);
                 dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
                           (rows + traits::blockDimM - 1) / traits::blockDimM);
                 kernel<<<grid, block, traits::smem, stream>>>(
-                  reinterpret_cast<typename traits::IType *>(input.data.dptr),
-                  reinterpret_cast<typename traits::OType *>(output->data.dptr),
-                  scales_rowwise_ptr,
-                  rows,
-                  cols,
-                  scale_stride_rowwise,
-                  scale_stride_colwise
-                );
+                    reinterpret_cast<typename traits::IType *>(input.data.dptr),
+                    reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                    scales_rowwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
 
                 break;
               }
@@ -1118,55 +1108,35 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 using traits = spec::CastTraits<IType, OType, true, true>;
                 auto kernel = spec::cast_mxfp8_kernel<traits>;
 
-                cudaFuncSetAttribute(
-                  kernel,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                  traits::smem
-                );
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     traits::smem);
                 // TMA for loading, so that we don't need STS for transposing
                 alignas(64) CUtensorMap tensor_map_input{};
                 constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-                create_2D_tensor_map(tensor_map_input,
-                                     input.data,
-                                     traits::input_swizzle_pattern,
-                                     rows, cols,
-                                     traits::blockIterDim::M, traits::blockIterDim::N,
-                                     /*stride_elems=*/cols, 
-                                     /*offset_elems=*/0,
-                                     input_type_bit_size);
+                create_2D_tensor_map(tensor_map_input, input.data, traits::input_swizzle_pattern,
+                                     rows, cols, traits::blockIterDim::M, traits::blockIterDim::N,
+                                     /*stride_elems=*/cols,
+                                     /*offset_elems=*/0, input_type_bit_size);
                 alignas(64) CUtensorMap tensor_map_rowwise_output{};
                 alignas(64) CUtensorMap tensor_map_colwise_output{};
                 constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
-                create_2D_tensor_map(tensor_map_rowwise_output,
-                                     output->data,
-                                     traits::output_swizzle_pattern,
-                                     rows, cols,
+                create_2D_tensor_map(tensor_map_rowwise_output, output->data,
+                                     traits::output_swizzle_pattern, rows, cols,
                                      traits::blockIterDim::M, traits::blockIterDim::N,
-                                     /*stride_elems=*/cols, 
-                                     /*offset_elems=*/0,
+                                     /*stride_elems=*/cols,
+                                     /*offset_elems=*/0, output_type_bit_size);
+                create_2D_tensor_map(tensor_map_colwise_output, output->columnwise_data,
+                                     traits::output_swizzle_pattern, rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N, cols, 0,
                                      output_type_bit_size);
-                create_2D_tensor_map(tensor_map_colwise_output,
-                                     output->columnwise_data,
-                                     traits::output_swizzle_pattern,
-                                     rows, cols,
-                                     traits::blockIterDim::M, traits::blockIterDim::N,
-                                     cols, 0, output_type_bit_size);
 
-                dim3 block(traits::rowThreadLayout::num,
-                           traits::numWarps);
+                dim3 block(traits::rowThreadLayout::num, traits::numWarps);
                 dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
                           (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
                 kernel<<<grid, block, traits::smem, stream>>>(
-                  tensor_map_input,
-                  tensor_map_rowwise_output,
-                  tensor_map_colwise_output,
-                  scales_rowwise_ptr,
-                  scales_colwise_ptr,
-                  rows,
-                  cols,
-                  scale_stride_rowwise,
-                  scale_stride_colwise
-                );
+                    tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
+                    scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                    scale_stride_colwise);
 
                 break;
               }

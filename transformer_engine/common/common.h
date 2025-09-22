@@ -722,17 +722,11 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint32_t shmemX, const uint32_t stride_elems,
                           const uint32_t offset_elems, const size_t type_num_bits);
 
-void create_2D_tensor_map(
-  CUtensorMap &tensorMap,
-  const SimpleTensor &tensor,
-  CUtensorMapSwizzle swizzle,
-  const uint64_t globalY, 
-  const uint64_t globalX,
-  const uint32_t shmemY,
-  const uint32_t shmemX,
-  const uint32_t stride_elems,
-  const uint32_t offset_elems,
-  const size_t type_num_bits);
+void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
+                          CUtensorMapSwizzle swizzle, const uint64_t globalY,
+                          const uint64_t globalX, const uint32_t shmemY, const uint32_t shmemX,
+                          const uint32_t stride_elems, const uint32_t offset_elems,
+                          const size_t type_num_bits);
 
 bool is_supported_by_CC_100();
 
