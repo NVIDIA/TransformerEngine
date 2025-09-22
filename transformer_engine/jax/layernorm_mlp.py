@@ -318,6 +318,7 @@ def _layernorm_mlp_fwd_rule(
     casted_act_out = tex.act_lu(
         dot_1_output,
         activation_type,
+        quantizer=ffn2_quantizer_set.x,
         act_params=ClampedSwigluParams(**activation_params) if activation_params else None,
     )
 
