@@ -39,6 +39,55 @@ void numbered_barrier_sync(uint32_t num_threads, uint32_t barrier_id = 1u) {
     asm volatile ("bar.sync %0, %1;\n" :: "r"(barrier_id), "r"(num_threads));
 }
 
+__device__ __forceinline__
+void fma_f32_f16(float &out,
+                 uint16_t const &a,
+                 uint16_t const &b,
+                 float const &c = 0.0f) {
+  asm volatile (
+    "fma.rn.f32.f16 %0, %1, %2, %3;"
+    : "=f"(out)
+    : "h"(a), "h"(b), "f"(c)
+    : "memory"
+  );
+}
+
+__device__ __forceinline__
+void fma_f32_bf16(float &out,
+                 uint16_t const &a,
+                 uint16_t const &b,
+                 float const &c = 0.0f) {
+  asm volatile (
+    "fma.rn.f32.bf16 %0, %1, %2, %3;"
+    : "=f"(out)
+    : "h"(a), "h"(b), "f"(c)
+    : "memory"
+  );
+}
+
+__device__ __forceinline__
+void reduce_sync_max_abs_f32(float &out,
+                             float const &in) {
+#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+  asm volatile (
+    "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
+    : "=f"(out)
+    : "f"(in)
+  );
+#else
+  asm volatile (
+    "{\n\t"
+    ".reg.b32 val;\n"
+    "abs.f32 val, %1;\n"
+    "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+    "}\n\t"
+    : "=r"(reinterpret_cast<uint32_t&>(out))
+    : "f"(in)
+  );
+#endif
+}
+
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
