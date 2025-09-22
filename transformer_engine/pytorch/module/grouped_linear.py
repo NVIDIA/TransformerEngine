@@ -827,10 +827,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.sequence_parallel,
                 self.activation_dtype,
                 torch.is_grad_enabled(),
-                self.fine_grained_activation_offloading,
                 self,
                 skip_fp8_weight_update,
                 self.save_original_input,
+                self.fine_grained_activation_offloading,
                 *weight_tensors,
                 *bias_tensors,
             )
