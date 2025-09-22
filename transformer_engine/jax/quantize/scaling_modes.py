@@ -608,18 +608,23 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         # This implementation needs to be updated for different block dims.
         assert self._block_dims == (1, 32)
         # WAR for compound factor = 1
+        blocksizes = {}
         if input_shape[-1] == 32:
             input_spec[-1] = f"{unique_var}_{input_rank - 1}"
             rowwise[-1] = f"{unique_var}_None"
+        else:
+            blocksizes["blocksize_x"] = 32
         if input_shape[flatten_axis - 1] == 32:
             input_spec[flatten_axis - 1] = f"{unique_var}_{flatten_axis - 1}"
             colwise[flatten_axis - 1] = f"{unique_var}_None"
+        else:
+            blocksizes["blocksize_y"] = 32
 
         return QuantizeShardyRules(
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {"blocksize_x": 32, "blocksize_y": 32},
+            blocksizes,
         )
 
 
