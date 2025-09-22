@@ -590,12 +590,22 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         input_spec = [f"{unique_var}_{i}" for i in range(input_rank)]
         flatten_axis = (flatten_axis + input_rank) % input_rank
 
+        # This implementation needs to be updated for different block dims.
+        assert self._block_dims == (1, 32)
+
         # We have to use two different factors in the two CompoundFactors because of Shardy
         # verifier requirements, even though they are the same.
-        rowwise_var = input_spec[-1] + "_compound"
-        colwise_var = input_spec[flatten_axis - 1] + "_compound"
-        input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
-        input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
+        blocksizes = {}
+        colwise_var = f"{unique_var}_None"
+        rowwise_var = f"{unique_var}_None"
+        if not input_shape[-1] == 32:
+            input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
+            rowwise_var = input_spec[-1] + "_compound"
+            blocksizes["blocksize_x"] = 32
+        if not input_shape[flatten_axis - 1] == 32:
+            input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
+            colwise_var = input_spec[flatten_axis - 1] + "_compound"
+            blocksizes["blocksize_y"] = 32
 
         # The rowwise and colwise scale tensors should be sharded the same way as the input.
         # However, we need to adjust the dimensions where the block scaling factor applies.
@@ -604,21 +614,6 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         colwise = input_spec.copy()
         colwise[flatten_axis - 1] = colwise_var
-
-        # This implementation needs to be updated for different block dims.
-        assert self._block_dims == (1, 32)
-        # WAR for compound factor = 1
-        blocksizes = {}
-        if input_shape[-1] == 32:
-            input_spec[-1] = f"{unique_var}_{input_rank - 1}"
-            rowwise[-1] = f"{unique_var}_None"
-        else:
-            blocksizes["blocksize_x"] = 32
-        if input_shape[flatten_axis - 1] == 32:
-            input_spec[flatten_axis - 1] = f"{unique_var}_{flatten_axis - 1}"
-            colwise[flatten_axis - 1] = f"{unique_var}_None"
-        else:
-            blocksizes["blocksize_y"] = 32
 
         return QuantizeShardyRules(
             tuple(input_spec),
