@@ -7,7 +7,6 @@ import warnings
 import operator
 from functools import partial, cache, reduce
 from typing import Optional, Union
-from packaging import version
 
 import jax
 import jax.numpy as jnp
