@@ -3,8 +3,7 @@
 	url = https://github.com/google/googletest.git
 [submodule "3rdparty/cudnn-frontend"]
 	path = 3rdparty/cudnn-frontend
-	url = https://gitlab-master.nvidia.com/cudnn/cudnn_frontend.git
-	branch = develop
+	url = https://github.com/NVIDIA/cudnn-frontend.git
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
