@@ -415,27 +415,28 @@ class ActLuPrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
-        prefix = "ActLuPrimitive_"
-        x_rank = len(value_types[0].shape)
+        prefix = "ActLu_"
+        input_shape = value_types[0].shape
+        output_shape = input_shape[:-2] + input_shape[-1:]
+        # Here we pass len of output so that the scales are propagated correctly
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var=prefix + "x", flatten_axis=-2
+            output_shape, unique_var=prefix + "x", flatten_axis=-1
         )
-        x_axes = scale_rules.input_spec + (prefix + f"x{x_rank - 1}",)
-        out = (*x_axes[:-2], x_axes[-1])
-        scale_inv = scale_rules.rowwise_rule
+        x_axes = scale_rules.input_spec
+        # Correct input spec with act dim
+        x_axes = x_axes[:-1] + (prefix + "_act_dim",) + x_axes[-1:]
+        out = scale_rules.input_spec
 
         colwise_out = (prefix + "out_colwise",)
         colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
             colwise_scale_inv = scale_rules.colwise_rule
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                colwise_out = tuple(
-                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-2)
-                )
+                colwise_out = multidim_transpose(out, transpose_axis=-1)
             else:
                 colwise_out = out
+                colwise_scale_inv = scale_rules.colwise_rule
 
-        # amax is always a unit tensor.
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
@@ -443,7 +444,8 @@ class ActLuPrimitive(BasePrimitive):
                 x_axes,
                 ("…1",),
             ),
-            (out, colwise_out, scale_inv, colwise_scale_inv, amax),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax),
+            **scale_rules.factor_sizes,
         )
 
 
@@ -888,26 +890,30 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
-        prefix = "BaseDActLuDBiasQuantizePrimitive_"
+        prefix = "DActLuDBias_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[1].shape), unique_var=prefix + "x", flatten_axis=-2
+            value_types[1].shape, unique_var=prefix + "x", flatten_axis=-2
         )
         x_axes = scale_rules.input_spec
         dz_axes = (*x_axes[:-2], x_axes[-1])
         out = x_axes
+
         colwise_out = (prefix + "out_colwise",)
+        colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
             else:
                 colwise_out = out
+                colwise_scale_inv = scale_rules.colwise_rule
 
         dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (dz_axes, x_axes, ("…2",)),
-            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            **scale_rules.factor_sizes,
         )
 
 

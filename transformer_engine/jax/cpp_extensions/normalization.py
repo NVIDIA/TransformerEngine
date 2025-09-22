@@ -587,9 +587,9 @@ class NormFwdPrimitive(BasePrimitive):
             result_types,
         )
 
-        prefix = "NormFwdPrimitive_"
+        prefix = "NormFwd_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
+            value_types[0].shape, unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
 
@@ -610,6 +610,7 @@ class NormFwdPrimitive(BasePrimitive):
                 mu,
                 rsigma,
             ),
+            **scale_rules.factor_sizes,
         )
 
 
