@@ -649,9 +649,9 @@ class AmaxCalculationPrimitive(BasePrimitive):
         amax calcuation shardy_sharding_rule
         """
         del amax_scope, mesh, result_types
-        prefix = "..."
-        input_spec = [f"{prefix}_{i}" for i in range(len(value_types[0].shape))]
-        output_spec = f"{prefix}_amax"
+        prefix = "AmaxCal"
+        input_spec = tuple(f"{prefix}_{i}" for i in range(len(value_types[0].shape)))
+        output_spec = (f"{prefix}_amax",)
         return SdyShardingRule((input_spec,), (output_spec,))
 
 
