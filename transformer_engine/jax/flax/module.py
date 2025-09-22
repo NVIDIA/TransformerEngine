@@ -961,8 +961,8 @@ class LayerNormMLP(TransformerEngineBase):
     bias_axes_1: Tuple[str, ...] = ("act", "mlp")
     bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = True
-    activations: Sequence[Union[str, Callable]] = ("relu",),
-    activation_params: dict = None,
+    activations: Sequence[Union[str, Callable]] = (("relu",),)
+    activation_params: dict = (None,)
     intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()
@@ -1039,7 +1039,9 @@ class LayerNormMLP(TransformerEngineBase):
                 return False
             normalized_acts.append(act.lower())
         normalized_acts = tuple(
-            reversed(normalized_acts) if (normalized_acts[0] == "linear" or normalized_acts[0] == "clamped_linear") else normalized_acts
+            reversed(normalized_acts)
+            if (normalized_acts[0] == "linear" or normalized_acts[0] == "clamped_linear")
+            else normalized_acts
         )
 
         is_act_implemented = normalized_acts in (gated_act_pool + act_pool)

@@ -18,7 +18,11 @@ from utils import (
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
-from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias, ClampedSwigluParams
+from transformer_engine.jax.cpp_extensions.activation import (
+    _jax_act_lu,
+    _jax_quantize_dact_dbias,
+    ClampedSwigluParams,
+)
 from transformer_engine.jax.cpp_extensions.normalization import (
     _jax_layernorm,
     _jax_rmsnorm,
@@ -170,7 +174,7 @@ ALL_ACTIVATION_TYPES = [
     ("quick_gelu", "linear"),
     ("squared_relu",),
     ("squared_relu", "linear"),
-    ("clamped_silu","clamped_linear"),
+    ("clamped_silu", "clamped_linear"),
 ]
 
 ACTIVATION_TYPES = {
@@ -189,12 +193,16 @@ class TestActivation:
 
     def value_n_grad_ref_func(self, x, activation_type, act_params):
         jitted_reference = jit(
-            value_and_grad(lambda out: jnp.mean(self.ref_act(out, activation_type, act_params)), (0,))
+            value_and_grad(
+                lambda out: jnp.mean(self.ref_act(out, activation_type, act_params)), (0,)
+            )
         )
         return jitted_reference(x)
 
     def primitive_func(self, inputs, activation_type, quantizer, act_params):
-        out = activation(inputs, activation_type=activation_type, quantizer=quantizer, act_params=act_params)
+        out = activation(
+            inputs, activation_type=activation_type, quantizer=quantizer, act_params=act_params
+        )
         return jnp.mean(out)
 
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
@@ -213,7 +221,11 @@ class TestActivation:
         value_n_grad_primitive_func = jit(
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
-        act_params = ClampedSwigluParams.create(limit=0.75, alpha=1.702) if activation_type == ("clamped_silu","clamped_linear") else None
+        act_params = (
+            ClampedSwigluParams.create(limit=0.75, alpha=1.702)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, None, act_params)
         ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type, act_params)
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
@@ -235,7 +247,8 @@ class TestActivation:
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(
-            value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3),
+            value_and_grad(self.primitive_func, (0,)),
+            static_argnums=(1, 3),
         )
 
         quantizer = QuantizerFactory.create(
@@ -243,10 +256,16 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
-        act_params = ClampedSwigluParams.create(limit=0.75, alpha=1.702) if activation_type == ("clamped_silu","clamped_linear") else None
-        prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, quantizer, act_params)
+        act_params = (
+            ClampedSwigluParams.create(limit=0.75, alpha=1.702)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
+        prim_out, (prim_grad,) = value_n_grad_primitive_func(
+            x, activation_type, quantizer, act_params
+        )
         ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type, act_params)
-        
+
         assert_allclose(prim_out, ref_out, dtype=output_type)
         assert_allclose(prim_grad, ref_grad, dtype=output_type)
 
@@ -275,7 +294,11 @@ class TestActivation:
             q_layout=q_layout,
         )
 
-        act_params = ClampedSwigluParams.create(limit=1.0, alpha=1.702) if activation_type == ("clamped_silu","clamped_linear") else None
+        act_params = (
+            ClampedSwigluParams.create(limit=1.0, alpha=1.702)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
         te_output = tex.act_lu(x, activation_type, te_quantizer, act_params)
         jax_output = _jax_act_lu(x, activation_type, jax_quantizer, act_params)
         assert_bitwise_scaled_tensors(te_output, jax_output)
@@ -297,7 +320,11 @@ class TestActivation:
         quantizer = QuantizerFactory.create(
             scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
-        act_params = ClampedSwigluParams.create(limit=7.0, alpha=1.702) if activation_type == ("clamped_silu","clamped_linear") else None
+        act_params = (
+            ClampedSwigluParams.create(limit=7.0, alpha=1.702)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
         output = tex.act_lu(x, activation_type, quantizer, act_params)
         ref_out = self.ref_act(x, activation_type, act_params)
         assert_dequantized_scaled_tensor(output, ref_out)

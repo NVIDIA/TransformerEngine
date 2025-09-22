@@ -18,6 +18,7 @@ from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 from .cpp_extensions.activation import ClampedSwigluParams
 
+
 def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
