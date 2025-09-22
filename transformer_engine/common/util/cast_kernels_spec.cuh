@@ -26,8 +26,20 @@ namespace cuda_ptx = cuda::ptx;
 
 namespace {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+#if defined(_ENABLE_MXFMA)
 template <typename IType, typename OType>
 struct _Quantized_Limits;
+
+template <>
+struct _Quantized_Limits<float, fp8e5m2> {
+    static constexpr uint16_t max_norm_rcp{0};
+};
+
+template <>
+struct _Quantized_Limits<float, fp8e4m3> {
+    static constexpr uint16_t max_norm_rcp{0};
+};
 
 template <>
 struct _Quantized_Limits<fp16, fp8e5m2> {
@@ -48,7 +60,7 @@ template <>
 struct _Quantized_Limits<bf16, fp8e4m3> {
     static constexpr uint16_t max_norm_rcp{0x3b12};
 };
-
+#endif // #if defined(_ENABLE_MXFMA)
 
 template <typename OType, typename IType>
 __device__ __forceinline__
@@ -58,19 +70,16 @@ e8m0_t to_e8m0(IType amax) {
 
     float amax_fp32;
     if constexpr (std::is_same_v<IType, fp16>) {
-        asm volatile (
-            "fma.rn.f32.f16 %0, %1, %2, 0.0;"
-            : "=f"(amax_fp32)
-            : "h"(reinterpret_cast<uint16_t&>(amax)),
-              "h"(max_norm_rcp)
-        );
+        ptx::fma_f32_f16(amax_fp32,
+                         reinterpret_cast<uint16_t&>(amax),
+                         max_norm_rcp);
     } else if constexpr (std::is_same_v<IType, bf16>) {
-        asm volatile (
-            "fma.rn.f32.bf16 %0, %1, %2, 0.0;"
-            : "=f"(amax_fp32)
-            : "h"(reinterpret_cast<uint16_t&>(amax)),
-              "h"(max_norm_rcp)
-        );
+        ptx::fma_f32_bf16(amax_fp32,
+                          reinterpret_cast<uint16_t&>(amax),
+                          max_norm_rcp);
+    } else {
+        amax_fp32 = 0.0f;
+        __trap();
     }
     return ptx::float_to_e8m0(amax_fp32);
 #else
@@ -107,12 +116,8 @@ inline bool is_cast_only_enabled() {
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename IType, typename OType>
 inline bool hasSpec() { return false; }
 
-// IType could be [float, fp16, bf16]
+// IType could be [fp16, bf16]
 // OType could be [fp8e5m2, fp8e4m3]
-template <>
-inline bool hasSpec<false, false, false, float, fp8e5m2>() { return is_cast_only_enabled(); }
-template <>
-inline bool hasSpec<false, false, false, float, fp8e4m3>() { return is_cast_only_enabled(); }
 template <>
 inline bool hasSpec<false, false, false, fp16, fp8e5m2>() { return is_cast_only_enabled(); }
 template <>
@@ -999,38 +1004,8 @@ __global__ void cast_mxfp8_kernel(
                             float2 values = ptx::up_cast(rInput2[i]);
               
                             float2 amaxs;
-                        #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-                             (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
-                            asm volatile (
-                                "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
-                                : "=f"(amaxs.x)
-                                : "f"(values.x)
-                            );
-                            asm volatile (
-                                "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
-                                : "=f"(amaxs.y)
-                                : "f"(values.y)
-                            );
-                        #else
-                            asm volatile (
-                                "{\n\t"
-                                ".reg.b32 val;\n"
-                                "abs.f32 val, %1;\n"
-                                "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-                                "}\n\t"
-                                : "=r"(reinterpret_cast<uint32_t&>(amaxs.x))
-                                : "f"(values.x)
-                            );
-                            asm volatile (
-                                "{\n\t"
-                                ".reg.b32 val;\n"
-                                "abs.f32 val, %1;\n"
-                                "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-                                "}\n\t"
-                                : "=r"(reinterpret_cast<uint32_t&>(amaxs.y))
-                                : "f"(values.y)
-                            );
-                        #endif
+                            ptx::reduce_sync_max_abs_f32(amaxs.x, values.x);
+                            ptx::reduce_sync_max_abs_f32(amaxs.y, values.y);
                             if (leader) {
                                 sColwiseReduce_2x[i] = amaxs;
                             }
@@ -1511,63 +1486,12 @@ __global__ void cast_mxfp8_kernel(
                     for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
                         ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
 
-                        float2 values;
-                        if constexpr (std::is_same_v<IType, fp16>) {
-                              asm volatile (
-                                "{\n\t"
-                                ".reg.b16 val1;\n"
-                                ".reg.b16 val2;\n"
-                                "mov.b32 {val1, val2}, %2;\n"
-                                "cvt.f32.f16 %0, val1;\n"
-                                "cvt.f32.f16 %1, val2;\n"
-                                "}\n\t"
-                                : "=f"(values.x), "=f"(values.y)
-                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
-                            );
-                        } else if constexpr (std::is_same_v<IType, bf16>) {
-                            asm volatile (
-                                "{\n\t"
-                                "prmt.b32 %1, 0x0, %2, 0x7632;\n"
-                                "prmt.b32 %0, 0x0, %2, 0x5410;\n"
-                                "}\n\t"
-                                : "=f"(values.x), "=f"(values.y)
-                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
-                            );
-                        }
+                        ptx::floatx2 values = ptx::up_cast(rInput2[i]);
 
                         float2 amaxs;
-                    #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-                         (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
-                        asm volatile (
-                            "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
-                            : "=f"(amaxs.x)
-                            : "f"(values.x)
-                        );
-                        asm volatile (
-                            "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
-                            : "=f"(amaxs.y)
-                            : "f"(values.y)
-                        );
-                    #else
-                        asm volatile (
-                            "{\n\t"
-                            ".reg.b32 val;\n"
-                            "abs.f32 val, %1;\n"
-                            "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-                            "}\n\t"
-                            : "=r"(reinterpret_cast<uint32_t&>(amaxs.x))
-                            : "f"(values.x)
-                        );
-                        asm volatile (
-                            "{\n\t"
-                            ".reg.b32 val;\n"
-                            "abs.f32 val, %1;\n"
-                            "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-                            "}\n\t"
-                            : "=r"(reinterpret_cast<uint32_t&>(amaxs.y))
-                            : "f"(values.y)
-                        );
-                    #endif
+                        ptx::reduce_sync_max_abs_f32(amaxs.x, values.x);
+                        ptx::reduce_sync_max_abs_f32(amaxs.y, values.y);
+
                         if (leader) {
                             sColwiseReduce_2x[i] = amaxs;
                         }
