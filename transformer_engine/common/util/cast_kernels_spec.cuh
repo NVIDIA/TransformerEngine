@@ -101,15 +101,15 @@ e8m0_t to_e8m0(IType amax) {
 
 
 inline bool is_cast_only_enabled() {
-    // static bool enabled = [](){
-    //     const char* env = std::getenv("ENABLE_CAST_ONLY");
-    //     return env != nullptr && (env[0] == '1');
-    // }();
-    // return enabled;
+    static bool enabled = [](){
+        const char* env = std::getenv("ENABLE_CAST_ONLY");
+        return env != nullptr && (env[0] == '1');
+    }();
+    return enabled;
 
-    // FIXME: when finish debugging, remove this
-    const char* env = std::getenv("ENABLE_CAST_ONLY");
-    return env != nullptr && (env[0] == '1');
+    // // FIXME: when finish debugging, remove this
+    // const char* env = std::getenv("ENABLE_CAST_ONLY");
+    // return env != nullptr && (env[0] == '1');
 }
 
 
@@ -236,7 +236,7 @@ __global__ void cast_mxfp8_kernel(
         coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
 
         if (coords.y < rows && coords.x < cols) {
-            int32_t offset = coords.y * cols + coords.x;
+            size_t offset = coords.y * static_cast<size_t>(cols) + coords.x;
             inputUnitType * input_units = 
                 reinterpret_cast<inputUnitType *>(input + offset);
         
@@ -259,7 +259,7 @@ __global__ void cast_mxfp8_kernel(
             coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
 
             if (coords.y < rows && coords.x < cols) {
-                int32_t offset = coords.y * cols + coords.x;
+                size_t offset = coords.y * static_cast<size_t>(cols) + coords.x;
                 inputUnitType * input_units = 
                     reinterpret_cast<inputUnitType *>(input + offset);
             
@@ -292,7 +292,7 @@ __global__ void cast_mxfp8_kernel(
                     + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
                 sRowwiseScale[rowwise_scale_offset] = biased_exponent;
             } else {
-                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+                scales_rowwise[coords.y * static_cast<size_t>(scale_stride_rowwise) + coords.x / CastTraits::chunkElems] = biased_exponent;
             }
 
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -343,7 +343,7 @@ __global__ void cast_mxfp8_kernel(
                     + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
                 sRowwiseScale[rowwise_scale_offset] = biased_exponent;
             } else {
-                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+                scales_rowwise[coords.y * static_cast<size_t>(scale_stride_rowwise) + coords.x / CastTraits::chunkElems] = biased_exponent;
             }
 
             // scaling input
@@ -408,7 +408,7 @@ __global__ void cast_mxfp8_kernel(
                     + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
                 sRowwiseScale[rowwise_scale_offset] = biased_exponent;
             } else {
-                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+                scales_rowwise[coords.y * static_cast<size_t>(scale_stride_rowwise) + coords.x / CastTraits::chunkElems] = biased_exponent;
             }
 
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -459,7 +459,7 @@ __global__ void cast_mxfp8_kernel(
                     + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
                 sRowwiseScale[rowwise_scale_offset] = biased_exponent;
             } else {
-                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+                scales_rowwise[coords.y * static_cast<size_t>(scale_stride_rowwise) + coords.x / CastTraits::chunkElems] = biased_exponent;
             }
 
             // scaling input
@@ -834,7 +834,7 @@ __global__ void cast_mxfp8_kernel(
                 coords.y = block_coords.y + iter_m * CastTraits::blockIterDim::M;
                 coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
 
-                int32_t gmem_offset = read_state.index() * CastTraits::blockIterDim::num;
+                size_t gmem_offset = static_cast<size_t>(read_state.index()) * CastTraits::blockIterDim::num;
 
                 if (coords.x >= cols || coords.y >= rows) {
                     break;
@@ -875,7 +875,7 @@ __global__ void cast_mxfp8_kernel(
                 coords.y = block_coords.y + iter_m * CastTraits::blockIterDim::M;
                 coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
 
-                int32_t gmem_offset = read_state.index() * CastTraits::blockIterDim::num;
+                size_t gmem_offset = static_cast<size_t>(read_state.index()) * CastTraits::blockIterDim::num;
 
                 if (coords.x >= cols || coords.y >= rows) {
                     break;
@@ -929,11 +929,11 @@ __global__ void cast_mxfp8_kernel(
             (threadIdx.x / CastTraits::rowThreadLayout::N) * (CastTraits::blockIterDim::N / CastTraits::rowNumElemsPerUnit)
             + (threadIdx.x % CastTraits::rowThreadLayout::N) * (CastTraits::rowChunkElems / CastTraits::rowNumElemsPerUnit);
 
-        int32_t rowwise_scale_base_offset = 
-            (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) * scale_stride_rowwise
+        size_t rowwise_scale_base_offset = 
+            (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) * static_cast<size_t>(scale_stride_rowwise)
             + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems) / CastTraits::rowChunkElems;
-        int32_t colwise_scale_base_offset =
-            ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * scale_stride_colwise
+        size_t colwise_scale_base_offset =
+            ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * static_cast<size_t>(scale_stride_colwise)
             + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
 
         constexpr int32_t rowwise_scale_stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
@@ -969,8 +969,7 @@ __global__ void cast_mxfp8_kernel(
 
                     IType rInput[CastTraits::rowChunkElems];
                     {
-                        inputUnitType *rInputUnit = 
-                            reinterpret_cast<inputUnitType *>(rInput);
+                        inputUnitType *rInputUnit = reinterpret_cast<inputUnitType *>(rInput);
                         int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
                         #pragma unroll
                         for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
@@ -1021,9 +1020,9 @@ __global__ void cast_mxfp8_kernel(
                                     + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
                                 sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
                             } else {
-                                int32_t rowwise_scale_offset = 
+                                size_t rowwise_scale_offset = 
                                     rowwise_scale_base_offset
-                                    + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                                    + iter_m * (CastTraits::blockIterDim::M) * static_cast<size_t>(scale_stride_rowwise)
                                     + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
                                 scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
                             }
@@ -1034,9 +1033,9 @@ __global__ void cast_mxfp8_kernel(
                             e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
                             float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
                             sColwiseReduce[threadIdx.x] = col_scale_inverse;
-                            int32_t colwise_scale_offset = 
+                            size_t colwise_scale_offset = 
                                 colwise_scale_base_offset 
-                                + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                                + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * static_cast<size_t>(scale_stride_colwise)
                                 + iter_n * CastTraits::blockIterDim::N;
                             scales_colwise[colwise_scale_offset] = col_biased_exponent;
                             __syncwarp();
@@ -1353,11 +1352,11 @@ __global__ void cast_mxfp8_kernel(
         (threadIdx.x / CastTraits::rowThreadLayout::N) * (CastTraits::blockIterDim::N / CastTraits::rowNumElemsPerUnit)
         + (threadIdx.x % CastTraits::rowThreadLayout::N) * (CastTraits::rowChunkElems / CastTraits::rowNumElemsPerUnit);
 
-    int32_t rowwise_scale_base_offset = 
-        (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) * scale_stride_rowwise
+    size_t rowwise_scale_base_offset = 
+        (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) * static_cast<size_t>(scale_stride_rowwise)
         + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems) / CastTraits::rowChunkElems;
-    int32_t colwise_scale_base_offset =
-            ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * scale_stride_colwise
+    size_t colwise_scale_base_offset =
+            ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * static_cast<size_t>(scale_stride_colwise)
             + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
 
     constexpr int32_t rowwise_scale_stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
@@ -1508,9 +1507,9 @@ __global__ void cast_mxfp8_kernel(
                                 + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
                             sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
                         } else {
-                            int32_t rowwise_scale_offset = 
+                            size_t rowwise_scale_offset = 
                                 rowwise_scale_base_offset
-                                + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                                + iter_m * (CastTraits::blockIterDim::M) * static_cast<size_t>(scale_stride_rowwise)
                                 + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
                             scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
                         }
@@ -1521,9 +1520,9 @@ __global__ void cast_mxfp8_kernel(
                         e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
                         float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
                         sColwiseReduce[threadIdx.x] = col_scale_inverse;
-                        int32_t colwise_scale_offset = 
+                        size_t colwise_scale_offset = 
                             colwise_scale_base_offset 
-                            + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                            + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * static_cast<size_t>(scale_stride_colwise)
                             + iter_n * CastTraits::blockIterDim::N;
                         scales_colwise[colwise_scale_offset] = col_biased_exponent;
                         __syncwarp();
@@ -1634,7 +1633,7 @@ __global__ void cast_mxfp8_kernel(
         __syncthreads();
 
         if (warpId == 0 && leader) {
-            int32_t gmem_offset = states.index() * CastTraits::blockIterDim::num;
+            size_t gmem_offset = static_cast<size_t>(states.index()) * CastTraits::blockIterDim::num;
             cuda_ptx::cp_async_bulk_tensor(
                 cuda_ptx::space_global,
                 cuda_ptx::space_shared,
