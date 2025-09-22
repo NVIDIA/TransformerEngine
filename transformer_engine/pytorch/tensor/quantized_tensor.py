@@ -477,6 +477,7 @@ class QuantizedTensor(torch.Tensor):
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
             rowwise_usage, columnwise_usage = tensor.get_usage()
+            quantizer_rowwise_usage, quantizer_columnwise_usage = tensor._quantizer.rowwise_usage, tensor._quantizer.columnwise_usage
             tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
             out = tensor._quantizer.make_empty(
                 shape=tensor.shape,
@@ -485,7 +486,7 @@ class QuantizedTensor(torch.Tensor):
                 requires_grad=requires_grad,
                 pin_memory=pin_memory,
             )
-            tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+            tensor._quantizer.set_usage(rowwise=quantizer_rowwise_usage, columnwise=quantizer_columnwise_usage)
             return out
         
         if func in (torch.ops.aten.numel.default, torch.ops.aten.is_pinned.default):

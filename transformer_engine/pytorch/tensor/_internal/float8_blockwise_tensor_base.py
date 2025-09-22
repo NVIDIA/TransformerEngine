@@ -125,6 +125,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         return tensors[4:]
 
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
+        """Get this Tensor's data."""
         if rowwise_data and columnwise_data:
             return self._rowwise_data, self._columnwise_data
         if rowwise_data:

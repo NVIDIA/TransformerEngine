@@ -629,17 +629,16 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
                 if dst._data is not None:
-                    dst._data.copy_(src._data, *args[2:])
+                    dst._data.copy_(src._data.detach(), *args[2:])
                 if dst._scale_inv is not None:
-                    dst._scale_inv.copy_(src._scale_inv, *args[2:])
+                    dst._scale_inv.copy_(src._scale_inv.view(dst._scale_inv.size()), *args[2:])
                 if dst._transpose is not None and not dst._transpose_invalid:
                     if not src._transpose_invalid:
                         dst._transpose.copy_(src._transpose, *args[2:])
                     else:
                         dst._create_transpose()
                 return dst
-
-        if func in _ops_to_preserve_subclass_in_fsdp2:
+        elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(
                 f"A function call({func}) in {cls} may not return {cls} tensor as an output. It"
