@@ -146,11 +146,6 @@ class MXFP8TensorBase(QuantizedTensorBase):
             return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
-    def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
-        """Set this Tensor's data."""
-        self._rowwise_data = rowwise_data
-        self._columnwise_data = columnwise_data
-
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
         return _FromMXFP8Func.forward(None, self, dtype)

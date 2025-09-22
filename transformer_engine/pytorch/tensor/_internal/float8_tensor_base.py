@@ -127,7 +127,7 @@ class Float8TensorBase(QuantizedTensorBase):
         self._transpose = tensors[1]
         self._scale_inv = tensors[2]
         return tensors[3:]
-    
+
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
         if rowwise_data and columnwise_data:
@@ -137,11 +137,6 @@ class Float8TensorBase(QuantizedTensorBase):
         if columnwise_data:
             return self._transpose
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
-
-    def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
-        """Set this Tensor's data."""
-        self._data = data
-        self._transpose = transpose
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
