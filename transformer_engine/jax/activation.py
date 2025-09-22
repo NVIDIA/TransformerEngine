@@ -18,6 +18,7 @@ from . import cpp_extensions as tex
 from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
+
 @dataclass(frozen=True)
 class ClampedSwigluParams:
     limit: float = 7.0
@@ -30,7 +31,6 @@ class ClampedSwigluParams:
 
     def to_ffi_lowering_dict(self):
         return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
-
 
 
 def activation(
