@@ -455,6 +455,9 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 size_t roundup(const size_t value, const size_t multiple);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
+
+std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
+
 }  // namespace transformer_engine::pytorch
 
 namespace std {
