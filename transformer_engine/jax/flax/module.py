@@ -902,7 +902,7 @@ class LayerNormMLP(TransformerEngineBase):
         The parameters for the ClampedSwiglu activation used in GPT OSS. This is only
         used when ('clamped_silu', 'clamped_linear') is in :attr:`activations`. At the moment
         ClampedSwiglu is the only activation that requires parameters. If there is more activation
-        functions that require parameters in the future, we might need to change it to a more gerneric
+        functions that require parameters in the future, we might need to change it to a more generic
         parameter container.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
