@@ -404,7 +404,9 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(weights[0], "__fsdp_param__")  # TODO(selvaraja): Quick hack, not in main branch
+                        if not hasattr(
+                            weights[0], "__fsdp_param__"
+                        )  # TODO(selvaraja): Quick hack, not in main branch
                         else False
                     ),
                 )
