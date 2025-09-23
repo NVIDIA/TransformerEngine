@@ -916,7 +916,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(fc1_weight, "__fsdp_param__")
+                        if not hasattr(fc1_weight, "__fsdp_param__")  # TODO(selvaraja): Quick hack, not in main branch
                         else False
                     ),
                     "layout": "NT",
@@ -1158,7 +1158,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(fc2_weight, "__fsdp_param__")
+                        if not hasattr(fc2_weight, "__fsdp_param__")  # TODO(selvaraja): Quick hack, not in main branch
                         else False
                     ),
                     "layout": "NT",

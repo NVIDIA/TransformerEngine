@@ -841,7 +841,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(weight, "__fsdp_param__")
+                        if not hasattr(weight, "__fsdp_param__")  # TODO(selvaraja): Quick hack, not in main branch
                         else False
                     ),
                     "layout": "NT",

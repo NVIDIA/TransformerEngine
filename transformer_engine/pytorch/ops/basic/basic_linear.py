@@ -997,7 +997,7 @@ class BasicLinear(BasicOperation):
             weight_param = self.weight
             if hasattr(weight_param, "__fsdp_param__"):
                 weight_param.main_grad = weight_param.get_main_grad()
-                accumulate_into_main_grad = False
+                accumulate_into_main_grad = False    # TODO(selvaraja): Quick hack, not in main branch
             if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
