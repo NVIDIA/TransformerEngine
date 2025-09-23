@@ -285,7 +285,7 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
                " rows, but it has ", input_scale_inv_rows, " rows instead.");
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
                "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 4) * 4,
-               "columns, but it has ", input_scale_inv_cols, " columns instead.");
+               " columns, but it has ", input_scale_inv_cols, " columns instead.");
 
     swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
                                      data_cols, stream);
@@ -295,7 +295,7 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
                " rows, but it has ", input_scale_inv_rows, " rows instead.");
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_cols, 512) * 4,
                "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_cols, 512) * 4, "columns, but it has ", input_scale_inv_cols,
+               DIVUP<size_t>(data_cols, 512) * 4, " columns, but it has ", input_scale_inv_cols,
                " columns instead.");
 
     swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
