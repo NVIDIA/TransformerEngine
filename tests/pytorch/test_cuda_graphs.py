@@ -32,7 +32,7 @@ mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 reset_rng_states()
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32),
+    "small": ModelConfig(2, 32, 2, 32),
 }
 
 
