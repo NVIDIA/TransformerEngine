@@ -696,7 +696,8 @@ def _unpermute_bwd_with_merging_probs_kernel(
             mask = current_offset < hidden_size
             src_row = pid.to(tl.int64)
             input_off = (
-                src_row * stride_fwd_output_grad_token + current_offset * stride_fwd_output_grad_hidden
+                src_row * stride_fwd_output_grad_token
+                + current_offset * stride_fwd_output_grad_hidden
             )
             inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
             inp = inp.to(compute_type)
