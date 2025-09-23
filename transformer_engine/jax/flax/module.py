@@ -899,11 +899,9 @@ class LayerNormMLP(TransformerEngineBase):
         The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
     activation_params: dict, default = None
-        The parameters for the ClampedSwiglu activation used in GPT OSS. This is only
-        used when ('clamped_silu', 'clamped_linear') is in :attr:`activations`. At the moment
-        ClampedSwiglu is the only activation that requires parameters. If there is more activation
-        functions that require parameters in the future, we might need to change it to a more gerneric
-        parameter container.
+        The parameters needed(if any) by the activation functions specified in :attr:`activations`.
+        At the moment only ('clamped_silu', 'clamped_linear') which is clamped_swiglu used in GPT OSS
+        need additional parameters.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
     intermediate_dropout_rate: float, default = 0.1
