@@ -1025,8 +1025,6 @@ def _jax_quantize_dact_dbias(
     return dx, dbias
 
 
-from dataclasses import dataclass
-
 
 def act_lu(
     x: jnp.ndarray,
