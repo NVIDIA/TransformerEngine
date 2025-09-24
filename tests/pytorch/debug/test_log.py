@@ -14,7 +14,7 @@ import contextlib
 import os
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-
+import math
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
@@ -150,7 +150,7 @@ fp8_recipes = [
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-def test_numerics(fp8_recipe, feature_dirs):
+def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if not mxfp8_available and fp8_recipe == recipe.MXFP8BlockScaling():
@@ -204,6 +204,78 @@ def test_numerics(fp8_recipe, feature_dirs):
                 (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
             )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
+
+
+LOG_HIGH_PRECISION_CONFIG_BASE = """
+log:
+  layers:
+    layer_name_regex_pattern: .*
+  enabled:
+    True
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      stats:
+        - dynamic_range
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 1
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 2
+      tensors: [activation, gradient, weight]
+      freq: 2
+      start_step: 0
+      end_step: 10
+"""
+
+
+def test_log_stats_numerics(feature_dirs):
+    """Check corectness of dynamic range and max blockwise dynamic range stats"""
+    stats = ["dynamic_range", "max_blockwise_4_dynamic_range"]
+    log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
+
+    with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
+        # There is 1024 x 1024 tensor with very small epsilon values in almost all elements,
+        # one row of large value A and three rows of large value B.
+        epsilon = 1e-10
+        A = 1000
+        B = 50
+        tensor = torch.zeros(1024, 1024).cuda() + epsilon
+        tensor[0, :] = A
+        tensor[1:4, :] = B
+
+        debug_api.transformer_engine.inspect_tensor(
+            layer_name="layer_name",
+            tensor_name="activation",
+            iteration=0,
+            tp_group=None,
+            tensor=tensor,
+            quantizer=None,
+            rowwise_quantized_tensor=None,
+            columnwise_quantized_tensor=None,
+        )
+        debug_api.step()
+
+        output = read_log(log_dir)
+
+    for line in output.splitlines():
+        if "max_blockwise_dynamic_range_block_size_4_dims_1" in line:
+            max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
+            expected = 0
+            assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(
+                expected, abs=1e-4
+            )
+        elif "max_blockwise_dynamic_range_block_size_4_dims_2" in line:
+            max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
+            expected = math.log2(A) - math.log2(B)
+            assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
+                expected, abs=1e-4
+            )
+        elif "dynamic_range" in line:
+            dynamic_range = float(line.split("value=")[1])
+            expected = math.log2(A) - math.log2(epsilon)
+            assert dynamic_range == pytest.approx(expected, abs=1e-4)
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
