@@ -496,11 +496,11 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
 
         # View op
         if func == aten.view.default:
-            tensor = args[0]
-            shape = args[1]
             if len(args) != 2:
                 raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
-            if shape == tensor.size():
+            tensor = args[0]
+            shape = args[1]
+            if shape == list(tensor.size()):
                 return tensor.detach()
             return tensor.view(shape)
 
@@ -794,7 +794,9 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        ctx.shape = tensor.shape
+        cur_shape = tensor.shape
+        if ctx is not None:
+            ctx.shape = cur_shape
         if shape is None:
             return tensor
 
@@ -805,12 +807,12 @@ class _ReshapeFunc(torch.autograd.Function):
             shape = shape[0]
         if -1 in shape:
             shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
             for i, d in enumerate(shape):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        if shape[-1] != ctx.shape[-1]:
+        if shape[-1] != cur_shape[-1]:
             raise RuntimeError(
                 "NVFP4Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import functools
 import math
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 import warnings
 
 import torch
@@ -199,16 +199,25 @@ class NVFP4TensorBase(QuantizedTensorBase):
         """Dequantize to a higher precision."""
         return _FromNVFP4Func.forward(None, self, dtype)
 
-    def size(self, *args, **kwargs):
+    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
         # pylint: disable=missing-function-docstring
+
+        # Infer tensor shape
+        shape = None
         if self._rowwise_data is not None:
-            byte_shape = list(self._rowwise_data.size(*args, **kwargs))
-            return byte_shape[:-1] + [byte_shape[-1] * 2]
-        if self._columnwise_data is not None:
+            byte_shape = list(self._rowwise_data.size())
+            shape = byte_shape[:-1] + [byte_shape[-1] * 2]
+        elif self._columnwise_data is not None:
             warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
-            byte_shape = list(self._columnwise_data.size(*args, **kwargs))
-            return byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
-        raise RuntimeError("Attempted to get shape of NVFP4 tensor with no data")
+            byte_shape = list(self._columnwise_data.size())
+            shape = byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
+        if shape is None:
+            raise RuntimeError("Attempted to get shape of NVFP4 tensor with no data")
+
+        # Return shape or dim
+        if dim is None:
+            return torch.Size(shape)
+        return shape[dim]
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
