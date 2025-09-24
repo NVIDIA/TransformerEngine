@@ -5,8 +5,8 @@
 from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
-from packaging import version
 from dataclasses import dataclass
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -59,23 +59,36 @@ ActivationEnum = {
 
 @dataclass(frozen=True)
 class ClampedSwigluParams:
-    limit: float = 7.0
-    alpha: float = 1.702
     """Parameters for the Clamped SwiGLU activation function
     used in GPT OSS."""
+    limit: float = 7.0
+    alpha: float = 1.702
 
     def __hash__(self):
+        """Custom hash function to ensure dataclass is hashable for jax jit to work.
+
+        Returns:
+            int: Hash value of the dataclass instance.
+        """
         return hash((self.limit, self.alpha))
 
     def to_ffi_lowering_dict(self):
+        """Convert the activation parameters to a dictionary format for FFI lowering.
+
+        Returns:
+            dict: A dictionary representation of the activation parameters consumable by
+            XLA FFI bindings for activation functions.
+        """
         return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
 
 
 @dataclass(frozen=True)
 class ActivationParams:
+    """Parameters for various activation functions.
+    Currently only Clamped SwiGLU activation has parameters.
+    """
     clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
-
-    # Add other activation-specific parameter fields here as needed in the future
+    
     @staticmethod
     def create(activation_type, **kwargs):
         """Factory method to create ActivationParams based on activation_type."""
@@ -86,52 +99,18 @@ class ActivationParams:
         }
         if activation_type in CLAMPED_ACTIVATION_TYPES:
             return ActivationParams(ClampedSwigluParams(**kwargs))
-        else:
-            return ActivationParams()  # Default params for activations without parameters
+        return ActivationParams()  # Default params for activations without parameters
 
     def __hash__(self):
+        """Custom hash function to ensure dataclass is hashable for jax jit to work"""
         return hash((self.clamped_swiglu,))
 
     def to_ffi_lowering_dict(self):
-        return {"clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict()}
-
-
-@dataclass(frozen=True)
-class ClampedSwigluParams:
-    limit: float = 7.0
-    alpha: float = 1.702
-    """Parameters for the Clamped SwiGLU activation function
-    used in GPT OSS."""
-
-    def __hash__(self):
-        return hash((self.limit, self.alpha))
-
-    def to_ffi_lowering_dict(self):
-        return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
-
-
-@dataclass(frozen=True)
-class ActivationParams:
-    clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
-
-    # Add other activation-specific parameter fields here as needed in the future
-    @staticmethod
-    def create(activation_type, **kwargs):
-        """Factory method to create ActivationParams based on activation_type."""
-        CLAMPED_ACTIVATION_TYPES = {
-            ("clamped_silu", "clamped_linear"),
-            "clamped_silu",
-            "clamped_linear",
-        }
-        if activation_type in CLAMPED_ACTIVATION_TYPES:
-            return ActivationParams(ClampedSwigluParams(**kwargs))
-        else:
-            return ActivationParams()  # Default params for activations without parameters
-
-    def __hash__(self):
-        return hash((self.clamped_swiglu,))
-
-    def to_ffi_lowering_dict(self):
+        """Convert the activation parameters to a dictionary format for FFI lowering.
+        Returns:
+            dict: A dictionary representation of the activation parameters consumable by 
+            XLA FFI bindings for activation functions.
+        """
         return {"clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict()}
 
 

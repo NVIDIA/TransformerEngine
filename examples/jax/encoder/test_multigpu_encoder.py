@@ -53,6 +53,7 @@ class Net(nn.Module):
             layer_type=te_flax.TransformerLayerType.ENCODER,
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
+            mlp_activations=('silu', 'linear'),
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
