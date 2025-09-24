@@ -8,11 +8,9 @@ This module provides optimized activation functions with quantization support.
 
 from typing import Sequence, Union, Callable, Optional
 from functools import partial
-from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from . import cpp_extensions as tex
 
 from .quantize.tensor import NoScaleTensor

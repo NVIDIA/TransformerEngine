@@ -6,7 +6,6 @@ from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
 from dataclasses import dataclass
-from packaging import version
 
 import jax
 import jax.numpy as jnp
