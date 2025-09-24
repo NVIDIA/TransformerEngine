@@ -236,7 +236,6 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                                  pre_gelu_, workspace_, grad, false, use_split_accumulator, out_,
                                  stream);
 
-      // TODO: Don't we need to copy the output back to the original buffer?
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
 

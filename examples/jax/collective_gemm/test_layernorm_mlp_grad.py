@@ -217,11 +217,8 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
             assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
 
 
-class TestCollectiveDenseGradient(unittest.TestCase):
+class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     """Collective Dense Gradient unittests"""
-
-    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     def setUp(self):
         self.args = cgemm_parser(

@@ -98,7 +98,7 @@ class CommunicatorHandler {
     return global_device_ids[device_idx];
   }
 
-  void nccl_barrier_impl(ExtComm);
+  void nccl_device_barrier_impl(ExtComm);
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
                            size_t input_bytes, ExtComm);
 
@@ -156,7 +156,7 @@ class CommunicatorHandler {
   ~CommunicatorHandler();
 
   bool _initialize = false;
-  int *_barrier = nullptr;
+  int *_device_barrier = nullptr;
   std::vector<std::string> _nccl_id_file_name;
 };
 

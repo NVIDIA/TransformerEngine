@@ -67,8 +67,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK(num_devices_per_process <= MAX_DEVICES,
              "num_devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
              ", got num_devices_per_process=", num_devices_per_process);
-  NVTE_CHECK(num_devices_per_process >= 1,
-             "num_devices_per_process must be >= 1, got num_devices_per_process=",
+  NVTE_CHECK(num_devices_per_process == 1,
+             "num_devices_per_process must be == 1, got num_devices_per_process=",
              num_devices_per_process);
   NVTE_CHECK(num_total_devices >= 1,
              "num_total_devices must be >= 1, got num_total_devices=", num_total_devices);
@@ -128,7 +128,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
   // Allocate device memory for barrier operations
-  NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
 
   handler._initialize = true;
 
@@ -202,13 +202,13 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   return executor_ptr;
 }
 
-void CommunicatorHandler::nccl_barrier_impl(ExtComm) {
+void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
 
-  NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
+  NVTE_CHECK_NCCL(ncclAllReduce(_device_barrier, _device_barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
   cudaDeviceSynchronize();
 }
 
@@ -227,7 +227,7 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
+CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
   for (int i = 0; i < MAX_DEVICES; i++) {
     local_device_ids_within_process[i] = -1;
     local_device_ids_within_tp_domain[i] = -1;
@@ -240,7 +240,7 @@ CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
   };
-  barrier_func = [this](ExtComm comm) { this->nccl_barrier_impl(comm); };
+  barrier_func = [this](ExtComm comm) { this->nccl_device_barrier_impl(comm); };
 }
 
 CommunicatorHandler::~CommunicatorHandler() {
@@ -251,7 +251,7 @@ CommunicatorHandler::~CommunicatorHandler() {
       }
     }
   }
-  if (_barrier) cudaFree(_barrier);
+  if (_device_barrier) cudaFree(_device_barrier);
 
   for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
