@@ -225,13 +225,15 @@ class SplitAlongDim(torch.autograd.Function):
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
         from transformer_engine.pytorch.float8_tensor import Float8Tensor
-        from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
 
-        if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
+        if isinstance(mixed_x_layer, Float8TensorStorage) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
             return tuple(
-                Float8TensorBase(
+                Float8TensorStorage(
                     fp8_scale_inv=mixed_x_layer._scale_inv,
                     fp8_dtype=mixed_x_layer._fp8_dtype,
                     data=x.squeeze(split_dim) if squeeze else x,

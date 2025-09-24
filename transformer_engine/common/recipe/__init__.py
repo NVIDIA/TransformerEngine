@@ -7,7 +7,8 @@ from __future__ import annotations
 import warnings
 import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
@@ -85,6 +86,10 @@ class Recipe:
     def float8_block_scaling(self):
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
+
+    def custom(self):
+        """Whether the given recipe is custom."""
+        return isinstance(self, CustomRecipe)
 
 
 @dataclass()
@@ -351,3 +356,37 @@ class Float8BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide quantizer factories.
+
+    .. warning::
+        **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Parameters
+    ----------
+    qfactory : Callable
+               Factory callable that returns a quantizer instance for a
+               given semantic tensor role.
+               The callable is typically invoked as:
+                   qfactory(
+                       role: str,
+                   )
+
+               Where `role` is one of the following strings for e.g. te.Linear
+               (stable public contract):
+               - forward:  "linear_input", "linear_weight", "linear_output"
+               - backward: "linear_grad_output", "linear_grad_input"
+    """
+
+    qfactory: Callable[..., Any]
+
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"

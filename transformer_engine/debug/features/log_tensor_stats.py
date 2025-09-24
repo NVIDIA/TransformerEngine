@@ -15,8 +15,8 @@ import nvdlfw_inspect.api as debug_api
 from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
-from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import next_enabled_iter, get_reduction_params
 
@@ -123,7 +123,7 @@ class LogTensorStats(BaseLogTensorStats):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
-            type(tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
+            type(tensor) not in [Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage]
             and tensor.dtype != torch.uint8
         ), (
             f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be in high precision when using"
