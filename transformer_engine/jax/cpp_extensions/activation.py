@@ -61,6 +61,7 @@ ActivationEnum = {
 class ClampedSwigluParams:
     """Parameters for the Clamped SwiGLU activation function
     used in GPT OSS."""
+
     limit: float = 7.0
     alpha: float = 1.702
 
@@ -87,8 +88,9 @@ class ActivationParams:
     """Parameters for various activation functions.
     Currently only Clamped SwiGLU activation has parameters.
     """
+
     clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
-    
+
     @staticmethod
     def create(activation_type, **kwargs):
         """Factory method to create ActivationParams based on activation_type."""
@@ -108,7 +110,7 @@ class ActivationParams:
     def to_ffi_lowering_dict(self):
         """Convert the activation parameters to a dictionary format for FFI lowering.
         Returns:
-            dict: A dictionary representation of the activation parameters consumable by 
+            dict: A dictionary representation of the activation parameters consumable by
             XLA FFI bindings for activation functions.
         """
         return {"clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict()}
