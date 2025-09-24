@@ -275,7 +275,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     shape=output.shape,
                     dtype=fake_dtype,
                     rowwise_data=output,
-                    rowwise_scale_inv=permuted_scale.T.contiguous(),
+                    rowwise_scale_inv=(
+                        permuted_scale.T.contiguous()
+                        if data_format == tex.Float8BlockScaleTensorFormat.GEMM_READY
+                        else permuted_scale
+                    ),
                     columnwise_data=None,
                     columnwise_scale_inv=None,
                     fp8_dtype=fp8_dtype,
@@ -482,7 +486,11 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         shape=act_grad.shape,
                         dtype=fake_dtype,
                         rowwise_data=act_grad,
-                        rowwise_scale_inv=permuted_scale.T.contiguous(),
+                        rowwise_scale_inv=(
+                            permuted_scale.T.contiguous()
+                            if data_format == tex.Float8BlockScaleTensorFormat.GEMM_READY
+                            else permuted_scale
+                        ),
                         columnwise_data=None,
                         columnwise_scale_inv=None,
                         fp8_dtype=fp8_dtype,
