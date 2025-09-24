@@ -78,7 +78,12 @@ class UserBufferQuantizationMode(Enum):
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        return 33_554_432
+        # We need to store GEMM alpha and beta on device for NVFP4 recipe,
+        # which requires 2 additional bytes that are used from the workspace.
+        # To keep workspace 4-byte aligned, add an additional 4 bytes here because
+        # the full amount of 33_554_432 (32 MiB) is required for selecting optimal
+        # GEMM kernel for NVFP4.
+        return 33_554_436
     return 4_194_304
 
 
