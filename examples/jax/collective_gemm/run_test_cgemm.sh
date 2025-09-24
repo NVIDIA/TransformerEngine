@@ -4,6 +4,21 @@
 
 NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
+# Check if NVLINK is supported before running tests
+echo "*** Checking NVLINK support***"
+NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
+NVLINK_EXIT_CODE=$?
+
+# Check if command failed OR output indicates no NVLINK
+if [ $NVLINK_EXIT_CODE -ne 0 ] || [[ "$NVLINK_OUTPUT" == *"not supported"* ]] || [[ "$NVLINK_OUTPUT" == *"No devices"* ]] || [ -z "$NVLINK_OUTPUT" ]; then
+  echo "NVLINK is not supported on this platform"
+  echo "Collective GEMM tests require NVLINK connectivity"
+  echo "SKIPPING all tests"
+  exit 0
+else
+  echo "NVLINK support detected"
+fi
+
 # Define the test files to run
 TEST_FILES=(
 "test_gemm.py"

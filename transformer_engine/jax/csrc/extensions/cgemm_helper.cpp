@@ -208,7 +208,8 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
 
-  NVTE_CHECK_NCCL(ncclAllReduce(_device_barrier, _device_barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
+  NVTE_CHECK_NCCL(
+      ncclAllReduce(_device_barrier, _device_barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
   cudaDeviceSynchronize();
 }
 
