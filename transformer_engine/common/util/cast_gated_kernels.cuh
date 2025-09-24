@@ -747,7 +747,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float gate_elt = static_cast<float>(in_gate.data.elt[e]);
             float after_act_elt;
             float after_gate_elt;
-            float dgate_elt = true;
+            bool dgate_elt = true;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
               // In case of GPT OSS, clamp the activation and gate values
               dgate_elt = gate_elt < p.limit && gate_elt > -p.limit;  // Derivative of clamp

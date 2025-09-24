@@ -338,7 +338,7 @@ template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typen
           typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
                                    const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
-                                   const Param params, cudaStream_t stream) {
+                                   const Param &params, cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, output);
 
