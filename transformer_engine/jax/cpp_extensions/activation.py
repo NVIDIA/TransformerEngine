@@ -8,7 +8,6 @@ from functools import reduce, partial
 from packaging import version
 from dataclasses import dataclass
 
-
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
@@ -518,7 +517,6 @@ class ActLuPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-
         del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types, act_params
         prefix = "ActLu_"
         input_shape = value_types[0].shape
@@ -1009,7 +1007,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
 
         del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types, act_params
         prefix = "DActLuDBias_"
-
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             value_types[1].shape, unique_var=prefix + "x", flatten_axis=-2
         )
@@ -1045,6 +1042,7 @@ class DActLuDBiasQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
 
 class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
     """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
+
 
 
 def _jax_act_lu(

@@ -79,7 +79,6 @@ def _activation_fwd_rule(x, activation_type, quantizer, act_params):
     Returns:
         Tuple of (output, context) for backward pass
     """
-
     fwd_output = tex.act_lu(x, activation_type, quantizer, act_params)
     # This is a no-op for higher-precision tensors
     fwd_output = fwd_output.dequantize()
