@@ -55,17 +55,36 @@ def fp4_to_fp32(fp4: torch.Tensor) -> torch.Tensor:
 def dequantize_fp4(qx: torch.Tensor, sx: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
     sf = sx.repeat_interleave(16, dim=1).view(torch.float8_e4m3fn).to(torch.float32)
     dqx = fp4_to_fp32(unpack_fp4(qx))
-    sf = sf[:dqx.shape[0], :dqx.shape[1]]
+    sf = sf[: dqx.shape[0], : dqx.shape[1]]
     dequant = dqx * sf * (amax / (6.0 * 448))
     return dequant
+
 
 def RHT(x: torch.Tensor) -> torch.Tensor:
     def get_wgrad_sign_vector() -> torch.Tensor:
         """Hard-coded signs for Hadamard transform"""
         return torch.tensor(
-            [1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0],
+            [
+                1.0,
+                1.0,
+                1.0,
+                -1.0,
+                1.0,
+                -1.0,
+                -1.0,
+                -1.0,
+                -1.0,
+                -1.0,
+                -1.0,
+                1.0,
+                -1.0,
+                1.0,
+                -1.0,
+                -1.0,
+            ],
             dtype=torch.float32,
         )
+
     def _build_hadamard_matrix(
         size: int, device: torch.device, dtype: torch.dtype, with_random_sign_mask: bool = True
     ) -> torch.Tensor:
@@ -104,10 +123,9 @@ def RHT(x: torch.Tensor) -> torch.Tensor:
     return out.view(original_shape)
 
 
-def quantize_fp4(x: torch.Tensor,
-                 use_stochastic_rounding: bool,
-                 use_2D: bool,
-                 use_RHT: bool) -> torch.Tensor:
+def quantize_fp4(
+    x: torch.Tensor, use_stochastic_rounding: bool, use_2D: bool, use_RHT: bool
+) -> torch.Tensor:
     nvfp4_quantizer = NVFP4Quantizer(
         rowwise=True,
         columnwise=True,
@@ -133,8 +151,9 @@ def quantize_fp4(x: torch.Tensor,
     return qx, sx, qx_t, sx_t
 
 
-def check_quantization_nvfp4_versus_reference(x_dtype: torch.dtype, M: int, N: int,
-                                              use_2D: bool, use_RHT: bool) -> None:
+def check_quantization_nvfp4_versus_reference(
+    x_dtype: torch.dtype, M: int, N: int, use_2D: bool, use_RHT: bool
+) -> None:
     device = "cuda"
     torch.manual_seed(seed)
     n_iters = 50
@@ -144,8 +163,9 @@ def check_quantization_nvfp4_versus_reference(x_dtype: torch.dtype, M: int, N: i
     if use_RHT:
         y = RHT(y)
     amax = torch.max(torch.abs(x)).float()
-    q_rn, s_rn, q_t_rn, s_t_rn = quantize_fp4(x, use_stochastic_rounding=False,
-                                              use_2D=use_2D, use_RHT=use_RHT)
+    q_rn, s_rn, q_t_rn, s_t_rn = quantize_fp4(
+        x, use_stochastic_rounding=False, use_2D=use_2D, use_RHT=use_RHT
+    )
     dq_rn = dequantize_fp4(q_rn, s_rn, amax)
     dq_t_rn = dequantize_fp4(q_t_rn, s_t_rn, amax)
     error_rn = (dq_rn - x).float()
@@ -155,8 +175,9 @@ def check_quantization_nvfp4_versus_reference(x_dtype: torch.dtype, M: int, N: i
     sr_result = torch.zeros_like(x).float()
     sr_t_result = torch.zeros_like(x).float().t().contiguous()
     for i in range(n_iters):
-        q_sr, s_sr, q_t_sr, s_t_sr = quantize_fp4(x, use_stochastic_rounding=True,
-                                                  use_2D=use_2D, use_RHT=use_RHT)
+        q_sr, s_sr, q_t_sr, s_t_sr = quantize_fp4(
+            x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=use_RHT
+        )
 
         dq_sr = dequantize_fp4(q_sr, s_sr, amax)
         dq_t_sr = dequantize_fp4(q_t_sr, s_t_sr, amax)
@@ -193,7 +214,7 @@ def check_quantization_nvfp4_versus_reference(x_dtype: torch.dtype, M: int, N: i
     "M, N",
     [
         (8192, 8192),
-        (8192, 8256), # to test the nonfused RHT path
+        (8192, 8256),  # to test the nonfused RHT path
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)

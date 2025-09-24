@@ -287,7 +287,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     OType* const output_t, ScaleType* const tile_scales_inv_c, ScaleType* const tile_scales_inv_t,
     const size_t row_length, const size_t num_rows, const size_t scale_stride_x,
     const size_t scale_stride_y, const size_t scale_t_stride_x, const size_t scale_t_stride_y,
-    const size_t kScaleBlockDim, const float epsilon, const size_t *rng_state,
+    const size_t kScaleBlockDim, const float epsilon, const size_t* rng_state,
     const float* noop_ptr) {
   constexpr int kNVecContainer = kNVecOut / kNFP4PerContainer;
   using SMemVec = Vec<IType, kNVecSMem>;
@@ -674,9 +674,9 @@ void quantize_transpose_vector_blockwise_fp4(
     const SimpleTensor& input, const SimpleTensor& global_amax, SimpleTensor& scale_inv,
     SimpleTensor& scale_inv_t, SimpleTensor& output, SimpleTensor& output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
-    const bool swizzled_scale, const bool use_stochastic_rounding, const NVTETensor rng_state_tensor,
-    const bool use_2d_quantization, const SimpleTensor& noop_tensor,
-    cudaStream_t stream) {
+    const bool swizzled_scale, const bool use_stochastic_rounding,
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization,
+    const SimpleTensor& noop_tensor, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
 #if CUDA_VERSION >= 12080
 
@@ -729,17 +729,15 @@ void quantize_transpose_vector_blockwise_fp4(
   // noop tensor for cuda graph
   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
-  const size_t *rng_state = nullptr;
+  const size_t* rng_state = nullptr;
   if (rng_state_tensor != nullptr) {
-    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    Tensor& rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
     NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
     NVTE_CHECK(rng_state_te_tensor.data.shape == std::vector<size_t>{2},
-               "Shape of the RNG state should be [2], but got ",
-               rng_state_te_tensor.data.shape);
+               "Shape of the RNG state should be [2], but got ", rng_state_te_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
   }
-
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
@@ -794,13 +792,13 @@ void quantize_transpose_vector_blockwise_fp4(
                                       num_rows, scale_stride_x, scale_stride_y, scale_t_stride_x,
                                       scale_t_stride_y, kScaleBlockDim, epsilon, rng_state,
                                       noop_ptr);)  // kIs2DBlockScaling
-                              )                                  // kApplyStochasticRounding
-                          )                                      // kSwizzledScale
-                      )                                          // kAligned
-                  )                                              // kReturnTranspose
-              )                                                  // kReturnIdentity
-          )                                                      // OutputType
-      )                                                          // InputType
+                              )                    // kApplyStochasticRounding
+                          )                        // kSwizzledScale
+                      )                            // kAligned
+                  )                                // kReturnTranspose
+              )                                    // kReturnIdentity
+          )                                        // OutputType
+      )                                            // InputType
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else

@@ -1438,15 +1438,15 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
     const size_t nvfp4_vals_per_rng_elt = 4;
     // Since some of the kernels used there are persistent, it is impossible to give
     // a better estimate
-    const size_t rng_elts_per_thread = roundup(rows * cols,
-                                               min_threads_per_block * nvfp4_vals_per_rng_elt);
+    const size_t rng_elts_per_thread =
+        roundup(rows * cols, min_threads_per_block * nvfp4_vals_per_rng_elt);
     // extract rng seed and offset
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
     auto rng_state = torch::empty({2}, opts);
-    philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
+    philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
   }

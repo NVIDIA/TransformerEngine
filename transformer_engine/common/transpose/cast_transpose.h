@@ -67,9 +67,9 @@ void quantize_transpose_vector_blockwise_fp4(
     const SimpleTensor &input, const SimpleTensor &global_amax, SimpleTensor &scale_inv,
     SimpleTensor &scale_inv_t, SimpleTensor &output, SimpleTensor &output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
-    const bool swizzled_scale, const bool use_stochastic_rounding, const NVTETensor rng_state_tensor,
-    const bool use_2d_quantization, const SimpleTensor &noop_tensor,
-    cudaStream_t stream);
+    const bool swizzled_scale, const bool use_stochastic_rounding,
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization,
+    const SimpleTensor &noop_tensor, cudaStream_t stream);
 
 }  // namespace transformer_engine::detail
 

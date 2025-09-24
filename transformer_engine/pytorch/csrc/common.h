@@ -459,10 +459,10 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
 
 // unpack the PhiloxCudaState into CUDA tensor
-void philox_unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr);
+void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);
 
 // extract PhiloxCudaState from CUDA random number generator
-at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl *gen, size_t elts_per_thread);
+at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_per_thread);
 
 }  // namespace transformer_engine::pytorch
 
