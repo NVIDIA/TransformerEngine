@@ -402,7 +402,13 @@ class _GroupedLinear(torch.autograd.Function):
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
+                    accumulate=(
+                        accumulate_wgrad_into_param_main_grad
+                        if not hasattr(
+                            weights[0], "__fsdp_param__"
+                        )  # TODO(selvaraja): Quick hack, not in main branch
+                        else False
+                    ),
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
