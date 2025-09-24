@@ -1044,7 +1044,6 @@ class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
     """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
-
 def _jax_act_lu(
     inputs, activation_type, quantizer=None, act_params: Optional[ActivationParams] = None
 ) -> Union[NoScaleTensor, ScaledTensor]:

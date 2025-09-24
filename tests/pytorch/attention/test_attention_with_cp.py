@@ -105,7 +105,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-
     subprocess.run(
         get_bash_arguments(
             num_gpus_per_node=num_gpus,

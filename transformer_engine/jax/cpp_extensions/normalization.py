@@ -1169,7 +1169,6 @@ def rmsnorm_fwd(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
-
         )
         return out, rsigma
 
