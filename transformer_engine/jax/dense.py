@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
+from .cpp_extensions.quantization import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
     ScalingMode,
@@ -68,6 +69,7 @@ def dense(
     output_axes: Tuple[str, ...] = None,
     collective_op_set: tex.CollectiveOpSet = tex.noop_collective_op_set,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    using_global_amax_of_x: bool = False,
 ):
     """Perform dense layer transformation with optional quantization.
 
@@ -86,6 +88,7 @@ def dense(
         output_axes: Logical axes for sharding the output
         collective_op_set: A set of CollectiveOp objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        using_global_amax_of_x: Indicate wether to use global amax for x. Only works when using current-scaling. Default is False.
 
     Returns:
         Transformed output tensor
@@ -108,11 +111,12 @@ def dense(
         output_axes,
         collective_op_set,
         quantizer_set,
+        using_global_amax_of_x,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8, 9))
 def _dense(
     x,
     kernel,
@@ -123,6 +127,7 @@ def _dense(
     kernel_axes,
     output_axes,
     collective_op_set,
+    using_global_amax_of_x,
     quantizer_set,  # need to be a diff_arg for DelayedScaling state management
 ):
     """Internal implementation of dense layer transformation with custom VJP.
@@ -140,6 +145,7 @@ def _dense(
         output_axes: Logical axes for sharding the output_axes
         kernel_axes: Logical axes for sharding the weight matrix
         collective_op_set: A set of CollectiveOp objects for forward and backward passes.
+        using_global_amax_of_x: Indicate wether to use global amax for x. Only works when using current-scaling. Default is False.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -155,6 +161,7 @@ def _dense(
         kernel_axes,
         output_axes,
         collective_op_set,
+        using_global_amax_of_x,
         quantizer_set,
     )
     return output
@@ -170,6 +177,7 @@ def _dense_fwd_rule(
     kernel_axes,
     output_axes,
     collective_op_set,
+    using_global_amax_of_x,
     quantizer_set,
 ):
     """Forward pass rule for dense layer transformation.
@@ -195,6 +203,7 @@ def _dense_fwd_rule(
         x,
         flatten_axis=flatten_axis_x,
         quantizer=quantizer_set.x,
+        amax_scope=AmaxScope.TPSP if using_global_amax_of_x else AmaxScope.LOCAL,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -202,6 +211,7 @@ def _dense_fwd_rule(
         kernel,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.kernel,
+        amax_scope=AmaxScope.FSDP,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -241,6 +251,7 @@ def _dense_bwd_rule(
     kernel_axes,
     output_axes,
     collective_op_set,
+    using_global_amax_of_x,
     ctx,
     grad,
 ):
@@ -269,6 +280,7 @@ def _dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
+        amax_scope=AmaxScope.LOCAL if using_global_amax_of_x else AmaxScope.TPSP,
     )
 
     # GEMM NT

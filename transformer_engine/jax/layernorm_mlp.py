@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
+from .cpp_extensions.quantization import AmaxScope
 from .layernorm import canonicalize_norm_type
 from .quantize import (
     with_sharding_constraint_by_logical_axes,
@@ -295,13 +296,12 @@ def _layernorm_mlp_fwd_rule(
         epsilon,
         norm_type,
         quantizer=ffn1_quantizer_set.x,
+        amax_scope=AmaxScope.TPSP,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(
-        kernel_1,
-        flatten_axis=-2,
-        quantizer=ffn1_quantizer_set.kernel,
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_scope=AmaxScope.FSDP
     )
 
     # NN GEMM
@@ -342,6 +342,7 @@ def _layernorm_mlp_fwd_rule(
     casted_kernel_2 = tex.quantize(
         kernel_2,
         quantizer=ffn2_quantizer_set.kernel,
+        amax_scope=AmaxScope.FSDP,
     )
 
     # NN GEMM
@@ -452,6 +453,7 @@ def _layernorm_mlp_bwd_rule(
         grad,
         is_dbias=use_bias_2,
         quantizer=ffn1_quantizer_set.dgrad,
+        amax_scope=AmaxScope.TPSP,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim

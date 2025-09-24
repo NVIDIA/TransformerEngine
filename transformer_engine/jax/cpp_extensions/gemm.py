@@ -1079,7 +1079,7 @@ class GemmPrimitive(BasePrimitive):
                 " Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false"
             )
 
-        prefix = "GemmPrimitive_"
+        prefix = "Gemm_"
 
         warnings.warn(
             "Known issues with TE GemmPrimitives when Shardy propagation is enabled. For now,"
@@ -1113,13 +1113,8 @@ class GemmPrimitive(BasePrimitive):
         lhs_scale_specs = ("…1",)
         rhs_scale_specs = ("…2",)
         if scaling_mode.is_1d_block_scaling():
-            # Shardy rules for MXFP8 scales cannot be related to the operands because of the
-            # global-unpadding and local-padding workflow. This can potentially insert expensive
-            # re-shards in the partition call later if the scales are not already sharded correctly.
-            lhs_scale_specs, rhs_scale_specs = map(
-                lambda specs: tuple(spec.replace(prefix, prefix + "scale_inv_") for spec in specs),
-                (lhs_specs, rhs_specs),
-            )
+            lhs_scale_specs = lhs_specs
+            rhs_scale_specs = rhs_specs
 
         lhs_non_cspec = tuple(lhs_specs[i] for i in range(operand_ndims[0]) if i not in lhs_cdims)
         rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
