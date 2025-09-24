@@ -875,6 +875,7 @@ def quantize_dbias(
             Defaults to -1.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
+
     Returns:
         A tuple containing:
         - A ScaledTensor containing the quantized input tensor.
