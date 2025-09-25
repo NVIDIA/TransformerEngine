@@ -446,16 +446,15 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
-            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor):
-                assert dst._quantizer == src._quantizer, \
-                    "Quantizers must be the same for copy_ of QuantizedTensor"
+            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor) \
+                and type(dst._quantizer) is type(src._quantizer):
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
                 src_tensors, src_tensor_obj = src.prepare_for_saving()
                 for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
                     if dst_tensor is not None:
                         dst_tensor.copy_(src_tensor, *args[2:], **kwargs)
-                dst.restore_from_saved(dst_tensor_obj, dst_tensors)
-                src.restore_from_saved(src_tensor_obj, src_tensors)
+                dst_tensor_obj.restore_from_saved(dst_tensors)
+                src_tensor_obj.restore_from_saved(src_tensors)
                 return
 
             if isinstance(dst, QuantizedTensor):

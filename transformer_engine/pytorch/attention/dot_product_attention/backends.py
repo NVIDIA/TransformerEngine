@@ -517,6 +517,7 @@ class FlashAttention(torch.nn.Module):
 
         if is_cpu_offload_enabled():
             start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
+        
 
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
@@ -945,6 +946,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         if is_cpu_offload_enabled():
             start_offload(q, k, v, offload_base_tensor=True)
+        
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
@@ -1095,6 +1097,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
+        
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
             *qkvo_tensors,

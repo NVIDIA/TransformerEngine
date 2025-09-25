@@ -629,12 +629,12 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
                 if dst._data is not None:
-                    dst._data.copy_(src._data.detach(), *args[2:])
+                    dst._data.copy_(src._data.detach(), *args[2:], **kwargs)
                 if dst._scale_inv is not None:
-                    dst._scale_inv.copy_(src._scale_inv.view(dst._scale_inv.size()), *args[2:])
+                    dst._scale_inv.copy_(src._scale_inv.view(dst._scale_inv.size()), *args[2:], **kwargs)
                 if dst._transpose is not None and not dst._transpose_invalid:
                     if not src._transpose_invalid:
-                        dst._transpose.copy_(src._transpose, *args[2:])
+                        dst._transpose.copy_(src._transpose, *args[2:], **kwargs)
                     else:
                         dst._create_transpose()
                 return dst

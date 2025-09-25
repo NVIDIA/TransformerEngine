@@ -23,7 +23,6 @@ __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
 
 NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH = os.environ.get("NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH", "0") == "1"
 
-DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2**20  # 1mb
 OFFLOAD_SYNCHRONIZER = None
 
 
@@ -45,7 +44,7 @@ def mark_not_offload(*tensors: torch.Tensor):
     if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
         return
 
-    tensor_obj, tensors = prepare_for_saving(*tensors)
+    tensors, tensor_obj = prepare_for_saving(*tensors)
 
     for tensor in tensors:
         if tensor is not None:
@@ -73,8 +72,8 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         t.start_reload_event.record(torch.cuda.current_stream())
         if offload_base_tensor:
             setattr(t, "offload_base_tensor", True)
-
-    tensors, tensor_obj = prepare_for_saving(tensors)
+    
+    tensors, tensor_obj = prepare_for_saving(*tensors)
 
     for tensor in tensors:
         _mark_tensor_for_offload(tensor)
@@ -135,12 +134,24 @@ class TensorGroupProcessor:
         this will save unnecessary calls to .contiguous(). It is used for example in
         MultiHeadAttention for interleavedq, k, v tensors.
         """
+
+        def _check_if_offload_base_tensor(tensor: torch.Tensor) -> bool:
+            if getattr(tensor, "offload_base_tensor", False):
+                return True
+            if tensor._base is not None:
+                # If tensor is a view of a tensor and has the same elements, 
+                # but with different strides, we can safely offload the base tensor.
+                # If tensor is a view on some part of a bigger tensor,
+                # the decision to offload the base tensor is non-trivial and we do not do it by default.
+                return tensor._base.numel() == tensor.numel()
+            return False
+
         aux["views"] = []
         for tensor_id in range(  # pylint: disable=consider-using-enumerate
             len(tensor_group.tensor_list)
         ):
             tensor = tensor_group.tensor_list[tensor_id]
-            if getattr(tensor, "offload_base_tensor", False):
+            if _check_if_offload_base_tensor(tensor):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
                 tensor = tensor._base
                 assert tensor is not None
@@ -212,11 +223,9 @@ class OffloadableLayerState:
     def __init__(
         self,
         offload_stream: torch.cuda.Stream,
-        min_tensor_size_to_offload: int,
         retain_pinned_cpu_buffers: bool = False,
     ):
         self.offload_stream = offload_stream
-        self.min_tensor_size_to_offload = min_tensor_size_to_offload
         self.retain_pinned_cpu_buffers = retain_pinned_cpu_buffers
 
         # There are 3 tensor groups: tensors on gpu before offload,
@@ -342,9 +351,9 @@ class OffloadableLayerState:
         """
         self._validate_state(func_name="push_tensor", allowed_states=["not_offloaded"])
 
+
         if self._check_if_offload(tensor):
             self.fwd_gpu_tensor_group.tensor_list.append(tensor)
-
             # The group is processed and offloaded at the end of the forward pass of current layer.
             # To enable offloading of tensors faster we use self.offload_stream and record
             # the events when the tensors are ready to be offloaded.
@@ -396,15 +405,16 @@ class OffloadableLayerState:
         if (
             not isinstance(t, torch.nn.Parameter)
             and not getattr(t, "_TE_do_not_offload", False)
-            and t.numel() >= self.min_tensor_size_to_offload
             and not isinstance(t, torch._subclasses.FakeTensor)
-        ):
+            and t.device.type == "cuda"
+        ): 
             if not t.is_contiguous() and not getattr(t, "offload_base_tensor", False):
                 warnings.warn(
                     "Tried to offload non-contiguous tensor, which is not supported. Offload of"
                     " this tensor will be skipped."
                 )
                 return False
+            
             return True
         return False
 
@@ -436,17 +446,15 @@ class OffloadSynchronizer:
     def __init__(
         self,
         num_layers: int,
-        min_tensor_size_to_offload: int,
         retain_pinned_cpu_buffers: bool = False,
         offload_stream: Optional[torch.cuda.Stream] = None,
     ):
         self.num_layers = num_layers
-        self.min_tensor_size_to_offload = min_tensor_size_to_offload
         self.offload_stream = offload_stream if offload_stream is not None else torch.cuda.Stream()
 
         self.layer_states = {
             i: OffloadableLayerState(
-                self.offload_stream, min_tensor_size_to_offload, retain_pinned_cpu_buffers
+                self.offload_stream, retain_pinned_cpu_buffers
             )
             for i in range(num_layers)
         }
@@ -518,12 +526,11 @@ class DefaultOffloadSynchronizer(OffloadSynchronizer):
         self,
         num_layers: int,
         num_offloaded_layers: int | None = None,
-        min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD,
         retain_pinned_cpu_buffers: bool = False,
         offload_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__(
-            num_layers, min_tensor_size_to_offload, retain_pinned_cpu_buffers, offload_stream
+            num_layers, retain_pinned_cpu_buffers, offload_stream
         )
 
         # map of layers to bool meaning if layer needs to be offloaded
@@ -628,7 +635,6 @@ def get_cpu_offload_context(
     offload_weights: bool = False,
     double_buffering: bool = False,  # pylint: disable=unused-argument
     manual_synchronization: bool = False,
-    min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD,
     retain_pinned_cpu_buffers: bool = False,
     offload_stream: Optional[torch.cuda.Stream] = None,
 ):
@@ -672,8 +678,6 @@ def get_cpu_offload_context(
             If provided, the offload stream is used for offloading and reloading.
             Otherwise, a new stream is allocated internally. It can be other than None
             only if manual_synchronization is True.
-    min_tensor_size_to_offload: int, default = 2 ** 20
-            Minimum number of elements in a tensor to be offloaded.
 
     Manual synchronization
     ----------
@@ -778,13 +782,12 @@ def get_cpu_offload_context(
 
     if manual_synchronization:
         offload_synchronizer = ManualOffloadSynchronizer(
-            model_layers, min_tensor_size_to_offload, retain_pinned_cpu_buffers, offload_stream
+            model_layers, retain_pinned_cpu_buffers, offload_stream
         )
     else:
         offload_synchronizer = DefaultOffloadSynchronizer(
             model_layers,
             num_layers,
-            min_tensor_size_to_offload,
             retain_pinned_cpu_buffers,
             offload_stream,
         )
