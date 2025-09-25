@@ -157,11 +157,12 @@ std::vector<py::object> fused_attn_fwd(
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && ((h * d) % block_size == 0) &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      te_O.zero_(at::cuda::getCurrentCUDAStream());
+    if (set_zero && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+      if ((h * d) % block_size == 0) {
+        mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+      } else {
+        te_O.zero_(at::cuda::getCurrentCUDAStream());
+      }
     }
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
     if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
@@ -442,18 +443,18 @@ std::vector<py::object> fused_attn_bwd(
   // construct NVTE tensors
   if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
-        dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous() &&
-        (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    } else {
-      dQ.fill_(0);
-      dK.fill_(0);
-      dV.fill_(0);
+    if (set_zero && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
+        dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
+        mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+        mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+        mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+      } else {
+        dQ.fill_(0);
+        dK.fill_(0);
+        dV.fill_(0);
+      }
     }
-
   } else if (dqkv_type == DType::kBFloat16 || dqkv_type == DType::kFloat16) {
     if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
