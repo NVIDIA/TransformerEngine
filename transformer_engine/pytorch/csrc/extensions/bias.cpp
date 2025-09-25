@@ -122,7 +122,12 @@ std::vector<py::object> dact_dbias(
   }
 
   // Choose implementation
-  enum class Impl { UNFUSED, FUSED_DACT_DBIAS_QUANTIZE, FUSED_DACT_AMAX_FP8, FUSED_DACT_AMAX_NVFP4 };
+  enum class Impl {
+    UNFUSED,
+    FUSED_DACT_DBIAS_QUANTIZE,
+    FUSED_DACT_AMAX_FP8,
+    FUSED_DACT_AMAX_NVFP4
+  };
   Impl impl = Impl::UNFUSED;
   if (detail::IsFloat8Quantizers(quantizer_py.ptr()) ||
       detail::IsMXFP8Quantizers(quantizer_py.ptr())) {
@@ -130,7 +135,7 @@ std::vector<py::object> dact_dbias(
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_AMAX_FP8;
   } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
-    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
+    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
       // Post-RHT amax is handled within NVFP4 quantizer
@@ -184,7 +189,8 @@ std::vector<py::object> dact_dbias(
     case Impl::FUSED_DACT_AMAX_FP8:
       // Fused dact-amax kernel, unfused dbias and FP8 quantize
       {
-        auto *fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+        auto *fp8_quantizer_cpp =
+            dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
         auto [temp_nvte, temp_py] =
@@ -200,12 +206,12 @@ std::vector<py::object> dact_dbias(
     case Impl::FUSED_DACT_AMAX_NVFP4:
       // Fused dact-amax kernel, unfused dbias and NVFP4 quantize
       {
-        auto *nvfp4_quantizer_cpp
-          = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());  // Already checked cast is valid
+        auto *nvfp4_quantizer_cpp =
+            static_cast<NVFP4Quantizer *>(quantizer_cpp.get());  // Already checked cast is valid
         NVTE_CHECK(nvfp4_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
-        auto [temp_nvte, temp_py] =
-            nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(grad_input_nvte, grad_output_dtype);
+        auto [temp_nvte, temp_py] = nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(
+            grad_input_nvte, grad_output_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });

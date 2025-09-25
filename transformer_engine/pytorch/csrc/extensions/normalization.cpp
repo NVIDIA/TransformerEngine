@@ -102,22 +102,23 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     // Compute norm and amax in high precision, then quantize to FP8
     FUSED_NORM_AMAX_FP8,
     // Compute norm and amax in high precision, then quantize to NVFP4
-    FUSED_NORM_AMAX_NVFP4 };
+    FUSED_NORM_AMAX_NVFP4
+  };
   Impl impl = Impl::UNFUSED;
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")
-        && outer_size % 128 == 0 && inner_size % 128 == 0) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
+        inner_size % 128 == 0) {
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
-    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
+    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
       // Post-RHT amax is handled within NVFP4 quantizer
@@ -132,37 +133,33 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   py::object unquantized_out;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
-  case Impl::UNFUSED:
-    {
+    case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_FP8:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_NVFP4:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
           nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    default: {
     }
-    break;
-  default: {}
   }
 
   // Query workspace size
   TensorWrapper workspace;
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps, kernel_out_nvte->data(),
-                       mu_nvte.data(), rsigma_nvte.data(), workspace.data(),
+    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
+                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
+                       workspace.data(),
                        at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        zero_centered_gamma, at::cuda::getCurrentCUDAStream());
   });
@@ -174,32 +171,28 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps, kernel_out_nvte->data(),
-                       mu_nvte.data(), rsigma_nvte.data(), workspace.data(),
+    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
+                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
+                       workspace.data(),
                        at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        zero_centered_gamma, at::cuda::getCurrentCUDAStream());
   });
 
   // Quantize output if needed
   switch (impl) {
-  case Impl::UNFUSED:
-    {
+    case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_FP8:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_NVFP4:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+    } break;
+    default: {
     }
-    break;
-  default: {}
   }
 
   return {out, py::cast(mu_py), py::cast(rsigma_py)};
@@ -331,22 +324,23 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     // Compute norm and amax in high precision, then quantize to FP8
     FUSED_NORM_AMAX_FP8,
     // Compute norm and amax in high precision, then quantize to NVFP4
-    FUSED_NORM_AMAX_NVFP4 };
+    FUSED_NORM_AMAX_NVFP4
+  };
   Impl impl = Impl::UNFUSED;
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")
-        && outer_size % 128 == 0 && inner_size % 128 == 0) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
+        inner_size % 128 == 0) {
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
-    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
+    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
       // Post-RHT amax is handled within NVFP4 quantizer
@@ -361,37 +355,32 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   py::object unquantized_out;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
-  case Impl::UNFUSED:
-    {
+    case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_FP8:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_NVFP4:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
           nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    default: {
     }
-    break;
-  default: {}
   }
 
   // Query workspace size
   TensorWrapper workspace;
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(), rsigma_nvte.data(),
-                     workspace.data(),
+    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
+                     rsigma_nvte.data(), workspace.data(),
                      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::cuda::getCurrentCUDAStream());
   });
@@ -403,32 +392,27 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(), rsigma_nvte.data(),
-                     workspace.data(),
+    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
+                     rsigma_nvte.data(), workspace.data(),
                      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::cuda::getCurrentCUDAStream());
   });
 
   // Quantize output if needed
   switch (impl) {
-  case Impl::UNFUSED:
-    {
+    case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_FP8:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    }
-    break;
-  case Impl::FUSED_NORM_AMAX_NVFP4:
-    {
+    } break;
+    case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+    } break;
+    default: {
     }
-    break;
-  default: {}
   }
 
   return {out, py::none(), py::cast(rsigma_py)};

@@ -200,8 +200,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
    * The amax is zeroed out. Most TE kernels that output amax expect
    * amax to be initialized to zero.
   */
-  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                           DType dtype);
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      const std::vector<size_t>& shape, DType dtype);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -314,8 +314,8 @@ class NVFP4Quantizer : public Quantizer {
    * The amax is zeroed out. Most TE kernels that output amax expect
    * amax to be initialized to zero.
    */
-  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(TensorWrapper& quantized_tensor,
-                                                                           DType dtype);
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      TensorWrapper& quantized_tensor, DType dtype);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -332,7 +332,7 @@ class NVFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
-private:
+ private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
