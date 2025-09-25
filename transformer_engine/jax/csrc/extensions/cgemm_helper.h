@@ -26,9 +26,6 @@
 namespace transformer_engine {
 namespace jax {
 
-#ifndef MAX_DEVICES
-#define MAX_DEVICES 8
-#endif
 
 // Configuration singleton for CGEMM parameters
 class CgemmConfig {
@@ -86,12 +83,12 @@ class CommunicatorHandler {
 
   int tp_size = -1;
   int tp_num_domains = -1;
-  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1};
-  int tp_domain_ids[MAX_DEVICES] = {-1};
-  ncclComm_t tp_comms[MAX_DEVICES];
+  std::vector<int> local_device_ids_within_tp_domain;
+  std::vector<int> tp_domain_ids;
+  std::vector<ncclComm_t> tp_comms;
 
-  int local_device_ids_within_process[MAX_DEVICES];
-  int global_device_ids[MAX_DEVICES];
+  std::vector<int> local_device_ids_within_process;
+  std::vector<int> global_device_ids;
 
   int get_global_rank() const {
     int device_idx = get_local_device_idx_for_current_device();

@@ -64,9 +64,6 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
                                int tp_size) {
   // Validate inputs
-  NVTE_CHECK(num_devices_per_process <= MAX_DEVICES,
-             "num_devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
-             ", got num_devices_per_process=", num_devices_per_process);
   NVTE_CHECK(num_devices_per_process == 1,
              "num_devices_per_process must be == 1, got num_devices_per_process=",
              num_devices_per_process);
@@ -90,6 +87,13 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   handler.num_processes = num_total_devices / num_devices_per_process;
   handler.tp_size = tp_size;
   handler.tp_num_domains = num_total_devices / tp_size;
+
+  // Initialize vectors with the correct size
+  handler.local_device_ids_within_process.resize(num_devices_per_process);
+  handler.local_device_ids_within_tp_domain.resize(num_devices_per_process);
+  handler.tp_domain_ids.resize(num_devices_per_process);
+  handler.global_device_ids.resize(num_devices_per_process);
+  handler.tp_comms.resize(num_devices_per_process);
 
   NVTE_CHECK(0 <= process_id && process_id < handler.num_processes,
              "Invalid process_id=", process_id, ", which is out of range [0, ",
@@ -229,14 +233,6 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
 }
 
 CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
-  for (int i = 0; i < MAX_DEVICES; i++) {
-    local_device_ids_within_process[i] = -1;
-    local_device_ids_within_tp_domain[i] = -1;
-    tp_domain_ids[i] = -1;
-    global_device_ids[i] = -1;
-    tp_comms[i] = nullptr;
-  }
-
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -245,10 +241,10 @@ CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
 }
 
 CommunicatorHandler::~CommunicatorHandler() {
-  if (_initialize) {
-    for (int i = 0; i < num_devices_per_process; i++) {
-      if (tp_comms[i] != nullptr) {
-        ncclCommDestroy(tp_comms[i]);
+  if (_initialize && !tp_comms.empty()) {
+    for (auto& comm : tp_comms) {
+      if (comm != nullptr) {
+        ncclCommDestroy(comm);
       }
     }
   }
