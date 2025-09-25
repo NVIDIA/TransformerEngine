@@ -114,13 +114,13 @@ void quantize_nvfp4_1d(float (*OP)(const float),
             const float S_dec_b = block_amax / 6.0f;
 
             // Scale & Store per-block decoding scaling factor
-            const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+            const float S_dec_b_fp8 = S_dec_b * S_enc;
 
             // Compute "correct" per-block encoding scaling factor
-            const float S_enc_b_fp8 = S_enc / static_cast<float>(S_dec_b_fp8);
+            const float S_enc_b_fp8 = S_dec_b_fp8 == 0 ? 0.f : S_enc / S_dec_b_fp8;
 
             const size_t scale_idx = i * scales_stride + block_X;
-            scales[scale_idx] = S_dec_b_fp8;
+            scales[scale_idx] = static_cast<fp8e4m3>(S_dec_b_fp8);
             const float scale_reciprocal = S_enc_b_fp8;
 
             for (size_t j = j_min; j < j_max; j += 2) {
@@ -230,8 +230,8 @@ void quantize_nvfp4_2d(float (*OP)(const float),
             const size_t j_max = std::min(j_min + block_size_X, cols);
 
             // Get the scaling factor for this block
-            const fp8e4m3 S_dec_b_fp8 = math_scales[block_Y][block_X];
-            const float S_enc_b_fp8 = S_enc / static_cast<float>(S_dec_b_fp8);
+            const float S_dec_b_fp8 = static_cast<float>(math_scales[block_Y][block_X]);
+            const float S_enc_b_fp8 = S_dec_b_fp8 == 0 ? 0.f : S_enc / S_dec_b_fp8;
             const float scale_reciprocal = S_enc_b_fp8;
 
             // Process and cache data for this 16x16 block
@@ -583,10 +583,14 @@ void performTest(float (*OP)(const float),
                            use_2d_quantization);
 
     QuantizationConfigWrapper quant_config;
-    const size_t RNG_seed = 123;
-    const size_t RNG_sequence = 321;
-    quant_config.set_rng_seed(RNG_seed);
-    quant_config.set_rng_sequence(RNG_sequence);
+
+    // Initialize stochastic rounding
+    Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
+    rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
+    rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
+    rng_state.from_cpu();
+    quant_config.set_stochastic_rounding(false);
+    quant_config.set_rng_state(rng_state.data());
 
     // Set 2D quantization based on compile-time flag
     quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
