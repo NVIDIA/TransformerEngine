@@ -567,7 +567,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p abstract
         """
-        del act_enum
+        del act_enum, act_params
         dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_dtype
