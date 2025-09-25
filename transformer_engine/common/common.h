@@ -351,17 +351,20 @@ struct TypeExtrema;
 template <>
 struct TypeExtrema<fp4e2m1> {
   static constexpr float max = 6.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 #endif
 
 template <>
 struct TypeExtrema<fp8e4m3> {
   static constexpr float max = 448.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>
 struct TypeExtrema<fp8e5m2> {
   static constexpr float max = 57344.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>

@@ -20,13 +20,18 @@
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 #include "curanddx.hpp"
-#include "nvfp4_utils.cuh"
 
 namespace transformer_engine {
 
 #if CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
 namespace {
+
+using std::int32_t;
+using std::uint32_t;
+using std::uint8_t;
+
+using transformer_engine::detail::TypeExtrema;
 
 // Define a cuRANDDx descriptor
 // Note curanddx::PhiloxRounds<4> means 4 rounds of philox4_32. If the operator is not specified, it will be default to 10.
@@ -168,6 +173,40 @@ __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
     val = max(val, __shfl_down_sync(groupMask, val, offset * shfl_down_stride));
   }
   return val;
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ ScaleType ComputeDecodeScaleFP4(const float amax,
+                                                           const float global_encode_scale) {
+  float decode_scale = amax / TypeExtrema<fp4e2m1>::max;
+  decode_scale = decode_scale * global_encode_scale;
+  decode_scale = fminf(decode_scale, TypeExtrema<float>::max);
+  return static_cast<ScaleType>(decode_scale);
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ float ComputeEncodeScaleFP4(ScaleType decode_scale,
+                                                       const float global_decode_scale) {
+  return fminf(1.0f / (static_cast<float>(decode_scale) * global_decode_scale),
+               TypeExtrema<float>::max);
+}
+
+template <typename IType, typename ScaleType>
+__device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scale) {
+  return static_cast<float>(input) * encode_scale;
+}
+
+__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
+  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
+  float global_encode_scale = fp8_max * fp4_max / global_amax;
+  // If scale is infinity, return max value of float32
+  global_encode_scale = fminf(global_encode_scale, TypeExtrema<float>::max);
+  // If global amax is 0 or infinity, return 1
+  if (global_amax == 0.f || global_encode_scale == 0.f) {
+    return 1.f;
+  }
+  return global_encode_scale;
 }
 
 __device__ __forceinline__ uint32_t get_rbits(RNG& rng, uint4& random_uint4, int& rnd_idx) {
@@ -351,10 +390,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       IVec input_vec;
       // Step 1.1: Load from global memory (input) to registers
       if constexpr (kAligned) {
-        input_vec.input_type.VecLoadFrom(input_g);
+        input_vec.input_type.load_from(input_g);
       } else {
         if (r_g < num_rows) {
-          input_vec.input_type.EleLoadFromIfNeeded(input_g, 0, num_ele);
+          input_vec.input_type.load_from_elts(input_g, 0, num_ele);
         } else {
           input_vec.input_type.clear();
         }
@@ -364,7 +403,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       for (int i = 0; i < kNVecIn / kNVecSMem; ++i) {
         int c = c_s + i;
         int r = r_s;
-        smem[r * kSMemCol + c] = input_vec.smem_type.data.ele[i];
+        smem[r * kSMemCol + c] = input_vec.smem_type.data.elt[i];
       }
       // Step 1.3: Update input address, row index of shared memory, (and row index of global memory
       // for not aligned case)
@@ -424,7 +463,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 #pragma unroll
         for (int j = 0; j < kNVecSMem; ++j) {
           __builtin_assume(amax >= 0);
-          amax = fmaxf(amax, fabsf(smem_vec[i].data.ele[j]));
+          amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[j]));
         }
       }
       // Step 2.3: Reduce amax
@@ -469,10 +508,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         amax = amax_smem[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x];
       }
       // Step 2.4: Compute scale
-      ScaleType scale_inv =
-          ComputeDecodeScaleFP4<OType, ScaleType, kIsE8Scaling>(amax, global_encode_scale);
-      float encode_scale =
-          ComputeEncodeScaleFP4<ScaleType, kIsE8Scaling>(scale_inv, global_decode_scale);
+      ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale);
+      float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
       // Step 2.5: Write scale_inv
       bool write_scale_inv = is_src_lane;
       if constexpr (!kAligned) {
@@ -498,27 +535,23 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         // Pack two elements into __nv_bfloat162
         float2 f2_a;
         float2 f2_b;
-        f2_a.x =
-            ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(smem_vec[i].data.ele[0], encode_scale);
-        f2_a.y =
-            ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(smem_vec[i].data.ele[1], encode_scale);
-        f2_b.x = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(smem_vec[i + 1].data.ele[0],
-                                                                  encode_scale);
-        f2_b.y = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(smem_vec[i + 1].data.ele[1],
-                                                                  encode_scale);
+        f2_a.x = ComputeOutputFP4<IType, ScaleType>(smem_vec[i].data.elt[0], encode_scale);
+        f2_a.y = ComputeOutputFP4<IType, ScaleType>(smem_vec[i].data.elt[1], encode_scale);
+        f2_b.x = ComputeOutputFP4<IType, ScaleType>(smem_vec[i + 1].data.elt[0], encode_scale);
+        f2_b.y = ComputeOutputFP4<IType, ScaleType>(smem_vec[i + 1].data.elt[1], encode_scale);
         const uint32_t rbits = kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
         // Convert to __nv_fp4x4_e2m1
         __nv_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
 
-        output_vec.data.ele[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
-        output_vec.data.ele[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
+        output_vec.data.elt[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
+        output_vec.data.elt[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
       }
       // Step 2.7: Store output_c
       if constexpr (kAligned) {
-        output_vec.VecStoreTo(output_g);
+        output_vec.store_to(output_g);
       } else {
         if (r_g < num_rows) {
-          output_vec.EleStoreToIfNeeded(output_g, 0, num_ele);
+          output_vec.store_to_elts(output_g, 0, num_ele);
         }
       }
       // Step 2.8: Update output address, row index of shared memory (and row index of global memory
@@ -583,7 +616,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         } else {
 #pragma unroll
           for (int i = 0; i < kNVecOut; ++i) {
-            amax = fmaxf(amax, fabsf(smem_vec[i].data.ele[smem_idx]));
+            amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[smem_idx]));
           }
         }
         // Step 3.3: Reduce amax
@@ -598,10 +631,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           amax = __shfl_sync(mask, amax, src_lane);
         }
         // Step 3.4: Compute scale
-        ScaleType scale_inv =
-            ComputeDecodeScaleFP4<OType, ScaleType, kIsE8Scaling>(amax, global_encode_scale);
-        float encode_scale =
-            ComputeEncodeScaleFP4<ScaleType, kIsE8Scaling>(scale_inv, global_decode_scale);
+        ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale);
+        float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
         // Step 3.5: Write scale_inv_t
         bool write_scale_inv = is_src_lane;
         if constexpr (!kAligned) {
@@ -627,29 +658,29 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           // Pack two elements into __nv_bfloat162
           float2 f2_a;
           float2 f2_b;
-          f2_a.x = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(
-              smem_vec[2 * i].data.ele[smem_idx], encode_scale);
-          f2_a.y = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(
-              smem_vec[2 * i + 1].data.ele[smem_idx], encode_scale);
-          f2_b.x = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(
-              smem_vec[2 * (i + 1)].data.ele[smem_idx], encode_scale);
-          f2_b.y = ComputeOutputFP4<IType, ScaleType, kIsE8Scaling>(
-              smem_vec[2 * (i + 1) + 1].data.ele[smem_idx], encode_scale);
+          f2_a.x =
+              ComputeOutputFP4<IType, ScaleType>(smem_vec[2 * i].data.elt[smem_idx], encode_scale);
+          f2_a.y = ComputeOutputFP4<IType, ScaleType>(smem_vec[2 * i + 1].data.elt[smem_idx],
+                                                      encode_scale);
+          f2_b.x = ComputeOutputFP4<IType, ScaleType>(smem_vec[2 * (i + 1)].data.elt[smem_idx],
+                                                      encode_scale);
+          f2_b.y = ComputeOutputFP4<IType, ScaleType>(smem_vec[2 * (i + 1) + 1].data.elt[smem_idx],
+                                                      encode_scale);
           const uint32_t rbits =
               kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
           // Convert to __nv_fp4x4_e2m1
           __nv_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
 
-          output_vec.data.ele[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
-          output_vec.data.ele[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
+          output_vec.data.elt[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
+          output_vec.data.elt[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
         }
         // Step 3.7: Store output_t
         if constexpr (kAligned) {
-          output_vec.VecStoreTo(output_g + smem_idx * num_rows / kNFP4PerContainer);
+          output_vec.store_to(output_g + smem_idx * num_rows / kNFP4PerContainer);
         } else {
           if (r_g + smem_idx < row_length) {
-            output_vec.EleStoreToIfNeeded(output_g + smem_idx * num_rows / kNFP4PerContainer, 0,
-                                          num_ele);
+            output_vec.store_to_elts(output_g + smem_idx * num_rows / kNFP4PerContainer, 0,
+                                     num_ele);
           }
         }
       }
