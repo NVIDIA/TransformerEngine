@@ -16,7 +16,10 @@ from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpu_offload_old_path as old_code_path
-from transformer_engine.pytorch.tensor.quantized_tensor import restore_from_saved, prepare_for_saving
+from transformer_engine.pytorch.tensor.quantized_tensor import (
+    restore_from_saved,
+    prepare_for_saving,
+)
 
 
 __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
@@ -49,7 +52,7 @@ def mark_not_offload(*tensors: torch.Tensor):
     for tensor in tensors:
         if tensor is not None:
             setattr(tensor, "_TE_do_not_offload", True)
-    
+
     restore_from_saved(tensor_obj, tensors)
 
 
@@ -72,7 +75,7 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         t.start_reload_event.record(torch.cuda.current_stream())
         if offload_base_tensor:
             setattr(t, "offload_base_tensor", True)
-    
+
     tensors, tensor_obj = prepare_for_saving(*tensors)
 
     for tensor in tensors:
@@ -139,7 +142,7 @@ class TensorGroupProcessor:
             if getattr(tensor, "offload_base_tensor", False):
                 return True
             if tensor._base is not None:
-                # If tensor is a view of a tensor and has the same elements, 
+                # If tensor is a view of a tensor and has the same elements,
                 # but with different strides, we can safely offload the base tensor.
                 # If tensor is a view on some part of a bigger tensor,
                 # the decision to offload the base tensor is non-trivial and we do not do it by default.
@@ -351,7 +354,6 @@ class OffloadableLayerState:
         """
         self._validate_state(func_name="push_tensor", allowed_states=["not_offloaded"])
 
-
         if self._check_if_offload(tensor):
             self.fwd_gpu_tensor_group.tensor_list.append(tensor)
             # The group is processed and offloaded at the end of the forward pass of current layer.
@@ -407,14 +409,14 @@ class OffloadableLayerState:
             and not getattr(t, "_TE_do_not_offload", False)
             and not isinstance(t, torch._subclasses.FakeTensor)
             and t.device.type == "cuda"
-        ): 
+        ):
             if not t.is_contiguous() and not getattr(t, "offload_base_tensor", False):
                 warnings.warn(
                     "Tried to offload non-contiguous tensor, which is not supported. Offload of"
                     " this tensor will be skipped."
                 )
                 return False
-            
+
             return True
         return False
 
@@ -453,9 +455,7 @@ class OffloadSynchronizer:
         self.offload_stream = offload_stream if offload_stream is not None else torch.cuda.Stream()
 
         self.layer_states = {
-            i: OffloadableLayerState(
-                self.offload_stream, retain_pinned_cpu_buffers
-            )
+            i: OffloadableLayerState(self.offload_stream, retain_pinned_cpu_buffers)
             for i in range(num_layers)
         }
 
@@ -529,9 +529,7 @@ class DefaultOffloadSynchronizer(OffloadSynchronizer):
         retain_pinned_cpu_buffers: bool = False,
         offload_stream: Optional[torch.cuda.Stream] = None,
     ):
-        super().__init__(
-            num_layers, retain_pinned_cpu_buffers, offload_stream
-        )
+        super().__init__(num_layers, retain_pinned_cpu_buffers, offload_stream)
 
         # map of layers to bool meaning if layer needs to be offloaded
         self.offload_layer_map: dict[int, bool] = {}

@@ -348,7 +348,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
-            
+
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 

@@ -446,8 +446,11 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
-            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor) \
-                and type(dst._quantizer) is type(src._quantizer):
+            if (
+                isinstance(dst, QuantizedTensor)
+                and isinstance(src, QuantizedTensor)
+                and type(dst._quantizer) is type(src._quantizer)
+            ):
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
                 src_tensors, src_tensor_obj = src.prepare_for_saving()
                 for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
@@ -476,7 +479,10 @@ class QuantizedTensor(torch.Tensor):
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
             rowwise_usage, columnwise_usage = tensor.get_usage()
-            quantizer_rowwise_usage, quantizer_columnwise_usage = tensor._quantizer.rowwise_usage, tensor._quantizer.columnwise_usage
+            quantizer_rowwise_usage, quantizer_columnwise_usage = (
+                tensor._quantizer.rowwise_usage,
+                tensor._quantizer.columnwise_usage,
+            )
             tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
             out = tensor._quantizer.make_empty(
                 shape=tensor.shape,
@@ -485,9 +491,11 @@ class QuantizedTensor(torch.Tensor):
                 requires_grad=requires_grad,
                 pin_memory=pin_memory,
             )
-            tensor._quantizer.set_usage(rowwise=quantizer_rowwise_usage, columnwise=quantizer_columnwise_usage)
+            tensor._quantizer.set_usage(
+                rowwise=quantizer_rowwise_usage, columnwise=quantizer_columnwise_usage
+            )
             return out
-        
+
         if func in (torch.ops.aten.numel.default, torch.ops.aten.is_pinned.default):
             data_tensors = tensor.get_data_tensors()
             for t in data_tensors:

@@ -420,6 +420,7 @@ class TestsDefaultOffloadSynchronizer:
 
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
 
+
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
@@ -475,11 +476,10 @@ class TestTELayers:
             if layer_type == "grouped_linear"
             else {}
         )
-        
+
         with recipe_ctx():
             out = layer(inp, is_first_microbatch=True, **m_splits)
         out.sum().backward()
-
 
         del inp
         init_cuda_memory = Utils.get_cuda_memory_mb()
@@ -544,12 +544,12 @@ class TestTELayers:
         with offload_ctx, recipe_ctx():
             out_1 = layer_1(inp1, **m_splits)
         out_1 = sync_function(out_1)
-        
+
         with offload_ctx, recipe_ctx():
             out_2 = layer_2(inp2, **m_splits)
         out_2 = sync_function(out_2)
 
-        mark_not_offload(out_1, out_2)  
+        mark_not_offload(out_1, out_2)
 
         del inp1, inp2
 
