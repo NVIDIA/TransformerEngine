@@ -116,6 +116,10 @@ def main(argv=None, namespace=None):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    # For fp8 block scaling, block size is 128,
+    # and to make low precision TP work, input tensor
+    # must be 128x128 divisible to be eligible for
+    # low precision All-Gather when needed
     elif QUANTIZATION == "fp8_block_scaling":
         SEQ_LEN = 128
         BATCH_SIZE = 128
