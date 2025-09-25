@@ -499,7 +499,7 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.numel.default:
             tensor = args[0]
             return math.prod(tensor.size())
-            
+
         if func == torch.ops.aten.is_pinned.default:
             tensor = args[0]
             for t in tensor.get_data_tensors():
