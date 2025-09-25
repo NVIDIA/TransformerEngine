@@ -619,7 +619,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 jax_dtype_to_te_dtype(out_dtype),
                 scaling_mode,
                 is_2x,
-                act_params,
             )
             wkspace_shape = wkspace_info[0]
             wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])

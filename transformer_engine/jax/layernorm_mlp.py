@@ -137,7 +137,7 @@ def layernorm_mlp(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
