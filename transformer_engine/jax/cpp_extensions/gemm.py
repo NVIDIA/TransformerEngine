@@ -58,6 +58,7 @@ __all__ = [
     "collective_gemm_bootstrap",
     "noop_collective_op_set",
     "gemm",
+    "grouped_gemm_copy_group_sizes",
     "grouped_gemm",
     "gemm_uses_jax_dot",
     "sanitize_dims",
@@ -1233,6 +1234,60 @@ def _te_gemm(
         collective_op=collective_op,
     )
 
+import pdb
+class GroupedGemmCopySizesPrimitive(BasePrimitive):
+    """
+    Primitive for async copying group sizes from device to host
+    """
+
+    name = "te_grouped_gemm_d2h_group_sizes_ffi"
+    multiple_results = False
+    impl_static_args = (1,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        group_sizes_aval,
+        *,
+        num_gemms,
+    ):
+        del num_gemms
+        out_aval = jax.core.ShapedArray(shape=group_sizes_aval.shape, dtype=group_sizes_aval.dtype)
+        return out_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        out = GroupedGemmCopySizesPrimitive.abstract(*args, **kwargs)
+        return out
+
+    @staticmethod
+    def lowering(
+        ctx,
+        group_sizes,
+        num_gemms,
+    ):
+        #pdb.set_trace()
+        return jax.ffi.ffi_lowering(GroupedGemmCopySizesPrimitive.name)(
+            ctx,
+            group_sizes,
+            num_gemms=num_gemms,
+        )
+
+    @staticmethod
+    def impl(
+        group_sizes,
+        num_gemms,
+    ):
+        assert GroupedGemmCopySizesPrimitive.inner_primitive is not None
+        #pdb.set_trace()
+        out = GroupedGemmCopySizesPrimitive.inner_primitive.bind(
+            group_sizes,
+            num_gemms=num_gemms,
+        )
+        return out
+
+register_primitive(GroupedGemmCopySizesPrimitive)
 
 class GroupedGemmPrimitive(BasePrimitive):
     """
@@ -1241,7 +1296,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
     inner_primitive = None
     outer_primitive = None
 
@@ -1264,6 +1319,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         out_dtype,
         has_bias,
         is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
     ):
         """
         Grouped GEMM operation.
@@ -1291,7 +1347,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
-        del K, lhs_is_trans, rhs_is_trans, has_bias
+        del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         workspace_alignment_padding = 256
@@ -1338,6 +1394,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         out_dtype,
         has_bias,
         is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
     ):
         del out_dtype
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
@@ -1351,6 +1408,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             scaling_mode=scaling_mode.value,
             has_bias=has_bias,
             is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
         )
 
     @staticmethod
@@ -1371,6 +1429,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         out_dtype,
         has_bias,
         is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
         (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
@@ -1390,6 +1449,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             out_dtype=out_dtype,
             has_bias=has_bias,
             is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
         )
         return (out,)
 
@@ -1657,6 +1717,24 @@ def gemm(
     return clean_outputs
 
 
+def grouped_gemm_copy_group_sizes(
+    group_sizes: jnp.ndarray,
+    num_gemms: int,
+) -> None:
+    """
+    Async copy group sizes from device to host
+
+    Args:
+        group_sizes: 1D array containing the sizes of each group
+        num_gemms: number of grouped gemm calls to be made
+    """
+    out = GroupedGemmCopySizesPrimitive.outer_primitive.bind(
+        group_sizes,
+        num_gemms=num_gemms,
+    )
+    return out
+
+
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -1667,6 +1745,7 @@ def grouped_gemm(
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    use_async_d2h_group_sizes: bool = False,
 ) -> jnp.ndarray:
     """
     Grouped GEMM operation.
@@ -1850,5 +1929,6 @@ def grouped_gemm(
         out_dtype=out_dtype,
         has_bias=has_bias,
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes=use_async_d2h_group_sizes,
     )
     return out
