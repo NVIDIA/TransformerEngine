@@ -886,7 +886,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None] * self.num_gemms
         weight_quantizers = [
             self.quantizers["scaling_fwd"][

@@ -133,12 +133,11 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream to wait on.
  */
-void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
-                                   const NVTETensor* bias, NVTETensor* pre_gelu_out,
-                                   const int num_gemms, bool transa, bool transb, bool grad,
-                                   NVTETensor* workspace, bool accumulate,
-                                   bool use_split_accumulator, int math_sm_count,
-                                   cudaStream_t stream);
+void nvte_multi_tensor_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                            const NVTETensor* bias, NVTETensor* pre_gelu_out, const int num_gemms,
+                            bool transa, bool transb, bool grad, NVTETensor* workspace,
+                            bool accumulate, bool use_split_accumulator, int math_sm_count,
+                            cudaStream_t stream);
 #ifdef __cplusplus
 }  // extern "C"
 #endif

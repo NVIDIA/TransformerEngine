@@ -5,11 +5,10 @@
 from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
@@ -27,7 +26,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_dbias, _quantize_dbias_impl
+from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -37,10 +36,6 @@ from ..quantize import (
     ScalingMode,
 )
 
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
@@ -415,27 +410,28 @@ class ActLuPrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
-        prefix = "ActLuPrimitive_"
-        x_rank = len(value_types[0].shape)
+        prefix = "ActLu_"
+        input_shape = value_types[0].shape
+        output_shape = input_shape[:-2] + input_shape[-1:]
+        # Here we pass len of output so that the scales are propagated correctly
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var=prefix + "x", flatten_axis=-2
+            output_shape, unique_var=prefix + "x", flatten_axis=-1
         )
-        x_axes = scale_rules.input_spec + (prefix + f"x{x_rank - 1}",)
-        out = (*x_axes[:-2], x_axes[-1])
-        scale_inv = scale_rules.rowwise_rule
+        x_axes = scale_rules.input_spec
+        # Correct input spec with act dim
+        x_axes = x_axes[:-1] + (prefix + "_act_dim",) + x_axes[-1:]
+        out = scale_rules.input_spec
 
         colwise_out = (prefix + "out_colwise",)
         colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
             colwise_scale_inv = scale_rules.colwise_rule
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                colwise_out = tuple(
-                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-2)
-                )
+                colwise_out = multidim_transpose(out, transpose_axis=-1)
             else:
                 colwise_out = out
+                colwise_scale_inv = scale_rules.colwise_rule
 
-        # amax is always a unit tensor.
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
@@ -443,7 +439,8 @@ class ActLuPrimitive(BasePrimitive):
                 x_axes,
                 ("…1",),
             ),
-            (out, colwise_out, scale_inv, colwise_scale_inv, amax),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax),
+            **scale_rules.factor_sizes,
         )
 
 
@@ -888,26 +885,30 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
-        prefix = "BaseDActLuDBiasQuantizePrimitive_"
+        prefix = "DActLuDBias_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[1].shape), unique_var=prefix + "x", flatten_axis=-2
+            value_types[1].shape, unique_var=prefix + "x", flatten_axis=-2
         )
         x_axes = scale_rules.input_spec
         dz_axes = (*x_axes[:-2], x_axes[-1])
         out = x_axes
+
         colwise_out = (prefix + "out_colwise",)
+        colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
             else:
                 colwise_out = out
+                colwise_scale_inv = scale_rules.colwise_rule
 
         dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (dz_axes, x_axes, ("…2",)),
-            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            **scale_rules.factor_sizes,
         )
 
 
@@ -984,6 +985,7 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -992,6 +994,7 @@ def act_lu(
             Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         If quantizer is None:
@@ -1045,11 +1048,17 @@ def act_lu(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = act_lu(
-            x=x.astype(jnp.float32),
+            x=x,
             activation_type=activation_type,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_scope=amax_scope,
+        )
         return out
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1178,8 +1187,8 @@ def quantize_dact_dbias(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = dact_lu(
-            dz=dz.astype(jnp.float32),
-            x=x.astype(jnp.float32),
+            dz=dz,
+            x=x,
             activation_type=activation_type,
             quantizer=None,
         )

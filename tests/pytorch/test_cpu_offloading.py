@@ -22,13 +22,13 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from utils import ModelConfig
 import transformer_engine_torch as tex
 
-# Check if FP8 is supported
+# Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 
-fp8_recipes = [None]
+quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
-    fp8_recipes.append(recipe.Float8CurrentScaling())
-    fp8_recipes.append(recipe.DelayedScaling())
+    quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),

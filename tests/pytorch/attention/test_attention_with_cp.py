@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import pathlib
+import logging
 
 import pytest
 import torch
@@ -19,13 +20,15 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import ModelConfig, get_available_attention_backends
 
+pytest_logging_level = logging.getLevelName(logging.root.level)
+
 # Initialize RNG state
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 model_configs_flash_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
@@ -36,6 +39,12 @@ model_configs_flash_attn = {
         2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
     ),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
+    "cp_3_0": ModelConfig(2, 4096, 12, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
+    "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
+    "cp_3_2": ModelConfig(
+        2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
+    ),  # MLA
+    "cp_3_3": ModelConfig(2, 4096, 12, 192, window_size=(512, 512), head_dim_v=128),  # MLA
 }
 
 
@@ -66,6 +75,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
 
     config = model_configs_flash_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and qkv_format == "thd":
@@ -81,6 +92,17 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
+    if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently only support KV P2P!")
+    dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
+    available_backends, *_ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtypes[dtype],
+        qkv_layout="_".join([qkv_format] * 3),
+    )
+    flash_attn_supported, *_ = available_backends
+    if not flash_attn_supported:
+        pytest.skip("No attention backend available.")
 
     subprocess.run(
         get_bash_arguments(
@@ -90,13 +112,14 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             qkv_format=qkv_format,
             kernel_backend="FlashAttention",
             cp_comm_type=cp_comm_type,
+            log_level=pytest_logging_level,
         ),
         check=True,
     )
 
 
 model_configs_fused_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(
@@ -127,6 +150,15 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64),  # MLA
+    "cp_4_0": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="vanilla"
+    ),  # GQA
+    "cp_4_1": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"
+    ),  # GQA
+    "cp_4_2": ModelConfig(
+        2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    ),  # GQA
 }
 
 
@@ -150,6 +182,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention is only supported on sm90+!")
 
     config = model_configs_fused_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
@@ -183,13 +217,22 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
+    if dtype == "fp8" and config.softmax_type != "vanilla":
+        pytest.skip("CP implementation does not support non-vanilla softmax types in FP8!")
+    if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
+        pytest.skip(
+            "CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!"
+        )
+    if config.softmax_type != "vanilla" and qkv_format == "thd":
+        pytest.skip(
+            "CP implementation does not support qkv_format=thd for non-vanilla softmax types!"
+        )
+
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
-        qkv_dtype=dtypes[dtype],
+        qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
-        window_size=config.window_size,
-        context_parallel=True,
     )
     _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
@@ -204,6 +247,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
             kernel_backend="FusedAttention",
             cp_comm_type=cp_comm_type,
             fp8_mha=fp8_mha,
+            log_level=pytest_logging_level,
         ),
         check=True,
     )
