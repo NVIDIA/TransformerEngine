@@ -314,8 +314,6 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
   const int original_K = kernel_args.original_k_list[tensor_id];
 
   constexpr int N_TILE_PER_TD = sizeof(LType) / sizeof(int);
-  constexpr int N_SF_PER_TD = N_TILE_PER_TD * N_SF_PER_TD_PER_TILE;
-  constexpr int SF_TILE_SIZE_I32 = SF_TILE_DIM_M * SF_TILE_DIM_K / 4;
 
   // Get block index in grid. Emulate 2D grid.
   const int num_tiles_k = K / SF_TILE_DIM_K;

@@ -128,7 +128,12 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
+      // Add PDL sync for the first tensor to make sure the previous kernel has flushed results to
+      // the global memory. The following kernels are launched to the same stream, and there's no
+      // data dependency between them.
+      // Add PDL trigger for all but the last tensor, so it won't trigger the next unknown kernel.
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i], std::nullopt,
+                                      /*pdl_sync=*/i == 0, /*pdl_trigger=*/i < (num_tensors - 1));
     }
   }
 }
