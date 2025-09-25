@@ -79,8 +79,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   const auto inner_size = shape.back();
 
   // Tensors to save for backward pass
-  at::Tensor mu_py = at::empty({static_cast<int64_t>(inner_size)}, at::CUDA(at::kFloat));
-  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(inner_size)}, at::CUDA(at::kFloat));
+  at::Tensor mu_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
+  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
   TensorWrapper mu_nvte = makeTransformerEngineTensor(mu_py);
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
@@ -303,7 +303,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   const auto inner_size = shape.back();
 
   // Tensors to save for backward pass
-  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(inner_size)}, at::CUDA(at::kFloat));
+  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
   // Output tensor
