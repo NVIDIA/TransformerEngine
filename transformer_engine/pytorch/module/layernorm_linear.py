@@ -122,6 +122,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_name: str,
+        fine_grained_activation_offloading: bool,
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
@@ -424,23 +425,25 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            offload_activation = False
-            if hasattr(inp, "offloading_activation"):
-                offload_activation = True
-                if inputmat.is_contiguous():
-                    inputmat = inputmat.contiguous()
-            ctx.offload_activation = offload_activation
+            # Do not offload weights and biases
+            weight.offloading_activation = False
+            weightmat.offloading_activation = False
+            if bias is not None:
+                bias.offloading_activation = False
+            ln_weight.offloading_activation = False
+            ctx.fine_grained_activation_offloading = fine_grained_activation_offloading
 
-            if offload_activation and cpu_offloading:
+            if fine_grained_activation_offloading and cpu_offloading:
                 raise ValueError(
-                    f"Do not use offload_activation and cpu_offloading at the same time."
+                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
                 )
 
-            if offload_activation and weight.requires_grad and fuse_wgrad_accumulation:
+            if fine_grained_activation_offloading and weight.requires_grad and fuse_wgrad_accumulation:
                 if hasattr(weight, "grad_added_to_main_grad"):
                     ctx.has_grad_added_to_main_grad = True
                     ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
                     weight.grad_added_to_main_grad = True
+                    ctx.weight_object = weight
                 else:
                     ctx.has_grad_added_to_main_grad = False
 
@@ -580,10 +583,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
-            if ctx.cpu_offloading or ctx.offload_activation:
+            if ctx.cpu_offloading or ctx.fine_grained_activation_offloading:
                 if ctx.has_grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
-                    if ctx.offload_activation:
+                    if ctx.fine_grained_activation_offloading:
                         origin_weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
                     origin_weight.main_grad = main_grad
@@ -1043,6 +1046,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_bulk_dgrad
             None,  # ub_bulk_wgrad
             None,  # ub_name
+            None,  # fine_grained_activation_offloading
             None,  # fsdp_group
             None,  # debug
             None,  # module
@@ -1178,6 +1182,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
+        fine_grained_activation_offloading: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1194,7 +1199,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
-
+        self.fine_grained_activation_offloading = fine_grained_activation_offloading
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
 
@@ -1597,6 +1602,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_name,
+                self.fine_grained_activation_offloading,
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,

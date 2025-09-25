@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from .base import (
     get_multi_stream_cublas_workspace,
+    get_dummy_wgrad,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -80,6 +81,7 @@ class _GroupedLinear(torch.autograd.Function):
         module,
         skip_fp8_weight_update,
         save_original_input,
+        fine_grained_activation_offloading,
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -209,19 +211,18 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorBase):
                         weight.update_usage(columnwise_usage=True)
 
-            offload_activation = False
-            if hasattr(inp, "offloading_activation"):
-                offload_activation = True
-                for i in range(num_gemms):
-                    inputmats[i].offloading_activation = inp.offloading_activation
-            ctx.offload_activation = offload_activation
+            for i in range(num_gemms):
+                weights[i].offloading_activation = False
+                weights_fp8[i].offloading_activation = False
+                biases[i].offloading_activation = False
+            ctx.fine_grained_activation_offloading = fine_grained_activation_offloading
 
-            if offload_activation and cpu_offloading:
+            if fine_grained_activation_offloading and cpu_offloading:
                 raise ValueError(
-                    f"Do not use offload_activation and cpu_offloading at the same time."
+                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
                 )
 
-            if offload_activation and weights[0].requires_grad and fuse_wgrad_accumulation:
+            if fine_grained_activation_offloading and weights[0].requires_grad and fuse_wgrad_accumulation:
                 grad_added_to_main_grad_list = []
                 for weight in weights:
                     if weight.requires_grad and hasattr(weight, "grad_added_to_main_grad"):
@@ -291,7 +292,7 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
-            if (ctx.cpu_offloading or ctx.offload_activation) and ctx.fuse_wgrad_accumulation:
+            if (ctx.cpu_offloading or ctx.fine_grained_activation_offloading) and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
                     if not ctx.cpu_offloading:
                         w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
@@ -448,18 +449,15 @@ class _GroupedLinear(torch.autograd.Function):
                         ):
                             weight.grad_added_to_main_grad = True
                             if getattr(weight, "zero_out_wgrad", False):
-                                wgrad = torch.zeros(
-                                    weight.main_grad.shape,
-                                    dtype=weight.dtype,
-                                    device=torch.cuda.current_device(),
-                                    requires_grad=False,
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
+                                    zero=True,
                                 )
                             else:
-                                wgrad = torch.empty(
-                                    weight.main_grad.shape,
-                                    dtype=weight.dtype,
-                                    device=torch.cuda.current_device(),
-                                    requires_grad=False,
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
                                 )
                         elif ctx.fuse_wgrad_accumulation:
                             wgrad = None
@@ -488,6 +486,7 @@ class _GroupedLinear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            None,
             None,
             None,
             None,
@@ -587,6 +586,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
+        fine_grained_activation_offloading: bool = False,
         delay_wgrad_compute: bool = False,
         save_original_input: bool = False,
     ) -> None:
@@ -609,6 +609,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         ), "GroupedLinear doesn't support Userbuffer overlap."
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+
+        self.fine_grained_activation_offloading = fine_grained_activation_offloading
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 
@@ -828,6 +830,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.save_original_input,
+                self.fine_grained_activation_offloading,
                 *weight_tensors,
                 *bias_tensors,
             )
