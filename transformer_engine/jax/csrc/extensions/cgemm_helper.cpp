@@ -242,7 +242,7 @@ CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
 
 CommunicatorHandler::~CommunicatorHandler() {
   if (_initialize && !tp_comms.empty()) {
-    for (auto& comm : tp_comms) {
+    for (auto &comm : tp_comms) {
       if (comm != nullptr) {
         ncclCommDestroy(comm);
       }

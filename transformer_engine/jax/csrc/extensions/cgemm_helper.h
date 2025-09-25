@@ -26,7 +26,6 @@
 namespace transformer_engine {
 namespace jax {
 
-
 // Configuration singleton for CGEMM parameters
 class CgemmConfig {
  public:
