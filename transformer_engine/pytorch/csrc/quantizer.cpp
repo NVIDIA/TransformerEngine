@@ -1195,7 +1195,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
-    amax_rowwise = at::zeros({1}, bit32_tensor_opts);
+    amax_rowwise = at::empty({1}, bit32_tensor_opts);
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -1208,7 +1208,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), bit8_tensor_opts);
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
-    amax_columnwise = at::zeros({1}, bit32_tensor_opts);
+    amax_columnwise = at::empty({1}, bit32_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -1346,11 +1346,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       rowwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
-    if (amax_rowwise) {
-      amax_rowwise->zero_();
-    } else {
+    if (!amax_rowwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-      amax_rowwise = at::zeros({1}, opts);
+      amax_rowwise = at::empty({1}, opts);
       tensor.attr("_amax_rowwise") = *amax_rowwise;
     }
   } else {  // rowwise_usage == false
@@ -1388,9 +1386,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       columnwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
-    if (amax_columnwise) {
-      amax_columnwise->zero_();
-    } else {
+    if (!amax_columnwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       amax_columnwise = at::zeros({1}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
@@ -1492,7 +1488,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      /// TODO (tmoon): zero out amax
       NVTE_SCOPED_GIL_RELEASE({
         nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                      this->rht_matrix_random_sign_mask_t, stream);
