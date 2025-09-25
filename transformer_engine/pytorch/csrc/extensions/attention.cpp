@@ -445,7 +445,7 @@ std::vector<py::object> fused_attn_bwd(
     // FP8
     if (set_zero && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
-        dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
+          dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
         mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
