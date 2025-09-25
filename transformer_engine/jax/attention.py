@@ -571,6 +571,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     #     if attn_mask_type.is_bottom_right()
     #     else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
     # )
+    # swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
     # attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
