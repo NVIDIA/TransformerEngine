@@ -496,12 +496,16 @@ class QuantizedTensor(torch.Tensor):
             )
             return out
 
-        if func in (torch.ops.aten.numel.default, torch.ops.aten.is_pinned.default):
-            data_tensors = tensor.get_data_tensors()
-            for t in data_tensors:
+        if func == torch.ops.aten.numel.default:
+            tensor = args[0]
+            return math.prod(tensor.size())
+            
+        if func == torch.ops.aten.is_pinned.default:
+            tensor = args[0]
+            for t in tensor.get_data_tensors():
                 if t is not None:
                     return func(t)
-            raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+            return False  # Or error out?
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
