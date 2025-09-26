@@ -1967,6 +1967,7 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
     src_nominal_dtype = q.dtype
+    reconstruct_f8tensor = True
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
@@ -1989,22 +1990,30 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
         case 3:
             tensors = [q, k, v]
-            num_tensors = len(tensors)
-            shapes = [x.shape for x in tensors]
-            numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
-            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
-            qkv_fp8 = qkv_quantizer(qkv)
-            q_data, k_data, v_data = [
-                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
-            ]
+            if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+                amax = max([x.abs().max() for x in tensors])
+                qkv_quantizer.use_existing_amax = True
+                qkv_quantizer.amax = amax.to(dtype=torch.float32)
+                q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in tensors]
+                reconstruct_f8tensor = False
+            else:
+                num_tensors = len(tensors)
+                shapes = [x.shape for x in tensors]
+                numels = [x.numel() for x in tensors]
+                numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+                qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+                qkv_fp8 = qkv_quantizer(qkv)
+                q_data, k_data, v_data = [
+                    qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+                ]
         case _:
             raise RuntimeError("Invalid qkv_layout " + qkv_layout)
 
-    q_fp8, k_fp8, v_fp8 = [
-        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
-        for x in [q_data, k_data, v_data]
-    ]
+    if reconstruct_f8tensor:
+        q_fp8, k_fp8, v_fp8 = [
+            Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+            for x in [q_data, k_data, v_data]
+        ]
 
     return q_fp8, k_fp8, v_fp8
 
