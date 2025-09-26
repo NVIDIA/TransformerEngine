@@ -3,8 +3,8 @@
 # See LICENSE for license information.
 
 
-pip3 install onnxruntime==1.20.1
-pip3 install onnxruntime_extensions==0.13.0
+pip3 install onnxruntime
+pip3 install onnxruntime_extensions
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
