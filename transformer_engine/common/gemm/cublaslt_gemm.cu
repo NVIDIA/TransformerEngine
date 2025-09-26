@@ -56,10 +56,7 @@ inline float *GetScalarZero() {
   return dev_ptr;
 }
 
-__global__ __launch_bounds__(1)
-void set_float_kernel(float *ptr, float val) {
-  *ptr = val;
-}
+__global__ __launch_bounds__(1) void set_float_kernel(float *ptr, float val) { *ptr = val; }
 
 uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
