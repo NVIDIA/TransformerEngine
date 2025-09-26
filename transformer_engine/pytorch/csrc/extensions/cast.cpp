@@ -44,8 +44,9 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     use_existing_amax = quantizer.attr("use_existing_amax").cast<bool>();
     if (use_existing_amax) {
-      const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
-      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()), getTensorShape(amax));
+      const at::Tensor &amax = quantizer.attr("amax").cast<at::Tensor>();
+      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                         getTensorShape(amax));
     }
   }
 

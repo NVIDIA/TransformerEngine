@@ -156,7 +156,9 @@ class FP8EmulationFunc(torch.autograd.Function):
             q_fp8, k_fp8, v_fp8 = combine_and_quantize(
                 qkv_layout, query_layer, key_layer, value_layer, quantizer
             )
-            tensors = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype)
+            tensors = combine_and_dequantize(
+                qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype
+            )
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
             t_fp8 = quantizer(tensor1)
             tensors = (t_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
@@ -178,7 +180,9 @@ class FP8EmulationFunc(torch.autograd.Function):
             dq_fp8, dk_fp8, dv_fp8 = combine_and_quantize(
                 ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer
             )
-            tensors = combine_and_dequantize(ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype)
+            tensors = combine_and_dequantize(
+                ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype
+            )
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None

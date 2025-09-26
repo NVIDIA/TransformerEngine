@@ -578,7 +578,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        elif fp8_recipe.float8_current_scaling() and (_dpa_fp8_recipe == "" or _dpa_fp8_recipe == "Float8CurrentScaling"):
+        elif fp8_recipe.float8_current_scaling() and (
+            _dpa_fp8_recipe == "" or _dpa_fp8_recipe == "Float8CurrentScaling"
+        ):
             # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
             fake_recipe = DelayedScaling(
@@ -607,7 +609,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_dpa=fp8_recipe.fp8_dpa,
                     fp8_mha=fp8_recipe.fp8_mha,
                     reduce_amax=_dpa_fp8ds_reduce_amax,
-                )
+                ),
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
