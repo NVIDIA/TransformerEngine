@@ -128,8 +128,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
  *  \param[in]  config    Additional configuration.
  *  \param[in]  stream    CUDA stream used for the operation.
  */
-void nvte_cublas_gemm_v2(int transa, int transb, float alpha, const NVTETensor A,
-                         const NVTETensor B, float beta, const NVTETensor C, NVTETensor D,
+void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTETensor A,
+                         const NVTETensor B, const float *beta, const NVTETensor C, NVTETensor D,
                          NVTETensor workspace, NVTEMatmulConfig config, cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations,
