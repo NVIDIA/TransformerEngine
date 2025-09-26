@@ -1501,15 +1501,22 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+      void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
 
       // Compute amax of input tensor
-      NVTE_CHECK(rowwise_amax_ptr != nullptr, "Could not find amax pointer");
+      out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
       NVTE_SCOPED_GIL_RELEASE(
           { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+      out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
 
       // Make sure row-wise and column-wise amaxes match
-      if (rowwise_amax_ptr != nullptr && columnwise_amax_ptr != nullptr) {
-        NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, rowwise_amax_ptr, sizeof(float),
+      if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
+      if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
                                         cudaMemcpyDeviceToDevice, stream));
       }
     }
