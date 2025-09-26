@@ -229,7 +229,7 @@ __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
   // Loop: for all positions in each row
   for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
     float C_coeff = Const_buf[0];
-    IndexType tokens_per_expert_i = tokens_per_expert[i];
+    double tokens_per_expert_i = static_cast<double>(tokens_per_expert[i]);
     double grad_aux_loss_value = static_cast<double>(grad_aux_loss[0]);
     // Loop: for all rows
     for (int j = global_warp_id; j < num_rows; j += global_warp_num) {

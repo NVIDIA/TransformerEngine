@@ -8,11 +8,10 @@ import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
 from typing import Optional, Tuple
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
@@ -34,6 +33,7 @@ from .misc import (
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
+    get_all_device_compute_capability,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -46,12 +46,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -2744,6 +2738,11 @@ def fused_attn_bwd(
     if attn_bias_type == AttnBiasType.NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    if 100 in get_all_device_compute_capability():
+        assert not (
+            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
+        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

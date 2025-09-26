@@ -17,7 +17,7 @@ from functools import reduce, lru_cache
 import operator
 import numpy as np
 
-from jax.experimental.custom_partitioning import BATCHING
+from jax.experimental.custom_partitioning import BATCHING, CompoundFactor
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -152,18 +152,108 @@ class ScalingModeMetadataImpl(ABC):
 
     @abstractmethod
     def get_shardy_sharding_rules(
-        self, input_rank, unique_var, flatten_axis
+        self,
+        input_shape,
+        unique_var,
+        flatten_axis,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
-            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
             flatten_axis: Axis along which data can be flattened to 2D for quantization.
 
         Returns:
             The Shardy rules for the scaling mode
         """
+
+
+class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
+    """Implementation for no scaling mode.
+
+    This implementation provides metadata for no scaling mode, for using non-quantized higher-precision datatypes such as bf16.
+    """
+
+    def get_scale_dtype(self) -> jnp.dtype:
+        """Get the data type for scale tensors. This is a placeholder and won't be used for higher-precision values that don't have scaling.
+
+        Returns:
+            The data type used for scale tensors (float32)
+        """
+        return jnp.float32
+
+    def get_scale_shape(
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
+        flatten_axis: int = -1,
+    ) -> Tuple[int, ...]:
+        """Get the shape for scale tensors. This always returns an empty shape because this mode applies no scaling.
+
+        Args:
+            data_shape: The shape of the tensor being scaled
+            is_colwise: Whether the scaling is column-wise
+            is_padded: Whether to return padded shape
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors - (1,)
+        """
+        del data_shape, is_colwise, is_padded, flatten_axis
+        return (0,)
+
+    @lru_cache(maxsize=4)
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+        return QuantizeLayout.ROWWISE
+
+    def get_grouped_scale_shape(
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for scale tensors in this mode.
+
+        Args:
+            data_shape: Original shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+        del data_shape, group_axis, is_colwise
+        assert isinstance(n_groups, int)
+        return (n_groups,)
+
+    def get_shardy_sharding_rules(
+        self,
+        input_shape,
+        unique_var,
+        flatten_axis,
+    ) -> QuantizeShardyRules:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+
+        Args:
+            input_shape: The shape of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization.
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
+        del flatten_axis
+        input_spec = tuple(f"{unique_var}{i}" for i in range(len(input_shape)))
+        scale_var = BATCHING + unique_var + "_scale_inv"
+        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
 
 
 class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
@@ -239,20 +329,23 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return (n_groups,)
 
     def get_shardy_sharding_rules(
-        self, input_rank, unique_var, flatten_axis
+        self,
+        input_shape,
+        unique_var,
+        flatten_axis,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
-            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
-            flatten_axis: Axis along which data can be flattened to 2D for quantization.
+            flatten_axis: Axis along which data can be flattened to 2D for quantization
 
         Returns:
             The Shardy rules for the scaling mode
         """
         del flatten_axis
-        input_spec = tuple(f"{unique_var}{i}" for i in range(input_rank))
+        input_spec = tuple(f"{unique_var}{i}" for i in range(len(input_shape)))
         scale_var = BATCHING + unique_var + "_scale_inv"
         return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
 
@@ -478,52 +571,55 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return (n_block_x * n_block_y,)
 
     def get_shardy_sharding_rules(
-        self, input_rank, unique_var, flatten_axis
+        self,
+        input_shape,
+        unique_var,
+        flatten_axis,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
-            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization
 
         Returns:
             The Shardy rules for the scaling mode
         """
-        del flatten_axis
-        input_spec = [f"{unique_var}{i}" for i in range(input_rank)]
-        rowwise = [f"{unique_var}scale_inv_rowwise{i}" for i in range(input_rank)]
-        colwise = [f"{unique_var}scale_inv_colwise{i}" for i in range(input_rank)]
+        input_rank = len(input_shape)
+        input_spec = [f"{unique_var}_{i}" for i in range(input_rank)]
+        flatten_axis = (flatten_axis + input_rank) % input_rank
 
-        # NOTE (Alp): Padding the scales breaks the size relationship in CompoundFactors.
-        #             Unfortunately, because Shardy rules are applied to the inner primitive, the
-        #             only way to preserve the relationship is to lower unpadded scales to the
-        #             underlying custom call and pad them in C++. Until that's implemented, the
-        #             Shardy rules for block scales have to be completely disconnected from the
-        #             Shardy rules for the tensor they belong to.
+        # This implementation needs to be updated for different block dims.
+        assert self._block_dims == (1, 32)
 
-        # # We have to use two different factors in the two CompoundFactors because of Shardy
-        # # verifier requirements, even though they are the same.
-        # rowwise_var = unique_var
-        # colwise_var = f"{unique_var}_"
-        # input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
-        # input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
+        # We have to use two different factors in the two CompoundFactors because of Shardy
+        # verifier requirements, even though they are the same.
+        blocksizes = {}
+        colwise_var = f"{unique_var}_None"
+        rowwise_var = f"{unique_var}_None"
+        if not input_shape[-1] == 32:
+            rowwise_var = input_spec[-1] + "_compound"
+            input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
+            blocksizes["blocksize_x"] = 32
+        if not input_shape[flatten_axis - 1] == 32:
+            colwise_var = input_spec[flatten_axis - 1] + "_compound"
+            input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
+            blocksizes["blocksize_y"] = 32
 
-        # # The rowwise and colwise scale tensors should be sharded the same way as the input.
-        # # However, we need to adjust the dimensions where the block scaling factor applies.
-        # rowwise = input_spec.copy()
-        # rowwise[-1] = rowwise_var
+        # The rowwise and colwise scale tensors should be sharded the same way as the input.
+        # However, we need to adjust the dimensions where the block scaling factor applies.
+        rowwise = input_spec.copy()
+        rowwise[-1] = rowwise_var
 
-        # colwise = input_spec.copy()
-        # colwise[flatten_axis - 1] = colwise_var
-
-        # # This implementation needs to be updated for different block dims.
-        # assert self._block_dims == (1, 32)
+        colwise = input_spec.copy()
+        colwise[flatten_axis - 1] = colwise_var
 
         return QuantizeShardyRules(
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {},  # {"block_size_rowwise": 32, "block_size_colwise": 32},
+            blocksizes,
         )
 
 
@@ -613,18 +709,22 @@ class ScalingMode(Enum):
         return self._get_impl().get_quantize_layout(usage)
 
     def get_shardy_sharding_rules(
-        self, input_rank, unique_var, flatten_axis=-1
+        self,
+        input_shape,
+        unique_var,
+        flatten_axis=-1,
     ) -> Tuple[Tuple[str]]:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
-            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization.
 
         Returns:
             The Shardy rules for the scaling mode
         """
-        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
+        return self._get_impl().get_shardy_sharding_rules(input_shape, unique_var, flatten_axis)
 
     def get_grouped_scale_shape_2x(
         self, data_shape, n_groups, group_axis, is_padded=True, flatten_axis=-1
@@ -740,5 +840,5 @@ SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
     ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
     ScalingMode.CURRENT_TENSOR_SCALING: CurrentScalingModeMetadataImpl(),
-    ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.NO_SCALING: NoScalingModeMetadataImpl(),
 }

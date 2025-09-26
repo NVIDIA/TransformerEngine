@@ -135,6 +135,17 @@ class MultiheadAttention(torch.nn.Module):
             For that, please use `get_qkv_layout` to gain the layout information.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 softmax type as described in this paper:
+                 `Efficient Streaming Language Models with Attention Sinks
+                 <https://arxiv.org/pdf/2309.17453v3>`_.
+                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+                 where alpha is a learnable parameter in shape [h].
+                 'off-by-one' and 'learnable' softmax types are also called sink attention
+                 ('zero sink' and 'learnable sink').
 
     Parallelism parameters
     ----------------------
@@ -245,6 +256,7 @@ class MultiheadAttention(torch.nn.Module):
         qk_norm_before_rope: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -262,6 +274,7 @@ class MultiheadAttention(torch.nn.Module):
         self.return_bias = return_bias
         self.cp_size = 1
         self.cp_rank = 0
+        self.softmax_type = softmax_type
 
         kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
 
@@ -416,6 +429,7 @@ class MultiheadAttention(torch.nn.Module):
             tp_group=tp_group,
             layer_number=self.layer_number,
             attention_type=self.attention_type,
+            softmax_type=self.softmax_type,
         )
 
         # Linear
@@ -889,23 +903,11 @@ class MultiheadAttention(torch.nn.Module):
 
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
-            # adjust key and value for inference
-            if inference_params is not None:
-                if self.qkv_format == "sbhd":
-                    sequence_length = key_layer.size(0)
-                elif self.qkv_format == "bshd":
-                    sequence_length = key_layer.size(1)
-                else:
-                    raise ValueError(
-                        f"qkv_format={self.qkv_format} not supported for KV caching and RoPE."
-                    )
-
-                sequence_start = inference_params.get_seqlens_pre_step()
-                # sequence_start = inference_params.seqlens[0]
-                sequence_end = sequence_start + sequence_length
-
-                q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
-                k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+            # Applyig RoPE for inference needs start positions of sequences
+            # for each iteration.
+            sequence_start_positions = (
+                inference_params.get_seqlens_pre_step() if inference_params is not None else None
+            )
 
             if pad_between_seqs:
                 rotary_pos_cu_seq_lens_q = cu_seqlens_q_padded
@@ -922,6 +924,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=rotary_pos_cu_seq_lens_q,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
             key_layer = apply_rotary_pos_emb(
@@ -932,6 +935,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=rotary_pos_cu_seq_lens_kv,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
 

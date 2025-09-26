@@ -21,12 +21,14 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
+from .cpp_extensions.quantization import AmaxScope
 from .layernorm import canonicalize_norm_type
 from .quantize import (
     with_sharding_constraint_by_logical_axes,
     QuantizerSet,
     noop_quantizer_set,
     TensorUsage,
+    get_quantize_config,
 )
 
 
@@ -103,6 +105,11 @@ def layernorm_mlp(
         assert (
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
+
+    if not get_quantize_config().is_fp8_enabled():
+        input_dtype = x.dtype
+        kernel_1 = kernel_1.astype(input_dtype)
+        kernel_2 = kernel_2.astype(input_dtype)
 
     output = _layernorm_mlp(
         x,
@@ -266,12 +273,12 @@ def _layernorm_mlp_fwd_rule(
         epsilon,
         norm_type,
         quantizer=ffn1_quantizer_set.x,
-        noop_scaled_tensor=True,
+        amax_scope=AmaxScope.TPSP,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(
-        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_scope=AmaxScope.FSDP
     )
 
     # NN GEMM
@@ -300,13 +307,17 @@ def _layernorm_mlp_fwd_rule(
 
     # (batch..., hidden_in) -> (batch..., hidden)
     casted_act_out = tex.act_lu(
-        dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
+        dot_1_output,
+        activation_type,
+        quantizer=ffn2_quantizer_set.x,
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
     casted_kernel_2 = tex.quantize(
-        kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
+        kernel_2,
+        quantizer=ffn2_quantizer_set.kernel,
+        amax_scope=AmaxScope.FSDP,
     )
 
     # NN GEMM
@@ -404,7 +415,10 @@ def _layernorm_mlp_bwd_rule(
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
 
     casted_grad, dbias_2 = tex.quantize_dbias(
-        grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
+        grad,
+        is_dbias=use_bias_2,
+        quantizer=ffn1_quantizer_set.dgrad,
+        amax_scope=AmaxScope.TPSP,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -445,7 +459,6 @@ def _layernorm_mlp_bwd_rule(
         activation_type=activation_type,
         is_dbias=use_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
-        noop_scaled_tensor=True,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim

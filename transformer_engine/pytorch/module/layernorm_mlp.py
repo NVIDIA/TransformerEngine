@@ -445,14 +445,19 @@ class _LayerNormMLP(torch.autograd.Function):
                 act_out = activation_func(fc1_out, None)
                 act_out = tex.quantize(act_out, fc2_input_quantizer)
             else:
-                act_out = activation_func(fc1_out, fc2_input_quantizer)
+                if fp8_calibration:
+                    act_out = activation_func(fc1_out, None)
+                else:
+                    act_out = activation_func(fc1_out, fc2_input_quantizer)
 
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
 
-        if fp8_calibration:
-            fc2_input_quantizer.calibrate(act_out)
-            fc2_weight_quantizer.calibrate(fc2_weight)
+        if not fp8 and fp8_calibration:
+            if fc2_input_quantizer is not None:
+                fc2_input_quantizer.calibrate(act_out)
+            if fc2_weight_quantizer is not None:
+                fc2_weight_quantizer.calibrate(fc2_weight)
 
         # Configure Userbuffers reduce-scatter if needed
         ub_obj_fc2out = None
@@ -1197,7 +1202,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             "with Userbuffers (tensor-parallel communication overlapping)"
                         )
                     ctx.wgrad_store.put([ln_out_total, dact], fc1_wgrad_gemm)
-                    fc1_wgrad = None
                     if fuse_gemm_and_bias_fc1_wgrad:
                         fc1_bias_grad = None
                 else:
@@ -1898,7 +1902,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         ) = [None] * 10
         fc1_weight_quantizer, fc2_weight_quantizer = self._get_weight_quantizers()
-        if self.fp8:
+        if self.fp8 or self.fp8_calibration:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
@@ -2115,7 +2119,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None, None]
         fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         fc1_weight_quantizer.internal = True
@@ -2168,10 +2172,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 if self.fc1_bias.grad is None:
                     self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
             if not self.fuse_wgrad_accumulation:
-                if self.fc2_weight.grad is None:
-                    self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
-                if self.fc1_weight.grad is None:
-                    self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
+                self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
+                self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
             del fc2_bias_grad_
             del fc2_wgrad
             del fc1_wgrad
