@@ -5,6 +5,7 @@
 
 pip3 install onnxruntime
 pip3 install onnxruntime_extensions
+pip3 install onnxscript>=0.5.2
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
