@@ -156,7 +156,7 @@ class FP8EmulationFunc(torch.autograd.Function):
             q_fp8, k_fp8, v_fp8 = combine_and_quantize(
                 qkv_layout, query_layer, key_layer, value_layer, quantizer
             )
-            tensors = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
+            tensors = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype)
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
             t_fp8 = quantizer(tensor1)
             tensors = (t_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
@@ -178,7 +178,7 @@ class FP8EmulationFunc(torch.autograd.Function):
             dq_fp8, dk_fp8, dv_fp8 = combine_and_quantize(
                 ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer
             )
-            tensors = combine_and_dequantize(ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8)
+            tensors = combine_and_dequantize(ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype)
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
@@ -361,7 +361,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 )
 
             if "2" in qkv_layout or "3" in qkv_layout:
-                qkv_layout = "_".join([qkv_layout.replace("3", "").replace("2", "")] * 3)
+                qkv_format, *_ = dpa_utils.get_qkv_format(qkv_layout)
+                qkv_layout = "_".join([qkv_format] * 3)
             # quantize and dequantize QKV to emulate FP8
             query_layer, key_layer, value_layer = FP8EmulationFunc.apply(
                 query_layer, key_layer, value_layer, QKV_quantizer, "QKV_quantizer", qkv_layout
