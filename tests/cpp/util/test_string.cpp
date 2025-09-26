@@ -38,7 +38,7 @@ TEST(UtilTest, ToStringLike) {  // to_string_like
 
   // Non-zero integer types
   EXPECT_EQ(to_string_like(static_cast<char>(1)), "1");
-  EXPECT_EQ(to_string_like(static_cast<char>(-1)), "-1");
+  EXPECT_EQ(to_string_like(static_cast<signed char>(-1)), "-1");
   EXPECT_EQ(to_string_like(static_cast<unsigned char>(2)), "2");
   EXPECT_EQ(to_string_like(static_cast<short>(3)), "3");
   EXPECT_EQ(to_string_like(static_cast<short>(-5)), "-5");

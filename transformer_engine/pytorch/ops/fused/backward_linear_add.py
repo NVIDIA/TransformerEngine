@@ -9,13 +9,10 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.basic import BasicLinear, MakeExtraOutput
-from transformer_engine.pytorch.ops.op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from ...module.base import get_dummy_wgrad
 from ...utils import clear_tensor_data
+from ..basic import BasicLinear, MakeExtraOutput
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class BackwardLinearAdd(FusedOperation):
@@ -29,10 +26,10 @@ class BackwardLinearAdd(FusedOperation):
     def __init__(
         self,
         *,
-        linear: BasicLinear,
         backward_add: MakeExtraOutput,
+        linear: BasicLinear,
     ) -> None:
-        super().__init__((linear, backward_add))
+        super().__init__((backward_add, linear))
 
     def fuser_backward(
         self,
@@ -47,23 +44,28 @@ class BackwardLinearAdd(FusedOperation):
     ]:
 
         # Get basic operations
-        linear_op = self.basic_ops[0]
+        linear_op = self.basic_ops[1]
         linear_op_ctx = basic_op_ctxs[0]
 
         # Saved tensors from forward pass
         (x_local, w) = linear_op_ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
-            if not hasattr(linear_op.weight, "main_grad"):
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = linear_op.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -89,12 +91,22 @@ class BackwardLinearAdd(FusedOperation):
             grad_output_quantizer=linear_op_ctx.grad_output_quantizer,
             grad_input_quantizer=linear_op_ctx.grad_input_quantizer,
         )
-        if accumulate_into_main_grad:
-            grad_weight = None
 
         # Clear input tensor if possible
-        if linear_op_ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
+
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
+        if accumulate_into_main_grad:
+            grad_weight = None
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
 
         return grad_input, [(grad_weight,), ()], [(), ()]
 
@@ -107,13 +119,13 @@ def fuse_backward_linear_add(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of the corresponding
+        Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
     ops: list of tuples
-        Updated forward pass operations
+        Updated backward pass operations
 
     """
 
@@ -136,6 +148,8 @@ def fuse_backward_linear_add(
         # Check if second op is "make extra output"
         op, _ = ops[0]
         if not isinstance(op, MakeExtraOutput):
+            continue
+        if not op._in_place:
             continue
         window.extend(ops[:1])
         ops = ops[1:]

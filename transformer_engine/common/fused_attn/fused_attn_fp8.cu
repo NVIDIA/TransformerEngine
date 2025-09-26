@@ -1111,6 +1111,7 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
         b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
         o_ragged_offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
@@ -1577,6 +1578,7 @@ void fused_attn_fp8_bwd_impl(
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
         b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
         o_ragged_offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
@@ -1693,6 +1695,7 @@ void fused_attn_fp8_fwd_impl_v1(
                                layout,
                                bias_type,
                                mask_type,
+                               NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
                                0,
                                0,
                                true,
@@ -1933,6 +1936,7 @@ void fused_attn_fp8_fwd_impl_v1(
           b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }
@@ -1997,6 +2001,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                layout,
                                bias_type,
                                mask_type,
+                               NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
                                0,
                                0,
                                false,
@@ -2329,6 +2334,7 @@ void fused_attn_fp8_bwd_impl_v1(
           b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
+      NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
     }
@@ -2364,9 +2370,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = static_cast<void*>(devPtrQKV);
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2466,9 +2472,9 @@ void fused_attn_fp8_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = devPtrQKV;
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2564,9 +2570,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);
@@ -2671,9 +2677,9 @@ void fused_attn_fp8_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);

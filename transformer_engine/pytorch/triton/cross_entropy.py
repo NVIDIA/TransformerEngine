@@ -97,6 +97,7 @@ def cross_entropy_kernel(
     ignore_idx,
     n_cols,
     n_non_ignore,
+    reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -176,7 +177,13 @@ def cross_entropy_kernel(
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
             scaled_x_sum += tl.sum(tl.where(X_offsets < n_cols, -eps * X_block, 0.0))
-        X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
+        # Scale gradients based on reduction mode
+        # For reduce_loss=True: PyTorch will scale by 1/n_rows, so we need to scale by n_rows/n_non_ignore
+        # For reduce_loss=False: No additional scaling from PyTorch, so we don't scale here
+        if reduce_loss:
+            X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
+        else:
+            X_block = tl.exp(X_block - m) / d - eps
         tl.store(X_ptr + X_offsets, X_block.to(grad_dtype), mask=X_offsets < n_cols)
 
     # We need tl.debug_barrier() to ensure the new result of X_ptr is written
@@ -204,7 +211,11 @@ def cross_entropy_kernel(
     if y >= vocab_start_idx:
         if y < vocab_end_idx:
             X_y = tl.load(X_ptr + y - vocab_start_idx)
-            X_y += -(1 - label_smoothing) / (n_non_ignore)
+            # Apply the same conditional scaling logic for the target token
+            if reduce_loss:
+                X_y += -(1 - label_smoothing) / (n_non_ignore)
+            else:
+                X_y += -(1 - label_smoothing)
             tl.store(X_ptr + y - vocab_start_idx, X_y)
 
     tl.store(loss_ptr, loss)
@@ -219,6 +230,7 @@ def element_mul_kernel(
     X_ptr,
     X_stride,
     grad_output_ptr,
+    grad_output_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -241,6 +253,7 @@ def element_mul_kernel(
     X_ptr += program_id * X_stride
 
     # Load the gradient output value
+    grad_output_ptr += program_id * grad_output_stride
     grad_output = tl.load(grad_output_ptr)
 
     # Perform the element-wise multiplication
@@ -318,6 +331,7 @@ def cross_entropy_forward(
         ignore_idx=ignore_idx,
         n_cols=V,
         n_non_ignore=n_rows,
+        reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
@@ -328,13 +342,17 @@ def cross_entropy_forward(
     return loss, _input
 
 
-def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
+def cross_entropy_backward(
+    _input: torch.Tensor, grad_output: torch.Tensor, is_cg_capturable: bool = False
+):
     """Backward implementation of cross entropy loss kernel"""
 
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
+    # Only check torch.equal when not in CUDA graph capturable mode
+    if not is_cg_capturable and torch.equal(
+        grad_output, torch.tensor(1.0, device=grad_output.device)
+    ):
         pass
-
     else:
         B, SQ, V = _input.shape
         n_rows = B * SQ
@@ -344,6 +362,7 @@ def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
             _input,
             _input.stride(-2),
             grad_output,
+            1 if grad_output.numel() > 1 else 0,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,

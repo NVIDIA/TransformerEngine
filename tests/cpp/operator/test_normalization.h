@@ -67,7 +67,8 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
   // Remove the use_cudnn check here when it is supported by both backends.
   const bool zero_centered_gamma_in_weight_dtype = use_cudnn && cudnn_zero_centered_gamma_in_weight_dtype;
 
-  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
+  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3> ||
+                std::is_same_v<InputType, fp4e2m1>){
     compute_t g = static_cast<compute_t>(gamma);
     if (zero_centered_gamma) {
       g += static_cast<compute_t>(1.f);
@@ -125,7 +126,8 @@ void compute_ref_output(NormType norm_type,
 
 
 template <typename InputType, typename OutputType>
-void compute_ref_backward(const NormType norm_type, const OutputType *output_grad, const InputType *data,
+void compute_ref_backward(const NormType norm_type, const OutputType *output_grad,
+                          const OutputType *add, const InputType *data,
                           const float *mu, const float *rsigma,
                           const InputType *gamma,
                           InputType *data_grad,
@@ -164,7 +166,8 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
       compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn, cudnn_zero_centered_gamma_in_weight_dtype);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
-      const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
+      const compute_t a = static_cast<compute_t>(add[i * H + j]);
+      const compute_t dx = a + rsigma[i] * (dy - mdyy * y - mdy);
       data_grad[i * H + j] = static_cast<InputType>(dx);
     }
   }

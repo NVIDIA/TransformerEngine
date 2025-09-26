@@ -188,7 +188,7 @@ class ReorderStrategy(Enum):
 
     - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
     GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
-    mulitple of 2 * cp_size.
+    multiple of 2 * cp_size.
       Examples:
       - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
       - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
@@ -277,6 +277,7 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 
 def is_fused_attn_kernel_available(
+    is_training,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -287,7 +288,8 @@ def is_fused_attn_kernel_available(
     kv_num_heads,
     q_max_seqlen,
     kv_max_seqlen,
-    head_dim,
+    head_dim_qk,
+    head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
 ):
     """
@@ -296,6 +298,7 @@ def is_fused_attn_kernel_available(
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
+            is_training,
             q_dtype,
             kv_dtype,
             qkv_layout,
@@ -306,7 +309,8 @@ def is_fused_attn_kernel_available(
             kv_num_heads,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            head_dim_qk,
+            head_dim_v,
             (-1, -1) if window_size is None else window_size,
         )
 
@@ -489,7 +493,7 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
 
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
-    """A class to descibe the sequences with flexible initialization.
+    """A class to describe the sequences with flexible initialization.
     - SequenceDescriptor.from_seqlens
       For non-THD (non-packed) cases, where each batch has only 1 sequence.
     - SequenceDescriptor.from_seqlens_and_offsets
@@ -851,7 +855,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -868,6 +872,7 @@ def _fused_attn(
     context_parallel_strategy: CPStrategy,
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
+    context_checkpoint_name: str = "context",
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -885,6 +890,7 @@ def _fused_attn(
         context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
     )
     return output
 
@@ -905,6 +911,7 @@ def _fused_attn_fwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    context_checkpoint_name,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -923,9 +930,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
-    output = checkpoint_name(output, "context")
-    softmax_aux = checkpoint_name(softmax_aux, "context")
-    rng_state = checkpoint_name(rng_state, "context")
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
+    rng_state = checkpoint_name(rng_state, context_checkpoint_name)
     return output, (
         qkv,
         bias,
@@ -948,9 +955,11 @@ def _fused_attn_bwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    context_checkpoint_name,
     ctx,
     dz,
 ):
+    del context_checkpoint_name
     (
         qkv,
         bias,
@@ -1008,6 +1017,7 @@ def fused_attn(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    context_checkpoint_name: str = "context",
 ):
     """
     Perform cuDNN fused attention.
@@ -1040,6 +1050,7 @@ def fused_attn(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1112,6 +1123,7 @@ def fused_attn(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
     )
 
     return output

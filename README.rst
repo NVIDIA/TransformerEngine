@@ -176,15 +176,15 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.04-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.08-py3
 
 For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.04-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.08-py3
 
-Where 25.04 (corresponding to April 2025 release) is the container version.
+Where 25.08 (corresponding to August 2025 release) is the container version.
 
 **Benefits of using NGC containers:**
 
@@ -216,13 +216,13 @@ Alternatively, install directly from the GitHub repository:
 
 .. code-block:: bash
 
-    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 When installing from GitHub, you can explicitly specify frameworks using the environment variable:
 
 .. code-block:: bash
 
-    NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    NVTE_FRAMEWORK=pytorch,jax pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 conda Installation
 ^^^^^^^^^^^^^^^^^^

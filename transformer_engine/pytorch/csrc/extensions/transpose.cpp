@@ -4,108 +4,78 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <optional>
+#include <pybind.h>
 
-#include "extensions.h"
+#include <optional>
+#include <vector>
+
+#include "../extensions.h"
 #include "pybind.h"
 
-namespace transformer_engine::pytorch {
-
-std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
-                                             std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list, DType otype) {
-  init_extension();
-  std::vector<NVTETensor> nvte_tensor_input_list;
-  std::vector<NVTETensor> nvte_tensor_output_list;
-  std::vector<py::object> py_output_objects_list;
-  std::vector<TensorWrapper> tensor_wrappers;
-  if (output_list.has_value()) {
-    py_output_objects_list = output_list.value();
-  }
-
-  // Choose implementation
-  // Note: Currently only have fused kernel for FP8 cast-transpose
-  bool with_fused_kernel = true;
-
-  // create TE tensors from input
-  for (size_t i = 0; i < input_list.size(); i++) {
-    auto input_tensor = makeTransformerEngineTensor(input_list[i]);
-    const NVTEShape input_shape = input_tensor.shape();
-
-    TensorWrapper output_tensor;
-
-    if (!detail::IsFloat8Quantizers(quantizer_list[i].ptr())) {
-      with_fused_kernel = false;
-    }
-    if (output_list == std::nullopt) {
-      std::unique_ptr<Quantizer> quantizer = convert_quantizer(quantizer_list[i]);
-      std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
-      py::object o;
-      std::tie(output_tensor, o) = quantizer->create_tensor(output_shape, otype);
-      py_output_objects_list.push_back(o);
-    } else {
-      output_tensor = makeTransformerEngineTensor((*output_list)[i], quantizer_list[i]);
-    }
-    if (input_tensor.numel() == 0) continue;
-
-    nvte_tensor_output_list.emplace_back(output_tensor.data());
-    nvte_tensor_input_list.emplace_back(input_tensor.data());
-    tensor_wrappers.emplace_back(std::move(input_tensor));
-    tensor_wrappers.emplace_back(std::move(output_tensor));
-  }
-
-  // Check tensor lists
-  NVTE_CHECK(nvte_tensor_output_list.size() == nvte_tensor_input_list.size(),
-             "Number of input and output tensors must match");
-
-  for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-    if (nvte_tensor_columnwise_data(nvte_tensor_output_list[i]) == nullptr) {
-      with_fused_kernel = false;
-      break;
-    }
-  }
-
-  // Launch TE kernel
-  if (with_fused_kernel) {
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
-    });
-  } else {
-    for (size_t i = 0; i < py_output_objects_list.size(); i++) {
-      quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);
-    }
-  }
-  return py_output_objects_list;
-}
+namespace transformer_engine {
+namespace pytorch {
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor> output) {
   init_extension();
 
-  const auto dim = input.dim();
-  NVTE_CHECK(dim >= 2, "Need at least 2D tensor to transpose.");
-
-  if (input.dim() > 2) {
-    input = input.view({-1, input.size(dim - 1)});
+  // Tensor dimensions
+  const auto shape = getTensorShape(input);
+  std::vector<int64_t> transpose_shape_int64;
+  if (shape.size() > 0) {
+    transpose_shape_int64.push_back(shape.back());
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
+      transpose_shape_int64.push_back(shape[i]);
+    }
   }
+  const size_t M = shape.size() > 0 ? product(shape) / shape.back() : 1;
+  const size_t N = shape.size() > 0 ? shape.back() : 1;
 
-  size_t M = static_cast<size_t>(input.size(0));
-  size_t N = static_cast<size_t>(input.size(1));
-
+  // Output tensor
   at::Tensor out;
   if (output.has_value()) {
     out = *output;
   } else {
-    out = allocateTorchTensor(input.size(1), input.size(0), DType::kByte);
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    out = at::empty(transpose_shape_int64, opts);
   }
-  if (M == 0 || N == 0) return out;
 
+  // Return immediately if tensor is empty
+  if (M == 0 || N == 0) {
+    return out;
+  }
+
+  // Compute transpose
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, N}, otype);
   auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{N, M}, otype);
-
   nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return out;
 }
 
-}  // namespace transformer_engine::pytorch
+at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
+  init_extension();
+
+  // Make sure input is contiguous
+  const auto &input = tensor.contiguous();
+
+  // Allocate output tensor if needed
+  if (!out) {
+    auto in_shape = getTensorShape(input);
+    NVTE_CHECK(in_shape.size() >= 2, "Invalid input tensor dimensions (shape=", in_shape, ")");
+    std::vector<int64_t> out_shape_int64(in_shape.begin(), in_shape.end());
+    out_shape_int64[0] = static_cast<int64_t>(in_shape[1]);
+    out_shape_int64[1] = static_cast<int64_t>(in_shape[0]);
+    auto opts = at::TensorOptions().dtype(input.dtype()).device(input.device());
+    out = at::empty(out_shape_int64, opts);
+  }
+
+  // Launch kernel
+  const TensorWrapper te_input = makeTransformerEngineTensor(input);
+  TensorWrapper te_output = makeTransformerEngineTensor(*out);
+  nvte_swap_first_dims(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+
+  return std::move(*out);
+}
+
+}  // namespace pytorch
+}  // namespace transformer_engine

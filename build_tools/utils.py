@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from importlib.metadata import version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -21,13 +21,7 @@ from typing import List, Optional, Tuple, Union
 @functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
-    for arg in sys.argv:
-        if arg == "--debug":
-            sys.argv.remove(arg)
-            return True
-    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
-        return True
-    return False
+    return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
 
 
 @functools.lru_cache(maxsize=None)
@@ -275,7 +269,7 @@ def cuda_version() -> Tuple[int, ...]:
         return tuple(int(v) for v in version)
 
     try:
-        version_str = version("nvidia-cuda-runtime-cu12")
+        version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:
@@ -360,10 +354,3 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
-
-
-def install_and_import(package):
-    """Install a package via pip (if not already installed) and import into globals."""
-    main_package = package.split("[")[0]
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    globals()[main_package] = importlib.import_module(main_package)

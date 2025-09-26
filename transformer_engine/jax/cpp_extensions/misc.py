@@ -183,19 +183,44 @@ def get_xla_flag(flag: str, default=None, cast=str):
     return default
 
 
+def get_min_device_compute_capability():
+    """
+    Returns the minimum compute capability of all local devices.
+    """
+    return min(
+        transformer_engine_jax.get_device_compute_capability(local_gpu_id)
+        for local_gpu_id in range(len(jax.local_devices()))
+    )
+
+
+def get_all_device_compute_capability():
+    """
+    Returns a list of compute capability of all local devices.
+    """
+    return tuple(
+        transformer_engine_jax.get_device_compute_capability(local_gpu_id)
+        for local_gpu_id in range(len(jax.local_devices()))
+    )
+
+
 def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quantizer=None):
     """
     Fused dbias is not supported for arch < 100 for 1x quantization, so we need to apply a workaround to
     calculate dbias separately. This function checks if the workaround should be applied.
     """
+    if quantizer is None:
+        return False
+
     arch_l_100 = False
     for local_gpu_id in range(len(jax.local_devices())):
         if transformer_engine_jax.get_device_compute_capability(local_gpu_id) < 100:
             arch_l_100 = True
             break
+    # _quantize_dbias_impl forcing 1x quantization for tensor scaling switches q_layout to ROWWISE,
+    # but this fails when bias fusion is turned on with arch < 100.
+    force_1x_quantization = quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
     return (
-        quantizer is not None
-        and quantizer.q_layout == QuantizeLayout.ROWWISE
+        (force_1x_quantization or quantizer.q_layout == QuantizeLayout.ROWWISE)
         and arch_l_100
         and is_dbias
     )

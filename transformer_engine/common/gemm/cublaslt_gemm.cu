@@ -8,6 +8,7 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -16,27 +17,11 @@
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
+#include "cutlass_grouped_gemm.cuh"
 
 namespace {
-
-cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return CUDA_R_16F;
-    case DType::kFloat32:
-      return CUDA_R_32F;
-    case DType::kBFloat16:
-      return CUDA_R_16BF;
-    case DType::kFloat8E4M3:
-      return CUDA_R_8F_E4M3;
-    case DType::kFloat8E5M2:
-      return CUDA_R_8F_E5M2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
 
 uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
@@ -220,6 +205,13 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
+/* cuBLAS version number at run-time */
+size_t cublas_version() {
+  // Cache version to avoid cuBLAS logging overhead
+  static size_t version = cublasLtGetVersion();
+  return version;
+}
+
 }  // namespace
 
 namespace transformer_engine {
@@ -229,8 +221,9 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 bool accumulate, bool use_split_accumulator, int math_sm_count, int m_split,
-                 int n_split, bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
+                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
+                 cudaStream_t stream) {
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();
@@ -286,12 +279,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                "fp8 Aux output for gemm + gelu fusion not supported!");
   }
   if (is_fp8_dtype(outputD->data.dtype)) {
-    NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
+    NVTE_CHECK(beta == 0.0f, "Accumulation mode not supported with FP8 GEMM output!");
   }
-
-  float one = 1.0;
-  float zero = 0.0;
-  float beta = (accumulate) ? one : zero;
 
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
@@ -340,10 +329,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                      &fastAccuMode, sizeof(fastAccuMode)));
 
     // Scaling factors.
-#if CUDA_VERSION >= 12080
+#if CUBLAS_VERSION >= 120800
     cublasLtMatmulMatrixScale_t scaling_mode_a;
     cublasLtMatmulMatrixScale_t scaling_mode_b;
-#endif
+#endif  // CUBLAS_VERSION >= 120800
     if ((is_tensor_scaling(inputA->scaling_mode) && is_tensor_scaling(inputB->scaling_mode))) {
       void *A_scale_inverse = param.A_scale_inv;
       void *B_scale_inverse = param.B_scale_inv;
@@ -353,10 +342,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
-#if CUDA_VERSION >= 12080
+#if CUBLAS_VERSION >= 120800
       scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
       scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+#endif  // CUBLAS_VERSION >= 120800
     } else if ((is_mxfp_scaling(inputA->scaling_mode) && is_mxfp_scaling(inputB->scaling_mode))) {
+#if CUBLAS_VERSION >= 120800
+      NVTE_CHECK(cublas_version() >= 120800,
+                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
       fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
       fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -369,17 +362,24 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
       // Workaround for heuristic cache bug in cublasLt. This separates the MXFP8 cache key from non-block scaling.
       // CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE is unused for block scaling so it's safe to set.
-      if (cublasLtGetVersion() <= 120803) {
+      if (cublas_version() <= 120803) {
         const int64_t dummy_a_vec_stride = 1;
         NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
+#else
+      NVTE_ERROR("MXFP8 requires cuBLAS 12.8+, but compile-time cuBLAS version is ",
+                 CUBLAS_VERSION);
+#endif  // CUBLAS_VERSION >= 120800
     } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
                 inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
                (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
                 inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
-#if CUDA_VERSION >= 12090
+#if CUBLAS_VERSION >= 120900
+      NVTE_CHECK(cublas_version() >= 120900,
+                 "FP8 block scaling requires cuBLAS 12.9+, but run-time cuBLAS version is ",
+                 cublas_version());
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -398,20 +398,24 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                            ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
                            : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
 #else
-      NVTE_ERROR("FP8 block scaling requires CUDA 12.9+");
-#endif  // CUDA_VERSION >= 12090
-#endif  // CUDA_VERSION >= 12080
+      NVTE_ERROR("FP8 block scaling requires cuBLAS 12.9+, but compile-time cuBLAS version is ",
+                 CUBLAS_VERSION);
+#endif  // CUBLAS_VERSION >= 120900
     } else {
       NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
                  to_string(inputB->scaling_mode) + ".");
     }
 
-#if CUDA_VERSION >= 12080
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode_a, sizeof(scaling_mode_a)));
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode_b, sizeof(scaling_mode_b)));
-#endif
+#if CUBLAS_VERSION >= 120800
+    if (cublas_version() >= 120800) {
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                       &scaling_mode_a, sizeof(scaling_mode_a)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                       &scaling_mode_b, sizeof(scaling_mode_b)));
+    }
+#endif  // CUBLAS_VERSION >= 120800
     if (is_fp8_dtype(outputD->data.dtype)) {
       // Accumulation mode not supported for FP8 output
       C = nullptr;
@@ -419,13 +423,15 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
           operationDesc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
-#if CUDA_VERSION >= 12080
-      // NOTE: In all current cases where FP8 output is supported, the input is
-      // scaled identically to the output.
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                       CUBLASLT_MATMUL_DESC_D_SCALE_MODE,
-                                                       &scaling_mode_a, sizeof(scaling_mode_a)));
-#endif
+#if CUBLAS_VERSION >= 120800
+      if (cublas_version() >= 120800) {
+        // NOTE: In all current cases where FP8 output is supported, the input is
+        // scaled identically to the output.
+        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                         CUBLASLT_MATMUL_DESC_D_SCALE_MODE,
+                                                         &scaling_mode_a, sizeof(scaling_mode_a)));
+      }
+#endif  // CUBLAS_VERSION >= 120800
       // For FP8 output, cuBLAS requires C_type to match bias_type and
       // be FP16/BF16
       const cudaDataType_t C_type = bias ? bias_type : CUDA_R_16BF;
@@ -493,9 +499,24 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
+  if (counter != nullptr) {
+#if !(CUDA_VERSION >= 12020 && CUDA_VERSION < 13000)
+    NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA version is ",
+               CUDA_VERSION);
+#endif
+#if !(CUBLAS_VERSION >= 120205 && CUBLAS_VERSION < 130000)
+    NVTE_ERROR(
+        "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS version is ",
+        CUBLAS_VERSION);
+#endif
 #if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205 && CUDA_VERSION < 13000 && \
     CUBLAS_VERSION < 130000
-  if (counter != nullptr) {
+    NVTE_CHECK(cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
+               "Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but run-time CUDA version is ",
+               cuda::cudart_version());
+    NVTE_CHECK(cublas_version() >= 120205 && cublas_version() < 130000,
+               "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
+               cublas_version());
     if (m_split == 0) m_split = 1;
     if (n_split == 0) n_split = 1;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
@@ -513,8 +534,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
           operationDesc, CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_IN_COUNTERS_POINTER, &counter,
           sizeof(counter)));
     }
-  }
 #endif
+  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -523,6 +544,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
   const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
   const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
+  const auto workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &A_alignment, sizeof(A_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -531,6 +553,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &C_alignment, sizeof(C_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
+  NVTE_CHECK(workspace_alignment % 256 == 0,
+             "cuBLAS workspace pointer must be aligned to 256 bytes, got ", workspace_alignment);
 
   const auto status =
       cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
@@ -542,7 +566,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, operationDesc,
-                                   static_cast<const void *>(&one),         /* alpha */
+                                   static_cast<const void *>(&alpha),       /* alpha */
                                    param.A,                                 /* A */
                                    Adesc, param.B,                          /* B */
                                    Bdesc, static_cast<const void *>(&beta), /* beta */
@@ -568,18 +592,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
-static std::once_flag init_flag;
-static cudaStream_t compute_streams[num_streams];
-static cudaEvent_t cublas_event[num_streams];
-
-// Warning: only call once per device!
-static void init_streams_and_events() {
-  for (int i = 0; i < num_streams; i++) {
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
-    NVTE_CHECK_CUDA(cudaEventCreate(&cublas_event[i]));
-  }
-}
-
 }  // namespace transformer_engine
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
@@ -597,7 +609,26 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              accumulate, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
+              1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, 0, 0, false,
+              nullptr, stream);
+}
+
+void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor D,
+                             const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
+                             bool transb, bool grad, NVTETensor workspace, float alpha, float beta,
+                             bool use_split_accumulator, int math_sm_count, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cublas_gemm_scaled);
+  using namespace transformer_engine;
+  const Tensor *inputA = convertNVTETensorCheck(A);
+  const Tensor *inputB = convertNVTETensorCheck(B);
+  Tensor *outputD = convertNVTETensor(D);
+  const Tensor *biasTensor = convertNVTETensor(bias);
+  Tensor *outputGelu = convertNVTETensor(pre_gelu_out);
+  Tensor *wspace = convertNVTETensor(workspace);
+
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              alpha, beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -607,15 +638,28 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
                              int n_split, bool gemm_producer, const NVTETensor counter,
                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
-
-  int cudart_version;
-  NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
-  NVTE_CHECK(cudart_version >= 12020 && cudart_version < 13000,
-             "Cuda version >=12.2 and <13.0 is required for atomic gemm.");
-  NVTE_CHECK(cublasLtGetVersion() >= 120205 && cublasLtGetVersion() < 130000,
-             "Cublas version >=12.2.5 and <13.0 is required for atomic gemm.");
-
   using namespace transformer_engine;
+
+  // Check CUDA and cuBLAS versions
+#if !(CUDA_VERSION >= 12020 && CUDA_VERSION < 13000)
+  NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA version is ",
+             CUDA_VERSION);
+#endif
+#if !(CUBLAS_VERSION >= 120205 && CUBLAS_VERSION < 130000)
+  NVTE_ERROR(
+      "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS version is ",
+      CUBLAS_VERSION);
+#endif
+  NVTE_CHECK(
+      transformer_engine::cuda::cudart_version() >= 12020 &&
+          transformer_engine::cuda::cudart_version() < 13000,
+      "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
+      transformer_engine::cuda::cudart_version());
+  NVTE_CHECK(
+      cublas_version() >= 120205 && cublas_version() < 130000,
+      "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
+      cublas_version());
+
   const Tensor *inputA = convertNVTETensorCheck(A);
   const Tensor *inputB = convertNVTETensorCheck(B);
   Tensor *outputD = convertNVTETensor(D);
@@ -629,8 +673,42 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
              "Atomic GEMM only supports delayed scaling.");
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              accumulate, use_split_accumulator, math_sm_count, m_split, n_split, gemm_producer,
-              inputCounter, stream);
+              1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, m_split,
+              n_split, gemm_producer, inputCounter, stream);
+}
+
+void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                              const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                              bool transa, bool transb, bool grad, NVTETensor *workspace,
+                              bool accumulate, bool use_split_accumulator, int math_sm_count,
+                              cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  int num_streams = nvte_get_num_compute_streams();
+
+  int num_stream_used = std::min(num_streams, num_gemms);
+  // wait for current stream to finish
+  NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(
+        cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
+  }
+
+  for (int i = 0; i < num_gemms; i++) {
+    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
+                     detail::get_compute_stream(i % num_streams));
+  }
+
+  // record events on compute streams
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(
+        cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
+  }
+  // wait for all compute streams to finish
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
+  }
 }
 
 void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
@@ -641,30 +719,15 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
-  // Inits streams and events (once, globally)
-  std::call_once(init_flag, init_streams_and_events);
 
-  int num_stream_used = std::min(num_streams, num_gemms);
-  // wait for current stream to finish
-  NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
-  }
+  // Deprecation warning
+  NVTE_WARN(
+      "nvte_multi_stream_cublas_gemm is deprecated and will be removed in a future release. "
+      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support when "
+      "applicable).");
 
-  for (int i = 0; i < num_gemms; i++) {
-    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     compute_streams[i % num_streams]);
-  }
-
-  // record events on compute streams
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[s], compute_streams[s]));
-  }
-  // wait for all compute streams to finish
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
-  }
+  multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad, workspace,
+                           accumulate, use_split_accumulator, math_sm_count, stream);
 }
 
 namespace transformer_engine {
@@ -674,3 +737,85 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
 }  //  namespace transformer_engine
+
+void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                            const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                            bool transa, bool transb, bool grad, NVTETensor *workspace,
+                            bool accumulate, bool use_split_accumulator, int math_sm_count,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_gemm);
+
+  const int current_device = transformer_engine::cuda::current_device();
+  const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool warn_fallback =
+      transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
+  auto cublas_path = [&]() {
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+  };
+
+  // Currently only support cutlass group gemm on Hopper Arch
+  if (!(is_hopper && use_cutlass)) {
+    cublas_path();
+    return;
+  }
+
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (transformer_engine::convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
+
+  auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
+    int64_t ref_k = -1;
+    for (size_t i = 0; i < num_gemms; i++) {
+      const auto tensor = transformer_engine::convertNVTETensorCheck(p[i]);
+      const int k = trans ? tensor->data.shape[0] : tensor->data.shape[1];
+
+      if ((k & 127) != 0) return false;
+
+      if (ref_k < 0)
+        ref_k = k;
+      else if (k != ref_k)
+        return false;
+    }
+
+    return true;
+  };
+
+  auto is_supported_dtype = [&]() -> bool {
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+    auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto A_type = get_cuda_dtype(inputA->data.dtype);
+    auto B_type = get_cuda_dtype(inputB->data.dtype);
+    auto D_type = get_cuda_dtype(OutputD->data.dtype);
+
+    return (A_type == B_type) && (A_type == D_type) &&
+           ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
+  };
+
+  // CUTLASS Grouped GEMM fast path (SM90/TMA)
+  // Conditions:
+  //  - No fused epilogue: both bias and pre_gelu_out are empty.
+  //  - Supported dtypes only: FP16/BF16 (FP32 accumulate).
+  //  - Uniform K across groups and K % 128 == 0.
+  //  - use_split_accumulator is ignored for FP16/BF16.
+  //  - grad is irrelevant when bias/pre_gelu_out are empty.
+  //
+  // Otherwise, fall back to cuBLAS.
+  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
+      all_groups_uniform_k128(B, transb)) {
+    cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+                         current_device, math_sm_count, stream);
+  } else {
+    if (warn_fallback) {
+      NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+    }
+    cublas_path();
+  }
+}

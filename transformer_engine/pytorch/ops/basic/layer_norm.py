@@ -13,9 +13,10 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...fp8 import FP8GlobalStateManager
 from ...constants import TE_DType
-from ...tensor import QuantizedTensor
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...export import is_in_onnx_export_mode
+from ...tensor import Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -23,7 +24,7 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, reshape
+from .._common import maybe_autocast_dtype, maybe_dequantize
 
 
 class LayerNorm(BasicOperation):
@@ -167,8 +168,8 @@ class LayerNorm(BasicOperation):
         self.weight = weight
         self.bias = bias
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_fuser_forward(self) -> None:
+        super().pre_first_fuser_forward()
         if self.weight.device.type == "meta" or self.bias.device.type == "meta":
             self.reset_parameters()
 
@@ -176,9 +177,11 @@ class LayerNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
+        if is_in_onnx_export_mode():
+            return self.op_onnx_forward(input_)
 
         # Check tensor dims
         weight = self.weight
@@ -192,55 +195,34 @@ class LayerNorm(BasicOperation):
 
         # Check input tensors
         inner_dim = math.prod(weight_dims)
-        device = weight.device
-        if device.type != "cuda":
-            device = canonicalize_device(None)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
-        x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
-        b = reshape(self.bias, (inner_dim,), device=device, dtype=dtype)
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        if isinstance(w, QuantizedTensor):
-            w = w.dequantize()
-        if isinstance(b, QuantizedTensor):
-            b = b.dequantize()
-
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
-
-        # Check if output is quantized
-        output_quantizer = None
-        if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and next_op is not None
-            and next_op.num_quantizers("forward") > 0
-        ):
-            output_quantizer = next_op.get_quantizer("forward", 0)
+        x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
+        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
+        b = maybe_dequantize(self.bias, dtype).view((inner_dim,))
 
         # Compute layer norm
-        sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
+        sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         y, means, rstdevs = layernorm_fwd(
             x,
             w,
             b,
             self.eps,
             None,
-            output_quantizer,
+            next_op_input_quantizer,
             TE_DType[dtype],
             sm_margin,
             self.zero_centered_gamma,
         )
 
         # Save state for backward pass
-        if requires_grad:
+        if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
-            ctx.device = device
             ctx.dtype = dtype
-            ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
-        out = reshape(y, input_dims)
+        out = y.view(input_dims)
         return out
 
     def op_backward(
@@ -257,14 +239,9 @@ class LayerNorm(BasicOperation):
         inner_dim = math.prod(weight_dims)
 
         # Check input tensors
-        device = ctx.device
         dtype = ctx.dtype
-        dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
-        if isinstance(w, QuantizedTensor):
-            w = w.dequantize()
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize()
+        dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
+        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute layer norm backward pass
         dx, dw, db = layernorm_bwd(
@@ -278,13 +255,22 @@ class LayerNorm(BasicOperation):
         )
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
         clear_tensor_data(means)
         clear_tensor_data(rstdevs)
 
         # Reshape results
-        grad_input = reshape(dx, grad_output.size())
-        grad_weight = reshape(dw, weight_dims)
-        grad_bias = reshape(db, weight_dims)
+        grad_input = dx.view(grad_output.size())
+        grad_weight = dw.view(weight_dims)
+        grad_bias = db.view(weight_dims)
         return grad_input, (grad_weight, grad_bias)
+
+    def op_onnx_forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        """Every operand in this function has a defined ONNX translation."""
+        weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+        return torch.nn.functional.layer_norm(
+            input_, input_.shape[-1:], weight, self.bias, self.eps
+        )

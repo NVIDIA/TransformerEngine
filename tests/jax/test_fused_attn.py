@@ -41,6 +41,7 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
+    get_device_compute_capability,
 )
 
 from distributed_test_base import assert_equal_collectives
@@ -106,7 +107,8 @@ def general_dot_product_attention(
         softmax_out = softmax_out * multiplier
 
     context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context = jnp.reshape(context, query.shape)
+    context_shape = query.shape[:-1] + (value.shape[-1],)
+    context = jnp.reshape(context, context_shape)
     return context
 
 
@@ -294,7 +296,8 @@ class FusedAttnRunner:
     max_seqlen_kv: int
     num_heads_q: int
     num_heads_kv: int
-    head_dim: int
+    head_dim_qk: int
+    head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
@@ -346,7 +349,24 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+            )
+        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
+        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
+        if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
+            pytest.skip(
+                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
+                "is either BSHD_BSHD_BSHD or THD_THD_THD"
+            )
+
         self.backend = FusedAttnHelper(
+            self.is_training,
             self.dtype,
             self.dtype,
             self.qkv_layout,
@@ -357,10 +377,11 @@ class FusedAttnRunner:
             self.num_heads_kv,
             self.max_seqlen_q,
             self.max_seqlen_kv,
-            self.head_dim,
+            self.head_dim_qk,
+            self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
-        if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
         if (
@@ -385,18 +406,14 @@ class FusedAttnRunner:
         self.mesh = Mesh(self.devices, self.mesh_axes)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
-        self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
+        self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
-        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
-        k_shape = v_shape = (
-            self.batch_size,
-            self.max_seqlen_kv,
-            self.num_heads_kv,
-            self.head_dim,
-        )
+        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
+        k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
+        v_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_v)
 
         if self.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_shape = None
@@ -615,14 +632,14 @@ class FusedAttnRunner:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
-        self.scaling_factor = 1.0 / sqrt(self.head_dim)
+        self.scaling_factor = 1.0 / sqrt(self.head_dim_qk)
 
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
         self.qkvo_psec = PartitionSpec(
             self.mesh_resource.dp_resource,
             self.mesh_resource.cp_resource,
-            self.mesh_resource.tp_resource,
+            self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
@@ -650,7 +667,7 @@ class FusedAttnRunner:
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
-                None, self.mesh_resource.tp_resource, self.mesh_resource.cp_resource, None
+                None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
@@ -934,9 +951,11 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d, dtype",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+        ),
         pytest.param(
             2,
             2048,
@@ -944,11 +963,33 @@ class FusedAttnRunner:
             12,
             12,
             64,
+            64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-BF16-CROSS",
+            id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
-        pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+        ),
+        pytest.param(
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+        ),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1002,7 +1043,8 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
@@ -1027,7 +1069,8 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -1054,7 +1097,8 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
@@ -1076,7 +1120,8 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,

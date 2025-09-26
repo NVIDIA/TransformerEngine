@@ -45,6 +45,11 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+set(CUTLASS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
+set(CUTLASS_TOOLS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -67,7 +72,9 @@ list(APPEND transformer_engine_SOURCES
      transpose/multi_cast_transpose.cu
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
+     transpose/swap_first_dims.cu
      activation/gelu.cu
+     dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
@@ -79,6 +86,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
+     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -92,12 +100,16 @@ list(APPEND transformer_engine_SOURCES
      util/cuda_driver.cpp
      util/cuda_nvml.cpp
      util/cuda_runtime.cpp
+     util/multi_stream.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     fused_router/fused_moe_aux_loss.cu
+     fused_router/fused_score_for_moe_aux_loss.cu
+     fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
@@ -105,20 +117,40 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu
      comm_gemm_overlap/comm_gemm_overlap.cpp)
+
+if (NVTE_WITH_CUBLASMP)
+list(APPEND transformer_engine_SOURCES
+     comm_gemm/comm_gemm.cpp)
+endif()
+
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+  set_source_files_properties(
+    "gemm/cutlass_grouped_gemm.cu"
+    PROPERTIES
+    COMPILE_FLAGS
+    "-gencode arch=compute_90a,code=sm_90a")
+else()
+  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
+endif()
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
 target_include_directories(transformer_engine PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+                          ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine SYSTEM PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE
+                          ${CUTLASS_INCLUDE_DIR}
+                          ${CUTLASS_TOOLS_INCLUDE_DIR})
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
@@ -134,6 +166,25 @@ if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
+endif()
+
+option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
+if (NVTE_WITH_CUBLASMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    find_library(CUBLASMP_LIB
+                 NAMES cublasmp libcublasmp
+                 PATHS ${CUBLASMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NVSHMEM_HOST_LIB
+                 NAMES nvshmem_host libnvshmem_host.so.3
+                 PATHS ${NVSHMEM_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
@@ -162,6 +213,8 @@ make_string_header_from_file(transpose/rtc/cast_transpose.cu
                              string_code_transpose_rtc_cast_transpose_cu)
 make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
+make_string_header_from_file(transpose/rtc/swap_first_dims.cu
+                             string_code_transpose_rtc_swap_first_dims_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
@@ -188,6 +241,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   set_source_files_properties(activation/gelu.cu
                               activation/relu.cu
                               activation/swiglu.cu
+                              util/cast.cu
                               PROPERTIES
                               COMPILE_OPTIONS "--use_fast_math")
 endif()

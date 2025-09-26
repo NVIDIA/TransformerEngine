@@ -138,8 +138,8 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
           reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
-      cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
-                      _launch_params.stream);
+      NVTE_CHECK_CUDA(cudaMemsetAsync(_launch_params.params.barrier, 0,
+                                      _launch_params.barrier_bytes, _launch_params.stream));
     }
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
       _launch_params.params.dgamma_part =
@@ -156,7 +156,7 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
 template <>
 void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                        void* mean_dptr, void* rsigma_dptr,
-                                                       void* dx_dptr, void* dz_dptr,
+                                                       void* dx_dptr, void* dz_dptr, void* add_dptr,
                                                        void* dbeta_dptr, void* dgamma_dptr,
                                                        void* workspace_dptr, cudaStream_t stream) {
   NVTE_ERROR("Forward normalization should not call the backward execute function!");
@@ -166,8 +166,9 @@ template <>
 void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                         void* mean_dptr, void* rsigma_dptr,
                                                         void* dx_dptr, void* dz_dptr,
-                                                        void* dbeta_dptr, void* dgamma_dptr,
-                                                        void* workspace_dptr, cudaStream_t stream) {
+                                                        void* add_dptr, void* dbeta_dptr,
+                                                        void* dgamma_dptr, void* workspace_dptr,
+                                                        cudaStream_t stream) {
   _launch_params.stream = stream;
 
   auto& kernel_params = _launch_params.params;
@@ -177,6 +178,7 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamm
   kernel_params.rs = rsigma_dptr;
   kernel_params.dx = dx_dptr;
   kernel_params.dz = dz_dptr;
+  kernel_params.add = add_dptr;
   kernel_params.dgamma = dgamma_dptr;
 
   if (_is_layernorm) {
@@ -212,8 +214,11 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
   }
 
   const auto gamma_dtype = use_zero_centered_gamma_in_weight_dtype() ? wtype : ctype;
+  NVTE_CHECK(gamma_dtype == DType::kFloat32 || gamma_dtype == DType::kFloat16 ||
+                 gamma_dtype == DType::kBFloat16,
+             "Gamma of type FP4 is not supported");
 
-  _scalar_dptr = std::make_unique<char[]>(typeToSize(gamma_dtype));
+  _scalar_dptr = std::make_unique<char[]>(typeToNumBits(gamma_dtype) / 8);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       gamma_dtype, cpp_dtype,
       *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
@@ -444,8 +449,11 @@ void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, 
 
 void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
                                      void* rsigma_dptr, void* dx_dptr, void* dz_dptr,
-                                     void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-                                     cudaStream_t stream) {
+                                     void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+                                     void* workspace_dptr, cudaStream_t stream) {
+  // cuDNN does not currently support fused backward+add
+  NVTE_CHECK(add_dptr == nullptr);
+
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};

@@ -4,8 +4,8 @@
 
 """JAX related extensions."""
 import os
-import shutil
 from pathlib import Path
+from packaging import version
 
 import setuptools
 
@@ -13,12 +13,28 @@ from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
 from typing import List
 
 
+def install_requirements() -> List[str]:
+    """Install dependencies for TE/JAX extensions."""
+    return ["jax", "flax>=0.7.1"]
+
+
+def test_requirements() -> List[str]:
+    """Test dependencies for TE/JAX extensions."""
+    return ["numpy"]
+
+
 def xla_path() -> str:
     """XLA root path lookup.
     Throws FileNotFoundError if XLA source is not found."""
 
     try:
-        from jax.extend import ffi
+        import jax
+
+        if version.parse(jax.__version__) >= version.parse("0.5.0"):
+            from jax import ffi  # pylint: disable=ungrouped-imports
+        else:
+            from jax.extend import ffi  # pylint: disable=ungrouped-imports
+
     except ImportError:
         if os.getenv("XLA_HOME"):
             xla_home = Path(os.getenv("XLA_HOME"))
@@ -66,20 +82,9 @@ def setup_jax_extension(
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
-    class Pybind11CPPExtension(Pybind11Extension):
-        """Modified Pybind11Extension to allow custom CXX flags."""
-
-        def _add_cflags(self, flags: List[str]) -> None:
-            if isinstance(self.extra_compile_args, dict):
-                cxx_flags = self.extra_compile_args.pop("cxx", [])
-                cxx_flags += flags
-                self.extra_compile_args["cxx"] = cxx_flags
-            else:
-                self.extra_compile_args[:0] = flags
-
-    return Pybind11CPPExtension(
+    return Pybind11Extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        extra_compile_args={"cxx": cxx_flags},
+        extra_compile_args=cxx_flags,
     )

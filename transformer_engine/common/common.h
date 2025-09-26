@@ -8,9 +8,15 @@
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
 #include <cudaTypedefs.h>
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#if FP4_TYPE_SUPPORTED
+#include <cuda_fp4.h>
+#endif
+
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -82,7 +88,7 @@ struct SimpleTensor {
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
@@ -183,6 +189,7 @@ struct Tensor {
         }
         break;
       case NVTE_MXFP8_1D_SCALING:
+      case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING:
         if (!has_data() && has_columnwise_data()) {
           return columnwise_data.shape;
         } else {
@@ -252,17 +259,29 @@ struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
+  Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
+      Float8BlockScaleTensorFormat::GEMM_READY;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),       // force_pow_2_scales
-      sizeof(float),      // amax_epsilon
-      sizeof(NVTETensor)  // noop_tensor
+      sizeof(bool),                         // force_pow_2_scales
+      sizeof(float),                        // amax_epsilon
+      sizeof(NVTETensor),                   // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
   };
 };
+
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t);
 
 template <typename T>
 constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
+}
+
+template <typename T1, typename T2>
+constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T1 &N, const T2 &M) {
+  static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value,
+                "Integral type required.");
+  return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
 }
 
 using byte = uint8_t;
@@ -276,6 +295,9 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
+#endif
+#if FP4_TYPE_SUPPORTED
+using fp4e2m1 = __nv_fp4_e2m1;
 #endif
 using e8m0_t = uint8_t;
 
@@ -300,10 +322,20 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
+#if FP4_TYPE_SUPPORTED
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
+#endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
 template <typename T>
 struct TypeExtrema;
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct TypeExtrema<fp4e2m1> {
+  static constexpr float max = 6.0f;
+};
+#endif
 
 template <>
 struct TypeExtrema<fp8e4m3> {
@@ -335,8 +367,37 @@ struct TypeExtrema {
 }  // namespace detail
 
 template <typename T>
+struct BitsNumber;
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct BitsNumber<fp4e2m1> {
+  static constexpr size_t num_bits = 4;
+};
+#endif
+
+template <typename T>
+struct BitsNumber {
+  static constexpr size_t num_bits = 8 * sizeof(T);
+};
+
+template <typename T>
 struct TypeInfo {
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+#if FP4_TYPE_SUPPORTED
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1
+#if CUDA_VERSION >= 12080
+                           ,
+                           fp8e8m0
+#endif
+                           >;
+#else
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
+#if CUDA_VERSION >= 12080
+                           ,
+                           fp8e8m0
+#endif
+                           >;
+#endif
 
   template <typename U, DType current>
   struct Helper {
@@ -361,10 +422,20 @@ struct TypeInfo {
   }
 
   constexpr static DType dtype = getType<T>();
-  constexpr static size_t size = sizeof(T);
+  constexpr static size_t size = BitsNumber<T>::num_bits;
   constexpr static float max_finite_value = detail::TypeExtrema<T>::max;
   constexpr static const char *name = detail::type_name<T>();
 };
+
+#if FP4_TYPE_SUPPORTED
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) \
+  case DType::kFloat4E2M1: {              \
+    using type = fp4e2m1;                 \
+    { __VA_ARGS__ }                       \
+  } break;
+#else
+#define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
   switch (dtype) {                                           \
@@ -409,6 +480,7 @@ struct TypeInfo {
       using type = byte;                                     \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
+      SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)              \
     default:                                                 \
       NVTE_ERROR("Invalid type.");                           \
   }
@@ -520,6 +592,9 @@ struct TypeInfo {
     case DType::kFloat8E4M3: {                                 \
       NVTE_ERROR("FP8 type not instantiated for input.");      \
     } break;                                                   \
+    case DType::kFloat4E2M1: {                                 \
+      NVTE_ERROR("FP4 type not instantiated for input.");      \
+    } break;                                                   \
     default:                                                   \
       NVTE_ERROR("Invalid type.");                             \
   }
@@ -590,6 +665,14 @@ struct is_fp8<fp8e4m3> : std::true_type {};
 template <>
 struct is_fp8<fp8e5m2> : std::true_type {};
 
+template <typename T>
+struct is_fp4 : std::false_type {};
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct is_fp4<fp4e2m1> : std::true_type {};
+#endif
+
 // [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
@@ -597,7 +680,8 @@ constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
@@ -608,12 +692,15 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 }
 
 size_t typeToSize(const DType type);
+size_t typeToNumBits(const DType type);
+
+size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
+size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
+                             const DType buffer_dtype);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
 void CheckInputTensor(const Tensor &t, const std::string &name);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
-
-bool is_fp8_dtype(const DType t);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -633,7 +720,7 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_size);
+                          const uint32_t offset_elems, const size_t type_num_bits);
 
 bool is_supported_by_CC_100();
 

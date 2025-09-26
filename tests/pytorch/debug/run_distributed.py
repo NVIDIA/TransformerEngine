@@ -16,7 +16,7 @@ import transformer_engine
 import transformer_engine_torch as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from test_numerics import (
     _emulate_linear,
@@ -44,6 +44,8 @@ NCCL_WORLD = None
 FEATURE_DIRS = None
 all_boolean = [True, False]
 TEST_NR = 0
+
+fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
 
 
 def _get_tensors(parallel_mode, weight_seed=SEED, data_seed=SEED, tp_size=None, tp_rank=None):
@@ -221,7 +223,7 @@ def run_debug_test(func):
     return wrapper
 
 
-CONFIG_LOG_TEST_DISTRIBUTED = """log_distributed:
+CONFIG_LOG_TEST_DISTRIBUTED_FP8 = """log_distributed:
   layers:
     layer_types: [linear]
   enabled:
@@ -241,11 +243,27 @@ CONFIG_LOG_TEST_DISTRIBUTED = """log_distributed:
       end_step: 1
 """
 
+CONFIG_LOG_TEST_DISTRIBUTED_NO_FP8 = """log_distributed:
+  layers:
+    layer_types: [linear]
+  enabled:
+    True
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors: [activation, gradient, weight, output, wgrad, dgrad]
+      stats: [min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range]
+      start_step : 0
+      end_step: 1
+"""
+
 
 def _prepare_config_test_log_distributed(config_file):
     if WORLD_RANK != 0:
         return
-    config_file.write(CONFIG_LOG_TEST_DISTRIBUTED)
+    config_file.write(
+        CONFIG_LOG_TEST_DISTRIBUTED_FP8 if fp8_available else CONFIG_LOG_TEST_DISTRIBUTED_NO_FP8
+    )
     config_file.flush()
 
 
@@ -347,6 +365,40 @@ def test_log_distributed(parallel_mode, gather_weight, **kwargs):
 
 
 @run_debug_test
+def sanity_test_log_quantized_stats(parallel_mode, gather_weight, **kwargs):
+    from test_log import LOG_QUANTIZED_CONFIG
+
+    kwargs["config_file"].write(LOG_QUANTIZED_CONFIG)
+    kwargs["config_file"].flush()
+    _init_debug(kwargs["config_file"].name, kwargs["log_dir"], FEATURE_DIRS)
+    set_weight_tensor_tp_group_reduce(gather_weight)
+    if WORLD_SIZE % 2 != 0:
+        return  # skip
+    TP_SIZE = WORLD_SIZE // 2
+    DP_SIZE = 2
+    TP_RANK = WORLD_RANK % TP_SIZE
+    DP_RANK = (WORLD_RANK - TP_RANK) // TP_SIZE
+
+    debug_api.set_tensor_reduction_group(NCCL_WORLD)
+
+    x, weight = _get_tensors(
+        parallel_mode,
+        weight_seed=TP_RANK * 1234,
+        data_seed=DP_RANK * 1234,
+        tp_size=TP_SIZE,
+        tp_rank=TP_RANK,
+    )
+
+    tp_group_ranks = [i for i in range(DP_RANK * TP_SIZE, (DP_RANK + 1) * TP_SIZE)]
+    tp_group = dist.new_group(ranks=tp_group_ranks)
+
+    model = _init_model(weight, parallel_mode=parallel_mode, tp_group=tp_group)
+    _run_forward_backward(x, model, parallel_mode=parallel_mode, group=tp_group)
+
+    set_weight_tensor_tp_group_reduce(True)  # reset
+
+
+@run_debug_test
 def test_log_expert_parallel(**kwargs):
     """
     This test tests the scenario, when one of the node of data parallel does not invoke the debug layer.
@@ -361,13 +413,13 @@ def test_log_expert_parallel(**kwargs):
     )  # data parallel
     model = _init_model(weight, parallel_mode=None, name="linear1")
     model1 = _init_model(weight, parallel_mode=None, name="linear2")
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
         y1 = model(x)
         y2 = model1(x)
         y = y1 + y2
     y.sum().backward()
     debug_api.step()
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
         y = model(x)
         if WORLD_RANK != 0:
             y = y + model1(x)
@@ -620,28 +672,29 @@ if __name__ == "__main__":
         for gather_weight in [True, False]:
             test_log_distributed(parallel_mode, gather_weight)
 
-    for parallel_mode in ["row", "column"]:
-        test_disable_fp8_layer(parallel_mode)
+    if fp8_available:
+        for parallel_mode in ["row", "column"]:
+            test_disable_fp8_layer(parallel_mode)
 
-    # test_disable_fp8_gemms
-    _run_test_with_combinations(
-        test_disable_fp8_gemms, all_boolean, num_repeat=3, extra_args=["column", "row"]
-    )
+        # test_disable_fp8_gemms
+        _run_test_with_combinations(
+            test_disable_fp8_gemms, all_boolean, num_repeat=3, extra_args=["column", "row"]
+        )
 
-    # test_fake_quant_fp8
-    dtype_options = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2, None]
-    _run_test_with_combinations(
-        test_fake_quant_fp8,
-        dtype_options,
-        num_repeat=6,
-        extra_args=["column", "row"],
-        sample_size=20,
-    )
+        # test_fake_quant_fp8
+        dtype_options = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2, None]
+        _run_test_with_combinations(
+            test_fake_quant_fp8,
+            dtype_options,
+            num_repeat=6,
+            extra_args=["column", "row"],
+            sample_size=20,
+        )
 
-    _run_test_with_combinations(
-        test_per_tensor_scaling,
-        all_boolean,
-        num_repeat=6,
-        extra_args=["column"],
-        sample_size=20,
-    )
+        _run_test_with_combinations(
+            test_per_tensor_scaling,
+            all_boolean,
+            num_repeat=6,
+            extra_args=["column"],
+            sample_size=20,
+        )

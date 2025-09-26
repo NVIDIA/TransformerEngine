@@ -8,11 +8,10 @@ import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
 from typing import Optional, Tuple
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
@@ -34,6 +33,7 @@ from .misc import (
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
+    get_all_device_compute_capability,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -46,12 +46,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -103,6 +97,7 @@ class FusedAttnHelper:
     Helper for the fused attention backend
     """
 
+    is_training: bool
     q_dtype: jnp.dtype
     kv_dtype: jnp.dtype
     qkv_layout: QKVLayout
@@ -113,7 +108,8 @@ class FusedAttnHelper:
     kv_num_heads: int
     q_max_seqlen: int
     kv_max_seqlen: int
-    head_dim: int
+    head_dim_qk: int
+    head_dim_v: int
     window_size: Tuple[int, int]
 
     def is_fused_attn_kernel_available(self):
@@ -123,6 +119,7 @@ class FusedAttnHelper:
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
         return transformer_engine_jax.get_fused_attn_backend(
+            self.is_training,
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
             self.qkv_layout.value,
@@ -133,7 +130,8 @@ class FusedAttnHelper:
             self.kv_num_heads,
             self.q_max_seqlen,
             self.kv_max_seqlen,
-            self.head_dim,
+            self.head_dim_qk,
+            self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
         )
@@ -153,23 +151,49 @@ class FusedAttnHelper:
             kv_batch_shape = q_batch_shape
             kv_max_seqlen = q_max_seqlen
             num_gqa_groups = attn_heads
-            kv_head_dim = q_head_dim
+            v_head_dim = q_head_dim
             assert nqkv == 3
         elif qkv_layout.is_kvpacked():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-            *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = k_aval.shape
+            *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = k_aval.shape
+            assert q_batch_shape == kv_batch_shape
+            assert q_head_dim == v_head_dim
             assert nkv == 2
         elif qkv_layout.is_separate():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-            *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
-            assert k_aval.shape == v_aval.shape, f"{k_aval.shape=} {v_aval.shape=}"
+            *k_batch_shape, k_max_seqlen, k_num_gqa_groups, k_head_dim = k_aval.shape
+            *v_batch_shape, v_max_seqlen, v_num_gqa_groups, v_head_dim = v_aval.shape
+            assert (
+                q_head_dim == k_head_dim
+            ), f"Mismatched q_head_dim: {q_head_dim} and k_head_dim: {k_head_dim}"
+            assert (
+                k_max_seqlen == v_max_seqlen
+            ), f"Mismatched k_max_seqlen: {k_max_seqlen} and v_max_seqlen: {v_max_seqlen}"
+            kv_max_seqlen = k_max_seqlen
+            assert q_batch_shape == k_batch_shape == v_batch_shape, (
+                f"Mismatched qkv batch size for q_batch_shape: {q_batch_shape}, k_batch_shape:"
+                f" {k_batch_shape} and v_batch_shape: {v_batch_shape}"
+            )
+            assert k_num_gqa_groups == v_num_gqa_groups, (
+                f"Mismatched k_num_gqa_groups: {k_num_gqa_groups} and v_num_gqa_groups:"
+                f" {v_num_gqa_groups}"
+            )
+            num_gqa_groups = k_num_gqa_groups
         else:
             raise ValueError(f"Unexpected {qkv_layout=}")
-        assert q_batch_shape == kv_batch_shape
-        assert q_head_dim == kv_head_dim
-        assert q_aval.dtype == k_aval.dtype == v_aval.dtype
-
-        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim)
+        assert q_aval.dtype == k_aval.dtype == v_aval.dtype, (
+            f"Mismatched data types for q_aval: {q_aval.dtype}, k_aval: {k_aval.dtype}, v_aval:"
+            f" {v_aval.dtype}"
+        )
+        return (
+            q_batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        )
 
 
 @dataclass(frozen=True)
@@ -267,15 +291,22 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             f" kv_seqlen_or_cu_seqlen_aval={kv_seqlen_or_cu_seqlen_aval}"
         )
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
-        output_shape = (*batch_shape, q_max_seqlen, attn_heads, head_dim)
+        output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(
+            config.is_training,
             q_dtype,
             k_dtype,
             config.qkv_layout,
@@ -286,7 +317,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             num_gqa_groups,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            q_head_dim,
+            v_head_dim,
             config.window_size,
         ).get_fused_attn_backend()
 
@@ -337,7 +369,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            head_dim,
+            q_head_dim,
+            v_head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type.value,
@@ -389,9 +422,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
 
@@ -430,7 +469,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             attn_heads=attn_heads,
             num_gqa_groups=num_gqa_groups,
             bias_heads=bias_heads,
-            head_dim=head_dim,
+            qk_head_dim=q_head_dim,
+            v_head_dim=v_head_dim,
             max_segments_per_seq=config.max_segments_per_seq,
             scaling_factor=float(config.scaling_factor),
             dropout_probability=float(config.dropout_probability),
@@ -708,9 +748,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         if config.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_batch = bias_heads = 0
@@ -729,7 +775,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            head_dim,
+            qk_head_dim,
+            v_head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type.value,
@@ -788,9 +835,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
 
@@ -832,7 +885,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             attn_heads=attn_heads,
             num_gqa_groups=num_gqa_groups,
             bias_heads=bias_heads,
-            head_dim=head_dim,
+            qk_head_dim=qk_head_dim,
+            v_head_dim=v_head_dim,
             max_segments_per_seq=config.max_segments_per_seq,
             scaling_factor=float(config.scaling_factor),
             dropout_probability=float(config.dropout_probability),
@@ -2684,6 +2738,11 @@ def fused_attn_bwd(
     if attn_bias_type == AttnBiasType.NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    if 100 in get_all_device_compute_capability():
+        assert not (
+            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
+        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

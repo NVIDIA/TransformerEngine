@@ -23,7 +23,11 @@ constexpr int amax_kernel_threads = 512;
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
     void amax_kernel(const InputType *input, float *amax, const size_t N,
-                     const size_t num_aligned_elements) {
+                     const size_t num_aligned_elements, const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max = 0.f;
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -58,9 +62,10 @@ __launch_bounds__(amax_kernel_threads) __global__
 }
 
 template <int nvec, typename InputType>
-void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cudaStream_t stream) {
+void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
+                        cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
-  cudaMemsetAsync(amax, 0, sizeof(float), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(amax, 0, sizeof(float), stream));
 
   // Return immediately if tensor is empty
   if (N == 0) {
@@ -81,16 +86,17 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
   switch (align) {
     case Alignment::SAME_ALIGNED:
       amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::SAME_UNALIGNED:
       amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
+      amax_kernel<1, true, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, N, noop_ptr);
       break;
     }
   }
@@ -102,8 +108,10 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 }  // namespace
 }  // namespace transformer_engine
 
-void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_compute_amax);
+namespace {
+
+void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream,
+                       const NVTEQuantizationConfig config_) {
   using namespace transformer_engine;
 
   // Check input tensor
@@ -138,12 +146,35 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
              to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax", true);
 
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+
+    // extract noop tensor from quant_config_cpp if it's not null
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
                                reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
-                               stream););  // NOLINT(*)
+                               noop_ptr, stream););  // NOLINT(*)
+}
+
+}  // anonymous namespace
+
+void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax);
+  compute_amax_impl(input_, output_, stream, nullptr);
+}
+
+void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor output_,
+                                   const NVTEQuantizationConfig config_, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax_with_config);
+  compute_amax_impl(input_, output_, stream, config_);
 }
 
 namespace transformer_engine {
@@ -151,7 +182,11 @@ namespace {
 
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
-                                               const float epsilon) {
+                                               const float epsilon, const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
   *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon,
                                        std::numeric_limits<float>::max());
 }
@@ -197,10 +232,21 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output.data.dtype, DType,
                                          max_fp8 = Quantized_Limits<DType>::max_norm;);
 
+  // noop tensor for cuda graph
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+
+    // extract noop tensor from quant_config_cpp if it's not null
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
   // Update scale
   compute_scale_from_amax_kernel<<<1, 1, 0, stream>>>(
       reinterpret_cast<const float *>(output.amax.dptr),
       reinterpret_cast<float *>(output.scale.dptr), max_fp8, config.force_pow_2_scales,
-      config.amax_epsilon);
+      config.amax_epsilon, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

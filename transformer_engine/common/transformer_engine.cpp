@@ -18,12 +18,15 @@
 
 namespace transformer_engine {
 
-size_t typeToSize(const DType type) {
+size_t typeToNumBits(const DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
                                      return TypeInfo<T>::size;);  // NOLINT(*)
 }
 
-bool is_fp8_dtype(const DType t) { return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2; }
+size_t typeToSize(const DType type) {
+  NVTE_CHECK(type != DType::kFloat4E2M1, "typeToSize() Does not support FP4 data type.");
+  return typeToNumBits(type) / 8;
+}
 
 std::string to_string(const DType type) {
   switch (type) {
@@ -41,6 +44,10 @@ std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
+    case DType::kFloat4E2M1:
+      return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
     case DType::kInt32:
       return "Int32";
     case DType::kInt64:
@@ -56,6 +63,8 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
       return "NVTE_MXFP8_1D_SCALING";
+    case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING:
+      return "NVTE_FWD_NVFP4_BWD_MXFP8_SCALING";
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -85,10 +94,13 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                  t.columnwise_scale_inv.shape, ")");
     }
   } else {
-    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING ||
+        t.scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
+      const size_t block_size_rowwise = (t.scaling_mode == NVTE_MXFP8_1D_SCALING) ? 32 : 16;
+      const size_t block_size_colwise = 32;
 
       if (t.has_data()) {
         alignment = block_alignment[0];
@@ -96,7 +108,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
             DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) * alignment;
         alignment = block_alignment[1];
         expected_y =
-            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(32)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) *
+            alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
@@ -105,7 +118,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
         expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(32)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) *
+            alignment;
         alignment = block_alignment[0];
         expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
@@ -183,7 +197,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     }
   } else {
     NVTE_CHECK(t.scale.dptr == nullptr, "Scale is not supported for non-FP8 output ", name);
-    NVTE_CHECK(t.amax.dptr == nullptr, "Amax is not supported for non-FP8 output ", name);
+    // Note: amax is supported for non-FP8 output as it can be fused into the computation
+    //       and later used for quantization with no need to compute it separately
     NVTE_CHECK(t.scale_inv.dptr == nullptr, "Scale_inv is not supported for non-FP8 output ", name);
     NVTE_CHECK(t.columnwise_scale_inv.dptr == nullptr,
                "Scale_inv is not supported for non-FP8 input ", name);
@@ -384,10 +399,24 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
   return numel;
 }
 
+size_t nvte_tensor_element_size_bits(const NVTETensor tensor) {
+  auto *t = transformer_engine::convertNVTETensor(tensor);
+  if (t == nullptr) return 8 * sizeof(float);
+  return transformer_engine::typeToNumBits(t->dtype());
+}
+
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) return sizeof(float);
-  return transformer_engine::typeToSize(t->dtype());
+  NVTE_CHECK(!is_fp4_dtype(t->dtype()),
+             "For FP4 type please use the nvte_tensor_element_size_bits.");
+  return nvte_tensor_element_size_bits(tensor) / 8;
+}
+
+size_t nvte_tensor_size_bytes(const NVTETensor tensor) {
+  auto *t = transformer_engine::convertNVTETensor(tensor);
+  if (t == nullptr) return 0;
+  return (nvte_tensor_numel(tensor) * nvte_tensor_element_size_bits(tensor)) / 8;
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -514,12 +543,12 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
-    cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
+    const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream));
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream));
   }
 }
 
@@ -562,6 +591,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(buf, &config_.noop_tensor, attr_size);
       break;
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
+      std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -593,6 +625,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(&config_.noop_tensor, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
+      std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

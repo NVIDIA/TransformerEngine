@@ -26,12 +26,31 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDA_R_16F;
+    case DType::kFloat32:
+      return CUDA_R_32F;
+    case DType::kBFloat16:
+      return CUDA_R_16BF;
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {
     NVTE_CHECK(t->scale_inv.dptr != nullptr, "Tensor should have allocated scale_inv.");
     update_tensor_scale_inv_kernel<<<1, 1, 0, stream>>>(
         reinterpret_cast<const float *>(t->scale.dptr),
         reinterpret_cast<float *>(t->scale_inv.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -73,6 +92,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     dim3 grid(numBlocks, 1, 1);                                                              \
     memset_kernel<vectorizedType>                                                            \
         <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
 
@@ -83,7 +103,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
   if (size_in_bytes > 4096) {
     // Use cudaMemsetAsync for larger sizes.
-    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(ptr, value, size_in_bytes, stream));
     return;
   }
 
@@ -95,6 +115,9 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {
@@ -116,13 +139,20 @@ void checkCuDriverContext(CUstream stream) {
 }
 
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
-  static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = {
-      {DType::kByte, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
-      {DType::kFloat32, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT32},
-      {DType::kFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16},
-      {DType::kBFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16},
-      {DType::kFloat8E4M3, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
-      {DType::kFloat8E5M2, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8}};
+  static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = []() {
+    std::unordered_map<DType, CUtensorMapDataType> typeMapping = {
+        {DType::kByte, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
+        {DType::kFloat32, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT32},
+        {DType::kFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16},
+        {DType::kBFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16},
+        {DType::kFloat8E4M3, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
+        {DType::kFloat8E5M2, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8}};
+#if FP4_TYPE_SUPPORTED
+    typeMapping.insert(
+        {DType::kFloat4E2M1, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B});
+#endif
+    return typeMapping;
+  }();
   return dtypeMapping.at(dtype);
 }
 
@@ -130,7 +160,7 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_size) {
+                          const uint32_t offset_elems, const size_t type_num_bits) {
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
   static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
@@ -142,7 +172,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
-  uint64_t stride[rank - 1] = {stride_elems * type_size};
+  uint64_t stride[rank - 1] = {(stride_elems * type_num_bits) / 8};
 
   // The boxSize is the size of the shared memory buffer that is used as the
   // source/destination of a TMA transfer
@@ -152,15 +182,15 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
-  void *dataPtr =
-      reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
+  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
+                                           (offset_elems * type_num_bits) / 8);
 
-  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
+  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_GMEM_ALIGNMENT),
              "Tensor data pointer must be 16B aligned");
 
-  const int TMA_needed_size = TMA_gmem_alignment / type_size;
-  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_size,
-             "-byte data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
+  const int TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
+  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
+             "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 
   // Create the tensor descriptor.
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
@@ -204,6 +234,20 @@ std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensor
     }
   }
   return ret;
+}
+
+size_t get_buffer_size_bytes(const size_t elements_num, const DType buffer_dtype) {
+  return (elements_num * typeToNumBits(buffer_dtype)) / 8;
+}
+
+size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
+                             const DType buffer_dtype) {
+  if (buffer_dtype == DType::kFloat4E2M1) {
+    NVTE_CHECK(dim_last % 2 == 0,
+               "Last dimension of a tensor with FP4 type of data must be an even number!");
+  }
+  const size_t elements_num = dim_first * dim_last;
+  return get_buffer_size_bytes(elements_num, buffer_dtype);
 }
 
 }  // namespace transformer_engine

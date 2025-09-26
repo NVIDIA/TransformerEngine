@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple
+from collections.abc import Iterable
+import math
 import torch
 
 import transformer_engine_torch as tex
@@ -66,19 +68,22 @@ class MXFP8TensorBase(QuantizedTensorBase):
 
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
-        rowwise_scale_inv: torch.Tensor,
+        rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
-        columnwise_scale_inv: torch.Tensor,
+        columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: Optional[Quantizer],
+        *args,
         **kwargs,
     ):
-        instance = super().__new__(cls, *args, **kwargs)
+        if cls is MXFP8TensorBase:
+            instance = object.__new__(cls)
+        else:
+            instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
@@ -131,9 +136,15 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
-        return self._rowwise_data, self._columnwise_data
+        if rowwise_data and columnwise_data:
+            return self._rowwise_data, self._columnwise_data
+        if rowwise_data:
+            return self._rowwise_data
+        if columnwise_data:
+            return self._columnwise_data
+        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
@@ -144,6 +155,51 @@ class MXFP8TensorBase(QuantizedTensorBase):
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         return self._columnwise_data.size(*args, **kwargs)
+
+    def view(self, shape: torch.Size):
+        # pylint: disable=missing-function-docstring
+
+        # Return input tensor if view not needed
+        cur_shape = self.size()
+        if shape is None or shape == cur_shape:
+            return self
+
+        # Canonicalize shape
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        if -1 in shape:
+            shape = list(shape)
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
+            for i, d in enumerate(shape):
+                if d == -1:
+                    shape[i] = d_inferred
+                    break
+        if shape[-1] != cur_shape[-1]:
+            raise RuntimeError(
+                "MXFP8Tensor does not support reshaping inner dimension "
+                f"(attempted to reshape dims={tuple(cur_shape)} to {tuple(shape)})"
+            )
+
+        # Construct new tensor
+        cur_rowwise_data = self._rowwise_data
+        cur_columnwise_data = self._columnwise_data
+        new_rowwise_data = None
+        new_columnwise_data = None
+        if cur_rowwise_data is not None:
+            new_rowwise_data = cur_rowwise_data.view(*shape)
+        if cur_columnwise_data is not None:
+            new_columnwise_data = cur_columnwise_data.view(*shape)
+
+        return MXFP8TensorBase(
+            rowwise_data=new_rowwise_data,
+            rowwise_scale_inv=self._rowwise_scale_inv,
+            columnwise_data=new_columnwise_data,
+            columnwise_scale_inv=self._columnwise_scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            quantizer=self._quantizer,
+        )
 
     def __repr__(self):
         data_rowwise = self.dequantize()
