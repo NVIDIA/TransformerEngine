@@ -195,20 +195,25 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  /*! @brief Construct a high precision tensor giving it this quantizer's amax
-
-  Note: this member function also zeros out the amax, as it is meant to be used in conjunction with
-        a kernel computing the amax, which might expect the amax to be initialized to zero
+  /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
+   *
+   * The amax is zeroed out. Most TE kernels that output amax expect
+   * amax to be initialized to zero.
   */
-  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                  DType dtype);
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      const std::vector<size_t>& shape, DType dtype);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
-  /*! @brief Convert to a quantized data format avoiding amax computation */
+  /*! @brief Quantize to FP8, skipping local amax computation
+   *
+   * The quantizer's amax pointer is assumed to already hold the local
+   * amax. The amax may still be reduced across the amax reduction
+   * group.
+   */
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
@@ -304,12 +309,32 @@ class NVFP4Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
+  /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer
+   *
+   * The amax is zeroed out. Most TE kernels that output amax expect
+   * amax to be initialized to zero.
+   */
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      TensorWrapper& quantized_tensor, DType dtype);
+
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
+  /*! @brief Quantize to NVFP4, skipping local amax computation
+   *
+   * The input tensor's amax pointer is assumed to already hold the
+   * local amax. The amax may still be reduced across the amax
+   * reduction group.
+   */
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
+
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+
+ private:
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);

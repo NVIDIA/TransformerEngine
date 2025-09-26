@@ -388,8 +388,9 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   return {std::move(out_cpp), std::move(out_py)};
 }
 
-std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_tensor_with_amax(
-    const std::vector<size_t>& shape, DType dtype) {
+std::pair<TensorWrapper, py::object>
+Float8CurrentScalingQuantizer::create_unquantized_tensor_with_amax(const std::vector<size_t>& shape,
+                                                                   DType dtype) {
   amax.zero_();
   auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
   out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
@@ -1195,7 +1196,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
-    amax_rowwise = at::zeros({1}, bit32_tensor_opts);
+    amax_rowwise = at::empty({1}, bit32_tensor_opts);
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -1208,7 +1209,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), bit8_tensor_opts);
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
-    amax_columnwise = at::zeros({1}, bit32_tensor_opts);
+    amax_columnwise = at::empty({1}, bit32_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -1264,6 +1265,26 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                 std::vector<size_t>{1});
   }
   this->set_quantization_params(&out_cpp);
+
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
+std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_with_amax(
+    TensorWrapper& quantized_tensor, DType dtype) {
+  // Construct tensor
+  auto shape = convertShape(quantized_tensor.shape());
+  auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
+
+  // Register amax pointer from quantized tensor
+  void* amax_ptr = quantized_tensor.amax();
+  if (amax_ptr == nullptr) {
+    amax_ptr = quantized_tensor.get_columnwise_amax().data_ptr;
+  }
+  NVTE_CHECK(amax_ptr != nullptr, "Could not extract amax pointer from NVFP4 tensor.");
+  out_cpp.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+
+  // Zero out amax
+  NVTE_CHECK_CUDA(cudaMemsetAsync(amax_ptr, 0, sizeof(float), at::cuda::getCurrentCUDAStream()));
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1327,7 +1348,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_rowwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-      amax_rowwise = at::zeros({1}, opts);
+      amax_rowwise = at::empty({1}, opts);
       tensor.attr("_amax_rowwise") = *amax_rowwise;
     }
   } else {  // rowwise_usage == false
@@ -1410,19 +1431,22 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              const std::optional<TensorWrapper>& noop_flag) {
+void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                                   const std::optional<TensorWrapper>& noop_flag,
+                                   bool compute_amax) {
+  // Nothing to be done if input is empty
   if (input.numel() == 0) {
     return;
   }
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
-
-  auto stream = at::cuda::getCurrentCUDAStream();
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
@@ -1455,6 +1479,7 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   bool eligible_for_rht_cast_fusion =
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
 
+  // Compute amax.
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
       NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
@@ -1471,18 +1496,29 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
       // raise error since it's not supported yet
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
     }
-  } else {
-    // compute amax based on input x
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
-    // when amax_columnwise also exists, we need to copy amax to amax columnwise
-    // when amax columnwise exists but rowwise does not, then there is also no need to copy
-    auto amax_tensor = out.get_amax();
-    auto amax_colwise = out.get_columnwise_amax();
-    if (amax_tensor.data_ptr != nullptr && amax_colwise.data_ptr != nullptr) {
-      // copy amax to amax columnwise
-      cudaMemcpyAsync(amax_colwise.data_ptr, amax_tensor.data_ptr, sizeof(float),
-                      cudaMemcpyDeviceToDevice, stream);
+  } else {  // Without RHT
+    if (compute_amax) {
+      // Amax pointers
+      auto rowwise_amax_ptr = out.get_amax().data_ptr;
+      auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+      void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+
+      // Compute amax of input tensor
+      out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+      NVTE_SCOPED_GIL_RELEASE(
+          { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+      out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+
+      // Make sure row-wise and column-wise amaxes match
+      if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
+      if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
     }
   }
 
@@ -1603,6 +1639,35 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
   }
+}
+
+void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
+                              const std::optional<TensorWrapper>& noop_flag) {
+  this->quantize_impl(input, out, noop_flag, true);
+}
+
+void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out) {
+  // Update output tensor amaxes with input tensor amax
+  auto input_amax_ptr = input.amax();
+  auto output_rowwise_amax_ptr = out.get_amax().data_ptr;
+  auto output_columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+  NVTE_CHECK(input_amax_ptr != nullptr ||
+                 (output_rowwise_amax_ptr == nullptr && output_columnwise_amax_ptr == nullptr),
+             "Input tensor does not have pre-computed amax");
+  if (input_amax_ptr != output_rowwise_amax_ptr && input_amax_ptr != nullptr &&
+      output_rowwise_amax_ptr != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(output_rowwise_amax_ptr, input_amax_ptr, sizeof(float),
+                                    cudaMemcpyDeviceToDevice, at::cuda::getCurrentCUDAStream()));
+  }
+  if (input_amax_ptr != output_columnwise_amax_ptr && input_amax_ptr != nullptr &&
+      output_columnwise_amax_ptr != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(output_columnwise_amax_ptr, input_amax_ptr, sizeof(float),
+                                    cudaMemcpyDeviceToDevice, at::cuda::getCurrentCUDAStream()));
+  }
+  input.set_amax(nullptr, DType::kFloat32, input.defaultShape);
+
+  // Perform quantization
+  this->quantize_impl(input, out, std::nullopt, false);
 }
 
 std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
