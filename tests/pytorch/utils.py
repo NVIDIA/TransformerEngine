@@ -101,6 +101,21 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
+def quantization_tols(name: str) -> dict[str, float]:
+    """Estimated numerical error for a quantization scheme"""
+    if name in (
+        "fp8",
+        "fp8_delayed_scaling",
+        "fp8_current_scaling",
+        "mxfp8",
+        "mxfp8_block_scaling",
+    ):
+        return dtype_tols(tex.DType.kFloat8E4M3)
+    if name == "nvfp4":
+        return dtype_tols(tex.DType.kFloat4E2M1)
+    raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
 def make_recipe(name: Optional[str]) -> Optional[Recipe]:
     """Make recipe for quantization scheme"""
     if name is None:

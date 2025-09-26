@@ -40,7 +40,7 @@ from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
-from utils import dtype_tols, make_recipe, reset_rng_states
+from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
 
 # Check for supported quantization schemes
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -417,12 +417,12 @@ class TestFuser:
             torch.testing.assert_close(
                 y,
                 torch.full_like(y, y_val_ref),
-                **dtype_tols(tex.DType.kFloat8E4M3),
+                **quantization_tols("fp8_delayed_scaling"),
             )
             torch.testing.assert_close(
                 x.grad,
                 torch.full_like(x.grad, dx_val_ref),
-                **dtype_tols(tex.DType.kFloat8E5M2),
+                **quantization_tols("fp8_delayed_scaling"),
             )
 
             # Check that scaling factors match expected
@@ -923,15 +923,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute or quantized_output or quantized_grad_input:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1109,15 +1101,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1215,15 +1199,7 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1385,15 +1361,7 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1692,16 +1660,10 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute or cache_quantized_input:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+        elif cache_quantized_input:
+            tols = quantization_tols("fp8_current_scaling")
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1766,15 +1728,7 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2004,15 +1958,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2123,15 +2069,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2237,15 +2175,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2340,15 +2270,7 @@ class TestFusedOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if with_quantization:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2535,15 +2457,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y1_test = y1_test.to(dtype=torch.float64, device="cpu")
@@ -2638,15 +2552,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            if quantization in (
-                "fp8_delayed_scaling",
-                "fp8_current_scaling",
-                "mxfp8",
-                "mxfp8_block_scaling",
-            ):
-                tols = dtype_tols(tex.DType.kFloat8E4M3)
-            elif quantization == "nvfp4":
-                tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
