@@ -615,7 +615,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             fp8_recipes = fake_recipes
         # DPA only support DS and CS; other recipes should have fp8_dpa=False, fp8_mha=False
         if not fp8_recipe_dpa.float8_per_tensor_scaling():
-            assert not (fp8_recipe_dpa.fp8_dpa or fp8_recipe_dpa.fp8_mha), f"DotProductAttention does not support {fp8_recipe_dpa.__class__.__name__} recipe"
+            assert not (
+                fp8_recipe_dpa.fp8_dpa or fp8_recipe_dpa.fp8_mha
+            ), f"DotProductAttention does not support {fp8_recipe_dpa.__class__.__name__} recipe"
 
         # reduce over TP+CP groups; expect fp8_group to be set up so
         # assume attention uses the same fp8_group as GEMMs
