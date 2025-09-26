@@ -459,7 +459,8 @@ class _GroupedLinear(torch.autograd.Function):
                                     list(weight.main_grad.shape),
                                     weight.dtype,
                                 )
-                        elif ctx.fuse_wgrad_accumulation:
+                        # TODO: Need to check why weight doesn't have attr grad_added_to_main_grad when fine_grained_activation_offloading is True.
+                        elif ctx.fuse_wgrad_accumulation and not ctx.fine_grained_activation_offloading:
                             wgrad = None
                     else:
                         wgrad = None
