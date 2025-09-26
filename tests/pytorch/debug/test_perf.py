@@ -28,13 +28,15 @@ def _run_cpu_overhead(debug_tools_initialized, layer, configs_dir, feature_dirs)
             model = torch.nn.Sequential(
                 te.Linear(1, 1, name="linear1"), te.Linear(1, 1, name="linear2")
             ).cuda()
-            NUM_ITERS = 18000
+            NUM_ITERS = 1800
         elif layer == "transformer":
             model = torch.nn.Sequential(
                 te.TransformerLayer(1, 1, 1, name="transformer1"),
                 te.TransformerLayer(1, 1, 1, name="transformer2"),
             ).cuda()
-            NUM_ITERS = 2000
+            NUM_ITERS = 200
+
+        NUM_INVOCATIONS_PER_ITER = 10
 
         x = torch.randn(1, 1, 1).cuda()
 
@@ -45,8 +47,9 @@ def _run_cpu_overhead(debug_tools_initialized, layer, configs_dir, feature_dirs)
 
         time_start = time.time()
         for i in range(NUM_ITERS):
-            y = model(x)
-            y.sum().backward()
+            for _ in range(NUM_INVOCATIONS_PER_ITER):
+                y = model(x)
+                y.sum().backward()
             if debug_tools_initialized:
                 debug_api.step()
         torch.cuda.synchronize()
