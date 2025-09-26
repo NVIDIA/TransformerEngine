@@ -559,7 +559,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "DelayedScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a DS recipe
             fake_recipe = DelayedScaling(
-                fp8_format=_fp8_recipe_format,
+                fp8_format=_dpa_fp8_format,
                 amax_history_len=_dpa_fp8ds_amax_histlen,
                 amax_compute_algo=_dpa_fp8ds_amax_algo,
                 reduce_amax=_dpa_fp8ds_reduce_amax,
