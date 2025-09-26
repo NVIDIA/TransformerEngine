@@ -87,17 +87,49 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
-# Force DotProductAttention to use a different recipe than the fp8_recipe set in fp8_autocast().
-# Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"
-# and "Float8CurrentScaling". Use other relevant variables here to define the recipe, e.g. fp8_dpa.
+# Attention layers and linear layers may use different fp8 recipes. Users can use multiple/nested fp8_autocasts
+# to customize the recipes for different layers, or use one fp8_autocast to control the recipe for all
+# non-attention layers and the following environment variables to control the recipe for attention.
+# FP8DS/FP8CS/NVFP4 linear + FP16/BF16 attention:
+#   pass FP8DS/FP8CS/NVFP4 to fp8_autocast()
+#   export NVTE_DPA_FP8_RECIPE = "F16"
+# FP8DS linear + FP8DS attention:
+#   pass FP8DS to fp8_autocast()
+# FP8CS linear + FP8DS attention:
+#   pass FP8CS to fp8_autocast(); attention FP8DS will reuse the fp8_format, fp8_dpa, fp8_mha from linear FP8CS
+#   export NVTE_DPA_FP8_RECIPE = "DelayedScaling"
+#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
+#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
+#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
+# NVFP4 linear + FP8DS attention:
+#   pass NVFP4 to fp8_autocast(); attention FP8DS will reuse the fp8_dpa, fp8_mha from linear NVFP4, not fp8_format
+#   export NVTE_DPA_FP8_RECIPE = "DelayedScaling"
+#   export NVTE_DPA_FP8_FORMAT = "HYBRID"
+#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
+#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
+#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
+# FP8DS linear + FP8CS attention:
+#   pass FP8DS to fp8_autocast(); attention will reuse linear FP8DS for S, dP tensors, and
+#   construct FP8CS for QKV, O, dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS
+# FP8CS linear + FP8CS attention:
+#   pass FP8CS to fp8_autocast(); attention will reuse linear FP8CS for QKV, O, dO, dQKV tensors, and
+#   construct FP8DS for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and these variables
+#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
+#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
+#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
+# NVFP4 linear + FP8CS attention:
+#   pass NVFP4 to fp8_autocast(); attention FP8CS will reuse the fp8_dpa, fp8_mha from linear NVFP4, not fp8_format
+#   export NVTE_DPA_FP8_RECIPE = "Float8CurrentScaling"
+#   export NVTE_DPA_FP8_FORMAT = "HYBRID"
+#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
+#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
+#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
 _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
 formats = {"HYBRID": Format.HYBRID, "E4M3": Format.E4M3, "E5M2": Format.E5M2}
-_dpa_fp8_recipe_format = formats[os.getenv("NVTE_DPA_FP8_RECIPE_FORMAT", "HYBRID")]
-_dpa_fp8_recipe_dpa = os.getenv("NVTE_DPA_FP8_RECIPE_DPA", "0") == "1"
-_dpa_fp8_recipe_mha = os.getenv("NVTE_DPA_FP8_RECIPE_MHA", "0") == "1"
-_dpa_fp8_recipe_amax_algo = os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_ALGO", "most_recent")
-_dpa_fp8_recipe_amax_histlen = int(os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_HISTLEN", "1"))
-_dpa_fp8_recipe_amax_reduce_ds = os.getenv("NVTE_DPA_FP8_RECIPE_AMAX_REDUCE_DS", "1") == "1"
+_dpa_fp8_format = formats[os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")]
+_dpa_fp8ds_amax_algo = os.getenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
+_dpa_fp8ds_amax_histlen = int(os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1"))
+_dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 __all__ = ["DotProductAttention"]
 
@@ -508,43 +540,74 @@ class DotProductAttention(TransformerEngineBaseModule):
         # x={DS, CS}                | y                   | refer to row x=y        | refer to row x=y
         fp8_recipe_dpa = fp8_recipe
         fp8_recipes = fp8_recipe
-        if fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
+        if _dpa_fp8_recipe == "F16":
+            # ignore the recipe from fp8_autocast, set fp8_dpa = False, fp8_mha = False
+            fp8_recipe.fp8_dpa = False
+            fp8_recipe.fp8_mha = False
+        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
             fake_recipe = DelayedScaling(
-                fp8_format=_dpa_fp8_recipe_format,
-                amax_history_len=_dpa_fp8_recipe_amax_histlen,
-                amax_compute_algo=_dpa_fp8_recipe_amax_algo,
-                fp8_dpa=_dpa_fp8_recipe_dpa,
-                fp8_mha=_dpa_fp8_recipe_mha,
-                reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
-            )
-            fp8_recipe_dpa = fake_recipe
-            fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
-        elif not fp8_recipe.delayed() and _dpa_fp8_recipe == "DelayedScaling":
-            fake_recipe = DelayedScaling(
-                fp8_format=_dpa_fp8_recipe_format,
-                amax_history_len=_dpa_fp8_recipe_amax_histlen,
-                amax_compute_algo=_dpa_fp8_recipe_amax_algo,
-                fp8_dpa=_dpa_fp8_recipe_dpa,
-                fp8_mha=_dpa_fp8_recipe_mha,
-                reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
+                fp8_format=fp8_recipe.fp8_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = fp8_recipe_dpa
-        elif not fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "Float8CurrentScaling":
+        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "DelayedScaling":
+            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a DS recipe
+            fake_recipe = DelayedScaling(
+                fp8_format=_fp8_recipe_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
+        elif fp8_recipe.delayed() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a CS+DS recipe
             fake_recipes = [
                 Float8CurrentScaling(
-                    fp8_format=_dpa_fp8_recipe_format,
-                    fp8_dpa=_dpa_fp8_recipe_dpa,
-                    fp8_mha=_dpa_fp8_recipe_mha,
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                fp8_recipe,
+            ]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
+        elif fp8_recipe.float8_current_scaling() and (_dpa_fp8_recipe == "" or _dpa_fp8_recipe == "Float8CurrentScaling"):
+            # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
+            fake_recipe = DelayedScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
+            # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
+            fake_recipes = [
+                Float8CurrentScaling(
+                    fp8_format=_dpa_fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
                 ),
                 DelayedScaling(
-                    fp8_format=_dpa_fp8_recipe_format,
-                    amax_history_len=_dpa_fp8_recipe_amax_histlen,
-                    amax_compute_algo=_dpa_fp8_recipe_amax_algo,
-                    fp8_dpa=_dpa_fp8_recipe_dpa,
-                    fp8_mha=_dpa_fp8_recipe_mha,
-                    reduce_amax=_dpa_fp8_recipe_amax_reduce_ds,
-                ),
+                    fp8_format=_dpa_fp8_format,
+                    amax_history_len=_dpa_fp8ds_amax_histlen,
+                    amax_compute_algo=_dpa_fp8ds_amax_algo,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                    reduce_amax=_dpa_fp8ds_reduce_amax,
+                )
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
