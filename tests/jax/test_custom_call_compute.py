@@ -1257,7 +1257,7 @@ GROUPED_DENSE_INPUT_SHAPES = [
     (8, 64, 128, 256),
 ]
 
-import pdb
+
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):

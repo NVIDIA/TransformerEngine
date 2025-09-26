@@ -1234,7 +1234,7 @@ def _te_gemm(
         collective_op=collective_op,
     )
 
-import pdb
+
 class GroupedGemmCopySizesPrimitive(BasePrimitive):
     """
     Primitive for async copying group sizes from device to host
@@ -1253,7 +1253,7 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         num_gemms,
     ):
         del num_gemms
-        out_aval = jax.core.ShapedArray(shape=group_sizes_aval.shape, dtype=group_sizes_aval.dtype)
+        out_aval = group_sizes_aval
         return out_aval
 
     @staticmethod
@@ -1267,8 +1267,10 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         group_sizes,
         num_gemms,
     ):
-        #pdb.set_trace()
-        return jax.ffi.ffi_lowering(GroupedGemmCopySizesPrimitive.name)(
+        return jax.ffi.ffi_lowering(
+            GroupedGemmCopySizesPrimitive.name,
+            operand_output_aliases={0: 0},  # Mark num_gemms as the output
+        )(
             ctx,
             group_sizes,
             num_gemms=num_gemms,
@@ -1280,7 +1282,6 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         num_gemms,
     ):
         assert GroupedGemmCopySizesPrimitive.inner_primitive is not None
-        #pdb.set_trace()
         out = GroupedGemmCopySizesPrimitive.inner_primitive.bind(
             group_sizes,
             num_gemms=num_gemms,
