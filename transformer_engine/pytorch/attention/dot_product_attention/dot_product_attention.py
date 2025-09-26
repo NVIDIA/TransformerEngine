@@ -562,6 +562,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_format=_dpa_fp8_format,
                 amax_history_len=_dpa_fp8ds_amax_histlen,
                 amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
                 reduce_amax=_dpa_fp8ds_reduce_amax,
             )
             fp8_recipe_dpa = fake_recipe
