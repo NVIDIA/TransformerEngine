@@ -167,7 +167,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.num_devices_per_process = self.num_devices_per_process
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
-        self.args.batch_size = 4
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)

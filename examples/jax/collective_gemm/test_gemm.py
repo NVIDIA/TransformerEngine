@@ -12,10 +12,9 @@ This script uses custom distributed initialization with the following arguments:
 Example:
     python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3
 """
-import argparse
 import unittest
 import os
-import numpy as np
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -45,12 +44,14 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
         x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, TPSP_AXIS, None))
         weight_sharding = NamedSharding(mesh, PartitionSpec(None, TPSP_AXIS))
         bias_sharding = NamedSharding(mesh, PartitionSpec(TPSP_AXIS))
+        output_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, TPSP_AXIS))
     else:  # RS
         x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, TPSP_AXIS))
         weight_sharding = NamedSharding(mesh, PartitionSpec(TPSP_AXIS, None))
         bias_sharding = NamedSharding(mesh, PartitionSpec(None))
+        output_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, TPSP_AXIS, None))
 
-    return x_sharding, weight_sharding, bias_sharding
+    return x_sharding, weight_sharding, bias_sharding, output_sharding
 
 
 def _get_dp_and_tp_sizes(args):
@@ -70,14 +71,18 @@ def _get_dp_and_tp_sizes(args):
     return num_gpu_dp, num_gpu_tp
 
 
-def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op):
-    return jax.jit(tex.gemm, static_argnames=("contracting_dims", "collective_op"))(
+@partial(jax.jit, static_argnames=("contracting_dims", "collective_op", "output_sharding"))
+def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op, output_sharding):
+    output = tex.gemm(
         x,
         weight,
         bias=bias,
         contracting_dims=contracting_dims,
         collective_op=collective_op,
     )
+    if output_sharding is not None:
+        output = jax.lax.with_sharding_constraint(output, output_sharding)
+    return output
 
 
 def run_gemm_tests(args, mesh=None):
@@ -111,7 +116,7 @@ def run_gemm_tests(args, mesh=None):
     ):
         print(f"Device mesh: {mesh}")
 
-        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(
+        x_sharding, weight_sharding, bias_sharding, output_sharding = _get_operand_sharding(
             mesh, collective_op, args.enable_data_parallel
         )
         x_sharded = jax.device_put(x, x_sharding)
@@ -124,6 +129,7 @@ def run_gemm_tests(args, mesh=None):
             bias_sharded,
             contracting_dims=((2,), (0,)),
             collective_op=CollectiveOp.NONE,
+            output_sharding=output_sharding,
         )
         output = _jitted_cgemm(
             x_sharded,
@@ -131,7 +137,12 @@ def run_gemm_tests(args, mesh=None):
             bias_sharded,
             contracting_dims=((2,), (0,)),
             collective_op=collective_op,
+            # CollectiveGEMM output should have a correct sharding without applying sharding constraint
+            output_sharding=None,
         )
+        assert (
+            ref_output.sharding == output.sharding
+        ), f"ref_output.sharding={ref_output.sharding}, output.sharding={output.sharding}"
         gathered_ref_output = jax.lax.with_sharding_constraint(
             ref_output, NamedSharding(mesh, PartitionSpec(None))
         )
@@ -160,7 +171,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
-        self.args.batch_size = 4
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True

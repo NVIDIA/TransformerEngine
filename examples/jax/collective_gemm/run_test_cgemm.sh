@@ -91,11 +91,11 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
   # Check and print the log content from process 0 (now has log file thanks to tee)
   if grep -q "SKIPPED" "${TEST_FILE}_gpu_0.log"; then
     echo "... $TEST_FILE SKIPPED"
-  elif grep -q "PASSED" "${TEST_FILE}_gpu_0.log"; then
-    echo "... $TEST_FILE PASSED"
-  else
-    HAS_FAILURE=1
+  elif grep -q "FAILED" "${TEST_FILE}_gpu_0.log"; then
     echo "... $TEST_FILE FAILED"
+    HAS_FAILURE=1
+  else
+    echo "... $TEST_FILE PASSED"
   fi
 
   # Remove the log files after processing them
