@@ -8,6 +8,7 @@ import warnings
 from typing import Callable, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
+import contextlib
 
 import torch
 from torch.nn.parameter import Parameter
@@ -1768,9 +1769,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(inp, num_gemms=2) as inp:
+        if is_first_microbatch is None or is_first_microbatch:
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
                 self._get_quantizers(fp8_output)

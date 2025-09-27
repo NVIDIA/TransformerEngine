@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import contextlib
 
 import torch
 
@@ -1401,9 +1402,14 @@ class Linear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(
+        if is_first_microbatch is None or is_first_microbatch:
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
