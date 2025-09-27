@@ -898,6 +898,10 @@ class LayerNormMLP(TransformerEngineBase):
     activations: Sequence[Union[str, Callable]], default = ('relu',)
         The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
+    activation_params: dict, default = None
+        The parameters needed(if any) by the activation functions specified in :attr:`activations`.
+        At the moment only ('clamped_silu', 'clamped_linear') which is clamped_swiglu used in GPT OSS
+        need additional parameters.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
     intermediate_dropout_rate: float, default = 0.1
@@ -956,6 +960,7 @@ class LayerNormMLP(TransformerEngineBase):
     bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    activation_params: dict = None
     intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()
@@ -1023,6 +1028,7 @@ class LayerNormMLP(TransformerEngineBase):
             ("relu", "linear"),
             ("quick_gelu", "linear"),
             ("squared_relu", "linear"),
+            ("clamped_silu", "clamped_linear"),
         ]
         act_pool = [("gelu",), ("silu",), ("relu",), ("quick_gelu",), ("squared_relu",)]
         normalized_acts = []
@@ -1031,7 +1037,9 @@ class LayerNormMLP(TransformerEngineBase):
                 return False
             normalized_acts.append(act.lower())
         normalized_acts = tuple(
-            reversed(normalized_acts) if normalized_acts[0] == "linear" else normalized_acts
+            reversed(normalized_acts)
+            if (normalized_acts[0] == "linear" or normalized_acts[0] == "clamped_linear")
+            else normalized_acts
         )
 
         is_act_implemented = normalized_acts in (gated_act_pool + act_pool)
@@ -1150,6 +1158,7 @@ class LayerNormMLP(TransformerEngineBase):
                 ffn1_ckpt_name=self.ffn1_ckpt_name,
                 ffn2_ckpt_name=self.ffn2_ckpt_name,
                 activation_type=normalized_acts,
+                activation_params=self.activation_params,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
             )
             out = out.reshape(*inputs.shape[: self.axis], *hidden_size_tuple)
@@ -1287,4 +1296,4 @@ class LayerNormMLP(TransformerEngineBase):
             out = checkpoint_name(out, self.ffn2_ckpt_name)
 
         assert out.dtype == input_dtype
-        return out, ln_output  # Output, layner_norm_output
+        return out, ln_output  # Output, layer_norm_output

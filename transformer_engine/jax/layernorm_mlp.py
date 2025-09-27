@@ -49,6 +49,7 @@ def layernorm_mlp(
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
+    activation_params: dict = None,
     quantizer_sets: Tuple[QuantizerSet] = (noop_quantizer_set, noop_quantizer_set),
 ) -> jnp.ndarray:
     """Apply layer normalization followed by MLP block.
@@ -130,12 +131,13 @@ def layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        activation_params,
         quantizer_sets,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -155,6 +157,7 @@ def _layernorm_mlp(
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
+    activation_params: dict,
     quantizer_sets,
 ):
     """Internal implementation of layernorm_mlp with custom VJP.
@@ -204,6 +207,7 @@ def _layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        activation_params,
         quantizer_sets,
     )
     return output
@@ -228,6 +232,7 @@ def _layernorm_mlp_fwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    activation_params,
     quantizer_sets,
 ):
     """Forward pass rule for layernorm_mlp.
@@ -306,10 +311,18 @@ def _layernorm_mlp_fwd_rule(
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     # (batch..., hidden_in) -> (batch..., hidden)
+    # At the moment the act_params is only used for ClampedSwiglu
+    # If there are more activations that require parameters in the future
+    # we might need to change it to a more generic parameter container
     casted_act_out = tex.act_lu(
         dot_1_output,
         activation_type,
         quantizer=ffn2_quantizer_set.x,
+        act_params=(
+            tex.activation.ActivationParams.create(activation_type, **activation_params)
+            if activation_params
+            else None
+        ),
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
@@ -372,6 +385,7 @@ def _layernorm_mlp_bwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    activation_params,
     ctx,
     grad,
 ):
@@ -459,6 +473,11 @@ def _layernorm_mlp_bwd_rule(
         activation_type=activation_type,
         is_dbias=use_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
+        act_params=(
+            tex.activation.ActivationParams.create(activation_type, **activation_params)
+            if activation_params
+            else None
+        ),
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
