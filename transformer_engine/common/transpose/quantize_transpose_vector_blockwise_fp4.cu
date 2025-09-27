@@ -342,10 +342,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   const size_t block_idx_x = blockIdx.x;
   const size_t block_idx_y = blockIdx.y;
-  const size_t rng_offest = threadIdx.x;
+  const size_t rng_sequence
+    = threadIdx.x + block_idx_x * kThreadsPerBlock + block_idx_y * gridDim.x * kThreadsPerBlock;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
-  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offest);  // seed, sequence, offset
+  const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
+  RNG rng(rng_seed, rng_sequence, rng_offset);
   curanddx::uniform_bits dist;
   uint4 random_uint4 = kApplyStochasticRounding ? dist.generate4(rng) : uint4{0, 0, 0, 0};
   int rnd_idx =

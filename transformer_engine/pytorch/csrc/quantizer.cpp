@@ -1458,13 +1458,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
   TensorWrapper te_rng_state;
   if (this->stochastic_rounding) {
-    const size_t min_threads_per_block = 128;
-    const size_t nvfp4_vals_per_rng_elt = 4;
-    // Since some of the kernels used there are persistent, it is impossible to give
-    // a better estimate
-    const size_t rng_elts_per_thread =
-        roundup(rows * cols, min_threads_per_block * nvfp4_vals_per_rng_elt);
-    // extract rng seed and offset
+    const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);

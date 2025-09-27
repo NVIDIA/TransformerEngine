@@ -172,7 +172,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   static constexpr int VectorSize = 16;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
-  const size_t rng_sequence = rng_state != nullptr ? rng_state[1] : 0;
+  const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
   // Preconditions
   CUTE_STATIC_ASSERT(is_static<ASmemLayout>::value);
   CUTE_STATIC_ASSERT(is_static<BSmemLayout>::value);
@@ -423,11 +423,6 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     bulk_tmem_epilogue.data() = tmem_base_ptr;
     int thread_idx = threadIdx.x % 128;
 
-    const size_t rng_offest = thread_idx;
-    RNG rng(rng_seed, rng_sequence, rng_offest); // seed, sequence, offset
-    curanddx::uniform_bits dist;
-    uint4 random_uint4 = uint4{0, 0, 0, 0};
-
     Tensor tCgC = thr_mma_epilogue.partition_C(gC_mn);                             // (MMA,MMA_M,MMA_N)                             // (MMA,MMA_M,MMA_N)
     auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_,_,_,_0{}));
     auto tiled_r2g = make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TC>{}, tiled_t2r);
@@ -502,6 +497,13 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(tC_rRowSFD_frg(_0{}));
         auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(qpvscale_ups, global_decode_scale);
         auto acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+
+        // Initialize RNG for tile
+        const size_t rng_sequence
+          = thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
+        RNG rng(rng_seed, rng_sequence, rng_offset);
+        curanddx::uniform_bits dist;
+        uint4 random_uint4 = uint4{0, 0, 0, 0};
 
         CUTLASS_PRAGMA_UNROLL
         for (int v = 0; v < NumVecs; v++) {
