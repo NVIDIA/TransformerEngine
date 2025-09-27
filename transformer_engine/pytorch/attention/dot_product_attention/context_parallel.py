@@ -3421,7 +3421,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-        dout = dout.view(*ctx.out_shape)
+            dout = dout.view(ctx.batch_size, -1, *dout.shape[-2:])
+        else:
+            dout = dout.view(*ctx.out_shape)
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
         dout = flash_attn_a2a_communicate(
