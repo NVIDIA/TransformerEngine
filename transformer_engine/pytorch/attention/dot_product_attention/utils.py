@@ -1987,7 +1987,9 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             tensors = [q, k, v]
             if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
                 amax_q, amax_k, amax_v = [x.abs().max() for x in tensors]
-                qkv_quantizer.amax = torch.maximum(torch.maximum(amax_q, amax_k), amax_v).to(dtype=torch.float32)
+                qkv_quantizer.amax = torch.maximum(torch.maximum(amax_q, amax_k), amax_v).to(
+                    dtype=torch.float32
+                )
                 qkv_quantizer.use_existing_amax = True
             q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in tensors]
         case _:
