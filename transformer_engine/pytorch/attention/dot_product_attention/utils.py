@@ -1923,22 +1923,6 @@ def print_quantizers(
     dP_quantizer,
 ):
     """Print the type and scale/amax of attention quantizers"""
-    names = [
-        "QKV_quantizer",
-        "S_quantizer",
-        "O_quantizer",
-        "dO_quantizer",
-        "dP_quantizer",
-        "dQKV_quantizer",
-    ]
-    quantizers = [
-        QKV_quantizer,
-        S_quantizer,
-        O_quantizer,
-        dO_quantizer,
-        dP_quantizer,
-        dQKV_quantizer,
-    ]
     if (
         _to_print
         and _to_print_layer == layer_number
@@ -1947,6 +1931,28 @@ def print_quantizers(
             or (dist.is_initialized() and dist.get_rank() == _to_print_rank)
         )
     ):
+        names = [
+            "QKV_quantizer",
+            "S_quantizer",
+            "O_quantizer",
+            "dO_quantizer",
+            "dP_quantizer",
+            "dQKV_quantizer",
+        ]
+        quantizers = [
+            QKV_quantizer,
+            S_quantizer,
+            O_quantizer,
+            dO_quantizer,
+            dP_quantizer,
+            dQKV_quantizer,
+        ]
+        if "forward" in label:
+            names = names[:3]
+            quantizers = quantizers[:3]
+        if "backward" in label:
+            names = names[3:]
+            quantizers = quantizers[3:]
         for i, q in enumerate(quantizers):
             type_str = ""
             if q is None:
