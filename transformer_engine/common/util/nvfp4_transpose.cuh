@@ -360,8 +360,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
   }
 
-  const size_t rng_sequence
-    = threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
+  const size_t rng_sequence =
+      threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
   RNG rng(rng_seed, rng_sequence, rng_offset);
@@ -871,8 +871,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
       return;
     }
   }
-  const size_t rng_sequence
-    = threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
+  const size_t rng_sequence =
+      threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
   RNG rng(rng_seed, rng_sequence, rng_offset);
