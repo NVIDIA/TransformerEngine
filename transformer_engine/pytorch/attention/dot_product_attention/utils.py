@@ -1978,17 +1978,17 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             kv = combine_tensors([k, v], dim)
             tensors = [q, kv]
             if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
-                amax = max([x.abs().max() for x in tensors])
+                amax_q, amax_kv = [x.abs().max() for x in tensors]
+                qkv_quantizer.amax = torch.maximum(amax_q, amax_kv).to(dtype=torch.float32)
                 qkv_quantizer.use_existing_amax = True
-                qkv_quantizer.amax = amax.to(dtype=torch.float32)
             q_fp8, kv_fp8 = [qkv_quantizer(x) for x in tensors]
             k_fp8, v_fp8 = SplitAlongDim.apply(kv_fp8, dim, [1, 1], True)
         case 3:
             tensors = [q, k, v]
             if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
-                amax = max([x.abs().max() for x in tensors])
+                amax_q, amax_k, amax_v = [x.abs().max() for x in tensors]
+                qkv_quantizer.amax = torch.maximum(torch.maximum(amax_q, amax_k), amax_v).to(dtype=torch.float32)
                 qkv_quantizer.use_existing_amax = True
-                qkv_quantizer.amax = amax.to(dtype=torch.float32)
             q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in tensors]
         case _:
             raise RuntimeError("Invalid qkv_layout " + qkv_layout)
