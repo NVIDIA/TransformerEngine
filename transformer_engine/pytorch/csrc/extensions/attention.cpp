@@ -35,22 +35,6 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
       { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
 }
 
-void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
-                                 arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
-                                 at::cuda::getCurrentCUDAStream());
-  });
-}
-
-// extract PhiloxCudaState from CUDA random number generator
-at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl *gen, size_t elts_per_thread) {
-  at::PhiloxCudaState philox_args;
-  std::lock_guard<std::mutex> lock(gen->mutex_);
-  philox_args = gen->philox_cuda_state(elts_per_thread);
-  return philox_args;
-}
-
 }  // namespace
 
 namespace transformer_engine::pytorch {
@@ -198,7 +182,7 @@ std::vector<py::object> fused_attn_fwd(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
-  unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
+  philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
 
   // create auxiliary output tensors

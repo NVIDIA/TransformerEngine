@@ -9,6 +9,7 @@ import datetime
 import os
 import sys
 from functools import wraps
+import math
 
 import transformer_engine.pytorch as te
 import torch
@@ -20,10 +21,15 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    NVFP4BlockScaling,
     Format,
     Recipe,
+    QParams,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.distributed import gather_along_first_dim
 from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
@@ -47,6 +53,14 @@ if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     )
 
 
+def nvfp4_vanilla():
+    nvfp4_recipe = NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = QParams()
+    return nvfp4_recipe
+
+
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "fp8":
@@ -59,6 +73,8 @@ def quantization_recipe() -> Recipe:
         return Float8CurrentScaling()
     if QUANTIZATION == "fp8_block_scaling":
         return Float8BlockScaling()
+    if QUANTIZATION == "nvfp4":
+        return nvfp4_vanilla()
     return te.fp8.get_default_fp8_recipe()
 
 
@@ -96,10 +112,14 @@ def main(argv=None, namespace=None):
     # Quantization scheme
     QUANTIZATION = args.quantization
     global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
-    if QUANTIZATION in ("fp8", "mxfp8"):
+    if QUANTIZATION in ("fp8", "mxfp8", "nvfp4"):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    # For fp8 block scaling, block size is 128,
+    # and to make low precision TP work, input tensor
+    # must be 128x128 divisible to be eligible for
+    # low precision All-Gather when needed
     elif QUANTIZATION == "fp8_block_scaling":
         SEQ_LEN = 128
         BATCH_SIZE = 128
@@ -107,6 +127,7 @@ def main(argv=None, namespace=None):
 
     test_dict = [
         test_quantizer,
+        test_quantized_all_gather,
         test_linear,
         test_layernorm,
         test_layernorm_linear,
@@ -176,6 +197,9 @@ def _get_tolerances(dtype):
     # row parallel & sequence parallel, because we do the all_gather in backward pass
     if QUANTIZATION == "fp8_cs":
         return {"rtol": 0.4, "atol": 0.25}
+    elif QUANTIZATION == "nvfp4":
+        # TODO(zhongboz): investigate why the tolerance is so large
+        return {"rtol": 0.125, "atol": 0.12}
     elif QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
 
@@ -326,22 +350,34 @@ def _alloc_main_grad(model_single_node, model_distributed):
 ###############################################
 #                   Quantizer                 #
 ###############################################
-def _construct_quantizer(quantizer_class, fp8_dtype, device, tp_group, tp_size):
+def _construct_quantizer(quantizer_class, low_precision_dtype, device, tp_group, tp_size):
     """
     quantizer is the reference quantizer on a single GPU.
     quantizer_dist is the distributed quantizer to be tested on multiple GPUs.
     """
     if quantizer_class == Float8CurrentScalingQuantizer:
         quantizer_dist = quantizer_class(
-            fp8_dtype=fp8_dtype,
+            fp8_dtype=low_precision_dtype,
             device=device,
             with_amax_reduction=True,
             amax_reduction_group=tp_group,
         )
         quantizer = quantizer_class(
-            fp8_dtype=fp8_dtype,
+            fp8_dtype=low_precision_dtype,
             device=device,
             with_amax_reduction=False,
+        )
+        return quantizer, quantizer_dist
+    elif quantizer_class == NVFP4Quantizer:
+        quantizer_dist = quantizer_class(
+            fp4_dtype=low_precision_dtype,
+            with_amax_reduction=True,
+            amax_reduction_group=tp_group,
+        )
+        quantizer = quantizer_class(
+            fp4_dtype=low_precision_dtype,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
         )
         return quantizer, quantizer_dist
     else:
@@ -412,6 +448,194 @@ def test_quantizer():
     for input_dtype in input_dtypes:
         for fp8_dtype in fp8_dtypes:
             _test_quantizer(input_dtype, fp8_dtype)
+
+
+############################################
+#            Quantized All-Gather          #
+############################################
+
+
+def _ref_zero_padding_scale_inv(scale_inv, unpadded_shape):
+    """
+    Zero padding the scale_inv.
+    scale_inv shape is the padded shape, but not zero padded
+    unpadded_shape is the original shape before padding
+    """
+    dim0, dim1 = scale_inv.shape
+    unpadded_dim0, unpadded_dim1 = unpadded_shape
+    pad_dim0 = (128 - unpadded_dim0 % 128) % 128
+    pad_dim1 = (4 - unpadded_dim1 % 4) % 4
+    new_dim0 = unpadded_dim0 + pad_dim0
+    new_dim1 = unpadded_dim1 + pad_dim1
+
+    assert dim0 == new_dim0
+    assert dim1 == new_dim1
+
+    # return input if no padding is needed
+    if pad_dim0 == 0 and pad_dim1 == 0:
+        return scale_inv
+
+    # unpad first to remove random bits from torch empty
+    scale_inv = scale_inv[:unpadded_dim0, :unpadded_dim1].contiguous()
+    # using torch padding
+    new_scale_inv = torch.nn.functional.pad(
+        scale_inv, (0, pad_dim1, 0, pad_dim0), mode="constant", value=0
+    )
+
+    assert new_scale_inv.shape == (new_dim0, new_dim1)
+
+    return new_scale_inv
+
+
+def _get_unpadded_scale_inv_shape(input_shape, quantizer_cls, columnwise):
+    """
+    Calculate the unpadded shape of the scale_inv tensor.
+    """
+    M, K = 1, 1
+    M = math.prod(input_shape[:-1])
+    K = input_shape[-1]
+
+    if quantizer_cls == NVFP4Quantizer:
+        if columnwise:
+            outer = K
+            inner = math.ceil(M / NVFP4_BLOCK_SCALING_SIZE)
+            return (outer, inner)
+        else:
+            outer = M
+            inner = math.ceil(K / NVFP4_BLOCK_SCALING_SIZE)
+            return (outer, inner)
+    else:
+        raise ValueError(f"Unsupported quantizer class: {quantizer_cls}")
+
+
+@run_distributed_test()
+def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
+    """Test the quantizer under distributed settings.
+
+    Args:
+        input_dtype (torch.dtype): The data type of the input.
+        low_precision_dtype (tex.DType): The data type of the low precision, can be fp4 or fp8.
+    """
+
+    M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE // 2
+
+    # high precision input
+    x_hp_cpu = torch.randn((M, N), device="cpu").to(input_dtype)
+    # set one element of the input to a very large value, which doesn't live in rank 0 after the split
+    # to test the amax reduction on purpose
+    # x_hp_cpu[M - 1, N - 1] = 1e4
+
+    # get the unpadded shapes
+    unpadded_rowwise_scale_inv_shape = _get_unpadded_scale_inv_shape((M, N), quantizer_cls, False)
+    unpadded_columnwise_scale_inv_shape = _get_unpadded_scale_inv_shape((M, N), quantizer_cls, True)
+
+    # rank 0 takes the full copy and quantize with GPU 0 for verification
+    if WORLD_RANK == 0:
+        x_hp_rank0 = x_hp_cpu.clone().detach().requires_grad_(True).to("cuda")
+    x_hp_local_rank = _shard_tensor(x_hp_cpu, WORLD_SIZE, 0)[WORLD_RANK]
+
+    # Create quantizers
+    quantizer, quantizer_dist = _construct_quantizer(
+        quantizer_cls, low_precision_dtype, x_hp_local_rank.device, NCCL_WORLD, WORLD_SIZE
+    )
+
+    # quantize the entire input
+    if WORLD_RANK == 0:
+        x_low_precision_single = quantizer(x_hp_rank0)
+
+    # run all-gather with a quantizer as input for quantized all-gather
+    x_low_precision_total, _ = gather_along_first_dim(
+        x_hp_local_rank, NCCL_WORLD, async_op=False, quantizer=quantizer_dist
+    )
+
+    # check the outputs
+    if WORLD_RANK == 0:
+        # assert all data and scale_inv are the same
+        torch.testing.assert_close(
+            x_low_precision_single._rowwise_data,
+            x_low_precision_total._rowwise_data,
+            rtol=0.0,
+            atol=0.0,
+        )
+        # check the rowwise scale without any padding
+        unpad_dim0, unpad_dim1 = unpadded_rowwise_scale_inv_shape
+        unpadded_rowwise_scale_inv_ref = x_low_precision_single._rowwise_scale_inv[
+            :unpad_dim0, :unpad_dim1
+        ]
+        unpadded_rowwise_scale_inv = x_low_precision_total._rowwise_scale_inv[
+            :unpad_dim0, :unpad_dim1
+        ]
+        torch.testing.assert_close(
+            unpadded_rowwise_scale_inv_ref,
+            unpadded_rowwise_scale_inv,
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            _ref_zero_padding_scale_inv(
+                x_low_precision_single._rowwise_scale_inv, unpadded_rowwise_scale_inv_shape
+            ),
+            _ref_zero_padding_scale_inv(
+                x_low_precision_total._rowwise_scale_inv, unpadded_rowwise_scale_inv_shape
+            ),
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            x_low_precision_single._columnwise_data,
+            x_low_precision_total._columnwise_data,
+            rtol=0.0,
+            atol=0.0,
+        )
+        unpad_dim0, unpad_dim1 = unpadded_columnwise_scale_inv_shape
+        unpadded_columnwise_scale_inv_ref = x_low_precision_single._columnwise_scale_inv[
+            :unpad_dim0, :unpad_dim1
+        ]
+        unpadded_columnwise_scale_inv = x_low_precision_total._columnwise_scale_inv[
+            :unpad_dim0, :unpad_dim1
+        ]
+        torch.testing.assert_close(
+            unpadded_columnwise_scale_inv_ref,
+            unpadded_columnwise_scale_inv,
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            _ref_zero_padding_scale_inv(
+                x_low_precision_single._columnwise_scale_inv, unpadded_columnwise_scale_inv_shape
+            ),
+            _ref_zero_padding_scale_inv(
+                x_low_precision_total._columnwise_scale_inv, unpadded_columnwise_scale_inv_shape
+            ),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+def test_quantized_all_gather():
+    """
+    Run quantized all-gather tests with various configurations.
+    """
+    # skip this test for other quantization schemes
+    is_nvfp4 = QUANTIZATION == "nvfp4"
+    # add other recipes for testing if needed
+    if not is_nvfp4:
+        return
+
+    input_dtypes = [torch.bfloat16]
+    fp4_dtype = [tex.DType.kFloat4E2M1]
+    fp8_dtype = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+    quantizer_cls_nvfp4 = [NVFP4Quantizer]
+    # add FP8 quantizers if needed
+    quantizer_cls_fp8 = []
+
+    low_precisio_dtypes = fp4_dtype if is_nvfp4 else fp8_dtype
+    quantizer_cls_list = quantizer_cls_nvfp4 if is_nvfp4 else quantizer_cls_fp8
+
+    for quantizer_cls in quantizer_cls_list:
+        for input_dtype in input_dtypes:
+            for low_precision_dtype in low_precisio_dtypes:
+                _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls)
 
 
 ############################################
@@ -514,10 +738,11 @@ def test_linear():
         {"init_method": _constant},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
-        {"params_dtype": torch.float16},
+        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"delay_wgrad_compute": True},
         {"save_original_input": True},
     ]
+
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
             continue
@@ -693,11 +918,12 @@ def test_layernorm_linear():
         {"init_method": _constant},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
-        {"params_dtype": torch.float16},
+        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
         {"delay_wgrad_compute": True},
     ]
+
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:
             for sequence_parallel in [False, True]:
@@ -799,7 +1025,7 @@ def test_layernorm_mlp():
         {"normalization": "RMSNorm"},
         {"zero_centered_gamma": True},
         {"bias": False},
-        {"params_dtype": torch.float16},
+        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"activation": "relu"},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
@@ -897,7 +1123,7 @@ def test_transformer_layer():
         {"fuse_qkv_params": True, "fuse_wgrad_accumulation": True},
         {"qkv_weight_interleaved": False},
         {"bias": False},
-        {"params_dtype": torch.float16},
+        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]

@@ -598,6 +598,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
             ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
+
         // const size_t scale_idx_gate = scale_idx + scale_stride_colwise / 2;
         const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
@@ -828,6 +829,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ptx::mul_cvt_2x(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
           }
         }
+
         const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
         const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
@@ -947,6 +949,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
+
           const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
@@ -1260,7 +1263,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
       }
     }
-  } else if (is_mxfp_scaling(output->scaling_mode)) {
+  } else if (is_mxfp8_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {

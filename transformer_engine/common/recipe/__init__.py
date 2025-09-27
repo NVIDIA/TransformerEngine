@@ -4,7 +4,6 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
-import warnings
 import os
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
@@ -23,9 +22,12 @@ class _FormatHelper(NamedTuple):
 class Format(Enum):
     """
     Supported FP8 formats.
+    Supported FP4 formats.
 
     Values
     ------
+    E2M1 :
+          All FP4 tensors are in e2m1 format
     E4M3 :
           All FP8 tensors are in e4m3 format
     E5M2 :
@@ -35,6 +37,7 @@ class Format(Enum):
             FP8 tensors in the backward pass are in e5m2 format
     """
 
+    E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
     E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
@@ -42,9 +45,13 @@ class Format(Enum):
 
 @dataclass(frozen=True)
 class MMParams:
-    """for pytorch as an example, _scaled_mm use_fast_accum = (not use_split_accumulator)
-    apply split accumulator or not, turning it on will increase accuracy but impact gemm performance,
-    so only turn it on for certain gemms
+    """Matrix multiplication options.
+
+    Parameters
+    ----------
+    use_split_accumulator : bool, default = `True`
+        Use FP8 fast accumulation on Hopper or Ada. For more details,
+        see CUBLASLT_MATMUL_DESC_FAST_ACCUM option for cublasLtMatmul.
     """
 
     use_split_accumulator: bool = True
@@ -55,16 +62,34 @@ class QParams:
     """Quantization parameters.
     power_2_scale: use power of 2 scale parameter
     amax_epsilon: optional minimum value of abs max
+    random_hadamard_transform: whether to use random hadamard transform
+    stochastic_rounding: whether to use stocastic rounding
     """
 
     power_2_scale: bool = False
     amax_epsilon: float = 0.0
+    random_hadamard_transform: bool = False
+    stochastic_rounding: bool = False
+    fp4_2d_quantization: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            f"Qparams(\npower_2_scale={self.power_2_scale},\n"
+            f"amax_epsilon={self.amax_epsilon},\n"
+            f"random_hadamard_transform={self.random_hadamard_transform},\n"
+            f"stochastic_rounding={self.stochastic_rounding},\n"
+            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
+        )
 
 
 class Recipe:
     """
     Base recipe class.
     """
+
+    def nvfp4(self):
+        """Whether the given recipe is NVFP4 1D block scaling."""
+        return isinstance(self, NVFP4BlockScaling)
 
     def mxfp8(self):
         """Whether the given recipe is MXFP8 block scaling."""
@@ -350,4 +375,85 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class NVFP4BlockScaling(Recipe):
+    """
+    Use the NVFP4 scaling strategy.
+
+    This is a 2-level block scaling strategy. In level 1, each group of
+    16 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E4M3 (4 bits of exponent,
+    3 bits of mantissa). In level 2, a global per tensor FP32 scaling
+    factor is used to scale the entire tensor.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    Parameters
+    ----------
+    fp4_format : {Format.E2M1}, default = Format.E2M1
+             FP4 data type.
+    fp8_format : {Format.E4M3}, default = Format.E4M3
+             FP8 data type. Only E4M3 is supported.
+    fp8_dpa: bool, default = `False`
+             FP8 dot product attention. Not yet supported.
+    fp8_mha: bool, default = `False`
+             FP8 multi-head attention. Not yet supported.
+    """
+
+    # Configuration envvars
+    disable_rht: bool = os.getenv("NVTE_NVFP4_DISABLE_RHT", "0") == "1"
+    disable_stochastic_rounding: bool = (
+        os.getenv("NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING", "0") == "1"
+    )
+    disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
+
+    fp4_format: Format = Format.E2M1
+    fp8_format: Format = Format.E4M3
+
+    # Not applying quantization to attention for now
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
+        assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+
+        # Quantization params
+        # Note: RHT is currently only applied to column-wise usage so that
+        # it can be used for wgrad GEMM.
+        self.fp4_quant_fwd_inp = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=False,
+            fp4_2d_quantization=False,
+        )
+        self.fp4_quant_fwd_weight = QParams(
+            random_hadamard_transform=False,
+            stochastic_rounding=False,
+            fp4_2d_quantization=not self.disable_2d_quantization,
+        )
+        self.fp4_quant_bwd_grad = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=not self.disable_stochastic_rounding,
+            fp4_2d_quantization=False,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"fp4_format={str(self.fp4_format).split('.')[1]}, "
+            f"fp8_format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}, "
+            f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
+            f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
+            f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
         )

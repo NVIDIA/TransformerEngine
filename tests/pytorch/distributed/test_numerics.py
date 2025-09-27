@@ -31,6 +31,7 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
+nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(4, torch.cuda.device_count())
@@ -51,7 +52,9 @@ def _run_test(quantization):
 all_boolean = [True, False]
 
 
-@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "fp8_cs", "fp8_block_scaling"])
+@pytest.mark.parametrize(
+    "quantization", [None, "fp8", "mxfp8", "fp8_cs", "fp8_block_scaling", "nvfp4"]
+)
 def test_distributed(quantization):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -61,4 +64,6 @@ def test_distributed(quantization):
         pytest.skip(reason_for_no_mxfp8)
     if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     _run_test(quantization)

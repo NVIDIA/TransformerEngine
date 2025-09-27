@@ -31,6 +31,7 @@
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/hadamard_transform.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
@@ -194,20 +195,25 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  /*! @brief Construct a high precision tensor giving it this quantizer's amax
-
-  Note: this member function also zeros out the amax, as it is meant to be used in conjunction with
-        a kernel computing the amax, which might expect the amax to be initialized to zero
+  /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
+   *
+   * The amax is zeroed out. Most TE kernels that output amax expect
+   * amax to be initialized to zero.
   */
-  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                  DType dtype);
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      const std::vector<size_t>& shape, DType dtype);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
-  /*! @brief Convert to a quantized data format avoiding amax computation */
+  /*! @brief Quantize to FP8, skipping local amax computation
+   *
+   * The quantizer's amax pointer is assumed to already hold the local
+   * amax. The amax may still be reduced across the amax reduction
+   * group.
+   */
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
@@ -275,6 +281,60 @@ class MXFP8Quantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+};
+
+class NVFP4Quantizer : public Quantizer {
+ public:
+  // fp4 dtype
+  DType dtype;
+  // amax reduction for low precision FP4 AG
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  // random hadamard transform
+  bool with_rht;
+  bool with_post_rht_amax;
+  // 2D block scaling
+  bool with_2d_quantization;
+  bool stochastic_rounding;
+
+  int rht_matrix_random_sign_mask_t;
+  at::Tensor rht_matrix;
+
+  explicit NVFP4Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_NVFP4_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer
+   *
+   * The amax is zeroed out. Most TE kernels that output amax expect
+   * amax to be initialized to zero.
+   */
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+      TensorWrapper& quantized_tensor, DType dtype);
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  /*! @brief Quantize to NVFP4, skipping local amax computation
+   *
+   * The input tensor's amax pointer is assumed to already hold the
+   * local amax. The amax may still be reduced across the amax
+   * reduction group.
+   */
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+
+ private:
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
@@ -420,6 +480,15 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 size_t roundup(const size_t value, const size_t multiple);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
+
+std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
+
+// unpack the PhiloxCudaState into CUDA tensor
+void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);
+
+// extract PhiloxCudaState from CUDA random number generator
+at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_per_thread);
+
 }  // namespace transformer_engine::pytorch
 
 namespace std {

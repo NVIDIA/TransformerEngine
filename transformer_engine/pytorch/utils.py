@@ -11,8 +11,8 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-import transformer_engine.pytorch.cpp_extensions as ext
 from . import torch_version
+from .tensor.quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -441,6 +441,16 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
         )
 
 
+def assert_dim_for_all_gather(
+    tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
+) -> None:
+    """Assert that tensor dimensions are supported for all-gather"""
+    if with_all_gather:
+        assert quantizer.is_quantizable(tensor), (
+            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
+        )
+
+
 def is_bf16_compatible() -> None:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
@@ -460,6 +470,8 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
+    import transformer_engine.pytorch.cpp_extensions as ext
+
     encoded_version = ext.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
