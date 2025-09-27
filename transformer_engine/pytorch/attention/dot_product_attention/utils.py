@@ -1966,7 +1966,6 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
-    src_nominal_dtype = q.dtype
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
