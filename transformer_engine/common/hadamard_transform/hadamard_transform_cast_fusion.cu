@@ -628,9 +628,9 @@ rht_gemm_ntt_w_sfc(int m, int n,
 
   // Assert checks on tile sizes -- no predication
   NVTE_CHECK(M % size<0>(cga_tile_shape) == 0,
-             "Inner dimension must be divisible by ", size<0>(cga_tile_shape), " but got ", M, ".");
+             "Inner dimension must be divisible by ", static_cast<size_t>(size<0>(cga_tile_shape)), " but got ", M, ".");
   NVTE_CHECK(N % (4 * size<1>(cga_tile_shape)) == 0,
-             "Outer dimension must be divisible by ", 4 * size<1>(cga_tile_shape),
+             "Outer dimension must be divisible by ", 4 * static_cast<size_t>(size<1>(cga_tile_shape)),
              " but got ", N, ".");
 
   uint32_t tiles = size(ceil_div(M, get<0>(cga_tile_shape))) * size(ceil_div(N, k_tile_size));
