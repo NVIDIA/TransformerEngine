@@ -66,8 +66,13 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
     general_gemm,
@@ -152,6 +157,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
+
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
 
@@ -428,8 +436,14 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
+                mark_not_offload(
+                    weightmat,
+                    weight,
+                    bias,
+                    ln_weight,
+                    ln_bias,
+                )
                 ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
                 if ctx.grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
                     # get back torch.Tensor. Torch rips off the Parameter wrapper.
@@ -462,6 +476,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.main_grad_func = weight.get_main_grad
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
+            ctx.quantized_weight = quantized_weight
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -536,6 +551,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 mu,
                 rsigma,
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
