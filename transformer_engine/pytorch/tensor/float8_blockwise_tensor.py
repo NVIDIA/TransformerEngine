@@ -798,3 +798,25 @@ class _ReshapeFunc(torch.autograd.Function):
             )
             return dgrad, None
         return grad.view(ctx.shape), None
+
+
+def get_columnwise_fp8_tensor(rowwise_tensor, requires_grad=False):
+    columnwise_scale_inv = rowwise_tensor._rowwise_scale_inv.transpose(-2, -1).contiguous()
+    M, N = rowwise_tensor.shape
+    columnwise_data = torch.empty(
+        (N, M), device=rowwise_tensor.device, dtype=rowwise_tensor._rowwise_data.dtype
+    )
+    tex.fp8_transpose(rowwise_tensor._rowwise_data, rowwise_tensor._fp8_dtype, out=columnwise_data)
+
+    return Float8BlockwiseQTensor(
+        shape=rowwise_tensor.shape,
+        dtype=rowwise_tensor.dtype,
+        fp8_dtype=rowwise_tensor._fp8_dtype,
+        rowwise_data=None,
+        rowwise_scale_inv=None,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        quantizer=rowwise_tensor._quantizer,
+        is_2D_scaled=True,
+        requires_grad=requires_grad,
+    )
