@@ -209,6 +209,7 @@ class DelayedScaling(Recipe):
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
+            f"reduce_amax={self.reduce_amax}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
