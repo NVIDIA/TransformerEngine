@@ -37,7 +37,18 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
   // Convert input tensor to C++ object
   auto input_contiguous = tensor.contiguous();
-  const auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  // Set amax if use_existing_amax = true (only valid for CS)
+  bool use_existing_amax = false;
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    use_existing_amax = quantizer.attr("use_existing_amax").cast<bool>();
+    if (use_existing_amax) {
+      const at::Tensor &amax = quantizer.attr("amax").cast<at::Tensor>();
+      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                         getTensorShape(amax));
+    }
+  }
 
   // Initialize output tensor
   TensorWrapper output_cpp;
@@ -57,7 +68,12 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   // Perform quantization
-  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  if (use_existing_amax) {
+    auto *quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+    quantizer_cs->quantize_with_amax(input_cpp, output_cpp, noop_flag_cpp);
+  } else {
+    quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  }
 
   return output_py;
 }
