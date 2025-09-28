@@ -1268,6 +1268,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Wrap parameters in QuantizedTensor if needed
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             high_precision_init_val = None
+            fp8_weight_on_demand_transpose = (
+                FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+            )
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
 
                 # Keep high-precision values on CPU if needed
@@ -1278,7 +1281,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
-                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=torch.is_grad_enabled() and not fp8_weight_on_demand_transpose,
+                )
                 quantizer.internal = False
 
                 # Quantize parameter

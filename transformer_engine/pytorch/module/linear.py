@@ -68,6 +68,7 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import get_columnwise_fp8_tensor
 
 __all__ = ["Linear"]
 
@@ -127,6 +128,10 @@ class _Linear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         assert inp.shape[-1] == in_features, "GEMM not possible"
+
+        fp8_weight_on_demand_transpose = (
+            FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose()
+        )
 
         # Configure tensor-parallel communication
         tp_world_size = get_distributed_world_size(tp_group)
@@ -241,7 +246,9 @@ class _Linear(torch.autograd.Function):
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
                     )
-                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                weight_quantizer.set_usage(
+                    rowwise=True, columnwise=columnwise_usage and not fp8_weight_on_demand_transpose
+                )
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -385,7 +392,10 @@ class _Linear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensorBase):
+                if (
+                    isinstance(weightmat, QuantizedTensorBase)
+                    and not fp8_weight_on_demand_transpose
+                ):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -673,7 +683,10 @@ class _Linear(torch.autograd.Function):
                 if isinstance(grad_output, QuantizedTensorBase):
                     grad_output.update_usage(rowwise_usage=True)
                 if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
-                    weight_fp8.update_usage(columnwise_usage=True)
+                    if FP8GlobalStateManager.is_blockwise_fp8_weight_on_demand_transpose():
+                        weight_fp8 = get_columnwise_fp8_tensor(weight_fp8)
+                    else:
+                        weight_fp8.update_usage(columnwise_usage=True)
 
                 # Choose whether to use GEMM kernel with split accumulator
                 use_split_accumulator = _2X_ACC_DGRAD
