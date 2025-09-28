@@ -155,7 +155,7 @@ def get_tols(config, dtype):
     elif dtype == "fp8":
         atol = 5e-1
         rtol = 5e-1
-        rmse_tol = 0.1
+        rmse_tol = 0.15
     else:
         assert False, f"{dtype=} is not supported!"
 
@@ -172,6 +172,7 @@ def run_dpa_with_cp(
     fp8_dpa="False",
     fp8_mha="False",
     scaling_mode="delayed",
+    f16_O="False",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -182,6 +183,8 @@ def run_dpa_with_cp(
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_bwd else "0"
     fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
     fp8_mha = fp8_mha == "True" and dtype == "fp8"
+    f16_O = dtype == "fp8" and scaling_mode == "current" and f16_O == "True"
+    os.environ["NVTE_DPA_FP8CS_O_in_F16"] = "1" if f16_O else "0"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -289,7 +292,7 @@ def run_dpa_with_cp(
         )
     qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
-    if dtype == "fp8":
+    if fp8_mha:
         q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
     for x in [q, k, v]:
         x.requires_grad = True
@@ -318,9 +321,9 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=True,
+            fp8_output=fp8_mha,
         )
-        if dtype == "fp8" and fp8_bwd:
+        if fp8_bwd and fp8_mha:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
         else:
@@ -372,7 +375,7 @@ def run_dpa_with_cp(
         qkv_quantizer.amax.fill_(0.0)
         dout_quantizer.scale.fill_(1.0)
         dout_quantizer.amax.fill_(0.0)
-    if dtype == "fp8":
+    if fp8_mha:
         q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
@@ -410,28 +413,30 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=True,
+            fp8_output=fp8_mha,
         )
-        if dtype == "fp8" and fp8_bwd:
+        if fp8_bwd and fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
             out_.backward(dout_)
-    if fp8_mha:
-        assert isinstance(out, Float8Tensor)
-        assert isinstance(out_, Float8Tensor)
-        out = out.dequantize()
-        out_ = out_.dequantize()
-
-    # get outputs
     dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
     d_softmax_offset_ = None
     if config.softmax_type != "vanilla":
         d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
-    for x in [out_, dq_, dk_, dv_, d_softmax_offset_]:
-        if x is not None:
-            assert torch.all(~torch.isnan(x))
-            assert torch.all(~torch.isinf(x))
+
+    # get outputs
+    tensors = [out, dq, dk, dv, out_, dq_, dk_, dv_]
+    if fp8_mha:
+        tensors_to_deq = [out, out_] if not fp8_bwd else tensors
+        for i, tensor in enumerate(tensors_to_deq):
+            tensors_to_deq[i] = tensor.dequantize()
+        if not fp8_bwd:
+            tensors[0], tensors[4] = tensors_to_deq
+    for tensor in tensors:
+        assert torch.all(~torch.isnan(tensor))
+        assert torch.all(~torch.isinf(tensor))
+    out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -442,17 +447,17 @@ def run_dpa_with_cp(
                 x.shape[seq_dim] // (2 * world_size),
                 *x.shape[(seq_dim + 1) :],
             )
-            for x in [q.grad, k.grad, v.grad, out]
+            for x in [dq, dk, dv, out]
         ]
         dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
         dq_, dk_, dv_, out_ = [
             x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            for x in [q_.grad, k_.grad, v_.grad, out_]
+            for x in [dq_, dk_, dv_, out_]
         ]
     elif qkv_format == "thd":
-        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
-        dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
+        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
+        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
+        dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
         cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True

@@ -3290,8 +3290,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out_ = out_.view(-1, batch_size, *out_.shape[-2:])
 
         if fp8 and use_fused_attention:
-            if fp8_recipe.float8_current_scaling() and is_output_fp8:
-                out_fp8 = O_quantizer(out_)
+            if fp8_recipe.float8_current_scaling():
+                out_f16 = out_
+                if is_output_fp8:
+                    out_fp8 = O_quantizer(out_)
             if fp8_recipe.delayed():
                 out_fp8 = Float8Tensor.make_like(out_fp8, data=out_, dtype=fwd_nominal_dtype)
                 if not is_output_fp8:
@@ -3311,8 +3313,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 fp8_tensors = (q_part, k_part, v_part, out_part)
         elif fp8:
-            if is_input_fp8:
-                q_part, k_part, v_part = combine_and_dequantize(qkv_layout, q_part, k_part, v_part)
+            q_part, k_part, v_part = combine_and_dequantize(qkv_layout, q_part, k_part, v_part)
             f16_tensors = (q_part, k_part, v_part, out_part)
         else:
             f16_tensors = (q_part, k_part, v_part, out_part)
