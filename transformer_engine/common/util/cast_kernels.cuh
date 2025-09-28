@@ -2095,46 +2095,44 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
+      // Check tensors
+      CheckNoopTensor(*noop_tensor, "cast_noop");
+      CheckInputTensor(*input_tensor, "input");
+      CheckOutputTensor(*output_tensor, "output", false);
+
+      // Choose kernel
       int32_t rows = input_tensor->flat_first_dim();
       int32_t cols = input_tensor->flat_last_dim();
-      bool use_2d_quantization = quant_config_cpp.nvfp4_2d_quantization;
       auto dtype = input_tensor->dtype();
-
-#define _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4()                                                 \
-  quantize_transpose_vector_blockwise_fp4(                                                         \
-      /*input=*/input_tensor->data, /*global_amax=*/global_amax,                                   \
-      /*scale_inv=*/output_tensor->scale_inv, /*scale_inv_t=*/output_tensor->columnwise_scale_inv, \
-      /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,                 \
-      /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),                             \
-      /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,             \
-      /*swizzled_scale=*/false, /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,  \
-      /*rng_state=*/quant_config_cpp.rng_state,                                                    \
-      /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,                              \
-      /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
-
       bool use_optimized_kernel = dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0 &&
                                   output_tensor->has_data();
 
+      // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {
-        if (use_2d_quantization) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         } else {
           nvfp4_quantize_transpose<IS_ACT, ParamOP, OP, false>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
-
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
-
         NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
                    "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_NVFP4_1D_SCALING for "
                    "2D quantization");
-
-        _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4();
+        quantize_transpose_vector_blockwise_fp4(
+          /*input=*/input_tensor->data, /*global_amax=*/global_amax,
+          /*scale_inv=*/output_tensor->scale_inv, /*scale_inv_t=*/output_tensor->columnwise_scale_inv,
+          /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
+          /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
+          /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
+          /*swizzled_scale=*/false, /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
+          /*rng_state=*/quant_config_cpp.rng_state,
+          /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
+          /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
       }
-#undef _QUANTIZE_TRANSPOSE_VECTOR_BLOCKWISE_FP4
       break;
     }
     case NVTE_BLOCK_SCALING_2D: {
