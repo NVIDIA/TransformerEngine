@@ -2123,15 +2123,17 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                    "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_NVFP4_1D_SCALING for "
                    "2D quantization");
         quantize_transpose_vector_blockwise_fp4(
-          /*input=*/input_tensor->data, /*global_amax=*/global_amax,
-          /*scale_inv=*/output_tensor->scale_inv, /*scale_inv_t=*/output_tensor->columnwise_scale_inv,
-          /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
-          /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
-          /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
-          /*swizzled_scale=*/false, /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
-          /*rng_state=*/quant_config_cpp.rng_state,
-          /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-          /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*input=*/input_tensor->data, /*global_amax=*/global_amax,
+            /*scale_inv=*/output_tensor->scale_inv,
+            /*scale_inv_t=*/output_tensor->columnwise_scale_inv,
+            /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
+            /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
+            /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
+            /*swizzled_scale=*/false,
+            /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
+            /*rng_state=*/quant_config_cpp.rng_state,
+            /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
+            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
       }
       break;
     }
