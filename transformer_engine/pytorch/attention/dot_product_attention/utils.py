@@ -371,11 +371,19 @@ def get_attention_backend(
         if _dpa_fp8_recipe != "":
             # config new recipe if switched
             run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
-            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
-            run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1"))
-            run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1"))
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+                "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
+            )
+            run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
+                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+            )
+            run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
+                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+            )
         # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
-        run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0"))
+        run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
+            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+        )
     logger.debug("Running with config=%s", run_config)
 
     # The following sections check if `FlashAttention` supports the provided attention params,
