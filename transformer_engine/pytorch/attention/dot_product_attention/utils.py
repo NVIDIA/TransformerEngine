@@ -1957,8 +1957,7 @@ def print_quantizers(
         _to_print
         and _print_layer == layer_number
         and (
-            not dist.is_initialized()
-            or (dist.is_initialized() and dist.get_rank() == _print_rank)
+            not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == _print_rank)
         )
     ):
         names = [

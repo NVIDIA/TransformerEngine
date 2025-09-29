@@ -3700,9 +3700,9 @@ def attn_forward_func_with_cp(
     """
 
     if cp_comm_type == "a2a+p2p":
-        assert isinstance(cp_group, list) and len(cp_group) == 2, (
-            "CP implementation a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
-        )
+        assert (
+            isinstance(cp_group, list) and len(cp_group) == 2
+        ), "CP implementation a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
         assert (
             qkv_format != "thd"
         ), f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
