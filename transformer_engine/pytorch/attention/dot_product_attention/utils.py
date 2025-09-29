@@ -364,7 +364,7 @@ def get_attention_backend(
         # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
-        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0"))
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
         # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
         _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
         run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe

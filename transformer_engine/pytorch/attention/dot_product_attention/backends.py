@@ -136,7 +136,7 @@ else:
     fa_utils.set_flash_attention_3_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
-_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0") == "1"
+_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
 class FP8EmulationFunc(torch.autograd.Function):

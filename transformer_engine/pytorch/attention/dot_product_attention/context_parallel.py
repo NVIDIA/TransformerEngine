@@ -53,7 +53,7 @@ _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
-_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "0") == "1"
+_dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
 def flash_attn_p2p_communicate(
