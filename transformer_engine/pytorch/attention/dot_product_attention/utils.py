@@ -467,6 +467,9 @@ def get_attention_backend(
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
+        if use_fused_attention and fp8_meta["recipe"].float8_current_scaling() and device_compute_capability < (10, 0):
+            logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
+            use_fused_attention = False
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
