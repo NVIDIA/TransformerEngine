@@ -13,6 +13,13 @@ function test_fail() {
     echo "Error: sub-test failed: $1"
 }
 
+function print_cudnn_version() {
+    python3 -c "
+from transformer_engine.pytorch.utils import get_cudnn_version
+print(f'cuDNN version: {get_cudnn_version()}')
+"
+}
+
 RET=0
 FAILED_CASES=""
 
@@ -27,6 +34,8 @@ pip uninstall -y nvdlfw-inspect
 pip install git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+
+print_cudnn_version
 
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_numerics.xml $TE_PATH/tests/pytorch/distributed/test_numerics.py || test_fail "test_numerics.py"
