@@ -113,7 +113,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
-  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
+             !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
@@ -336,7 +337,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
-  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
+             !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
