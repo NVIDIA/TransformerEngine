@@ -1677,7 +1677,8 @@ class FusedAttention(torch.nn.Module):
         if isinstance(cp_group, dist_group_type):
             cp_size = get_distributed_world_size(cp_group)
         elif isinstance(cp_group, list):
-            cp_size = get_distributed_world_size(cp_group[0])
+            for group in cp_group:
+                cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
         # get q_format and kv_format for training and inference

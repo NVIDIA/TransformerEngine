@@ -227,7 +227,7 @@ def run_dpa_with_cp(
         )
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = [cp_comm_group]
+        cp_comm_sub_groups = []
         for sub_ranks in cp_comm_sub_ranks:
             sub_group = dist.new_group(sub_ranks, backend="nccl")
             if rank in sub_ranks:

@@ -1104,16 +1104,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}")
 
         # set up CP groups for cp_comm_type = {'p2p', 'a2a+p2p'}
-        cp_group_global = None
         cp_group_a2a = None
         cp_size_a2a = 1
         rank_a2a = 0
         if isinstance(cp_group, list):
-            cp_group_global = cp_group[0]
-            cp_group_a2a = cp_group[1]
+            cp_group_a2a = cp_group[0]
             cp_size_a2a = get_distributed_world_size(cp_group_a2a)
             rank_a2a = get_distributed_rank(cp_group_a2a)
-            cp_group = cp_group[2]
+            cp_group = cp_group[1]
         cp_size = get_distributed_world_size(cp_group)
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
@@ -1768,7 +1766,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
 
-        ctx.cp_group_global = cp_group_global
         ctx.cp_group_a2a = cp_group_a2a
         ctx.cp_size_a2a = cp_size_a2a
         ctx.rank_a2a = rank_a2a
@@ -3703,9 +3700,8 @@ def attn_forward_func_with_cp(
     """
 
     if cp_comm_type == "a2a+p2p":
-        assert isinstance(cp_group, list) and len(cp_group) == 3, (
-            "CP implementation a2a+p2p requires three CP groups, [global_cp_group, a2a_cp_group,"
-            " p2p_cp_group]!"
+        assert isinstance(cp_group, list) and len(cp_group) == 2, (
+            "CP implementation a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
         )
         assert (
             qkv_format != "thd"
@@ -3713,11 +3709,11 @@ def attn_forward_func_with_cp(
         assert (
             attn_bias_type == "no_bias"
         ), f"{attn_bias_type} bias type is not supported with hierarchical CP implementation yet!"
-        if get_distributed_world_size(cp_group[1]) == 1:
-            cp_group = cp_group[2]
-            cp_comm_type = "p2p"
-        elif get_distributed_world_size(cp_group[2]) == 1:
+        if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
+            cp_comm_type = "p2p"
+        elif get_distributed_world_size(cp_group[1]) == 1:
+            cp_group = cp_group[0]
             cp_comm_type = "a2a"
     else:
         assert isinstance(
