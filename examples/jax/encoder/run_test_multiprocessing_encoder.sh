@@ -58,7 +58,11 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
     # For process 0: show live output AND save to log file using tee
     if [ $i -eq 0 ]; then
       echo "=== Live output from process 0 ==="
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" -vs --junitxml=$XML_LOG_DIR/multiprocessing_encoder_${TEST_CASE}.xml "$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py::TestEncoder::$TEST_CASE" --num-process=$NUM_GPUS --process-id=$i 2>&1 | tee "$LOG_FILE" &
+      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+        -vs --junitxml=$XML_LOG_DIR/multiprocessing_encoder_${TEST_CASE}.xml \
+        "$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py::TestEncoder::$TEST_CASE" \
+        --num-process=$NUM_GPUS \
+        --process-id=$i 2>&1 | tee "$LOG_FILE" &
       PID=$!
       PIDS+=($PID)
     else
