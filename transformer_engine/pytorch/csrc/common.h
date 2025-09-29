@@ -199,8 +199,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   Note: this member function also zeros out the amax, as it is meant to be used in conjunction with
         a kernel computing the amax, which might expect the amax to be initialized to zero
   */
-  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                  DType dtype, std::optional<at::Tensor> data = std::nullopt);
+  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(
+      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
