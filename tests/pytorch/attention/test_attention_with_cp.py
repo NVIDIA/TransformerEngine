@@ -77,6 +77,12 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
+    test_id = int(model.split('_')[2])
+    if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
+        pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
+    if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
+        pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
+
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and qkv_format == "thd":
@@ -194,6 +200,16 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
+    test_id = int(model.split('_')[2])
+    if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
+        pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
+    if test_id % 2 == 0 and dtype == "fp8" and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd):
+        pytest.skip(f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to reduce CI time")
+    if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
+        pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
+    if test_id % 2 == 1 and dtype == "fp8" and ((not fp8_dpa and scaling_mode == "current") or not fp8_bwd):
+        pytest.skip(f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce CI time")
+
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
