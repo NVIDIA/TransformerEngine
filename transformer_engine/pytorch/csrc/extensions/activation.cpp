@@ -17,7 +17,6 @@ using DFuncType = void(const NVTETensor, const NVTETensor, NVTETensor, cudaStrea
 template <FuncType* act_func, auto act_func_with_args, typename... Args>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1,
                              Args&&... args) {
-
   init_extension();
 
   // Input tensor
@@ -58,12 +57,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       // Compute activation in high precision, then quantize
       {
         auto [temp_nvte, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
-        NVTE_SCOPED_GIL_RELEASE({ 
+        NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
-          act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
-                             stream);
-          }
-          else{
+            act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
+                               stream);
+          } else {
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
@@ -73,12 +71,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     case Impl::FULLY_FUSED:
       // Compute activation directly
       {
-        NVTE_SCOPED_GIL_RELEASE({ 
+        NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
             act_func_with_args(input_nvte.data(), out_nvte.data(), std::forward<Args>(args)...,
-                             stream);
-          }
-          else{
+                               stream);
+          } else {
             act_func(input_nvte.data(), out_nvte.data(), stream);
           }
         });
@@ -91,12 +88,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
         auto [temp_nvte, _] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype);
-        NVTE_SCOPED_GIL_RELEASE({ 
+        NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
-          act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
-                             stream);
-          }
-          else{
+            act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
+                               stream);
+          } else {
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
@@ -110,12 +106,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             static_cast<NVFP4Quantizer*>(quantizer_cpp.get());  // Already checked cast is valid
         auto [temp_nvte, _] =
             nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, fake_dtype);
-        NVTE_SCOPED_GIL_RELEASE({ 
+        NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
-          act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
-                             stream);
-          }
-          else{
+            act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
+                               stream);
+          } else {
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
@@ -175,13 +170,12 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto [temp_nvte, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (dact_func == nullptr) {
-          dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
-                              std::forward<Args>(args)..., stream);
-        } else {
-          dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
-                    stream);
-        }
+          if constexpr (dact_func == nullptr) {
+            dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
+                                std::forward<Args>(args)..., stream);
+          } else {
+            dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
+          }
         });
         quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
       }
@@ -190,13 +184,12 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       // Compute activation backward directly
       {
         NVTE_SCOPED_GIL_RELEASE({
-        if constexpr (dact_func == nullptr) {
-          dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), grad_input_nvte.data(),
-                              std::forward<Args>(args)..., stream);
-        } else {
-          dact_func(grad_output_nvte.data(), input_nvte.data(), grad_input_nvte.data(),
-                    stream);
-        }
+          if constexpr (dact_func == nullptr) {
+            dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), grad_input_nvte.data(),
+                                std::forward<Args>(args)..., stream);
+          } else {
+            dact_func(grad_output_nvte.data(), input_nvte.data(), grad_input_nvte.data(), stream);
+          }
         });
       }
       break;
@@ -212,10 +205,8 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
                                 std::forward<Args>(args)..., stream);
           } else {
-            dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
-                      stream);
+            dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
-            
         });
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
@@ -227,13 +218,12 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             static_cast<NVFP4Quantizer*>(quantizer_cpp.get());  // Already checked cast is valid
         auto [temp_nvte, _] =
             nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(grad_input_nvte, fake_dtype);
-        NVTE_SCOPED_GIL_RELEASE({ 
+        NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
             dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
                                 std::forward<Args>(args)..., stream);
           } else {
-            dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
-                      stream);
+            dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
@@ -247,7 +237,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
 }
 }  // namespace
 
-  /* GELU and variants */
+/* GELU and variants */
 py::object gelu(const at::Tensor& input, py::handle quantizer) {
   return activation_helper<nvte_gelu, nullptr>(input, quantizer);
 }
@@ -340,4 +330,3 @@ py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::
 }
 
 }  // namespace transformer_engine::pytorch
-
