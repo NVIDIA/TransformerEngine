@@ -27,7 +27,12 @@ def main():
         "--cuda_graph", action="store_true", help="Use CUDA Graphs (pass this flag to enable)"
     )
     parser.add_argument("--validate", action="store_true", help="Validate allreduce ubnext")
-    parser.add_argument("--comm_type", type=str, default="sym", help="Comm type: none,nccl,sym,ub,ubnext,ubnext_add,ubnext_rms")
+    parser.add_argument(
+        "--comm_type",
+        type=str,
+        default="sym",
+        help="Comm type: none,nccl,sym,ub,ubnext,ubnext_add,ubnext_rms",
+    )
     parser.add_argument(
         "--sym_type",
         type=str,
@@ -141,7 +146,11 @@ def main():
 
     fc1 = te.LayerNormLinear(
         in_features=args.hidden_size,
-        out_features=args.hidden_size*args.fc_factor//tp_size if args.comm_type == "none" else args.hidden_size*args.fc_factor,
+        out_features=(
+            args.hidden_size * args.fc_factor // tp_size
+            if args.comm_type == "none"
+            else args.hidden_size * args.fc_factor
+        ),
         bias=False,
         device=device,
         params_dtype=torch.bfloat16,
@@ -156,7 +165,7 @@ def main():
         ub_overlap_ag=args.comm_type == "ub",
         ub_name="fc1" if args.comm_type == "ub" else None,
     )
-    
+
     if args.comm_type == "ubnext_add_rms":
         proj.layer_norm_weight = fc1.layer_norm_weight.data
     # Create CUDA stream
@@ -167,22 +176,29 @@ def main():
 
     for logbatch in range(int(math.log2(args.batch_size)) + 1):
         batch = 2**logbatch
-        if args.comm_type == "ub":# and batch < tp_size:
-            batch = args.batch_size#tp_size
+        if args.comm_type == "ub":  # and batch < tp_size:
+            batch = args.batch_size  # tp_size
         # Create input tensor
         torch.cuda.synchronize()
         torch.distributed.barrier(group=torch.distributed.group.WORLD)
-        residual = torch.randn(batch//tp_size if args.comm_type == "ub" else batch, args.hidden_size, device=device, dtype=torch.bfloat16)
+        residual = torch.randn(
+            batch // tp_size if args.comm_type == "ub" else batch,
+            args.hidden_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
         inp = torch.randn(batch, args.hidden_size // tp_size, device=device, dtype=torch.bfloat16)
-        
+
         # Warm-up run
         if not args.comm_type.startswith("ubnext_add"):
-            out_proj=proj(inp)
+            out_proj = proj(inp)
             out_proj.add_(residual)
-            out=fc1(out_proj)
+            out = fc1(out_proj)
         else:
-            out=fc1(proj(inp,residual=residual)) # this also allocates distributed internal residual
-            
+            out = fc1(
+                proj(inp, residual=residual)
+            )  # this also allocates distributed internal residual
+
         torch.cuda.synchronize()
         if args.cuda_graph:
             with torch.cuda.stream(stream):
@@ -191,11 +207,11 @@ def main():
 
                 with torch.cuda.graph(graph):
                     if not args.comm_type.startswith("ubnext_add"):
-                        out_proj=proj(inp)
+                        out_proj = proj(inp)
                         out_proj.add_(residual)
-                        out=fc1(out_proj)
+                        out = fc1(out_proj)
                     else:
-                        out=fc1(proj(inp))
+                        out = fc1(proj(inp))
 
             # Warm-up the graph
             for _ in range(5):
@@ -215,11 +231,11 @@ def main():
                     graph.replay()
                 else:
                     if not args.comm_type.startswith("ubnext_add"):
-                        out_proj=proj(inp)
+                        out_proj = proj(inp)
                         out_proj.add_(residual)
-                        out=fc1(out_proj)
+                        out = fc1(out_proj)
                     else:
-                        out=fc1(proj(inp))
+                        out = fc1(proj(inp))
 
             torch.cuda.synchronize()
         end_time = time.time()
@@ -227,9 +243,7 @@ def main():
 
         # Calculate and print elapsed time (only on rank 0)
         if myrank == 0:
-            print(
-                f"Batch{batch},{(elapsed/ args.iterations) * 1e6:.4f}"
-            )
+            print(f"Batch{batch},{(elapsed/ args.iterations) * 1e6:.4f}")
         if args.cuda_graph:
             # needed or NCCL would hang
             del graph

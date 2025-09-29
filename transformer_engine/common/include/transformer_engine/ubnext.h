@@ -16,12 +16,17 @@ extern "C" {
 #endif
 
 void allreduce_2shot_mc(int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* mcptr_in,
-                        void* mcptr_out, size_t bytes, void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size, cudaStream_t stream);
+                        void* mcptr_out, size_t bytes, void* residual_in, void* residual_out,
+                        bool fuse_layernorm, void* gamma, float eps, const int hidden_size,
+                        cudaStream_t stream);
 void allreduce_2shot_mc_lamport(int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* ucptr_out,
                                 void* mcptr_in, void* mcptr_out, void* clear_ptr, size_t bytes,
-                                bool poisoned, void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size, cudaStream_t stream);
+                                bool poisoned, void* residual_in, void* residual_out,
+                                bool fuse_layernorm, void* gamma, float eps, const int hidden_size,
+                                cudaStream_t stream);
 void allreduce_2shot_uc(int ranks, int myrank, void* uc0ptr, void* ucptr_in, void* ucptr_out,
-                        size_t bytes, void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size, cudaStream_t stream);
+                        size_t bytes, void* residual_in, void* residual_out, bool fuse_layernorm,
+                        void* gamma, float eps, const int hidden_size, cudaStream_t stream);
 
 #ifdef __cplusplus
 }
