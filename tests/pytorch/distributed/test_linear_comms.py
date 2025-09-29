@@ -32,7 +32,7 @@ def main():
         "--sym_type",
         type=str,
         default="multimem_all_reduce",
-        help="sym type: one_shot, two_shot, multimem_all_reduce, ub_custom",
+        help="sym type: one_shot, two_shot, multimem_all_reduce, ubnext",
     )
     parser.add_argument("--iterations", type=int, default=1000, help="Number of iterations")
     parser.add_argument(
@@ -41,6 +41,8 @@ def main():
         default=None,
         help="Tensor parallelism size (defaults to number of GPUs)",
     )
+    parser.add_argument("--eps", type=float, default=1e-5, help="Epsilon")
+    parser.add_argument("--rmsnorm", action="store_true", help="Use RMSNorm")
     args = parser.parse_args()
 
     # Check CUDA availability and get device count
@@ -109,6 +111,16 @@ def main():
         params_dtype=torch.bfloat16,
     )
 
+    modelnorm = te.RMSNorm(
+        normalized_shape=int(args.out_features),
+        eps=args.eps,
+        device=device,
+        dtype=torch.bfloat16,
+        zero_centered_gamma=False,
+    )
+    residual = torch.randn(args.batch_size, args.out_features, device=device, dtype=torch.bfloat16) if args.rmsnorm else None
+
+    ln_weight = modelnorm.weight.data if args.rmsnorm else None
     if (
         args.comm_type == "sym" and os.environ.get("NVTE_USE_UB_FOR_UBNEXT")
     ) or args.comm_type == "ub":
@@ -134,6 +146,8 @@ def main():
             parallel_mode="row",
             tp_group=torch.distributed.group.WORLD,
             symmetric_ar_type=args.sym_type if args.comm_type == "sym" else None,
+            eps=args.eps,
+            ln_weight=ln_weight,
         )
 
     if args.comm_type == "ub":
@@ -149,6 +163,8 @@ def main():
             sequence_parallel=True,
             ub_overlap_rs=True,
             ub_name="proj",
+            eps=args.eps,
+            ln_weight=ln_weight,
         )
 
     # Create CUDA stream
@@ -165,6 +181,27 @@ def main():
     # Run tensor comparison tests only for symmetric communication
     if args.comm_type == "sym" and args.validate:
 
+        if args.rmsnorm:
+            torch.manual_seed(57)
+            torch.cuda.manual_seed(57)
+            residual = torch.randn(1, args.out_features, dtype=torch.bfloat16, device=device)
+            t = allocator.create_tensor((1,args.out_features,), dtype=torch.bfloat16)
+            #te.cpp_extensions.symm_allocator.ubsymm_free_residual(t)
+            t.fill_(myrank)
+            t_in = t.clone()
+            torch.distributed.all_reduce(t_in)
+            t_in.add_(residual)
+            out1=modelnorm(t_in)
+            out2 = allocator.allreduce_simple(t,hidden_size=args.out_features,residual_in=residual,residual_out=residual,fuse_layernorm=True,eps=args.eps,gamma=modelnorm.weight.data)
+            abs_diff = torch.abs(out1 - out2)
+            max_delta = torch.max(abs_diff).item()
+            num_different = torch.sum(out1 != out2).item()
+            print(f"FUSED RMSNorm Max delta: {max_delta}, num different: {num_different}")
+            if(myrank== 0):
+                print(f"gamma: {modelnorm.weight.data}")
+                print(f"FUSED RMSNorm output: {out1}")
+                print(f"FUSED RMSNorm output: {out2}")
+    
         # Test different tensor sizes from 64 to 1024*1024 elements
         all_max_deltas = []
         all_num_different = []
@@ -240,8 +277,9 @@ def main():
             batch, int(args.in_features / tp_size), device=device, dtype=torch.bfloat16
         )
         # Warm-up run
-        modelseq(inp)
-        modelpar(inp)
+        out=modelseq(inp)
+        modelnorm(out)
+        modelpar(inp,residual=residual)
         torch.cuda.synchronize()
         if args.cuda_graph:
             with torch.cuda.stream(stream):
@@ -250,8 +288,11 @@ def main():
                 gpar = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(gseq):
                     output = modelseq(inp)
+                    if args.rmsnorm:
+                        output.add_(residual[:batch,:args.out_features])
+                        output=modelnorm(output)
                 with torch.cuda.graph(gpar):
-                    output = modelpar(inp)
+                    output = modelpar(inp,residual=residual)
             # Warm-up the graph
             for _ in range(5):
                 gseq.replay()

@@ -54,12 +54,58 @@
 // If we expect that producer will be 2B+ messages behind consumer
 #define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
 
+#define FINAL_MASK 0xffffffff
+template <typename T, int NUM>
+__inline__ __device__ T warpReduceSumV2(T* val)
+{
+#pragma unroll
+    for (int i = 0; i < NUM; i++)
+    {
+#pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1)
+            val[i] += __shfl_xor_sync(FINAL_MASK, val[i], mask, 32);
+    }
+    return (T) (0.0f);
+}
+
+template <typename T, int NUM>
+__inline__ __device__ T blockReduceSumV2(T* val)
+{
+    static __shared__ T shared[NUM][33];
+    int lane = threadIdx.x & 0x1f;
+    int wid = threadIdx.x >> 5;
+
+    warpReduceSumV2<T, NUM>(val);
+
+    if (lane == 0)
+    {
+#pragma unroll
+        for (int i = 0; i < NUM; i++)
+        {
+            shared[i][wid] = val[i];
+        }
+    }
+
+    __syncthreads();
+
+    bool is_mask = threadIdx.x < (blockDim.x / 32.f);
+#pragma unroll
+    for (int i = 0; i < NUM; i++)
+    {
+        val[i] = is_mask ? shared[i][lane] : (T) (0.0f);
+    }
+    warpReduceSumV2<T, NUM>(val);
+    return (T) 0.0f;
+}
+
+template <int UNROLL>
 __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
-    userbuffers_fp16_sum_inplace_gpu_mc(const int RANKS, const int myrank, const int numlines,
-                                        int *uc_flagptr, int *mc_flagptr, float4 *mc_ptr_in,
-                                        float4 *mc_ptr_out) {
+    userbuffers_fp16_sum_inplace_gpu_mc(const int RANKS, const int myrank, const int mylines,
+                                        int *uc_flagptr, int *mc_flagptr, uint4 *mc_ptr_in,
+                                        uint4 *mc_ptr_out, uint4 *residual_in, uint4 *residual_out, xhalf* gamma, float eps, const int hidden_size, bool fuse_layernorm) {
   // flags[3,4,5,6]: reduce_id, sm_sync-local, flag-barrier-1,flag-barrier-2
   int reduce_id;
+  __shared__ float s_variance;
 
   if (threadIdx.x == 0) {
     cudaGridDependencySynchronize();
@@ -86,27 +132,80 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
   }
 
   __syncthreads();
-#define UNROLL_MC 4
-  const int loop_step0 = blockDim.x * gridDim.x * RANKS;
-  const int loop_step = loop_step0 * UNROLL_MC;
-  const int start_elem = threadIdx.x + blockDim.x * (myrank + RANKS * blockIdx.x);
-  const int end_elem = max(start_elem, numlines);
-  const int aligned_elem = ((end_elem - start_elem) / loop_step) * loop_step;
-  const int end_aligned = start_elem + aligned_elem;
 
-  for (int line = start_elem; line < end_aligned; line += loop_step) {
-    uint4 val[UNROLL_MC];
+  const int loop_step0 = blockDim.x;
+  const int loop_step = loop_step0 * UNROLL * gridDim.x;
+  const int start_elem = threadIdx.x + blockDim.x*blockIdx.x*UNROLL;
+  const int end_elem = max(start_elem, mylines);
+  //const int aligned_elem = ((end_elem - start_elem) / loop_step) * loop_step;
+  //const int end_aligned = start_elem + aligned_elem;
+
+  for (int line = start_elem; line < end_elem; line += loop_step) {
+    uint4 val[UNROLL];
+    xhalf *x = reinterpret_cast<xhalf *>(&val[0]);
 #pragma unroll
-    for (int i = 0; i < UNROLL_MC; i++) MULTIMEM_LD(val[i], mc_ptr_in + (line + i * loop_step0))
+    for (int i = 0; i < UNROLL; i++) MULTIMEM_LD(val[i], mc_ptr_in + (line + i * loop_step0))
+    
+    if(residual_in!=nullptr) {
+      for (int i = 0; i < UNROLL; i++) {
+        uint4 resval = residual_in[line+i*loop_step0];
+        xhalf *y = reinterpret_cast<xhalf *>(&resval);
+        #pragma unroll
+          for (int j = 0; j < 8; j++)
+            x[i*8+j] += y[j];
+            if(residual_out!=nullptr)
+              residual_out[line+i*loop_step0]=val[i];
+      }
+    }
+    if(fuse_layernorm) {
+      float local_var_sum = 0.0f;
+      for (int j = 0; j < UNROLL*sizeof(int4) / sizeof(xhalf); j++)
+          local_var_sum +=  (float)(x[j])*(float)(x[j]);
+
+      float packed[1] = {local_var_sum};
+      blockReduceSumV2<float, 1>(packed);
+      float variance = packed[0];
+
+      if (threadIdx.x == 0)
+      {
+          variance = (variance / hidden_size); // Var[x] = E[x²]
+          s_variance = rsqrtf(variance + eps);
+      }
+      __syncthreads();
+    }
+
+    int i=0;
 #pragma unroll
-    for (int i = 0; i < UNROLL_MC; i++) MULTIMEM_ST(val[i], mc_ptr_out + (line + i * loop_step0))
+    for (int g = 0; g < UNROLL; g++) {
+      if(fuse_layernorm) {
+        #pragma unroll
+        for (int j = 0; j < sizeof(int4) / sizeof(xhalf); j++) {
+          x[i] = (xhalf)((float)(x[i]) * s_variance * (float) gamma[(threadIdx.x+g*loop_step0)*sizeof(int4)/sizeof(xhalf)+j]);
+          i++;
+        }
+      }
+      MULTIMEM_ST(val[g], mc_ptr_out + (line + g * loop_step0))
+    }
   }
+  /*
   for (int line = end_aligned; line < end_elem; line += loop_step0) {
     uint4 val;
+    xhalf *x = reinterpret_cast<xhalf *>(&val);
     MULTIMEM_LD(val, mc_ptr_in + (line))
+
+    if(residual_in!=nullptr) {
+      uint4 resval = residual_in[line];
+      xhalf *y = reinterpret_cast<xhalf *>(&resval);
+      #pragma unroll
+      for (int j = 0; j < 8; j++)
+          x[j] += y[j];
+        if(residual_out!=nullptr)
+          residual_out[line]=val;
+    }
+
     MULTIMEM_ST(val, mc_ptr_out + (line))
   }
-
+  */
   __syncthreads();
   if (threadIdx.x != 0) return;
 
@@ -142,11 +241,11 @@ template <int RANKS>
 __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
     userbuffers_fp16_sum_inplace_gpu_uc(const int myrank, const int numlines,
                                         const int lineoffset_in, const int lineoffset_out,
-                                        int *uc_flagptr, void **commbuff) {
+                                        int *uc_flagptr, void **commbuff, uint4 *residual_in, uint4 *residual_out, xhalf* gamma, float eps, const int hidden_size, bool fuse_layernorm) {
   // flags[3,4,5,6]: reduce_id, sm_sync-local, flag-barrier-1,flag-barrier-2
   //NB! uc_flagptr is shifted by ranks*8 for easier flag offsets
   //    while lineoffset is relative to start of reg0
-  __shared__ int4 *userptr[RANKS];
+  __shared__ uint4 *userptr[RANKS];
   __shared__ int lastSM;
   int reduce_id;
 
@@ -157,7 +256,7 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
 
     reduce_id = uc_flagptr[NVTE_UB_FLAG_NVLS2_ID] + 1;
 
-    userptr[threadIdx.x] = (int4 *)rem_flagptr;
+    userptr[threadIdx.x] = (uint4 *)rem_flagptr;
   }
 
   if (threadIdx.x == 0) {
@@ -188,7 +287,7 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
   __syncthreads();
   for (int line = threadIdx.x + blockDim.x * (myrank + RANKS * blockIdx.x); line < numlines;
        line += blockDim.x * gridDim.x * RANKS) {
-    int4 val[RANKS];
+    uint4 val[RANKS];
 
 #pragma unroll
     for (int i = 0; i < RANKS; i++) {
@@ -196,7 +295,7 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
       val[i] = userptr[dest[i]][lineoffset_in + line];
     }
 
-    int4 sum = val[0];
+    uint4 sum = val[0];
     xhalf *s = reinterpret_cast<xhalf *>(&sum);
 
 #pragma unroll
@@ -205,6 +304,17 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
 #pragma unroll
       for (int j = 0; j < 8; j++) s[j] += x[j];
     }
+
+    if(residual_in!=nullptr) {
+      uint4 resval = residual_in[lineoffset_in + line];
+      xhalf *y = reinterpret_cast<xhalf *>(&resval);
+      #pragma unroll
+      for (int j = 0; j < 8; j++)
+          s[j] += y[j];
+        if(residual_out!=nullptr)
+          residual_out[lineoffset_in + line]=sum;
+    }
+
 #pragma unroll
     for (int i = 0; i < RANKS; i++) {
       // int dest = (i+myrank+warp)&(RANKS-1);
@@ -252,12 +362,14 @@ __global__ void memset_int(uint32_t *data, int n, uint32_t val) {
   }
 }
 
+template <int UNROLL>
 __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS) userbuffers_fp16_sum_inplace_gpu_mc_lamport(
-    const int RANKS, const int myrank, const int numlines, int *uc_flagptr, int *mc_flagptr,
-    float4 *mc_ptr_in, float4 *mc_ptr_out, uint4 *uc_ptr_out, uint4 *clear_ptr) {
+    const int RANKS, const int myrank, const int mylines, const int numlines, int *uc_flagptr, int *mc_flagptr,
+    uint4 *mc_ptr_in, uint4 *mc_ptr_out, uint4 *uc_ptr_out, uint4 *clear_ptr, uint4 *residual_in, uint4 *residual_out, xhalf* gamma, float eps, const int hidden_size, bool fuse_layernorm) {
   // flags[0,1,2]: reduce_id, sm_sync-local, flag-barrier
   // those go right after rank UC pointers, but its the CPU caller who should account for it
   int reduce_id;
+  __shared__ float s_variance;
 
   if (threadIdx.x == 0) {
     cudaGridDependencySynchronize();
@@ -291,13 +403,57 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS) userbuffers_fp16_sum_inpla
   }
   __syncthreads();
 
-  const int loop_step0 = blockDim.x * gridDim.x * RANKS;
-  const int start_elem = threadIdx.x + blockDim.x * (myrank + RANKS * blockIdx.x);
+  const int loop_step0 = blockDim.x;
+  const int loop_step = loop_step0 * UNROLL * gridDim.x;
+  const int start_elem = threadIdx.x + blockDim.x*blockIdx.x*UNROLL;
+  const int end_elem = max(start_elem, mylines);
 
-  for (int line = start_elem; line < numlines; line += loop_step0) {
-    uint4 val;
-    MULTIMEM_LD(val, mc_ptr_in + (line))
-    MULTIMEM_ST(val, mc_ptr_out + (line))
+  for (int line = start_elem; line < end_elem; line += loop_step) {
+    uint4 val[UNROLL];
+    xhalf *x = reinterpret_cast<xhalf *>(&val[0]);
+#pragma unroll
+    for (int i = 0; i < UNROLL; i++) MULTIMEM_LD(val[i], mc_ptr_in + (line + i * loop_step0))
+    
+    if(residual_in!=nullptr) {
+      for (int i = 0; i < UNROLL; i++) {
+        uint4 resval = residual_in[line+i*loop_step0];
+        xhalf *y = reinterpret_cast<xhalf *>(&resval);
+        #pragma unroll
+          for (int j = 0; j < 8; j++)
+            x[i*8+j] += y[j];
+            if(residual_out!=nullptr)
+              residual_out[line+i*loop_step0]=val[i];
+      }
+    }
+    if(fuse_layernorm) {
+      float local_var_sum = 0.0f;
+      for (int j = 0; j < UNROLL*sizeof(int4) / sizeof(xhalf); j++)
+          local_var_sum +=  (float)(x[j])*(float)(x[j]);
+
+      float packed[1] = {local_var_sum};
+      blockReduceSumV2<float, 1>(packed);
+      float variance = packed[0];
+
+      if (threadIdx.x == 0)
+      {
+          variance = (variance / hidden_size); // Var[x] = E[x²]
+          s_variance = rsqrtf(variance + eps);
+      }
+      __syncthreads();
+    }
+
+    int i=0;
+#pragma unroll
+    for (int g = 0; g < UNROLL; g++) {
+      if(fuse_layernorm) {
+        #pragma unroll
+        for (int j = 0; j < sizeof(int4) / sizeof(xhalf); j++) {
+          x[i] = (xhalf)((float)(x[i]) * s_variance * (float) gamma[(threadIdx.x+g*loop_step0)*sizeof(int4)/sizeof(xhalf)+j]);
+          i++;
+        }
+      }
+      MULTIMEM_ST(val[g], mc_ptr_out + (line + g * loop_step0))
+    }
   }
 
   for (int line = threadIdx.x + blockDim.x * blockIdx.x; line < numlines;
@@ -343,28 +499,70 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS) userbuffers_fp16_sum_inpla
 
 namespace transformer_engine {
 
+  #define split_tokens(x)                                                  \
+  const int elements = bytes/sizeof(half);                                 \
+  const int elements_per_thread = sizeof(uint4)/sizeof(half);              \
+  int nthreads=1024, nlines=4;                                             \
+  size_t total_bytes = bytes/ranks, start_bytes = myrank*total_bytes;      \
+  int sms=x;                                                               \
+  if(hidden_size) {                                                        \
+    assert(hidden_size<=32768);                                            \
+    assert(elements % hidden_size==0);                                     \
+    assert(hidden_size%elements_per_thread==0);                            \
+    int ntokens = elements/hidden_size;                                    \
+    int my_tokens = ntokens / ranks;                                       \
+    int extra_tokens = ntokens % ranks;                                    \
+    int first_token = myrank*my_tokens;                                    \
+    first_token+= myrank<extra_tokens? myrank : extra_tokens;              \
+    if(myrank<extra_tokens) my_tokens++;                                   \
+    start_bytes = first_token*hidden_size * sizeof(half);                  \
+    total_bytes = my_tokens*hidden_size * sizeof(half);                    \
+    nthreads = hidden_size/elements_per_thread;                            \
+    nlines = 1;                                                            \
+    while (nthreads>1024) {                                                \
+      nlines++;                                                            \
+      assert(nlines<=4);                                                   \
+      if((hidden_size/elements_per_thread)%nlines==0)                      \
+        nthreads=((hidden_size/elements_per_thread))/nlines;               \
+    }                                                                      \
+    if(sms>my_tokens) sms=my_tokens;                                       \
+    if (sms==0) sms=1;                                                     \
+  }                                                                        \
+  bool residual_in_global = residual_in!=nullptr && residual_in!=residual_out && residual_out!=nullptr; // out residual is always local
+
 extern "C" void allreduce_2shot_mc(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
                                    void *mcptr_in, void *mcptr_out, size_t bytes,
+                                   void *residual_in, void *residual_out, bool fuse_layernorm,
+                                   void* gamma, float eps, const int hidden_size,
                                    cudaStream_t stream) {
-  SETUP_LAUNCH_CONFIG(32, 1024, stream, 4, 1);
+  split_tokens(32);
 
-  int arg1 = ranks, arg2 = myrank, arg3 = bytes / 16;
-  void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = mcptr_in,
-       *arg7 = mcptr_out;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, 4, 1);
+
+  int arg1 = ranks, arg2 = myrank, arg3 = total_bytes / sizeof(uint4);
+  void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = mcptr_in+start_bytes,
+       *arg7 = mcptr_out+start_bytes, *arg8 = residual_in_global?residual_in+start_bytes:residual_in, *arg9 = residual_out, *arg10 = gamma;
+  float arg11 = eps; int arg12 = hidden_size; bool arg13 = fuse_layernorm;
   void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4,
-                        (void *)&arg5, (void *)&arg6, (void *)&arg7};
-  CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)(userbuffers_fp16_sum_inplace_gpu_mc), kernelArgs));
+                        (void *)&arg5, (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9, (void *)&arg10, (void *)&arg11, (void *)&arg12, (void *)&arg13};
+  #define call_mc_kernel(x,cond) \
+    if(x==nlines || cond) {CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)(userbuffers_fp16_sum_inplace_gpu_mc<x>), kernelArgs)); return;}
+  call_mc_kernel(1,false);
+  call_mc_kernel(2,false);
+  call_mc_kernel(3,false);
+  call_mc_kernel(4,true);
 }
 
 extern "C" void allreduce_2shot_uc(int ranks, int myrank, void *uc0ptr, void *ucptr_in,
-                                   void *ucptr_out, size_t bytes, cudaStream_t stream) {
+                                   void *ucptr_out, size_t bytes, void *residual_in, void *residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size, cudaStream_t stream) {
   SETUP_LAUNCH_CONFIG(64, 1024, stream, 4, 1);
 
   int arg1 = myrank, arg2 = bytes / 16, arg3 = (int4 *)ucptr_in - (int4 *)uc0ptr,
       arg4 = (int4 *)ucptr_out - (int4 *)uc0ptr;
-  void *arg5 = uc0ptr + (ranks * 8), **arg6 = (void **)uc0ptr;
+  void *arg5 = uc0ptr + (ranks * 8), **arg6 = (void **)uc0ptr, *arg7 = residual_in, *arg8 = residual_out, *arg9 = gamma;
+  float arg10 = eps; int arg11 = hidden_size; bool arg12 = fuse_layernorm;
   void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3,
-                        (void *)&arg4, (void *)&arg5, (void *)&arg6};
+                        (void *)&arg4, (void *)&arg5, (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9, (void *)&arg10, (void *)&arg11, (void *)&arg12};
 #define call_uc_kernel(x) \
   if (x == ranks)         \
     CUDACHECK(            \
@@ -377,6 +575,8 @@ extern "C" void allreduce_2shot_uc(int ranks, int myrank, void *uc0ptr, void *uc
 extern "C" void allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
                                            void *ucptr_out, void *mcptr_in, void *mcptr_out,
                                            void *clear_ptr, size_t bytes, bool poisoned,
+                                           void *residual_in,void* residual_out, bool fuse_layernorm,
+                                           void* gamma, float eps, const int hidden_size,
                                            cudaStream_t stream) {
   if (!poisoned) {
     //user tells us destination was not pre-poisoned, so we need to do it before calling allreduce
@@ -385,14 +585,24 @@ extern "C" void allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, 
     memset_int<<<blocks, threadsPerBlock, 0, stream>>>((uint32_t *)ucptr_out, bytes / 4,
                                                        NVTE_UB_LAMPORT_INT);
   }
-  SETUP_LAUNCH_CONFIG(64, 1024, stream, 4, 1);
+  split_tokens(64);
+  
+  SETUP_LAUNCH_CONFIG(64, nthreads, stream, 4, 1);
 
-  int arg1 = ranks, arg2 = myrank, arg3 = bytes / 16;
-  void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = mcptr_in,
-       *arg7 = mcptr_out, *arg8 = ucptr_out, *arg9 = clear_ptr;
-  void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4, (void *)&arg5,
-                        (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9};
-  CUDACHECK(
-      cudaLaunchKernelExC(&cfg, (void *)(userbuffers_fp16_sum_inplace_gpu_mc_lamport), kernelArgs));
-}
+  int arg1 = ranks, arg2 = myrank, arg3 = total_bytes / sizeof(uint4), arg3a = bytes / sizeof(uint4);
+  void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = mcptr_in+start_bytes,
+       *arg7 = mcptr_out+start_bytes, *arg8 = ucptr_out, *arg9 = clear_ptr, *arg10 = residual_in_global?residual_in+start_bytes:residual_in, *arg11 = residual_out, *arg12 = gamma;
+  float arg13 = eps; int arg14 = hidden_size; bool arg15 = fuse_layernorm;
+  void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg3a, (void *)&arg4, (void *)&arg5,
+                        (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9, (void *)&arg10, (void *)&arg11, (void *)&arg12, (void *)&arg13, (void *)&arg14, (void *)&arg15};
+
+  #define call_mc_lamport_kernel(x,cond) \
+    if(x==nlines || cond) {CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)(userbuffers_fp16_sum_inplace_gpu_mc_lamport<x>), kernelArgs)); return;}
+
+  call_mc_lamport_kernel(1,false);
+  call_mc_lamport_kernel(2,false);
+  call_mc_lamport_kernel(3,false);
+  call_mc_lamport_kernel(4,true);
+  }
+
 }  // namespace transformer_engine

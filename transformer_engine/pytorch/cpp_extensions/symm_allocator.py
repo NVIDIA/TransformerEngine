@@ -7,7 +7,6 @@ from threading import Lock
 import torch.distributed._symmetric_memory as symm_mem
 from ctypes import pythonapi, c_void_p, py_object
 
-
 def to_capsule(ptr):
     # Set the return type to py_object to get a Python object (PyCapsule)
     pythonapi.PyCapsule_New.restype = py_object
@@ -83,6 +82,7 @@ class SymmAllocator:
         else:
             alignment = 2 * 1024 * 1024  # memory is allocated in 2MB pages anyways
             self.pool_size = int((size_bytes + alignment - 1) / alignment) * alignment
+#            symm_mem.set_backend("NCCL")
             self.internal_pool = symm_mem.empty(self.pool_size, dtype=torch.uint8, device=device)
             self.hdl0 = symm_mem.rendezvous(self.internal_pool, dist_group)
             self.mc0_ptr = self.hdl0.multicast_ptr
@@ -101,6 +101,8 @@ class SymmAllocator:
         # Track free segments: (offset, size)
         self.freelist: List[Tuple[int, int]] = [(self.reg0_size, self.pool_size - self.reg0_size)]
         self.nextpoisoned = None
+        self.residual = None
+        self.residual_tokens = 0
         self.tensors = weakref.WeakSet()
         self.lock = Lock()
 
@@ -168,7 +170,7 @@ class SymmAllocator:
         self.tensors.add(tensor)
         return tensor
 
-    def allreduce_uc(self, tensor_in: torch.Tensor) -> torch.Tensor:
+    def allreduce_uc(self, tensor_in: torch.Tensor, hidden_size: int = 0, residual_in: Optional[torch.Tensor] = None,residual_out: Optional[torch.Tensor] = None, fuse_layernorm: bool = False, gamma: Optional[torch.Tensor] = None, eps: Optional[float] = None) -> torch.Tensor:
         """Performs in-place allreduce on the given SymmTensor using best algo"""
         assert tensor_in.device == self.device, "Tensor device mismatch with allocator device"
 
@@ -188,10 +190,16 @@ class SymmAllocator:
             to_capsule(ucptr_in),
             to_capsule(ucptr_in),  # out
             nbytes,
+            to_capsule(residual_in.data_ptr()) if residual_in is not None else None,
+            to_capsule(residual_out.data_ptr()) if residual_out is not None else None,
+            fuse_layernorm,
+            to_capsule(gamma.data_ptr()) if gamma is not None else None,
+            eps if eps is not None else 0.0,
+            hidden_size
         )
         return tensor_in
 
-    def allreduce(self, tensor_in: torch.Tensor) -> torch.Tensor:
+    def allreduce_simple(self, tensor_in: torch.Tensor, hidden_size: int = 0, residual_in: Optional[torch.Tensor] = None,residual_out: Optional[torch.Tensor] = None, fuse_layernorm: bool = False, gamma: Optional[torch.Tensor] = None, eps: Optional[float] = None) -> torch.Tensor:
         """Performs in-place allreduce on the given SymmTensor using best algo"""
         assert tensor_in.device == self.device, "Tensor device mismatch with allocator device"
 
@@ -212,10 +220,16 @@ class SymmAllocator:
             to_capsule(mcptr_in),
             to_capsule(mcptr_in),  # out
             nbytes,
+            to_capsule(residual_in.data_ptr()) if residual_in is not None else None,
+            to_capsule(residual_out.data_ptr()) if residual_out is not None else None,
+            fuse_layernorm,
+            to_capsule(gamma.data_ptr()) if gamma is not None else None,
+            eps if eps is not None else 0.0,
+            hidden_size
         )
         return tensor_in
 
-    def allreduce_lamport(self, tensor_in: torch.Tensor) -> torch.Tensor:
+    def allreduce_lamport(self, tensor_in: torch.Tensor, hidden_size: int = 0, residual_in: Optional[torch.Tensor] = None,residual_out: Optional[torch.Tensor] = None, fuse_layernorm: bool = False, gamma: Optional[torch.Tensor] = None, eps: Optional[float] = None) -> torch.Tensor:
         """
         Performs allreduce using 2-shot multicast Lamport variant:
         - Takes `tensor_in` as input (SymmTensor).
@@ -225,7 +239,7 @@ class SymmAllocator:
         """
         assert tensor_in.device == self.device, "Tensor device mismatch with allocator device"
         if self.mc0_ptr is None or self.mc0_ptr == 0:
-            return self.allreduce_uc(tensor_in)
+            return self.allreduce_uc(tensor_in,hidden_size,residual_in,residual_out,fuse_layernorm, gamma, eps)
         from transformer_engine_torch import allreduce_2shot_mc_lamport
 
         # Allocate output tensor of same shape/dtype
@@ -239,7 +253,7 @@ class SymmAllocator:
             tensor_out = self.create_tensor(tensor_in.shape, tensor_in.dtype)
             poisonedout = False
         if tensor_out is None:
-            return self.allreduce(tensor_in)
+            return self.allreduce_simple(tensor_in,hidden_size,residual_in,residual_out,fuse_layernorm, gamma, eps)
 
         # alllcate potential output for next allreduce (speculative) and poison it now
         self.nextpoisoned = self.create_tensor(tensor_in.shape, tensor_in.dtype)
@@ -266,6 +280,12 @@ class SymmAllocator:
             to_capsule(self.nextpoisoned.data_ptr()) if self.nextpoisoned is not None else None,
             nbytes,
             poisonedout,
+            to_capsule(residual_in.data_ptr()) if residual_in is not None else None,
+            to_capsule(residual_out.data_ptr()) if residual_out is not None else None,
+            fuse_layernorm,
+            to_capsule(gamma.data_ptr()) if gamma is not None else None,
+            eps if eps is not None else 0.0,
+            hidden_size
         )
 
         return tensor_out
@@ -276,7 +296,7 @@ _allocator_map: Dict[torch.distributed.group, Tuple[int, "SymmAllocator"]] = {}
 
 def ubsymm_request_allocator(
     dist_group: torch.distributed.group,
-    shape: Optional[Tuple[int, ...]] = None,
+    shape: Optional[torch.Size] = None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     if shape is not None:
@@ -298,7 +318,7 @@ def ubsymm_request_allocator(
 
 
 def ubsymm_get_sym_tensor(
-    shape: Tuple[int, ...], dtype: torch.dtype, dist_group: torch.distributed.group
+    shape: torch.Size, dtype: torch.dtype, dist_group: torch.distributed.group
 ) -> torch.Tensor:
     if dtype != torch.bfloat16:
         return None  # Unsupported dtype, do fallback to nccl
@@ -318,5 +338,52 @@ def ubsymm_get_sym_tensor(
     return allocator.create_tensor(shape, dtype)
 
 
-def ubsymm_allreduce(tensor_in: SymmTensor) -> SymmTensor:
-    return tensor_in._allocator.allreduce_lamport(tensor_in)
+def ubsymm_allreduce(tensor_in: SymmTensor,residual_global: Optional[torch.Tensor] = None, gamma: Optional[torch.Tensor] = None, eps: Optional[float] = None) -> SymmTensor:
+    """
+    Performs allreduce on the given SymmTensor using best algo
+    Four modes:
+     standalone allreduce: no residual, no layernorm (residual_global passed by user, both eps and gamma=None)
+     first PROJ layer: layernorm fused, global residual in, internal residual out (residual_global passed by user, both eps and gamma not None)
+        this allocates internal residual if it wasnt allocated previously or token count is different from previous allreduce
+     middle layers: layernorm fused, internal residual in, internal residual out (residual_global=None, both eps and gamma not None)
+     Last FC2 layer: no layernorm, internal residual in, no residual out(layer output is actually the global residual) (residual_global=None, fboth eps and gamma=None)
+       this is different from standalone once there is no internal residual allocated
+    """
+    fuse_layernorm = gamma is not None and eps is not None
+    internal_residual = tensor_in._allocator.residual
+    num_ranks = tensor_in._allocator.world_size
+    hidden_size = tensor_in.shape[-1] if fuse_layernorm or internal_residual is not None or residual_global is not None else tensor_in.numel() // num_ranks
+    num_tokens = tensor_in.numel() // hidden_size
+    myrank = tensor_in._allocator.myrank
+    if residual_global is not None and (internal_residual is None or tensor_in._allocator.residual_tokens != num_tokens):
+        my_tokens = num_tokens // num_ranks
+        extra_tokens = num_tokens % num_ranks
+        first_token = myrank*my_tokens
+        if myrank < extra_tokens:
+            my_tokens += 1
+            first_token += myrank
+        else:
+            first_token += extra_tokens
+        if my_tokens == 0:
+            my_tokens = 1 #avoid empty residual
+        if tensor_in._allocator.residual is not None:
+            del tensor_in._allocator.residual
+        tensor_in._allocator.residual = torch.empty(my_tokens*hidden_size, dtype=tensor_in.dtype, device=tensor_in.device)
+        tensor_in._allocator.residual_tokens = num_tokens
+        internal_residual = tensor_in._allocator.residual
+
+    residual_in = residual_global if residual_global is not None else internal_residual
+
+    residual_out = internal_residual if fuse_layernorm else None #without layernorm new full residual is output of allreduce
+    if tensor_in.numel() > 1048576:
+        return tensor_in._allocator.allreduce_simple(tensor_in,hidden_size,residual_in,residual_out,fuse_layernorm, gamma, eps)
+    else:
+        return tensor_in._allocator.allreduce_lamport(tensor_in,hidden_size,residual_in,residual_out,fuse_layernorm, gamma, eps)
+
+
+def ubsymm_free_residual(tensor_in: SymmTensor):
+    if tensor_in._allocator.residual is not None:
+        del tensor_in._allocator.residual
+        tensor_in._allocator.residual_tokens = 0
+        tensor_in._allocator.residual = None
+        
