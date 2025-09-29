@@ -12,6 +12,8 @@
 #include <cudnn.h>
 #include <nvrtc.h>
 
+#include "nccl.h"
+
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
 #endif  // NVTE_WITH_CUBLASMP
@@ -103,5 +105,13 @@
   } while (false)
 
 #endif  // NVTE_WITH_CUBLASMP
+
+#define NVTE_CHECK_NCCL(expr)                                                 \
+  do {                                                                        \
+    const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
+    if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
+      NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
+    }                                                                         \
+  } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
