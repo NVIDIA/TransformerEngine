@@ -377,18 +377,13 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_tensor_with_amax(
-    const std::vector<size_t>& shape, DType dtype) {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data) {
   amax.zero_();
-  auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
-  out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
-                   getTensorShape(amax));
-  return {std::move(out_cpp), std::move(out_py)};
-}
-
-std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_tensor_with_amax(
-    const std::vector<size_t>& shape, DType dtype, at::Tensor data) {
-  amax.zero_();
-  auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype, data);
+  auto out = data.has_value()
+    ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
+    : NoneQuantizer(py::none()).create_tensor(shape, dtype);
+  TensorWrapper out_cpp = std::move(out.first);
+  py::object out_py = std::move(out.second);
   out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
                    getTensorShape(amax));
   return {std::move(out_cpp), std::move(out_py)};
