@@ -1331,7 +1331,9 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
-        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes"))(
+        prim_out = jax.jit(
+            tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
+        )(
             lhs,
             rhs,
             group_sizes,

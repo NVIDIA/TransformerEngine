@@ -1288,7 +1288,9 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         )
         return out
 
+
 register_primitive(GroupedGemmCopySizesPrimitive)
+
 
 class GroupedGemmPrimitive(BasePrimitive):
     """
