@@ -225,6 +225,9 @@ class CommOverlapBase : public CommOverlapCore {
 
   void bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
                                 cudaStream_t stream_main) override;
+
+  // initialize ubnext buffer and return multicast pointer for allreduce
+  uintptr_t init_ubnext();
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {
