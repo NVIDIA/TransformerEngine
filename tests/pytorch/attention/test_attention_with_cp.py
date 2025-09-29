@@ -27,6 +27,8 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
+test_basic = False
+
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
@@ -63,12 +65,19 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
     return args
 
 
+dtypes = ["bf16", "fp16"]
+qkv_formats = ["bshd", "sbhd", "thd"]
+cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+if test_basic:
+    model_configs_flash_attn = {"cp_1_0": model_configs_flash_attn["cp_1_0"]}
+    dtypes = ["bf16"]
+    qkv_formats = ["sbhd", "thd"]
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
-@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
+@pytest.mark.parametrize("qkv_format", qkv_formats)
+@pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
@@ -77,11 +86,12 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
-    test_id = int(model.split("_")[2])
-    if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
-        pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
-    if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
-        pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
+    if not test_basic:
+        test_id = int(model.split("_")[2])
+        if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
+            pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
+        if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
+            pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
 
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
@@ -168,15 +178,22 @@ model_configs_fused_attn = {
 }
 
 
+dtypes = ["bf16", "fp16", "fp8"]
+qkv_formats = ["bshd", "sbhd", "thd"]
+cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+if test_basic:
+    model_configs_fused_attn = {"cp_1_0": model_configs_fused_attn["cp_1_0"]}
+    dtypes = ["bf16", "fp8"]
+    qkv_formats = ["sbhd", "thd"]
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
-@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
+@pytest.mark.parametrize("qkv_format", qkv_formats)
+@pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("fp8_bwd", [True, False])
-@pytest.mark.parametrize("fp8_mha", [False, True])
-@pytest.mark.parametrize("fp8_dpa", [False, True])
+@pytest.mark.parametrize("fp8_mha", [True, False])
+@pytest.mark.parametrize("fp8_dpa", [True, False])
 @pytest.mark.parametrize("scaling_mode", [None, "delayed", "current"])
 @pytest.mark.parametrize("f16_O", [True, False])
 def test_cp_with_fused_attention(
@@ -200,25 +217,26 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
-    test_id = int(model.split("_")[2])
-    if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
-        pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
-    if test_id % 2 == 0 and dtype == "fp8" and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd):
-        pytest.skip(
-            f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to reduce CI"
-            " time"
-        )
-    if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
-        pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
-    if (
-        test_id % 2 == 1
-        and dtype == "fp8"
-        and ((not fp8_dpa and scaling_mode == "current") or not fp8_bwd)
-    ):
-        pytest.skip(
-            f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce CI"
-            " time"
-        )
+    if not test_basic:
+        test_id = int(model.split("_")[2])
+        if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
+            pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
+        if test_id % 2 == 0 and dtype == "fp8" and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd):
+            pytest.skip(
+                f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to reduce CI"
+                " time"
+            )
+        if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
+            pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
+        if (
+            test_id % 2 == 1
+            and dtype == "fp8"
+            and ((not fp8_dpa and scaling_mode == "current") or not fp8_bwd)
+        ):
+            pytest.skip(
+                f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce CI"
+                " time"
+            )
 
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
