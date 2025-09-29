@@ -4,6 +4,10 @@
 
 NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
+: ${TE_PATH:=/opt/transformerengine}
+: ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
+
 # Check if NVLINK is supported before running tests
 echo "*** Checking NVLINK support***"
 NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
@@ -69,7 +73,8 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
       # For process 0: show live output AND save to log file using tee
       echo "=== Live output from process 0 ==="
       pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-        -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
+        -vs --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_FILE}.xml \
+        "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i 2>&1 | tee "$LOG_FILE" &
       PID=$!
@@ -94,8 +99,11 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
   elif grep -q "FAILED" "${TEST_FILE}_gpu_0.log"; then
     echo "... $TEST_FILE FAILED"
     HAS_FAILURE=1
-  else
+  elif grep -q "PASSED" "${TEST_FILE}_gpu_0.log"; then
     echo "... $TEST_FILE PASSED"
+  else
+    echo "... $TEST_FILE INVALID"
+    HAS_FAILURE=1
   fi
 
   # Remove the log files after processing them
