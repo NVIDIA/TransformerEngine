@@ -87,49 +87,66 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
-# Attention layers and linear layers may use different fp8 recipes. Users can use multiple/nested fp8_autocasts
-# to customize the recipes for different layers, or use one fp8_autocast to control the recipe for all
-# non-attention layers and the following environment variables to control the recipe for attention.
-# FP8DS/FP8CS/NVFP4 linear + FP16/BF16 attention:
-#   pass FP8DS/FP8CS/NVFP4 to fp8_autocast()
-#   export NVTE_DPA_FP8_RECIPE = "F16"
-# FP8DS linear + FP8DS attention:
-#   pass FP8DS to fp8_autocast()
-# FP8CS linear + FP8DS attention:
-#   pass FP8CS to fp8_autocast(); attention FP8DS will reuse the fp8_format, fp8_dpa, fp8_mha from linear FP8CS
-#   export NVTE_DPA_FP8_RECIPE = "DelayedScaling"
-#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
-#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
-#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
-# NVFP4 linear + FP8DS attention:
-#   pass NVFP4 to fp8_autocast(); attention FP8DS will reuse the fp8_dpa, fp8_mha from linear NVFP4, not fp8_format
-#   export NVTE_DPA_FP8_RECIPE = "DelayedScaling"
-#   export NVTE_DPA_FP8_FORMAT = "HYBRID"
-#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
-#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
-#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
-# FP8DS linear + FP8CS attention:
-#   pass FP8DS to fp8_autocast(); attention will reuse linear FP8DS for S, dP tensors, and
-#   construct FP8CS for QKV, O, dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS
-# FP8CS linear + FP8CS attention:
-#   pass FP8CS to fp8_autocast(); attention will reuse linear FP8CS for QKV, O, dO, dQKV tensors, and
-#   construct FP8DS for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and these variables
-#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
-#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
-#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
-# NVFP4 linear + FP8CS attention:
-#   pass NVFP4 to fp8_autocast(); attention FP8CS will reuse the fp8_dpa, fp8_mha from linear NVFP4, not fp8_format
-#   export NVTE_DPA_FP8_RECIPE = "Float8CurrentScaling"
-#   export NVTE_DPA_FP8_FORMAT = "HYBRID"
-#   export NVTE_DPA_FP8DS_AMAX_ALGO = most_recent
-#   export NVTE_DPA_FP8DS_AMAX_HISTLEN = 1
-#   export NVTE_DPA_FP8DS_REDUCE_AMAX = 1
+"""
+This feature is **experimental** and subject to change.
+
+Some models may use different FP8 recipes for their linear layers and attention layers. To support this,
+users can either use multiple, nested fp8_autocast() contexts to assign a distinct recipe for each layer,
+or use a single fp8_autocast() for the non-attention layers and configure the recipe for the attention
+layers as follows.
+
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| Linear            | Attention | Configuration                                                                     |
++===================+===========+===================================================================================+
+| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to fp8_autocast();                                     |
+|                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS             | FP8DS     | Pass FP8DS to fp8_autocast();                                                     |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8CS             | FP8DS     | Pass FP8CS to fp8_autocast();                                                     |
+|                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8DS     | Pass NVFP4 to fp8_autocast();                                                     |
+|                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS             | FP8CS     | Pass FP8DS to fp8_autocast();                                                     |
+|                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
+|                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8CS             | FP8CS     | Pass FP8CS to fp8_autocast();                                                     |
+|                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
+|                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8CS     | Pass NVFP4 to fp8_autocast();                                                     |
+|                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
+|                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
+|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+"""
 _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
 formats = {"HYBRID": Format.HYBRID, "E4M3": Format.E4M3, "E5M2": Format.E5M2}
 _dpa_fp8_format = formats[os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")]
 _dpa_fp8ds_amax_algo = os.getenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
 _dpa_fp8ds_amax_histlen = int(os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1"))
 _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
+
 
 __all__ = ["DotProductAttention"]
 

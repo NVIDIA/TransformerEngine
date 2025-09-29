@@ -1199,7 +1199,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     qkvo_tensors = (None, None, None, out)
                 else:
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
-            if not is_bwd_fp8:
+            else:
                 if is_input_fp8:
                     q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
                 qkvo_tensors = (q, k, v, out)
@@ -1310,7 +1310,6 @@ class FusedAttnFunc(torch.autograd.Function):
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
 
-        # corner case:
         # d_out is expected to be in FP8 if is_output_fp8=True,
         # but in the case it's not, convert it to FP8 before any operation
         if ctx.fp8 and ctx.is_output_fp8 and not isinstance(d_out, QuantizedTensorBase):
@@ -1455,8 +1454,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
                     dq, dk, dv = dq_, dk_, dv_
+                    is_float8tensor = isinstance(dq_, Float8Tensor)
                     if (
-                        all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_])
+                        is_float8tensor
                         and not ctx.is_input_fp8
                     ):
                         dq, dk, dv = combine_and_dequantize(
@@ -1467,7 +1467,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             src_nominal_dtype=dq_fp8.dtype,
                         )
                     if (
-                        not all(isinstance(x, Float8Tensor) for x in [dq_, dk_, dv_])
+                        not is_float8tensor
                         and ctx.is_input_fp8
                     ):
                         # return dq_fp8, dk_fp8, dv_fp8

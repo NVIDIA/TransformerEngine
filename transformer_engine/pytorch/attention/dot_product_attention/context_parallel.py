@@ -1824,7 +1824,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_label = "transformer_engine.AttnFuncWithCPAndKVP2P.backward"
         nvtx_range_push(f"{nvtx_label}")
 
-        # corner case:
         # dout is expected to be in FP8 if is_output_fp8=True,
         # but in the case it's not, convert it to FP8 before any operation
         if ctx.fp8 and ctx.is_output_fp8 and not isinstance(dout, QuantizedTensorBase):
@@ -3504,7 +3503,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
                 softmax_type=ctx.softmax_type,
             )
-            if all(isinstance(x, Float8Tensor) for x in [dq, dk, dv]):
+            if isinstance(dq, Float8Tensor):
                 dq_fp8, dk_fp8, dv_fp8 = dq, dk, dv
                 dq, dk, dv = [x._data for x in [dq, dk, dv]]
         else:
