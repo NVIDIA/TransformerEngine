@@ -1449,25 +1449,22 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
 
-                    # dq_fp8, dk_fp8, dv_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
-                    #                                       fp8_dtype = tex.DType.kFloat8E4M3
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                    dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
                     dq, dk, dv = dq_, dk_, dv_
                     is_float8tensor = isinstance(dq_, Float8Tensor)
                     if is_float8tensor and not ctx.is_input_fp8:
                         # return in F16
                         dq, dk, dv = combine_and_dequantize(
                             ctx.qkv_layout,
-                            dq_fp8,
-                            dk_fp8,
-                            dv_fp8,
-                            src_nominal_dtype=dq_fp8.dtype,
+                            dq_,
+                            dk_,
+                            dv_,
+                            src_nominal_dtype=dq_.dtype,
                         )
                     if not is_float8tensor and ctx.is_input_fp8:
                         # return in FP8
                         dq, dk, dv = combine_and_quantize(
-                            ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
+                            ctx.qkv_layout, dq_, dk_, dv_, ctx.dQKV_quantizer
                         )
 
                     # print quantizers
