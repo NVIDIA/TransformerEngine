@@ -16,6 +16,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.tensor.utils import is_experimental
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_workspace,
@@ -29,6 +30,7 @@ from .base import (
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
+    assert_dim_for_all_gather,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -53,7 +55,7 @@ from ..distributed import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, WeightGradStore
+from ._common import apply_normalization, noop_cat, WeightGradStore, get_module_quantizers
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorBase,
@@ -135,6 +137,8 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
 
+        with_input_all_gather = parallel_mode == "column" and sequence_parallel
+
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
@@ -144,6 +148,7 @@ class _LayerNormLinear(torch.autograd.Function):
         inputmat = inp
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
+            assert_dim_for_all_gather(inputmat, with_input_all_gather, input_quantizer)
 
         # Cast for native AMP
         nvtx_range_push(f"{nvtx_label}.norm_input_cast")
@@ -157,7 +162,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
-        with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         if debug:  # turn off userbuffers in debug mode
@@ -190,11 +194,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
+        experimental = is_experimental(input_quantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
+            and not experimental
         )
 
         # Apply normalization
@@ -240,7 +246,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if fp8 or debug:
                     quantizer = input_quantizer
-                    if not with_quantized_norm:
+                    # experimental recipe doesn't need to support quantized AG
+                    if not with_quantized_norm and not experimental:
                         ln_out = quantizer(ln_out)
                     quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
@@ -1422,6 +1429,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
         elif recipe.float8_block_scaling():
             self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
+        elif recipe.nvfp4():
+            self._customize_quantizers_nvfp4(fwd, recipe)
         # elif other recipes (mxfp8, etc)
 
     def reset_layer_norm_parameters(self) -> None:
@@ -1526,11 +1535,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = (
-                self._get_quantizers(fp8_output, fp8_grad)
-                if not debug
-                else self._get_debug_quantizers(fp8_output, fp8_grad)
-            )
+            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False
@@ -1754,6 +1759,28 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             # parallel related
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # customize grad_output_quantizer with amax reduction TP group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
+
+    def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on current scaling recipe + layernorm_linear."""
+        assert recipe.nvfp4(), "Incorrect recipe."
+        if fwd:
+            if self.sequence_parallel and self.parallel_mode == "column":
+                # set input_quantizer with amax reduction TP group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_group = self.tp_group
+        else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # customize grad_output_quantizer with amax reduction TP group
                 self.quantizers["scaling_bwd"][
