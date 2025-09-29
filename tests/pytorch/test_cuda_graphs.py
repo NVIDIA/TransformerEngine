@@ -32,12 +32,59 @@ mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 reset_rng_states()
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32),
+    "small": ModelConfig(2, 32, 2, 32),
 }
+
+
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
+
+
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
+
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
+
 
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -278,7 +325,7 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
 def test_make_graphed_callables(
     *,
     module: str,
@@ -295,8 +342,18 @@ def test_make_graphed_callables(
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if fp8 and fp8_recipe.float8_block_scaling() and module == "linear_op":
-        pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
+    if fp8 and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()) and module == "linear_op":
+        pytest.skip(
+            f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
+        )
+    if fp8 and fp8_recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {fp8_recipe.__class__.__name__}"
+            )
+        if fp8_params:
+            pytest.skip("NVFP4 params not supported")
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -334,17 +391,19 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     "module",
     _test_make_graphed_callables_with_fp8_weight_caching_modules,
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
+    dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
 ) -> None:
     test_make_graphed_callables(
         module=module,
-        dtype=torch.float32,
+        dtype=dtype,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,

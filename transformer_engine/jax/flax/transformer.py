@@ -53,6 +53,7 @@ def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[
     return drop_path_shape
 
 
+# TODO(Phuong): move this function to sharding.py
 def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     """
     Extend the given Flax logical axis rules with the predefined TransformerLayer's
