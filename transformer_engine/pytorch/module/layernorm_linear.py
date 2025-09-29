@@ -346,7 +346,12 @@ class _LayerNormLinear(torch.autograd.Function):
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
         symm_out = None
-        if symmetric_ar_type is not None and symmetric_ar_type.startswith("ubnext") and parallel_mode == "row" and tp_size > 1:
+        if (
+            symmetric_ar_type is not None
+            and symmetric_ar_type.startswith("ubnext")
+            and parallel_mode == "row"
+            and tp_size > 1
+        ):
             out_shape_list = list(tuple(inp.shape))
             out_shape_list[-1] = out_features
             symm_out = ubsymm_get_sym_tensor(
@@ -1299,7 +1304,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-            if self.symmetric_ar_type.startswith("ubnext") and parallel_mode == "row" and tp_size > 1:
+            if (
+                self.symmetric_ar_type.startswith("ubnext")
+                and parallel_mode == "row"
+                and tp_size > 1
+            ):
                 ubsymm_request_allocator(
                     self.tp_group,
                     (

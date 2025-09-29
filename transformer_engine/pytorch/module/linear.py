@@ -309,7 +309,12 @@ class _Linear(torch.autograd.Function):
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
         symm_out = None
-        if symmetric_ar_type is not None and symmetric_ar_type.startswith("ubnext") and parallel_mode == "row" and tp_size > 1:
+        if (
+            symmetric_ar_type is not None
+            and symmetric_ar_type.startswith("ubnext")
+            and parallel_mode == "row"
+            and tp_size > 1
+        ):
             out_shape_list = list(tuple(inp.shape))
             out_shape_list[-1] = out_features
             symm_out = ubsymm_get_sym_tensor(
@@ -317,7 +322,10 @@ class _Linear(torch.autograd.Function):
                 activation_dtype,
                 tp_group,
             )
-            assert symm_out is not None or symmetric_ar_type == "ubnext", "No symmetric pool out of space fallback for fused ops, increase NVTE_UB_SYMM_POOL_SIZE"
+            assert symm_out is not None or symmetric_ar_type == "ubnext", (
+                "No symmetric pool out of space fallback for fused ops, increase"
+                " NVTE_UB_SYMM_POOL_SIZE"
+            )
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
@@ -363,7 +371,9 @@ class _Linear(torch.autograd.Function):
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
                     if symm_out is not None:
-                        out = ubsymm_allreduce(symm_out,residual_global=residual,gamma=ln_weight,eps=eps)
+                        out = ubsymm_allreduce(
+                            symm_out, residual_global=residual, gamma=ln_weight, eps=eps
+                        )
                     else:
                         fallback_symmetric = (
                             "multimem_all_reduce"
@@ -1230,7 +1240,11 @@ class Linear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-            if self.symmetric_ar_type.startswith("ubnext") and parallel_mode == "row" and tp_size > 1:
+            if (
+                self.symmetric_ar_type.startswith("ubnext")
+                and parallel_mode == "row"
+                and tp_size > 1
+            ):
                 ubsymm_request_allocator(
                     self.tp_group,
                     (
@@ -1240,7 +1254,7 @@ class Linear(TransformerEngineBaseModule):
                     params_dtype,
                 )
         self.eps = eps
-        self.layer_norm_weight = ln_weight # in general expected to be filled with reference to layernorm_weight from next LayerNormLinear later
+        self.layer_norm_weight = ln_weight  # in general expected to be filled with reference to layernorm_weight from next LayerNormLinear later
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
