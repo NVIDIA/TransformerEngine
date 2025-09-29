@@ -59,10 +59,9 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-# Print debug info
-_to_print = os.getenv("NVTE_PRINT", "0") == "1"
-_to_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
-_to_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
+# print quantizer info for a particular layer on a particular rank
+_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
+_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
@@ -1953,12 +1952,13 @@ def print_quantizers(
     dP_quantizer,
 ):
     """Print the type and scale/amax of attention quantizers"""
+    _to_print = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL == 2
     if (
         _to_print
-        and _to_print_layer == layer_number
+        and _print_layer == layer_number
         and (
             not dist.is_initialized()
-            or (dist.is_initialized() and dist.get_rank() == _to_print_rank)
+            or (dist.is_initialized() and dist.get_rank() == _print_rank)
         )
     ):
         names = [
