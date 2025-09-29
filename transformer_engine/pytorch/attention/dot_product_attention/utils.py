@@ -24,6 +24,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    SoftmaxType,
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -126,10 +127,10 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
+(2) cd flash-attention/ && git checkout 3ba6f82 && git submodule update --init && cd hopper/ && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
-(5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.py"""
+(5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
     v3_warning_printed = False
 
     @staticmethod
@@ -206,6 +207,8 @@ class AttentionParams:
         Attention dropout.
     context_parallel: bool, default = `False`
         Whether context parallelism is used or not.
+    cp_comm_type: str, default = "p2p"
+        The communication type of context parallelism.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
     is_training: bool, default = `True`
@@ -216,6 +219,8 @@ class AttentionParams:
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`
         Inference-related parameters. See InferenceParams for details.
+    softmax_type: str, default = "vanilla"
+        The type of softmax operation. See DotProductAttention for details.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -237,11 +242,13 @@ class AttentionParams:
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
+    cp_comm_type: str = "p2p"
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
 
     def __eq__(self, other):
         """
@@ -308,11 +315,13 @@ def get_attention_backend(
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
+    cp_comm_type = attention_params.cp_comm_type
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
+    softmax_type = attention_params.softmax_type
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -434,8 +443,10 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        if device_compute_capability == (8, 9) and cudnn_version <= (9, 13, 0):
-            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN <= 9.13")
+        # Temporarily disabling fused attention for kv caching for sm89 irrespective of cuDNN version
+        # until the cuDNN bug is resolved
+        if device_compute_capability == (8, 9):
+            logger.debug("Disabling FusedAttention for KV caching for sm89")
             use_fused_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
@@ -477,11 +488,10 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-        ):
-            logger.debug("Disabling FlashAttention as it does not support MLA.")
-        use_flash_attention = False
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
+            use_flash_attention_2 = False
+
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -508,10 +518,41 @@ def get_attention_backend(
                 ".".join([str(i) for i in device_compute_capability]),
             )
         use_flash_attention_2 = False
-    if use_flash_attention_3 and (head_dim_qk > 128 or head_dim_v > 128):
-        if FlashAttentionUtils.v3_is_installed:
-            logger.debug("Disabling FlashAttention 3 for head_dim > 128")
-        use_flash_attention_3 = False
+    if use_flash_attention_3:
+
+        def _is_fa3_supported(num_heads, num_gqa_groups, head_dim_qk, head_dim_v, qkv_dtype):
+            if head_dim_qk > 256 or num_heads % num_gqa_groups != 0:
+                return False
+            if head_dim_qk != head_dim_v:
+                cond1 = 128 < head_dim_qk <= 192
+                cond2 = 96 < head_dim_v <= 128
+                cond3 = head_dim_qk <= 64 and head_dim_v <= 512
+                if not ((cond1 and cond2) or cond3):
+                    return False
+                if head_dim_v > 256 and qkv_dtype not in (torch.bfloat16, torch.float16):
+                    return False
+            return True
+
+        if not _is_fa3_supported(num_heads, num_gqa_groups, head_dim_qk, head_dim_v, qkv_dtype):
+            if FlashAttentionUtils.v3_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention 3 due to unsupported num_heads, num_gqa_groups, "
+                    "head_dim_qk, head_dim_v or qkv_dtype. "
+                    "Supported: head_dim_qk <= 256, and num_heads %% num_gqa_groups = 0, and "
+                    "if head_dim_qk is different from head_dim_v, then "
+                    "(head_dim_qk must in (128, 192] and head_dim_v in (96, 128]) or "
+                    "(head_dim_qk <= 64 and head_dim_v <= 512), and "
+                    "if head_dim_qk is different from head_dim_v and head_dim_v > 256, then "
+                    "qkv_dtype requires fp16 and bf16 data type. "
+                    "Found: num_heads = %s, num_gqa_groups = %s, "
+                    "head_dim_qk = %s, head_dim_v = %s and qkv_dtype = %s.",
+                    num_heads,
+                    num_gqa_groups,
+                    head_dim_qk,
+                    head_dim_v,
+                    qkv_dtype,
+                )
+            use_flash_attention_3 = False
 
     # Filter: QKV layout
     if qkv_format == "thd":
@@ -532,6 +573,51 @@ def get_attention_backend(
     if attention_dropout != 0.0 and use_flash_attention_3:
         logger.debug("Disabling FlashAttention 3 for dropout")
         use_flash_attention_3 = False
+
+    # Filter: Softmax type
+    # context_parallel | softmax_type | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # no               | vanilla      | All
+    # no               | off-by-one   | FusedAttention, UnfusedDotProductAttention
+    # no               | learnable    | FusedAttention, UnfusedDotProductAttention
+    # yes              | vanilla      | FusedAttention, FlashAttention
+    # yes              | off-by-one   | FusedAttention
+    # yes              | learnable    | FusedAttention
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
+        use_flash_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+            )
+            use_unfused_attention = False
+        if qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type
+            )
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s and qkv_format = thd",
+                softmax_type,
+            )
+            use_unfused_attention = False
+        if context_parallel:
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type"
+                " = %s",
+                softmax_type,
+            )
+            use_unfused_attention = False
+            if cp_comm_type != "a2a":
+                logger.debug(
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                    " cp_comm_type = %s",
+                    softmax_type,
+                    cp_comm_type,
+                )
+                use_fused_attention = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -774,6 +860,7 @@ def get_attention_backend(
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
             attention_dropout,
             num_heads,
             num_gqa_groups,

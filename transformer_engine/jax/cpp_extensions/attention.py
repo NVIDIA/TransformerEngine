@@ -8,11 +8,10 @@ import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
 from typing import Optional, Tuple
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
@@ -47,12 +46,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [

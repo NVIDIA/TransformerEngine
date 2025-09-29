@@ -27,6 +27,7 @@ from ..fp8 import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -39,6 +40,7 @@ from ..distributed import (
 from ..constants import dist_group_type
 from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
@@ -76,7 +78,8 @@ class UserBufferQuantizationMode(Enum):
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        return 33_554_432
+        # 32 MiB for NVFP4 GEMM, plus 256 B for misc scales
+        return 32 * 1024 * 1024 + 256
     return 4_194_304
 
 
@@ -757,6 +760,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
+            if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -966,12 +971,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         dtype = inp.dtype
-        for name, param in self.named_parameters():
-            if param is not None:
-                assert dtype == param.dtype, (
-                    "Data types for parameters must match when outside of autocasted region. "
-                    f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-                )
+        if not self.allow_different_data_and_param_types:
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
         self.activation_dtype = dtype
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -1060,6 +1066,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
+        allow_different_data_and_param_types: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
@@ -1067,6 +1074,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.allow_different_data_and_param_types = allow_different_data_and_param_types
         self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
@@ -1215,15 +1223,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, Float8BlockQuantizer):
+                # TODO(ksivaman): Re-add fusion once kernel is available.
+                if isinstance(quantizer, (Float8BlockQuantizer, NVFP4Quantizer)):
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(
-            grad_output,
-            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
-        ):
+        if not isinstance(grad_output, QuantizedTensorBase):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
