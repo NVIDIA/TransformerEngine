@@ -72,6 +72,8 @@ if test_basic:
     model_configs_flash_attn = {"cp_1_0": model_configs_flash_attn["cp_1_0"]}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
+
+
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
@@ -185,6 +187,8 @@ if test_basic:
     model_configs_fused_attn = {"cp_1_0": model_configs_fused_attn["cp_1_0"]}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
@@ -221,10 +225,14 @@ def test_cp_with_fused_attention(
         test_id = int(model.split("_")[2])
         if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
             pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
-        if test_id % 2 == 0 and dtype == "fp8" and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd):
+        if (
+            test_id % 2 == 0
+            and dtype == "fp8"
+            and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd)
+        ):
             pytest.skip(
-                f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to reduce CI"
-                " time"
+                f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to"
+                " reduce CI time"
             )
         if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
             pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
@@ -234,8 +242,8 @@ def test_cp_with_fused_attention(
             and ((not fp8_dpa and scaling_mode == "current") or not fp8_bwd)
         ):
             pytest.skip(
-                f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce CI"
-                " time"
+                f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce"
+                " CI time"
             )
 
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
