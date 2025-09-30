@@ -475,6 +475,8 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                                          const bool return_transpose, const bool pow_2_scale,
                                          cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_square_blockwise);
+  checkCuDriverContext(stream);
+
   NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_rows = 1;

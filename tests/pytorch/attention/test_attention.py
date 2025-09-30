@@ -6,7 +6,7 @@ import math
 import os
 import sys
 import pathlib
-from typing import Any, Dict, List, Tuple, Union, Optional
+from typing import Any, Dict, Tuple, Union
 
 import pytest
 import torch
@@ -20,10 +20,8 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
-    get_attention_backend,
     check_set_window_size,
 )
-from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -54,7 +52,6 @@ from utils import (
     reset_rng_states,
     ModelConfig,
     dtype_tols,
-    logging_context,
     get_available_attention_backends,
 )
 
@@ -277,6 +274,8 @@ model_configs_mla = {
     "mla_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048, head_dim_v=64),  # inference
     "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
 }
 
 

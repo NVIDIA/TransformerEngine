@@ -12,7 +12,7 @@
 
 namespace transformer_engine::pytorch {
 
-std::vector<size_t> getTensorShape(at::Tensor t) {
+std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
     shape.push_back(s);
@@ -286,7 +286,7 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-int roundup(const int value, const int multiple) {
+size_t roundup(const size_t value, const size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }

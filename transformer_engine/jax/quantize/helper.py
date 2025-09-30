@@ -352,9 +352,6 @@ class BlockScalingQuantizeConfig:
         cls.initialize(fp8_recipe)
         cls.AMAX_HISTORY_LEN = 0
 
-        # Use TE GEMM instead of JAX GEMM for better performance
-        tex.base.manage_primitives(enable_names=["GemmPrimitive"])
-
     @staticmethod
     def finalize() -> None:
         """Reset the block scaling configuration."""
@@ -406,9 +403,6 @@ def fp8_autocast(
     """
     if fp8_recipe is None:
         fp8_recipe = recipe.DelayedScaling()
-
-    if mesh_resource is None:
-        mesh_resource = MeshResource()
 
     Config = DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):

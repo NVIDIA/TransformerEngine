@@ -39,8 +39,10 @@ def generate_configs():
     return configs
 
 
-def generate_context_parallel_configs():
-    configs = []
+def generate_context_parallel_configs_for_attn():
+    """Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only"""
+    configsL1 = []
+    configsL2 = []
     mr = MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp")
     axes = ("dp", "cp", "tp")
     DP_sizes = (1, 2)
@@ -49,10 +51,16 @@ def generate_context_parallel_configs():
     for dp, cp, tp in product(DP_sizes, CP_sizes, TP_sizes):
         ndev = cp * tp * dp
         if is_devices_enough(ndev):
-            configs.append(
-                pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
-            )
-
+            # Do not run cp1 case in L1 as that is already covered in TestDistributedSelfAttn and TestDistributedCrossAttn (as these do not have any cp combinations)
+            if cp != 1:
+                configsL1.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
+                )
+            else:
+                configsL2.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
+                )
+    configs = {"L0": [], "L1": configsL1, "L2": configsL2}
     return configs
 
 

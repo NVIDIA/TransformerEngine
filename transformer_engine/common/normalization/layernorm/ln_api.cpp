@@ -65,6 +65,10 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool is_aligned = true;
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
+  if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
+    cudnn_backend = false;  // cuDNN does not currently support amax output for non quantized output
+  }
+
   bool gamma_in_weight_dtype = false;
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH

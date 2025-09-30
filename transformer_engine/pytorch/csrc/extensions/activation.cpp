@@ -13,87 +13,92 @@ namespace transformer_engine::pytorch {
 template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1) {
   init_extension();
-  auto my_quantizer = convert_quantizer(quantizer);
+
+  // Input tensor
   auto input_tensor = input.contiguous();
+  const TensorWrapper& input_cpp = makeTransformerEngineTensor(input_tensor);
 
-  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
-  const auto& te_input_shape = te_input.shape();
-  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
-  input_shape[input_shape.size() - 1] /= shape_divisor;
-  auto fake_tensor_type = input.scalar_type();
+  // Construct output tensor
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  const auto input_shape = input_cpp.shape();
+  std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
+  output_shape.back() /= shape_divisor;
+  auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
+  auto [out_cpp, out_py] = quantizer_cpp->create_tensor(output_shape, fake_dtype);
 
-  auto [te_output, out] =
-      my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
-
-  // for current scaling, we need to compute amax first and then quantize
-  // because cache cannot fit in the entire tensor to compute amax and quantize
-  // the quantizer should not need amax reduction, no process group needed here
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    // activation function might change the input data range, we need to first call the activation function
-    // and then find the amax and scale of that and then do the quantization
-    // get a NoneQuantizer to calculate amax of activation output
-    auto my_quantizer_none = std::make_unique<NoneQuantizer>(py::none());
-    auto [te_output_act, out_act] =
-        my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
-
-    NVTE_SCOPED_GIL_RELEASE({
-      act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
-      // use te_output_act as input to the compute amax and find the amax of activated tensor
-      nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
-    });
-
-    // my_quantizer here has to be a Float8CurrentScalingQuantizer
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-    if (my_quantizer_cs->with_amax_reduction) {
-      NVTE_ERROR(
-          "per-tensor current scaling amax reduction is not supported in activation functions.");
-    }
-    QuantizationConfigWrapper quant_config;
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(te_output.data(), quant_config,
-                                   at::cuda::getCurrentCUDAStream());
-      // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-      te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
-      nvte_quantize_v2(te_output_act.data(), te_output.data(), quant_config,
-                       at::cuda::getCurrentCUDAStream());
-    });
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
-    // sanity check, since activation fusion is not supported for blockwise quantization yet
-    // need to raise an error here instead of silently going into act_func with wrong numerics
-    NVTE_ERROR("Activation fusion is not supported for blockwise quantization yet.");
-  } else {
+  // Compute activation
+  if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
+      detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE(
-        { act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream()); });
+        { act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream()); });
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    // Compute activation in high-precision fused together with amax, then quantize.
+
+    auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE(
+        { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
+    quantizer_cpp_cs->quantize_with_amax(temp_cpp, out_cpp);
+  } else {
+    // Compute activation in high-precision, then quantize
+
+    auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE(
+        { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
+    quantizer_cpp->quantize(temp_cpp, out_cpp);
   }
 
-  return out;
+  return out_py;
 }
 
-template <void (*act_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t)>
-py::object dactivation_helper(const at::Tensor& grad, const at::Tensor& input,
+template <void (*dact_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t)>
+py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& input,
                               py::handle quantizer) {
   init_extension();
-  auto my_quantizer = convert_quantizer(quantizer);
+
+  // Grad output and input tensors
+  auto grad_output_tensor = grad_output.contiguous();
   auto input_tensor = input.contiguous();
-  auto grad_tensor = grad.contiguous();
+  const TensorWrapper& grad_output_cpp = makeTransformerEngineTensor(grad_output_tensor);
+  const TensorWrapper& input_cpp = makeTransformerEngineTensor(input_tensor);
 
-  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
-  const TensorWrapper& te_grad = makeTransformerEngineTensor(grad_tensor);
-  const auto& te_input_shape = te_input.shape();
-  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
-  auto fake_tensor_type = input.scalar_type();
+  // Construct grad input tensor
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  const auto input_shape_te = input_cpp.shape();
+  const std::vector<size_t> input_shape(input_shape_te.data,
+                                        input_shape_te.data + input_shape_te.ndim);
+  auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
+  auto [grad_input_cpp, grad_input_py] = quantizer_cpp->create_tensor(input_shape, fake_dtype);
 
-  auto [te_output, out] =
-      my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
+  // Compute activation backward
+  if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
+      detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    // Compute activation backward directly
+    NVTE_SCOPED_GIL_RELEASE({
+      dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
+    });
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    // Compute activation backward in high-precision fused together with amax, then quantize.
+    auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE({
+      dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
+    });
+    quantizer_cpp_cs->quantize_with_amax(temp_cpp, grad_input_cpp);
+  } else {
+    // Compute activation backward in high-precision, then quantize
+    auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE({
+      dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
+    });
+    quantizer_cpp->quantize(temp_cpp, grad_input_cpp);
+  }
 
-  NVTE_SCOPED_GIL_RELEASE({
-    act_func(te_grad.data(), te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
-  });
-
-  return out;
+  return grad_input_py;
 }
 
 py::object gelu(const at::Tensor& input, py::handle quantizer) {

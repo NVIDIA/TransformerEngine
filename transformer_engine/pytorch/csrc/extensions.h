@@ -11,6 +11,10 @@
 
 #include "common.h"
 
+class CommOverlapHelper;
+class CommOverlap;
+class CommOverlapP2P;
+
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
@@ -118,7 +122,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
                              std::optional<CommOverlapType> comm_type = std::nullopt,
-                             MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false);
+                             MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
+                             float alpha = 1.0f, std::optional<float> beta = std::nullopt);
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
@@ -142,6 +147,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
+
+at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
  * Activations
@@ -417,6 +424,13 @@ void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_k
 
 void nvshmem_finalize();
 
+/***************************************************************************************************
+ * Comm+GEMM Overlap Wrappers
+ **************************************************************************************************/
+
+void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
+                                        at::Stream recv_stream);
+
 }  // namespace transformer_engine::pytorch
 
 /***************************************************************************************************
@@ -466,7 +480,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  at::Stream get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlap
 
@@ -487,7 +501,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  at::Stream get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
 
