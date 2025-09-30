@@ -1799,7 +1799,9 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute:
+        if quantized_compute and quantization == "nvfp4":
+            tols = dtype_tols(tex.DType.kFloat4E2M1)
+        elif quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
