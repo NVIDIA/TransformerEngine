@@ -31,7 +31,7 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
-test_basic = False
+test_essential = True
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -72,8 +72,9 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
-if test_basic:
-    model_configs_flash_attn = {"cp_1_0": model_configs_flash_attn["cp_1_0"]}
+if test_essential:
+    configs = ["cp_1_0", "cp_2_1", "cp_3_2", "cp_3_3"]
+    model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
 
@@ -92,12 +93,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
-    if not test_basic:
-        test_id = int(model.split("_")[2])
-        if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
-            pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
-        if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
-            pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
 
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
@@ -187,8 +182,9 @@ model_configs_fused_attn = {
 dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
-if test_basic:
-    model_configs_fused_attn = {"cp_1_0": model_configs_fused_attn["cp_1_0"]}
+if test_essential:
+    configs = ["cp_1_0", "cp_2_0", "cp_2_2", "cp_3_2", "cp_4_2"]
+    model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
 
@@ -225,30 +221,6 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
-    if not test_basic:
-        test_id = int(model.split("_")[2])
-        if test_id % 2 == 0 and dtype == "fp16" and qkv_format == "sbhd":
-            pytest.skip(f"Only test {model} for bf16 and bshd to reduce CI time")
-        if (
-            test_id % 2 == 0
-            and dtype == "fp8"
-            and ((fp8_dpa and scaling_mode == "delayed") or fp8_bwd)
-        ):
-            pytest.skip(
-                f"Only test {model} for fp8_dpa=False, scaling_mode=current, fp8_bwd=False to"
-                " reduce CI time"
-            )
-        if test_id % 2 == 1 and dtype == "bf16" and qkv_format == "bshd":
-            pytest.skip(f"Only test {model} for fp16 and sbhd to reduce CI time")
-        if (
-            test_id % 2 == 1
-            and dtype == "fp8"
-            and ((not fp8_dpa and scaling_mode == "current") or not fp8_bwd)
-        ):
-            pytest.skip(
-                f"Only test {model} for fp8_dpa=True, scaling_mode=delayed, fp8_bwd=True to reduce"
-                " CI time"
-            )
 
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
