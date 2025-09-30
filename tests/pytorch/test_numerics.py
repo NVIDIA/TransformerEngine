@@ -55,6 +55,7 @@ from utils import ModelConfig, reset_rng_states, get_available_attention_backend
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -115,6 +116,42 @@ if NVTE_TEST_NVINSPECT_ENABLED:
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
 
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
+
+
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
+
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
+
 
 fp8_recipes = []
 if mxfp8_available:
@@ -124,6 +161,8 @@ if fp8_block_scaling_available:
 if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
+if nvfp4_available:
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
@@ -601,6 +640,12 @@ def _test_e2e_selective_recompute(
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
 
     config = model_configs[model]
 
@@ -711,6 +756,12 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
 
     config = model_configs[model]
 
@@ -1303,6 +1354,13 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
+    
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         te_linear_ref = Linear(
@@ -1747,8 +1805,8 @@ def _test_grouped_linear_accuracy(
         split_size = 1
         if fp8:
             split_size = 16
-            if recipe.mxfp8():
-                split_size = 128
+            if recipe.mxfp8() or recipe.nvfp4():
+                split_size = 32
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
@@ -1819,6 +1877,13 @@ def test_grouped_linear_accuracy(
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -1956,6 +2021,13 @@ def test_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
+
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
@@ -2043,7 +2115,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
         align_size = 16
-        if recipe.mxfp8():
+        if recipe.mxfp8() or recipe.nvfp4():
             align_size = 32
         padded_tokens_per_expert = [
             (num_tokens + align_size - 1) // align_size * align_size
@@ -2158,6 +2230,13 @@ def test_padding_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
+
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
@@ -2228,6 +2307,13 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
@@ -2437,6 +2523,14 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+
+    if recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {recipe.__class__.__name__}"
+            )
+
 
     config = model_configs[model]
 

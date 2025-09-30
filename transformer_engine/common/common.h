@@ -154,7 +154,8 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept { return data.dptr != nullptr; }
+  // Check for size (not just pointer) for 0-dim or no token cases.
+  bool has_data() const noexcept { return data.dptr != nullptr || data.shape.size() != 0; }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept {
