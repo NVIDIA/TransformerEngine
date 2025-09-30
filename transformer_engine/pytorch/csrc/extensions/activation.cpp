@@ -341,3 +341,4 @@ py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::
 
 }  // namespace transformer_engine::pytorch
 
+}
