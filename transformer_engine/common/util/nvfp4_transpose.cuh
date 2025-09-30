@@ -1433,7 +1433,8 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
   const size_t block_size = THREADS_NUM;
 
   const size_t scale_stride = output->scale_inv.shape[1];
-  const size_t scale_stride_transpose = output->columnwise_scale_inv.shape[1];
+  const size_t scale_stride_transpose =
+      return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
   nvfp4_scale_t *const scales_ptr = reinterpret_cast<nvfp4_scale_t *>(output->scale_inv.dptr);
   nvfp4_scale_t *const scales_transpose_ptr =
