@@ -285,11 +285,14 @@ def test_cp_with_fused_attention(
     fp8_meta["recipe"] = None
     fp8_meta["local_recipes"] = []
     if scaling_mode == "delayed":
-        fp8_meta["recipe"]=DelayedScaling(fp8_dpa=True)
-        fp8_meta["local_recipes"]=[DelayedScaling(fp8_dpa=True)]
+        fp8_meta["recipe"] = DelayedScaling(fp8_dpa=True)
+        fp8_meta["local_recipes"] = [DelayedScaling(fp8_dpa=True)]
     if scaling_mode == "current":
-        fp8_meta["recipe"]=DelayedScaling(fp8_dpa=True)
-        fp8_meta["local_recipes"]=[Float8CurrentScaling(fp8_dpa=True), DelayedScaling(fp8_dpa=True)]
+        fp8_meta["recipe"] = DelayedScaling(fp8_dpa=True)
+        fp8_meta["local_recipes"] = [
+            Float8CurrentScaling(fp8_dpa=True),
+            DelayedScaling(fp8_dpa=True),
+        ]
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
