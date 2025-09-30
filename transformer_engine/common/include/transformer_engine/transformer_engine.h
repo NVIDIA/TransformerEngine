@@ -66,6 +66,7 @@ enum NVTETensorParam {
   kNVTEAmax = 3,               /*!< Amax tensor */
   kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
   kNVTENumTensorParams
 };
 
@@ -88,10 +89,9 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
-  /*! Single NVFP4 scale per block of 16 contiguous elements in forward pass (FWD),
-    and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
-  */
-  NVTE_FWD_NVFP4_BWD_MXFP8_SCALING = 4,
+  /*! Single scale per block of 16 elements consecutive in either
+   * rowwise or columnwise direction */
+  NVTE_NVFP4_1D_SCALING = 4,
   NVTE_INVALID_SCALING = 100
 };
 
@@ -330,6 +330,12 @@ enum NVTEQuantizationConfigAttribute {
    *  likely be refactored away in the future.
    */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
+  /*! RNG state (NVTETensor with 2 elements - seed and offset */
+  kNVTEQuantizationConfigRNGState = 4,
+  /*! Whether to use 2D block scaling for NVFP4 */
+  kNVTEQuantizationConfigNVFP42DQuantization = 5,
+  /*! Whether to enable stochastic rounding */
+  kNVTEQuantizationConfigStochasticRounding = 6,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -430,6 +436,15 @@ inline bool is_fp8_dtype(const DType t) {
  *  \param[in] DType      TE Datatype of interest
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
+
+/*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
+ *
+ * Return true if TE datatype is high precision
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_high_precision_dtype(const DType t) {
+  return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
+}
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -566,6 +581,11 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseScaleInv, dptr, type, shape);
   }
 
+  template <typename ShapeType>
+  TensorWrapper &set_columnwise_amax(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -588,6 +608,10 @@ class TensorWrapper {
 
   NVTEBasicTensor get_columnwise_scale_inv() const noexcept {
     return get_parameter(kNVTEColumnwiseScaleInv);
+  }
+
+  NVTEBasicTensor get_columnwise_amax() const noexcept {
+    return get_parameter(kNVTEColumnwiseAmax);
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -836,6 +860,24 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_,
                                            kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
                                            &format, sizeof(Float8BlockScaleTensorFormat));
+  }
+
+  /*! \brief Set stochastic rounding state */
+  void set_rng_state(NVTETensor rng_state) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigRNGState, &rng_state,
+                                           sizeof(NVTETensor));
+  }
+
+  /*! \brief Set whether to use 2D block scaling for NVFP4 */
+  void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
+                                           &nvfp4_2d_quantization, sizeof(bool));
+  }
+
+  /*! \brief Set whether to use stochastic rounding */
+  void set_stochastic_rounding(bool stochastic_rounding) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
+                                           &stochastic_rounding, sizeof(bool));
   }
 
  private:
