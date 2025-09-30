@@ -33,7 +33,7 @@ PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorStoragePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
-PyTypeObject *NVFP4TensorBasePythonClass = nullptr;
+PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
 
 void init_float8_extension() {
@@ -97,9 +97,9 @@ void init_nvfp4_extensions() {
   NVFP4TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Tensor"));
   auto nvfp4_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor._internal.nvfp4_tensor_base");
-  NVFP4TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(nvfp4_base_module.ptr(), "NVFP4TensorBase"));
+      py::module_::import("transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage");
+  NVFP4TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(nvfp4_base_module.ptr(), "NVFP4TensorStorage"));
   NVTE_CHECK(NVFP4TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }

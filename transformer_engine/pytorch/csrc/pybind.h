@@ -41,7 +41,7 @@ extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
 extern PyTypeObject *Float8BlockwiseQTensorStoragePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
-extern PyTypeObject *NVFP4TensorBasePythonClass;
+extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
 
 void init_extension();
@@ -76,7 +76,7 @@ inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
 }
 
 inline bool IsNVFP4Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorBasePythonClass;
+  return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorStoragePythonClass;
 }
 
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);

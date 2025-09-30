@@ -173,6 +173,10 @@ class NVFP4Quantizer(Quantizer):
 
         return dst
 
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if inp.ndim < 2:
