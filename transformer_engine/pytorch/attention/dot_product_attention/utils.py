@@ -466,9 +466,10 @@ def get_attention_backend(
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
+        fp8_recipe = fp8_meta["local_recipes"][0]
         if (
             use_fused_attention
-            and fp8_meta["recipe"].float8_current_scaling()
+            and fp8_recipe.float8_current_scaling()
             and device_compute_capability < (10, 0)
         ):
             logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
