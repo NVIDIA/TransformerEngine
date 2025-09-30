@@ -186,10 +186,11 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     config.cp_comm_type = cp_comm_type
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
-    if qkv_format == "thd" and cp_comm_type == "all_gather":
-        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
-    if qkv_format == "thd" and "a2a" in cp_comm_type:
-        pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
+    if qkv_format == "thd":
+        if cp_comm_type == "all_gather":
+            pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format yet!")
     if dtype == "fp8" and cp_comm_type == "all_gather":
         pytest.skip(
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
