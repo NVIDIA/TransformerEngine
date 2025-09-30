@@ -14,6 +14,10 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -305,10 +309,21 @@ def test_cp_with_fused_attention(
         )
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+    fp8_meta = {}
+    fp8_meta["recipe"] = None
+    fp8_meta["local_recipes"] = []
+    if scaling_mode == "delayed":
+        fp8_meta["recipe"]=DelayedScaling(fp8_dpa=True)
+        fp8_meta["local_recipes"]=[DelayedScaling(fp8_dpa=True)]
+    if scaling_mode == "current":
+        fp8_meta["recipe"]=DelayedScaling(fp8_dpa=True)
+        fp8_meta["local_recipes"]=[Float8CurrentScaling(fp8_dpa=True), DelayedScaling(fp8_dpa=True)]
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
+        fp8=(dtype == "fp8" and (fp8_dpa or fp8_mha)),
+        fp8_meta=fp8_meta,
     )
     _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
