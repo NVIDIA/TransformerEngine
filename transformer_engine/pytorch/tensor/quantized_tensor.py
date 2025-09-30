@@ -18,7 +18,10 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 _qunatized_tensor_cpu_supported_ops = (
-    torch.ops.aten.empty_like.default, torch.ops.aten.copy_.default)
+    torch.ops.aten.empty_like.default,
+    torch.ops.aten.copy_.default,
+)
+
 
 class QuantizedTensorBase:
     r"""Base class for all *TensorBase classes.
@@ -277,7 +280,7 @@ class Quantizer(abc.ABC):
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
         """Returns whether or not given tensor can be quantized"""
         return True
-    
+
     def get_usage(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""
         return {
@@ -469,7 +472,6 @@ class QuantizedTensor(torch.Tensor):
                 dst_tensor_obj.restore_from_saved(dst_tensors)
                 src_tensor_obj.restore_from_saved(src_tensors)
                 return None
-            
 
             if isinstance(dst, QuantizedTensor):
                 dst.quantize_(src)
@@ -499,9 +501,7 @@ class QuantizedTensor(torch.Tensor):
                 requires_grad=requires_grad,
                 pin_memory=pin_memory,
             )
-            tensor._quantizer.set_usage(
-                **quantizer_usage
-            )
+            tensor._quantizer.set_usage(**quantizer_usage)
             return out
 
         if func == torch.ops.aten.numel.default:
@@ -555,12 +555,14 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        
+
         def check_if_cpu(arg):
             if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
-                assert func in _qunatized_tensor_cpu_supported_ops, \
-                    f"QuantizedTensor on CPU does not support this operation: {func}"
+                assert (
+                    func in _qunatized_tensor_cpu_supported_ops
+                ), f"QuantizedTensor on CPU does not support this operation: {func}"
             return arg
+
         args = tree_map(check_if_cpu, args)
 
         # Do not force the QuantizedTensor type on the returned tensor

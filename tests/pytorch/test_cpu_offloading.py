@@ -170,7 +170,6 @@ class Utils:
             return lambda: contextlib.nullcontext()
         else:
             return lambda: te.fp8_autocast(fp8_recipe=recipe)
-        
 
     @staticmethod
     def get_tensor_size_mb(tensor):
@@ -623,11 +622,7 @@ class TestTELayers:
                 callable_offload,
                 (x,),
                 fp8_enabled=recipe is not None,
-                fp8_recipe=(
-                    Utils.create_recipe_ctx(recipe)
-                    if recipe is not None
-                    else None
-                ),
+                fp8_recipe=(Utils.create_recipe_ctx(recipe) if recipe is not None else None),
             )
 
         # warm up (for example to compute sf for delayed scaling)
