@@ -51,22 +51,20 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>
-void gated_act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+void gated_act_fn(const NVTETensor input, NVTETensor output, Param &p, cudaStream_t stream) {
   using namespace detail;
   constexpr bool IS_DGATED = false;
   constexpr NVTETensor grad = nullptr;
-
-  quantize_gated_helper<IS_DGATED, Param, ActOP, nullptr>(grad, input, output, stream);
+  quantize_gated_helper<IS_DGATED, Param, ActOP, nullptr>(grad, input, output, p, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &),
           ComputeType (*DActOP)(ComputeType, const Param &)>
-void dgated_act_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+void dgated_act_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output, Param &p,
                    cudaStream_t stream) {
   using namespace detail;
   constexpr bool IS_DGATED = true;
-
-  quantize_gated_helper<IS_DGATED, Param, ActOP, DActOP>(grad, input, output, stream);
+  quantize_gated_helper<IS_DGATED, Param, ActOP, DActOP>(grad, input, output, p, stream);
 }
 
 }  // namespace transformer_engine
