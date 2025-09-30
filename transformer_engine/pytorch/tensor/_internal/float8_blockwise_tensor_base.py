@@ -422,3 +422,10 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             return
 
         return
+
+    def get_usage(self) -> Dict[str, bool]:
+        """Get the usage of the tensor"""
+        return {
+            "rowwise": self._rowwise_data is not None,
+            "columnwise": self._columnwise_data is not None,
+        }
