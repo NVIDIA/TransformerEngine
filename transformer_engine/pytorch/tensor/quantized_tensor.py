@@ -59,7 +59,7 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
-    def get_usage(self) -> Tuple[bool, bool]:
+    def get_usage(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement get_usage function"
@@ -446,11 +446,10 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
-            if (
-                isinstance(dst, QuantizedTensor)
-                and isinstance(src, QuantizedTensor)
-                and type(dst._quantizer) is type(src._quantizer)
-            ):
+            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor) \
+                and type(dst._quantizer) is type(src._quantizer) \
+                and all(d == s for d, s in zip(dst.get_usage(), src.get_usage())):
+                
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
                 src_tensors, src_tensor_obj = src.prepare_for_saving()
                 for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
