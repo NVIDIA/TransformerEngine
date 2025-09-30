@@ -284,10 +284,11 @@ def test_cp_with_fused_attention(
     fp8_meta = {}
     fp8_meta["recipe"] = None
     fp8_meta["local_recipes"] = []
-    if scaling_mode == "delayed":
+    fp8 = dtype == "fp8" and (fp8_dpa or fp8_mha)
+    if fp8 and scaling_mode == "delayed":
         fp8_meta["recipe"] = DelayedScaling(fp8_dpa=True)
         fp8_meta["local_recipes"] = [DelayedScaling(fp8_dpa=True)]
-    if scaling_mode == "current":
+    if fp8 and scaling_mode == "current":
         fp8_meta["recipe"] = DelayedScaling(fp8_dpa=True)
         fp8_meta["local_recipes"] = [
             Float8CurrentScaling(fp8_dpa=True),
@@ -297,7 +298,7 @@ def test_cp_with_fused_attention(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
-        fp8=(dtype == "fp8" and (fp8_dpa or fp8_mha)),
+        fp8=fp8,
         fp8_meta=fp8_meta,
     )
     _, fused_attn_supported, _ = available_backends
