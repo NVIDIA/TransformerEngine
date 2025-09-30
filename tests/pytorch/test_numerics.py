@@ -116,6 +116,7 @@ if NVTE_TEST_NVINSPECT_ENABLED:
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
 
+
 def nvfp4_rht_and_2d_quantization():
     nvfp4_recipe = recipe.NVFP4BlockScaling()
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
@@ -643,8 +644,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     config = model_configs[model]
@@ -759,8 +759,7 @@ def test_gpt_full_activation_recompute(
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     config = model_configs[model]
@@ -1354,12 +1353,11 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
-    
+
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -1881,8 +1879,7 @@ def test_grouped_linear_accuracy(
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2024,8 +2021,7 @@ def test_grouped_linear_accuracy_save_original_input(
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2233,8 +2229,7 @@ def test_padding_grouped_linear_accuracy(
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2311,8 +2306,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2527,10 +2521,8 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe"
-                f" {recipe.__class__.__name__}"
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
-
 
     config = model_configs[model]
 
