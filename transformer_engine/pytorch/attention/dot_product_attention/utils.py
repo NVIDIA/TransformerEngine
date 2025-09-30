@@ -2004,33 +2004,45 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
+    src_nominal_dtype = q.dtype
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
             qkv = combine_tensors([q, k, v], dim)
             qkv_fp8 = qkv_quantizer(qkv)
-            q_fp8, k_fp8, v_fp8 = SplitAlongDim.apply(qkv_fp8, dim, [1, 1, 1], True)
+            q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
         case 2:
             dim = qkv_layout.split("_")[1].find("2")
             kv = combine_tensors([k, v], dim)
             tensors = [q, kv]
-            if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
-                amax_q, amax_kv = [x.abs().max() for x in tensors]
-                qkv_quantizer.amax = torch.maximum(amax_q, amax_kv).to(dtype=torch.float32)
-                qkv_quantizer.use_existing_amax = True
-            q_fp8, kv_fp8 = [qkv_quantizer(x) for x in tensors]
-            k_fp8, v_fp8 = SplitAlongDim.apply(kv_fp8, dim, [1, 1], True)
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, kv_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+            k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
         case 3:
             tensors = [q, k, v]
-            if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
-                amax_q, amax_k, amax_v = [x.abs().max() for x in tensors]
-                qkv_quantizer.amax = torch.maximum(torch.maximum(amax_q, amax_k), amax_v).to(
-                    dtype=torch.float32
-                )
-                qkv_quantizer.use_existing_amax = True
-            q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in tensors]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
         case _:
             raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+
+    q_fp8, k_fp8, v_fp8 = [
+        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        for x in [q_data, k_data, v_data]
+    ]
 
     return q_fp8, k_fp8, v_fp8
 
