@@ -3505,7 +3505,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
-        assert not padding, f"{attn_mask_type} mask type is not supported!"
+        assert not padding or qkv_format == "thd", f"{attn_mask_type} mask type is not supported for BSHD and SBHD!"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
