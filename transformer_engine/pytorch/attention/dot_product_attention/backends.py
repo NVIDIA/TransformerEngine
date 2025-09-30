@@ -342,8 +342,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # max attention score
         max_score = None
         if self.return_max_score:
-            max_indices = torch.argmax(attention_probs, dim=-1, keepdim=True)
-            max_score = torch.max(matmul_result.gather(dim=-1, index=max_indices))
+            # matmul_result [b, np, sq, dk], max_score [np]
+            max_score = matmul_result.view(*matmul_result.shape[:2],-1)
+            max_score = torch.max(max_score, dim=-1)[0]
+            max_score = torch.max(max_score, dim=0)[0]
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
