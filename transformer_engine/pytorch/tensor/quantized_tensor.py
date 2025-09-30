@@ -450,10 +450,13 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
-            if isinstance(dst, QuantizedTensor) and isinstance(src, QuantizedTensor) \
-                and type(dst._quantizer) is type(src._quantizer) \
-                and all(d == s for d, s in zip(dst.get_usage(), src.get_usage())):
-                
+            if (
+                isinstance(dst, QuantizedTensor)
+                and isinstance(src, QuantizedTensor)
+                and type(dst._quantizer) is type(src._quantizer)
+                and all(d == s for d, s in zip(dst.get_usage(), src.get_usage()))
+            ):
+
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
                 src_tensors, src_tensor_obj = src.prepare_for_saving()
                 for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
