@@ -118,7 +118,12 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
     # no activation fusion written yet
     # Per-tensor current scaling or fp8 blockwise scaling or custom quantization: []
     # TODO(ksivaman): Fuse nvfp4 act once kernel is available.
-    if recipe.float8_current_scaling() or recipe.float8_block_scaling() or recipe.nvfp4() or recipe.custom():
+    if (
+        recipe.float8_current_scaling()
+        or recipe.float8_block_scaling()
+        or recipe.nvfp4()
+        or recipe.custom()
+    ):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
@@ -1034,7 +1039,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     # TODO(ksivaman): Re-add fusion once kernel is available.
                     if (
-                        isinstance(ctx.fc1_grad_output_quantizer, (Float8BlockQuantizer, NVFP4Quantizer))
+                        isinstance(
+                            ctx.fc1_grad_output_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
+                        )
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
