@@ -631,6 +631,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
             amax = AmaxCalculationPrimitive.impl(
                 x,
                 amax_scope=amax_scope,
+                batch_sequence_transpose=batch_sequence_transpose,
             )
             gmesh = global_mesh_resource()
             sequence_dim = 0 if batch_sequence_transpose else 1
