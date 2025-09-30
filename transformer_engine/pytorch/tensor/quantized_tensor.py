@@ -17,6 +17,8 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
+_qunatized_tensor_cpu_supported_ops = (
+    torch.ops.aten.empty_like.default, torch.ops.aten.copy_.default)
 
 class QuantizedTensorBase:
     r"""Base class for all *TensorBase classes.
@@ -275,6 +277,13 @@ class Quantizer(abc.ABC):
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
         """Returns whether or not given tensor can be quantized"""
         return True
+    
+    def get_usage(self) -> Dict[str, bool]:
+        """Get the usage of the quantizer"""
+        return {
+            "rowwise": self.rowwise_usage,
+            "columnwise": self.columnwise_usage,
+        }
 
 
 class _QuantizeFunc(torch.autograd.Function):
@@ -405,12 +414,6 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement clear function"
         )
 
-    def empty_like(self, *args, **kwargs):
-        """Create a new empty tensor with the same shape and type as this tensor"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement empty_like function"
-        )
-
     def __repr__(self, *, tensor_contents=None) -> str:
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
 
@@ -466,6 +469,7 @@ class QuantizedTensor(torch.Tensor):
                 dst_tensor_obj.restore_from_saved(dst_tensors)
                 src_tensor_obj.restore_from_saved(src_tensors)
                 return None
+            
 
             if isinstance(dst, QuantizedTensor):
                 dst.quantize_(src)
@@ -485,12 +489,9 @@ class QuantizedTensor(torch.Tensor):
             device = kwargs.get("device", tensor.device)
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
-            rowwise_usage, columnwise_usage = tensor.get_usage()
-            quantizer_rowwise_usage, quantizer_columnwise_usage = (
-                tensor._quantizer.rowwise_usage,
-                tensor._quantizer.columnwise_usage,
-            )
-            tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+            usage = tensor.get_usage()
+            quantizer_usage = tensor._quantizer.get_usage()
+            tensor._quantizer.set_usage(**usage)
             out = tensor._quantizer.make_empty(
                 shape=tensor.shape,
                 dtype=tensor.dtype,
@@ -499,7 +500,7 @@ class QuantizedTensor(torch.Tensor):
                 pin_memory=pin_memory,
             )
             tensor._quantizer.set_usage(
-                rowwise=quantizer_rowwise_usage, columnwise=quantizer_columnwise_usage
+                **quantizer_usage
             )
             return out
 
@@ -554,6 +555,14 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
+        
+        def check_if_cpu(arg):
+            if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
+                assert func in _qunatized_tensor_cpu_supported_ops, \
+                    f"QuantizedTensor on CPU does not support this operation: {func}"
+            return arg
+        args = tree_map(check_if_cpu, args)
+
         # Do not force the QuantizedTensor type on the returned tensor
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
 

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import math
 from typing import Optional, Tuple, Union
 import functools
+from typing import Dict
 
 import torch
 import transformer_engine_torch as tex
@@ -493,8 +494,11 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
             return self
         raise ValueError("NVFP4Tensor does not support different memory formats!")
     
-    def get_usage(self) -> Tuple[bool, bool]:
-        return (self._rowwise_data is not None, self._columnwise_data is not None)
+    def get_usage(self) -> Dict[str, bool]:
+        return {
+            "rowwise": self._rowwise_data is not None,
+            "columnwise": self._columnwise_data is not None,
+        }
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

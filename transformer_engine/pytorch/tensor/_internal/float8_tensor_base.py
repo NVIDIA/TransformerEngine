@@ -228,6 +228,9 @@ class Float8TensorBase(QuantizedTensorBase):
             self._transpose = None
             self._transpose_invalid = True
 
-    def get_usage(self) -> Tuple[bool, bool]:
+    def get_usage(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
-        return self._data is not None, self._transpose is not None and not self._transpose_invalid
+        return {
+            "rowwise": self._data is not None,
+            "columnwise": self._transpose is not None and not self._transpose_invalid,
+        }
