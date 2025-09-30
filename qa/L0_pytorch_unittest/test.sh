@@ -13,13 +13,6 @@ function test_fail() {
     echo "Error: sub-test failed: $1"
 }
 
-function print_cudnn_version() {
-    python3 -c "
-from transformer_engine.pytorch.utils import get_cudnn_version
-print(f'cuDNN version: {get_cudnn_version()}')
-"
-}
-
 RET=0
 FAILED_CASES=""
 
@@ -30,8 +23,6 @@ set -x
 mkdir -p "$XML_LOG_DIR"
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
-
-print_cudnn_version
 
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_recipe.xml $TE_PATH/tests/pytorch/test_recipe.py || test_fail "test_recipe.py"
