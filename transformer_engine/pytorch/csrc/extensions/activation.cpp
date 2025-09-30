@@ -329,6 +329,5 @@ py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::
   return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha);
 }
 
-}  // namespace transformer_engine::pytorch
-
-}
+}  // namespace pytorch
+}  // namespace transformer_engine
