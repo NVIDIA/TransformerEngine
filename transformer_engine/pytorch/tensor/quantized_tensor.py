@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
 import warnings
+import math
 
 import torch
 from torch.utils._pytree import tree_map
@@ -464,7 +465,7 @@ class QuantizedTensor(torch.Tensor):
                         dst_tensor.copy_(src_tensor, *args[2:], **kwargs)
                 dst_tensor_obj.restore_from_saved(dst_tensors)
                 src_tensor_obj.restore_from_saved(src_tensors)
-                return
+                return None
 
             if isinstance(dst, QuantizedTensor):
                 dst.quantize_(src)

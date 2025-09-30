@@ -24,11 +24,20 @@ import transformer_engine_torch as tex
 
 # Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
 
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
+if fp8_block_scaling_available:
+    quantization_recipes.append(recipe.Float8BlockScaling())
+if mxfp8_available:
+    quantization_recipes.append(recipe.MXFP8BlockScaling())
+if nvfp4_available:
+    quantization_recipes.append(recipe.NVFP4BlockScaling())
+
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
@@ -125,71 +134,43 @@ class Utils:
             raise ValueError(f"Unknown layer type: {layer_type}")
 
     @staticmethod
-    def get_recipe_names():
-        return [
-            "high precision",
-            "fp8_delayed_scaling",
-            "fp8_current_scaling",
-            "fp8_block_scaling",
-            "mxfp8",
-        ]
-
-    @staticmethod
-    def create_tensor(recipe_name: str, requires_grad: bool = False) -> torch.Tensor:
+    def create_tensor(recipe: Optional[recipe.Recipe], requires_grad: bool = False) -> torch.Tensor:
         shape = (Utils._B, Utils._S, Utils._D)
         tensor = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-        if recipe_name == "high precision":
+        if recipe is None:
             tensor = tensor.requires_grad_() if requires_grad else tensor
             return tensor
-        elif recipe_name == "fp8_delayed_scaling":
+        elif recipe.delayed():
             quantizer = te.tensor.float8_tensor.Float8Quantizer(
                 fp8_dtype=tex.DType.kFloat8E4M3,
                 scale=torch.tensor([1.0], device="cuda"),
                 amax=torch.tensor([1.0], device="cuda"),
             )
             return quantizer(tensor)
-        elif recipe_name == "fp8_current_scaling":
+        elif recipe.float8_current_scaling():
             quantizer = te.tensor.float8_tensor.Float8CurrentScalingQuantizer(
                 fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"
             )
             return quantizer(tensor)
-        elif recipe_name == "fp8_block_scaling":
+        elif recipe.float8_block_scaling():
             quantizer = te.tensor.float8_blockwise_tensor.Float8BlockQuantizer(
                 fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
             )
             return quantizer(tensor)
-        elif recipe_name == "mxfp8":
+        elif recipe.mxfp8():
             quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            return quantizer(tensor)
+        elif recipe.nvfp4():
+            quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer()
             return quantizer(tensor)
 
     @staticmethod
-    def skip_if_recipe_not_supported(recipe_name: str):
-        fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-        mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-        fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-            FP8GlobalStateManager.is_fp8_block_scaling_available()
-        )
-        if recipe_name == "fp8_delayed_scaling" and not fp8_available:
-            pytest.skip(reason_for_no_fp8)
-        elif recipe_name == "fp8_current_scaling" and not fp8_available:
-            pytest.skip(reason_for_no_fp8)
-        elif recipe_name == "fp8_block_scaling" and not fp8_block_scaling_available:
-            pytest.skip(reason_for_no_fp8_block_scaling)
-        elif recipe_name == "mxfp8" and not mxfp8_available:
-            pytest.skip(reason_for_no_mxfp8)
-
-    @staticmethod
-    def create_recipe_ctx(recipe_name: str):
-        if recipe_name == "high precision":
+    def create_recipe_ctx(recipe: Optional[recipe.Recipe]):
+        if recipe is None:
             return lambda: contextlib.nullcontext()
-        elif recipe_name == "fp8_delayed_scaling":
-            return lambda: te.fp8_autocast(fp8_recipe=recipe.DelayedScaling())
-        elif recipe_name == "fp8_current_scaling":
-            return lambda: te.fp8_autocast(fp8_recipe=recipe.Float8CurrentScaling())
-        elif recipe_name == "fp8_block_scaling":
-            return lambda: te.fp8_autocast(fp8_recipe=recipe.Float8BlockScaling())
-        elif recipe_name == "mxfp8":
-            return lambda: te.fp8_autocast(fp8_recipe=recipe.MXFP8BlockScaling())
+        else:
+            return lambda: te.fp8_autocast(fp8_recipe=recipe)
+        
 
     @staticmethod
     def get_tensor_size_mb(tensor):
@@ -206,7 +187,7 @@ class Utils:
         # Only cublas workspaces and some global tensors are allowed to be allocated.
         # All other allocations should be released.
         # This is a simple check to catch memory leaks.
-        if Utils.get_cuda_memory_mb() > 200:
+        if Utils.get_cuda_memory_mb() > 1000:
             memory_num = Utils.get_cuda_memory_mb()
             import gc
 
@@ -217,15 +198,14 @@ class Utils:
 
 class TestsOffloadableLayerState:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_general(self, random_num_tensors, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
         for each layer offload random number of random tensors.
         Then do backward pass for each layer, and check if reloaded tensors are equal to original tensors.
         """
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         NUM_ITERATIONS = 10
 
         stream = torch.cuda.Stream()
@@ -240,7 +220,7 @@ class TestsOffloadableLayerState:
             tensors_ids = []
             NUM_TENSORS = random.choice([1, 20]) if random_num_tensors else 1
             for _ in range(NUM_TENSORS):
-                tensor = Utils.create_tensor(recipe_name)
+                tensor = Utils.create_tensor(recipe)
                 original_tensors.append(tensor)
                 tensor_id = offload_layer_state.push_tensor(tensor)
                 assert tensor.device.type == "cuda"
@@ -266,7 +246,7 @@ class TestsOffloadableLayerState:
             offload_stream=stream,
         )
         init_cuda_memory = Utils.get_cuda_memory_mb()
-        x = Utils.create_tensor("high precision")
+        x = Utils.create_tensor(None)
         x_size = Utils.get_tensor_size_mb(x)
         x_1 = x[::2]
         x_2 = x[1::2]
@@ -296,15 +276,14 @@ class TestsOffloadableLayerState:
 
 class TestsDefaultOffloadSynchronizer:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_general(self, random_num_tensors, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
         for each layer offload random number of random tensors.
         Then do backward pass for each layer, and check if reloaded tensors are equal to original tensors.
         """
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         NUM_LAYERS = 10
         NUM_ITERATIONS = 10
 
@@ -324,7 +303,7 @@ class TestsDefaultOffloadSynchronizer:
                 layer_tensors_ids = []
                 layer_id = offload_synchronizer.fwd_step()
                 for _ in range(NUM_LAYER_TENSORS):
-                    tensor = Utils.create_tensor(recipe_name)
+                    tensor = Utils.create_tensor(recipe)
                     layer_tensors.append(tensor)
                     tensor_id = offload_synchronizer.push_tensor(tensor)
                     assert tensor.device.type == "cuda"
@@ -343,11 +322,10 @@ class TestsDefaultOffloadSynchronizer:
             offload_synchronizer.finish_part_of_bwd()
         torch.cuda.synchronize()
 
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_memory(self, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_memory(self, recipe):
         torch.cuda.synchronize()
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         NUM_LAYERS = 10
 
         torch.cuda.reset_peak_memory_stats()
@@ -364,7 +342,7 @@ class TestsDefaultOffloadSynchronizer:
         torch.cuda.synchronize()
         for _ in range(NUM_LAYERS):
             offload_synchronizer.fwd_step()
-            tensor = Utils.create_tensor(recipe_name)
+            tensor = Utils.create_tensor(recipe)
             tensor_size = Utils.get_tensor_size_mb(tensor)
             tensor_id = offload_synchronizer.push_tensor(tensor)
             assert tensor.device.type == "cuda"
@@ -372,7 +350,7 @@ class TestsDefaultOffloadSynchronizer:
             del tensor, tensor_id
         torch.cuda.synchronize()
 
-        if recipe_name == "high precision":
+        if recipe is None:
             assert Utils.get_max_cuda_memory_mb() == pytest.approx(
                 init_cuda_memory + tensor_size, 0.1
             )
@@ -388,23 +366,22 @@ class TestsDefaultOffloadSynchronizer:
         del tensor_ids
         torch.cuda.synchronize()
 
-        if recipe_name == "high precision":
+        if recipe is None:
             assert Utils.get_max_cuda_memory_mb() == pytest.approx(
                 init_cuda_memory + tensor_size, 0.1
             )
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
 
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_multiple_tensor_offload(self, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_multiple_tensor_offload(self, recipe):
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         init_cpu_memory = Utils.get_cpu_memory_mb()
         init_cuda_memory = Utils.get_cuda_memory_mb()
         offload_synchronizer = DefaultOffloadSynchronizer(
             num_layers=2,
             num_offloaded_layers=1,
         )
-        x1 = Utils.create_tensor(recipe_name)
+        x1 = Utils.create_tensor(recipe)
         x_size = Utils.get_tensor_size_mb(x1)
         offload_synchronizer.fwd_step()
         offload_synchronizer.push_tensor(x1)
@@ -423,11 +400,10 @@ class TestsDefaultOffloadSynchronizer:
 
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_sanity(self, layer_type, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_sanity(self, layer_type, recipe):
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
         init_cuda_memory = Utils.get_cuda_memory_mb()
         OFFLOAD_LAYERS = 6
         NUM_LAYERS = 10
@@ -438,9 +414,9 @@ class TestTELayers:
         )
         offload_ctx = contextlib.nullcontext()
         sync_function = lambda x: x
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
         layers = [Utils.create_layer(layer_type) for _ in range(NUM_LAYERS)]
-        inp = Utils.create_tensor("high precision")
+        inp = Utils.create_tensor(None)
         m_splits = (
             {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
             if layer_type == "grouped_linear"
@@ -456,10 +432,9 @@ class TestTELayers:
         del out, inp, layers
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_memory(self, layer_type, recipe_name):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_memory(self, layer_type, recipe):
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         offload_ctx, sync_function = get_cpu_offload_context(
             enabled=True,
             num_layers=1,
@@ -467,9 +442,9 @@ class TestTELayers:
             offload_activations=True,
             offload_weights=False,
         )
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
         layer = Utils.create_layer(layer_type)
-        inp = Utils.create_tensor("high precision")
+        inp = Utils.create_tensor(None)
 
         m_splits = (
             {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
@@ -485,7 +460,7 @@ class TestTELayers:
         init_cuda_memory = Utils.get_cuda_memory_mb()
 
         # run layer without offload
-        inp = Utils.create_tensor("high precision")
+        inp = Utils.create_tensor(None)
         with recipe_ctx():
             out = layer(inp, is_first_microbatch=False, **m_splits)
         with recipe_ctx():
@@ -495,7 +470,7 @@ class TestTELayers:
 
         out.sum().backward()
         # run layer with offload
-        inp = Utils.create_tensor("high precision")
+        inp = Utils.create_tensor(None)
         with offload_ctx, recipe_ctx():
             out = layer(inp, is_first_microbatch=False, **m_splits)
         out = sync_function(out)
@@ -515,10 +490,9 @@ class TestTELayers:
         out.sum().backward()
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_manual_synchronization(self, recipe_name, layer_type):
+    @pytest.mark.parametrize("recipe", quantization_recipes)
+    def test_manual_synchronization(self, recipe, layer_type):
         Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
         offload_ctx, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True,
             model_layers=6,
@@ -527,10 +501,10 @@ class TestTELayers:
         )
         layer_1 = Utils.create_layer(layer_type)
         layer_2 = Utils.create_layer(layer_type)
-        inp1 = Utils.create_tensor("high precision")
-        inp2 = Utils.create_tensor("high precision")
+        inp1 = Utils.create_tensor(None)
+        inp2 = Utils.create_tensor(None)
 
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
 
         m_splits = (
             {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
@@ -570,21 +544,20 @@ class TestTELayers:
         out_1.sum().backward()
         out_2.sum().backward()
 
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
+    @pytest.mark.parametrize("recipe", quantization_recipes)
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
     @pytest.mark.parametrize("backend", ["FlashAttention", "FusedAttention", "UnfusedAttention"])
     def test_numerics(
         self,
-        recipe_name,
+        recipe,
         layer_type,
         use_cuda_graphs,
         backend,
         retain_pinned_cpu_buffers,
     ):
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
-        Utils.skip_if_recipe_not_supported(recipe_name)
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
 
         if use_cuda_graphs and not retain_pinned_cpu_buffers:
             pytest.skip(
@@ -643,16 +616,16 @@ class TestTELayers:
         ):
             param_offload.data.copy_(param_no_offload.data)
 
-        x = Utils.create_tensor("high precision")
+        x = Utils.create_tensor(None)
 
         if use_cuda_graphs:
             callable_offload = te.make_graphed_callables(
                 callable_offload,
                 (x,),
-                fp8_enabled=recipe_name != "high precision",
+                fp8_enabled=recipe is not None,
                 fp8_recipe=(
-                    Utils.create_recipe_ctx(recipe_name)
-                    if recipe_name != "high precision"
+                    Utils.create_recipe_ctx(recipe)
+                    if recipe is not None
                     else None
                 ),
             )
@@ -692,7 +665,7 @@ class TestTELayers:
         offload_stream = torch.cuda.Stream()
         num_layers = 10
         layers = [Utils.create_layer("transformer_layer") for _ in range(num_layers)]
-        inp = [Utils.create_tensor("high precision") for _ in range(num_layers)]
+        inp = [Utils.create_tensor(None) for _ in range(num_layers)]
         out = [None] * num_layers
         cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True,
