@@ -80,9 +80,9 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
         std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_hp_tensor_with_amax(shape, dtype, data.value());
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_hp_tensor_with_amax(shape, dtype);
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
       }
     } else {
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
@@ -209,7 +209,8 @@ std::vector<py::object> fused_attn_fwd(
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-  auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
+  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  auto rng_state = torch::empty({2}, options);
   philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
 
