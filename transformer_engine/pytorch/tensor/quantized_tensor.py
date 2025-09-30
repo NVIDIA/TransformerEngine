@@ -305,6 +305,10 @@ class Quantizer(abc.ABC):
         """Returns True if the quantizer supports only rowwise all-gather"""
         return False
 
+    def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
+        """Returns whether or not given tensor can be quantized"""
+        return True
+
 
 class _QuantizeFunc(torch.autograd.Function):
     """Quantize tensor"""

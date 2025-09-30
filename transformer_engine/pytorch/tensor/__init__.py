@@ -73,6 +73,14 @@ def get_all_tensor_types():
     """
     Get all tensor-like types that can be used in TE.
     """
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+    from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Tensor
+    from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+    from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+    from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+    from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
     all_tensor_types = [
         torch.Tensor,
@@ -83,5 +91,7 @@ def get_all_tensor_types():
         MXFP8TensorStorage,
         Float8BlockwiseQTensor,
         Float8BlockwiseQTensorStorage,
+        NVFP4Tensor,
+        NVFP4TensorStorage,
     ]
     return all_tensor_types

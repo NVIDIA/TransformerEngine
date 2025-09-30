@@ -35,22 +35,6 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
       { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
 }
 
-void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
-                                 arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
-                                 at::cuda::getCurrentCUDAStream());
-  });
-}
-
-// extract PhiloxCudaState from CUDA random number generator
-at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl *gen, size_t elts_per_thread) {
-  at::PhiloxCudaState philox_args;
-  std::lock_guard<std::mutex> lock(gen->mutex_);
-  philox_args = gen->philox_cuda_state(elts_per_thread);
-  return philox_args;
-}
-
 }  // namespace
 
 namespace transformer_engine::pytorch {
@@ -58,13 +42,14 @@ namespace transformer_engine::pytorch {
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
-    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
+    int64_t window_size_right) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
-      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
+      bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups,
+      max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
   return fused_attention_backend;
 }
 
@@ -72,14 +57,15 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
-    const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
-    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    const std::vector<int64_t> window_size, const at::Tensor cu_seqlens_q,
+    const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
+    const at::ScalarType fake_dtype, const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
-    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
+    const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
+    size_t rng_elts_per_thread) {
   TensorWrapper te_Q, te_K, te_V, te_O, te_S;
 
   auto none = py::none();
@@ -181,12 +167,22 @@ std::vector<py::object> fused_attn_fwd(
                                     DType::kInt32, nullptr, nullptr, nullptr);
   }
 
+  // softmax offset
+  TensorWrapper te_SoftmaxOffset;
+  if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
+    auto SoftmaxOffset_sizes = SoftmaxOffset.value().sizes().vec();
+    std::vector<size_t> SoftmaxOffset_shape{SoftmaxOffset_sizes.begin(), SoftmaxOffset_sizes.end()};
+    te_SoftmaxOffset =
+        makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(), SoftmaxOffset_shape,
+                                    DType::kFloat32, nullptr, nullptr, nullptr);
+  }
+
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
-  unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
+  philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
 
   // create auxiliary output tensors
@@ -199,11 +195,11 @@ std::vector<py::object> fused_attn_fwd(
   // populate tensors with appropriate shapes and dtypes
   NVTE_SCOPED_GIL_RELEASE({
     nvte_fused_attn_fwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
-        &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_SoftmaxOffset.data(), te_S.data(),
+        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -215,51 +211,52 @@ std::vector<py::object> fused_attn_fwd(
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<py::object> output_tensors;
   output_tensors.push_back(o_python);
-  for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    // allocate memory for nvte_aux_tensor_pack.tensors
-    at::Tensor output_tensor;
-    if (nvte_aux_tensor_pack.size >= 2) {
-      if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
-        if (i < nvte_aux_tensor_pack.size - 2) {
-          NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-          output_tensor = allocateSpace(
-              nvte_shape_to_vector(temp_shape),
-              static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
-        } else if (i == nvte_aux_tensor_pack.size - 2) {
-          output_tensor = rng_state;
-        } else if (i == nvte_aux_tensor_pack.size - 1) {
-          output_tensor = Bias.value();
-        }
-      } else {
-        NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-        output_tensor =
-            (i < nvte_aux_tensor_pack.size - 1)
-                ? allocateSpace(
-                      nvte_shape_to_vector(temp_shape),
-                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false)
-                : rng_state;
-      }
-    } else {
-      NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
-      output_tensor = allocateSpace(
-          nvte_shape_to_vector(temp_shape),
-          static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
-    }
+  auto set_tensor_param = [&](size_t i, const at::Tensor &output_tensor) {
     output_tensors.push_back(py::cast(output_tensor));
     NVTEBasicTensor temp_data = {output_tensor.data_ptr(),
                                  nvte_tensor_type(nvte_aux_tensor_pack.tensors[i]),
                                  nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
+  };
+  // allocate memory for nvte_aux_tensor_pack.tensors
+  // f16_max512   : S [b, h, sq, skv]
+  // f16_arbitrary: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
+  // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
+  size_t i = 0;
+  at::Tensor output_tensor;
+  // intermediate softmax tensor, S or M
+  output_tensor =
+      allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+                    static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+  set_tensor_param(i++, output_tensor);
+  // fp8 has an additional softmax stats tensor, ZInv
+  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    output_tensor =
+        allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+    set_tensor_param(i++, output_tensor);
+  }
+  // rng_state
+  if (i < nvte_aux_tensor_pack.size) {
+    set_tensor_param(i++, rng_state);
+  }
+  // bias (optional)
+  if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
+    set_tensor_param(i++, Bias.value());
+  }
+  // softmax_offset (optional)
+  if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
+    set_tensor_param(i++, SoftmaxOffset.value());
   }
 
   // execute the kernel
   NVTE_SCOPED_GIL_RELEASE({
     nvte_fused_attn_fwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
-        &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_SoftmaxOffset.data(), te_S.data(),
+        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -274,9 +271,10 @@ std::vector<py::object> fused_attn_fwd(
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
-    const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
+    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size, bool deterministic,
+    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
+    const py::handle K, const py::handle V, const py::handle O, const py::handle dO,
+    const at::ScalarType fake_dtype, const DType dqkv_type,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
@@ -499,6 +497,15 @@ std::vector<py::object> fused_attn_bwd(
     }
   }
 
+  // create dSoftmaxOffset in the same shape as SoftmaxOffset
+  at::Tensor dSoftmaxOffset;
+  TensorWrapper te_dSoftmaxOffset;
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    options = torch::TensorOptions().dtype(at::kFloat).device(torch::kCUDA);
+    dSoftmaxOffset = torch::empty({1, static_cast<int64_t>(h_q), 1, 1}, options);
+    te_dSoftmaxOffset = makeTransformerEngineTensor(dSoftmaxOffset);
+  }
+
   // create workspace
   TensorWrapper workspace;
 
@@ -507,10 +514,10 @@ std::vector<py::object> fused_attn_bwd(
     nvte_fused_attn_bwd(
         te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
-        te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-        te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1], deterministic,
-        workspace.data(), at::cuda::getCurrentCUDAStream());
+        te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
+        window_size[1], deterministic, workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
   // allocate memory for workspace
@@ -523,16 +530,16 @@ std::vector<py::object> fused_attn_bwd(
     nvte_fused_attn_bwd(
         te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
-        te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-        te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1], deterministic,
-        workspace.data(), at::cuda::getCurrentCUDAStream());
+        te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
+        window_size[1], deterministic, workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
 
-  return {py_dQ, py_dK, py_dV, py::cast(dBias)};
+  return {py_dQ, py_dK, py_dV, py::cast(dBias), py::cast(dSoftmaxOffset)};
 }
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
