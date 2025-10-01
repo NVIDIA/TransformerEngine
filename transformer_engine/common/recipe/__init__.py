@@ -382,6 +382,7 @@ class Float8BlockScaling(Recipe):
         )
 
 
+@dataclass()
 class NVFP4BlockScaling(Recipe):
     """
     Use the NVFP4 scaling strategy.
