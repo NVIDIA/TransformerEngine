@@ -29,7 +29,7 @@ from ...module.base import (
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -568,7 +568,7 @@ class BasicLinear(BasicOperation):
         # Prepare input tensor for backward pass
         if weight_requires_grad:
             if with_quantized_compute and is_quantized_tensor(x_local):
-                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
@@ -926,6 +926,7 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
+            # Recipe-specific configuration
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if recipe.float8_current_scaling():
                 input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
@@ -934,6 +935,13 @@ class BasicLinear(BasicOperation):
                 weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
                 grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
                 grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                if self.sequence_parallel and self.tensor_parallel_mode == "column":
+                    input_quantizer.with_amax_reduction = True
+                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                if self.sequence_parallel and self.tensor_parallel_mode == "row":
+                    grad_output_quantizer.with_amax_reduction = True
+                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+            if recipe.nvfp4():
                 if self.sequence_parallel and self.tensor_parallel_mode == "column":
                     input_quantizer.with_amax_reduction = True
                     input_quantizer.amax_reduction_group = self.tensor_parallel_group

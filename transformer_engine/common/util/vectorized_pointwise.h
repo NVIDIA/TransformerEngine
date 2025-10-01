@@ -11,7 +11,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
-
+#include "math.h"
 namespace transformer_engine {
 
 /* \brief Helper class that enables storing multiple values of type DType
@@ -338,7 +338,7 @@ template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typen
           typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
                                    const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
-                                   const Param params, cudaStream_t stream) {
+                                   const Param &params, cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, output);
 
@@ -372,7 +372,7 @@ template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename In
           typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
-                                       fp32 *scale_inv, const size_t N, const Param params,
+                                       fp32 *scale_inv, const size_t N, const Param &params,
                                        cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, grad, output);
@@ -431,7 +431,13 @@ __launch_bounds__(unary_kernel_threads) __global__
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
-      const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+      ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+
+      if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
+        // Clamp the gated value and add 1 at the end
+        ComputeType limit = p.limit;
+        val2 = std::min(std::max(-limit, val2), limit) + 1;
+      }
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
       if (requires_amax) {
         __builtin_assume(max >= 0);
@@ -532,10 +538,18 @@ __launch_bounds__(unary_kernel_threads) __global__
     for (int i = 0; i < nvec; ++i) {
       const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
-      const ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      bool dgate_in = true;
+
+      if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
+        // In case of GPT OSS, clamp the activation and gate values
+        const ComputeType limit = p.limit;
+        dgate_in = gate_in <= limit && gate_in >= -limit;  // Derivative of clamp
+        gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+      }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = grad_val * Activation(gelu_in, p);
+      ComputeType after_dgate = dgate_in ? grad_val * Activation(gelu_in, p) : 0.0f;
 
       if (requires_amax) {
         __builtin_assume(max >= 0);

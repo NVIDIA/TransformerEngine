@@ -109,9 +109,6 @@ META_O = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO = tex.FP8BwdTensors.GRAD_INPUT2
 META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP = tex.FP8BwdTensors.GRAD_INPUT3
-# repurpose some unused amax history buffers for partial results of CP fwd and bwd
-META_O_CP = tex.FP8FwdTensors.GEMM2_OUTPUT
-META_DQKV_CP = tex.FP8BwdTensors.GRAD_INPUT1
 
 
 def fused_attn_fwd(
