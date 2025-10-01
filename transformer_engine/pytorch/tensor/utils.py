@@ -10,7 +10,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
-from .quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorBase
+from .quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
@@ -454,7 +454,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         )
 
 
-def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorBase]] = None) -> bool:
+def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
     """Check if an environment or object is using experimental Kitchen middleware.
 
     Returns False if x is a torch.Tensor.
@@ -466,6 +466,6 @@ def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorBase]] = None) -
     # Detect if the object is experimental
     if isinstance(x, torch.Tensor):
         return False
-    if not isinstance(x, (Quantizer, QuantizedTensorBase)):
-        raise AssertionError("Object must be a Quantizer or QuantizedTensorBase instance")
+    if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
+        raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")
     return hasattr(x, "experimental") and x.experimental

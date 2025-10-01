@@ -314,7 +314,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
 
   // Construct FP8 block-wise tensors
   py::handle Float8BlockwiseQTensorClass(
-      reinterpret_cast<PyObject *>(Float8BlockwiseQTensorBasePythonClass));
+      reinterpret_cast<PyObject *>(Float8BlockwiseQTensorStoragePythonClass));
   for (size_t i = 0; i < num_tensors; ++i) {
     // Create tensor objects with proper reference counting
     py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
@@ -461,7 +461,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   }
 
   // Construct mxfp8 tensors
-  py::handle MXFP8TensorClass(reinterpret_cast<PyObject *>(MXFP8TensorBasePythonClass));
+  py::handle MXFP8TensorClass(reinterpret_cast<PyObject *>(MXFP8TensorStoragePythonClass));
   for (size_t i = 0; i < num_tensors; ++i) {
     // Create tensor objects with proper reference counting
     py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
