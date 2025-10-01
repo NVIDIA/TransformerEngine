@@ -679,6 +679,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #endif
   }
 
+  // align the workspace to 256 B
+  const int required_alignment = 256;
+  const auto original_workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
+  uint8_t *aligned_workspace_ptr =
+      reinterpret_cast<uint8_t *>(workspace) + required_alignment - original_workspace_alignment;
+  workspaceSize = workspaceSize - required_alignment + original_workspace_alignment;
+  const auto new_workspace_alignment =
+      _getAlignment(reinterpret_cast<uintptr_t>(aligned_workspace_ptr));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
@@ -686,7 +694,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
   const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
   const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
-  const auto workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &A_alignment, sizeof(A_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -695,8 +702,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &C_alignment, sizeof(C_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
-  NVTE_CHECK(workspace_alignment % 256 == 0,
-             "cuBLAS workspace pointer must be aligned to 256 bytes, got ", workspace_alignment);
+  NVTE_CHECK(new_workspace_alignment % 256 == 0,
+             "cuBLAS workspace pointer must be aligned to 256 bytes, got ",
+             new_workspace_alignment);
 
   const auto status =
       cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
@@ -714,7 +722,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    C,                            /* C */
                                    Cdesc, D,                     /* D */
                                    Ddesc, &heuristicResult.algo, /* algo */
-                                   workspace,                    /* workspace */
+                                   aligned_workspace_ptr,        /* workspace */
                                    workspaceSize, stream));      /* stream */
 
   // Update FP8 scale-inv in output tensor
