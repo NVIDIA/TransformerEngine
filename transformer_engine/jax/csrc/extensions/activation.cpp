@@ -154,8 +154,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int64_t>("act_enum")
         .Attr<JAXX_Scaling_Mode>("scaling_mode")
         .Attr<bool>("is_2x")
-        .Attr<ActivationConfig>(
-            "act_params"),  // Can generalize the config later if we have more activations that need params
+        .Attr<ActivationConfig>("act_params"),
     FFI_CudaGraph_Traits);
 
 Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
