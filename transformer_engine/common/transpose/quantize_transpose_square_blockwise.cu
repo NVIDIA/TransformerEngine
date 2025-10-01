@@ -486,7 +486,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   NVTE_API_CALL(quantize_transpose_square_blockwise);
   checkCuDriverContext(stream);
 
-  if (transformer_engine::cuda::sm_arch() > 90) {
+  if (transformer_engine::cuda::sm_arch() >= 100) {
     NVTE_CHECK(pow_2_scale, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
                "with MXFP8, which requires using power of two scaling factors.");
   }

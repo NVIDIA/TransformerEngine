@@ -33,7 +33,7 @@ tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DU
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scaling_available()
-recipe_emulated = get_device_compute_capability() > (9, 0)
+recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 
 class GetRecipes:

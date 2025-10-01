@@ -228,7 +228,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
-    if (fp8_block_scaling && transformer_engine::cuda::sm_arch() > 90) {
+    if (fp8_block_scaling && transformer_engine::cuda::sm_arch() >= 100) {
       // Convert tensors to mxfp8 and swizzle their scaling factors
       swizzled_scale_inverses_list.emplace_back(
           std::move(convert_block_scaling_to_mxfp8_tensor(A_tensor, transa)));

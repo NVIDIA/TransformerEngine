@@ -503,7 +503,7 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
 
   // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
   // which requires using power of two scaling factors. Skip unsupported tests.
-  if (getDeviceComputeCapability() > hopperComputeCapability && !force_pow_2) {
+  if (getDeviceComputeCapability() >= blackwellComputeCapability && !force_pow_2) {
     GTEST_SKIP();
   }
 
@@ -560,7 +560,7 @@ TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
 
   // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
   // which requires using power of two scaling factors. Skip unsupported tests.
-  if (getDeviceComputeCapability() > hopperComputeCapability && !force_pow_2) {
+  if (getDeviceComputeCapability() >= blackwellComputeCapability && !force_pow_2) {
     GTEST_SKIP();
   }
 
