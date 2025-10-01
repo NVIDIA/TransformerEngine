@@ -78,8 +78,8 @@ class UserBufferQuantizationMode(Enum):
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        # 32 MiB for NVFP4 GEMM, plus 256 B for misc scales
-        return 32 * 1024 * 1024 + 256
+        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
+        return 32 * 1024 * 1024 + 1024
     return 4_194_304
 
 
