@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor class with FP8 data"""
+"""Tensor class with MXFP8 data"""
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -186,8 +186,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
                    be applied when casting from FP8 to higher
-                   precision. Can be inferred from fp8_meta if
-                   provided.
+                   precision.
     dtype: torch.dtype, default = torch.float32
            Nominal tensor datatype.
 

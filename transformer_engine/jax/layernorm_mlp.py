@@ -41,6 +41,7 @@ def layernorm_mlp(
     norm_type: str,
     zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
+    batch_sequence_transpose: bool = False,
     norm_input_axes: Tuple[str, ...] = None,
     dot_1_input_axes: Tuple[str, ...] = None,
     dot_2_input_axes: Tuple[str, ...] = None,
@@ -49,6 +50,10 @@ def layernorm_mlp(
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
+    collective_op_sets: Tuple[tex.CollectiveOpSet] = (
+        tex.noop_collective_op_set,
+        tex.noop_collective_op_set,
+    ),
     quantizer_sets: Tuple[QuantizerSet] = (noop_quantizer_set, noop_quantizer_set),
 ) -> jnp.ndarray:
     """Apply layer normalization followed by MLP block.
@@ -72,6 +77,7 @@ def layernorm_mlp(
         norm_type: Type of normalization ("layernorm" or "rmsnorm")
         zero_centered_gamma: Whether to use zero-centered gamma for normalization
         epsilon: Small constant for numerical stability in normalization
+        batch_sequence_transpose: Whether to transpose the batch and sequence dimensions
         norm_input_axes: Logical axes for sharding the layernorm input
         dot_1_input_axes: Logical axes for sharding the first matrix multiplication
         dot_2_input_axes: Logical axes for sharding the second matrix multiplication
@@ -80,6 +86,7 @@ def layernorm_mlp(
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
         activation_type: Activation function(s) to apply after the first dense layer transformation
+        collective_op_sets: Tuple of two collective gemm config sets for the two dense layer transformations
         quantizer_sets: Tuple of two quantizer sets for the two dense layer transformations
 
     Returns:
@@ -122,6 +129,7 @@ def layernorm_mlp(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        batch_sequence_transpose,
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
@@ -130,12 +138,13 @@ def layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        collective_op_sets,
         quantizer_sets,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -147,6 +156,7 @@ def _layernorm_mlp(
     norm_type: str,
     zero_centered_gamma: bool,
     epsilon: float,
+    batch_sequence_transpose: bool,
     norm_input_axes: Tuple[str, ...],
     dot_1_input_axes: Tuple[str, ...],
     dot_2_input_axes: Tuple[str, ...],
@@ -155,6 +165,7 @@ def _layernorm_mlp(
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
+    collective_op_sets: Tuple[tex.CollectiveOpSet],
     quantizer_sets,
 ):
     """Internal implementation of layernorm_mlp with custom VJP.
@@ -174,12 +185,16 @@ def _layernorm_mlp(
         norm_type: Type of normalization
         zero_centered_gamma: Whether to use zero-centered gamma
         epsilon: Small constant for numerical stability
+        batch_sequence_transpose: Whether to transpose the batch and sequence dimensions
         norm_input_axes: Logical axes for layernorm sharding
         dot_1_input_axes: Logical axes for first matrix multiplication sharding
         dot_2_input_axes: Logical axes for second matrix multiplication sharding
+        kernel_1_axes: Logical axes for first weight matrix sharding
+        kernel_2_axes: Logical axes for second weight matrix sharding
         ffn1_ckpt_name: Name for first feed-forward network checkpointing
         ffn2_ckpt_name: Name for second feed-forward network checkpointing
         activation_type: Activation function(s)
+        collective_op_sets: Tuple of two collective gemm config sets for the two dense layer transformations
         quantizer_sets: Tuple of quantizer sets
 
     Returns:
@@ -196,6 +211,7 @@ def _layernorm_mlp(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        batch_sequence_transpose,
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
@@ -204,6 +220,7 @@ def _layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        collective_op_sets,
         quantizer_sets,
     )
     return output
@@ -220,6 +237,7 @@ def _layernorm_mlp_fwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    batch_sequence_transpose,
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
@@ -228,6 +246,7 @@ def _layernorm_mlp_fwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    collective_op_sets,
     quantizer_sets,
 ):
     """Forward pass rule for layernorm_mlp.
@@ -247,6 +266,10 @@ def _layernorm_mlp_fwd_rule(
     del kernel_1_axes, kernel_2_axes
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
+    collective_op_set_1, collective_op_set_2 = collective_op_sets
+
+    assert not collective_op_set_1.forward.is_reduce_scatter
+    assert not collective_op_set_2.forward.is_all_gather
 
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (hidden_in, activation_len, intermediate)
@@ -287,8 +310,10 @@ def _layernorm_mlp_fwd_rule(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
+        collective_op=collective_op_set_1.forward,
     )
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
@@ -326,8 +351,10 @@ def _layernorm_mlp_fwd_rule(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
+        collective_op=collective_op_set_2.forward,
     )
 
     if use_bias_2 and tex.gemm_uses_jax_dot():
@@ -335,6 +362,8 @@ def _layernorm_mlp_fwd_rule(
         bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
         dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
 
+    # sharding of outputs should be the same as dot_1's input
+    dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_1_input_axes)
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (
@@ -364,6 +393,7 @@ def _layernorm_mlp_bwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    batch_sequence_transpose,
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
@@ -372,6 +402,7 @@ def _layernorm_mlp_bwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    collective_op_sets,
     ctx,
     grad,
 ):
@@ -410,6 +441,10 @@ def _layernorm_mlp_bwd_rule(
     ) = ctx
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
+    collective_op_set_1, collective_op_set_2 = collective_op_sets
+
+    assert not collective_op_set_1.backward.is_all_gather
+    assert not collective_op_set_2.backward.is_reduce_scatter
 
     # Since the sharding of outputs should be the same as dot_1's input
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
@@ -436,6 +471,8 @@ def _layernorm_mlp_bwd_rule(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel_2,
         contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
+        transpose_batch_sequence=batch_sequence_transpose,
+        collective_op=collective_op_set_2.backward,
     )
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
@@ -450,6 +487,7 @@ def _layernorm_mlp_bwd_rule(
         casted_act_out,
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -476,6 +514,8 @@ def _layernorm_mlp_bwd_rule(
         casted_dact_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1,
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
+        transpose_batch_sequence=batch_sequence_transpose,
+        collective_op=collective_op_set_1.backward,
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
@@ -486,6 +526,7 @@ def _layernorm_mlp_bwd_rule(
         casted_ln_out,
         casted_dact_out.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
