@@ -35,6 +35,26 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Device-side error
+#define NVTE_DEVICE_ERROR(message)                                                                 \
+  do {                                                                                             \
+    printf("%s:%d in function %s (thread (%d,%d,%d), block (%d,%d,%d)): %s\n", __FILE__, __LINE__, \
+           __func__, threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z,    \
+           (message));                                                                             \
+    assert(0);                                                                                     \
+  } while (false)
+
+// Device-side error on thread 0
+#define NVTE_DEVICE_THREAD0_ERROR(message)                                           \
+  do {                                                                               \
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && \
+        threadIdx.y == 0 && threadIdx.z == 0) {                                      \
+      NVTE_DEVICE_ERROR(message);                                                    \
+    }                                                                                \
+  } while (false)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 inline __device__ float2 operator+(const float2 &a, const float2 &b) {  // NOLINT(*)
   return {a.x + b.x, a.y + b.y};
 }

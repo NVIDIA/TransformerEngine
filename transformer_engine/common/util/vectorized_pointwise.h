@@ -372,7 +372,7 @@ template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename In
           typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
-                                       fp32 *scale_inv, const size_t N, const Param params,
+                                       fp32 *scale_inv, const size_t N, const Param &params,
                                        cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, grad, output);
@@ -544,7 +544,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
         const ComputeType limit = p.limit;
-        dgate_in = gate_in < limit && gate_in > -limit;  // Derivative of clamp
+        dgate_in = gate_in <= limit && gate_in >= -limit;  // Derivative of clamp
         gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
       }
 

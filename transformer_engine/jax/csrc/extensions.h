@@ -50,16 +50,20 @@ inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == D
 // Activation
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler);
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
                                                    JAXX_Scaling_Mode scaling_mode, bool is_2x);
 
 // Normalization
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardHandler);
 
 pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
