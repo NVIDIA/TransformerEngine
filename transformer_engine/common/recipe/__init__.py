@@ -6,7 +6,8 @@
 from __future__ import annotations
 import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
@@ -111,6 +112,10 @@ class Recipe:
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
 
+    def custom(self):
+        """Whether the given recipe is custom."""
+        return isinstance(self, CustomRecipe)
+
 
 @dataclass()
 class DelayedScaling(Recipe):
@@ -209,6 +214,7 @@ class DelayedScaling(Recipe):
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
+            f"reduce_amax={self.reduce_amax}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
@@ -226,10 +232,11 @@ class Float8CurrentScaling(Recipe):
                 pass.
     """
 
+    use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_fwd_inp = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
@@ -238,9 +245,6 @@ class Float8CurrentScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-        assert (
-            not self.fp8_dpa and not self.fp8_mha
-        ), "FP8 attention is not supported for Float8CurrentScaling."
 
     def __repr__(self) -> str:
         return (
@@ -378,7 +382,6 @@ class Float8BlockScaling(Recipe):
         )
 
 
-@dataclass()
 class NVFP4BlockScaling(Recipe):
     """
     Use the NVFP4 scaling strategy.
@@ -457,3 +460,37 @@ class NVFP4BlockScaling(Recipe):
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
         )
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide quantizer factories.
+
+    .. warning::
+        **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Parameters
+    ----------
+    qfactory : Callable
+               Factory callable that returns a quantizer instance for a
+               given semantic tensor role.
+               The callable is typically invoked as:
+                   qfactory(
+                       role: str,
+                   )
+
+               Where `role` is one of the following strings for e.g. te.Linear
+               (stable public contract):
+               - forward:  "linear_input", "linear_weight", "linear_output"
+               - backward: "linear_grad_output", "linear_grad_input"
+    """
+
+    qfactory: Callable[..., Any]
+
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"

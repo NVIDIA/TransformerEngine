@@ -12,7 +12,7 @@ from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_experimental
 from ..experimental.gemm import experimental_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -107,9 +107,9 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
+    if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # There is not use_split_accumulator == False
-        # implementation for Float8BlockwiseQTensorBase GEMM
+        # implementation for Float8BlockwiseQTensorStorage GEMM
         use_split_accumulator = True
 
         # Check that data format is supported
