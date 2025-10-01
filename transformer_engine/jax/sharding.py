@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 import warnings
+
 import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
@@ -364,3 +365,21 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
+
+
+def tpsp_axis_size():
+    """
+    Get the size of the tensor parallelism axis.
+    Return 1 if no TP axis is set.
+    """
+    return get_mesh_axis_size(global_mesh_resource().tpsp_resource)
+
+
+def dp_or_fsdp_axis_size():
+    """
+    Get the size of the data parallelism or FSDP axis.
+    Return 1 if no DP/FSDP axis is set.
+    """
+    dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
+    fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
+    return dp_size if dp_size > 1 else fsdp_size

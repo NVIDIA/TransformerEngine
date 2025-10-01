@@ -293,3 +293,11 @@ class NamedSharding(jax.sharding.NamedSharding):
         Create a new NamedSharding with the same mesh and spec but with a new description.
         """
         return NamedSharding(self.mesh, self.spec, desc=desc)
+
+
+@functools.lru_cache(maxsize=1)
+def is_all_reduce_in_float32():
+    """
+    Check if all-reduce is in float32
+    """
+    return os.getenv("NVTE_JAX_ALL_REDUCE_IN_FP32", "0") == "1"
