@@ -140,22 +140,21 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    ActLuHandler, ActLuFFI,
-    FFI::Bind()
-        .Ctx<FFI_Stream_Type>()  // stream
-        .Arg<Buffer_Type>()      // input
-        .Arg<Buffer_Type>()      // scale
-        .Ret<Buffer_Type>()      // output
-        .Ret<Buffer_Type>()      // colwise output
-        .Ret<Buffer_Type>()      // scale_inv
-        .Ret<Buffer_Type>()      // scale_inv colwise
-        .Ret<Buffer_Type>()      // amax
-        .Attr<int64_t>("act_enum")
-        .Attr<JAXX_Scaling_Mode>("scaling_mode")
-        .Attr<bool>("is_2x")
-        .Attr<ActivationConfig>("act_params"),
-    FFI_CudaGraph_Traits);
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // scale_inv colwise
+                                  .Ret<Buffer_Type>()      // amax
+                                  .Attr<int64_t>("act_enum")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<bool>("is_2x")
+                                  .Attr<ActivationConfig>("act_params"),
+                              FFI_CudaGraph_Traits);
 
 Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
                               Result_Type output_buf, Result_Type colwise_output_buf,
