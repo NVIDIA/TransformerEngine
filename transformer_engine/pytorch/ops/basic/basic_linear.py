@@ -373,10 +373,10 @@ class BasicLinear(BasicOperation):
             if recipe.float8_current_scaling():
                 input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
                 input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
+                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
                 if getattr(self, "sequence_parallel", False):
                     tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
                     if tensor_parallel_mode == "column":
