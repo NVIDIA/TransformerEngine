@@ -777,7 +777,7 @@ class TestFusedQuantize:
     def _test_quantize_dact_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, activation_type, is_dbias, q_layout
     ):
-        
+
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(subkeys[0], input_shape, in_dtype, -1, 1)
