@@ -42,7 +42,7 @@ struct ClampedSwigluConfig {
 };
 
 struct ActivationConfig {
-  ClampedSwigluConfig clamped_swiglu_config;
+  ClampedSwigluConfig clamped_swiglu;
 };
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }

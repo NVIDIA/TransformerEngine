@@ -20,8 +20,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Result_Type amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
                     bool is_2x_int, ActivationConfig act_params) {
   // parameters for clamped swiglu used in GPT OSS
-  auto swiglu_limit = act_params.clamped_swiglu_config.limit;
-  auto swiglu_alpha = act_params.clamped_swiglu_config.alpha;
+  auto swiglu_limit = act_params.clamped_swiglu.limit;
+  auto swiglu_alpha = act_params.clamped_swiglu.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
@@ -252,8 +252,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   int64_t act_enum, bool is_2x, bool is_dbias,
                                   ActivationConfig act_params) {
   // parameters for clamped swiglu used in GPT OSS
-  auto swiglu_limit = act_params.clamped_swiglu_config.limit;
-  auto swiglu_alpha = act_params.clamped_swiglu_config.alpha;
+  auto swiglu_limit = act_params.clamped_swiglu.limit;
+  auto swiglu_alpha = act_params.clamped_swiglu.alpha;
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
