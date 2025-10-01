@@ -682,11 +682,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // align the workspace to 256 B
   const int required_alignment = 256;
   const auto original_workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
-  uint8_t* aligned_workspace_ptr = reinterpret_cast<uint8_t*>(workspace) +
-                                   required_alignment - original_workspace_alignment;
+  uint8_t *aligned_workspace_ptr =
+      reinterpret_cast<uint8_t *>(workspace) + required_alignment - original_workspace_alignment;
   workspaceSize = workspaceSize - required_alignment + original_workspace_alignment;
   const auto new_workspace_alignment =
-    _getAlignment(reinterpret_cast<uintptr_t>(aligned_workspace_ptr));
+      _getAlignment(reinterpret_cast<uintptr_t>(aligned_workspace_ptr));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
@@ -721,7 +721,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    C,                            /* C */
                                    Cdesc, D,                     /* D */
                                    Ddesc, &heuristicResult.algo, /* algo */
-                                   aligned_workspace_ptr,                    /* workspace */
+                                   aligned_workspace_ptr,        /* workspace */
                                    workspaceSize, stream));      /* stream */
 
   // Update FP8 scale-inv in output tensor
