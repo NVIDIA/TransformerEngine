@@ -25,7 +25,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -1312,7 +1312,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # d_out is expected to be in FP8 if is_output_fp8=True,
         # but in the case it's not, convert it to FP8 before any operation
-        if ctx.fp8 and ctx.is_output_fp8 and not isinstance(d_out, QuantizedTensorBase):
+        if ctx.fp8 and ctx.is_output_fp8 and not isinstance(d_out, QuantizedTensorStorage):
             d_out = ctx.dO_quantizer(d_out)
             if not ctx.use_FAv2_bwd:
                 d_out._data = d_out._data.contiguous()
@@ -1479,7 +1479,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.dP_quantizer,
                     )
                 else:
-                    if isinstance(d_out, QuantizedTensorBase):
+                    if isinstance(d_out, QuantizedTensorStorage):
                         d_out = d_out.dequantize(dtype=ctx.nominal_dtype)
                     dqkv_te_dtype = TE_DType[d_out.dtype]
                     # q, k, v, out, d_out, dq, dk, dv: torch.Tensor; torch.float16 or torch.bfloat16
