@@ -27,6 +27,7 @@ from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
+    AttnSoftmaxType,
     QKVLayout,
     QKVFormat,
     reorder_causal_load_balancing,
@@ -300,6 +301,7 @@ class FusedAttnRunner:
     head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
+    softmax_type: AttnSoftmaxType
     dropout_prob: float
     dtype: DTypeLike
     is_training: bool
@@ -372,6 +374,7 @@ class FusedAttnRunner:
             self.qkv_layout,
             self.attn_bias_type,
             self.attn_mask_type,
+            self.softmax_type,
             self.dropout_prob,
             self.num_heads_q,
             self.num_heads_kv,
@@ -714,6 +717,7 @@ class FusedAttnRunner:
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -806,6 +810,7 @@ class FusedAttnRunner:
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -940,6 +945,14 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
+    ],
+)
+@pytest.mark.parametrize(
     "qkv_layout",
     [
         pytest.param(QKVLayout.BS3HD, id="QKV_PACKED"),
@@ -1047,6 +1060,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         dtype,
         is_training,
@@ -1073,6 +1087,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             is_training,
@@ -1101,6 +1116,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         dtype,
         qkv_layout,
@@ -1124,6 +1140,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             True,
