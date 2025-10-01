@@ -161,10 +161,10 @@ Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer
                               Result_Type output_buf, Result_Type colwise_output_buf,
                               Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                               Result_Type amax_buf, int64_t act_enum,
-                              JAXX_Scaling_Mode scaling_mode, bool is_2x_int) {
+                              JAXX_Scaling_Mode scaling_mode, bool is_2x_int, ActivationConfig act_params) {
   return wrapInStreamCapture(std::function(ActLuFFI), stream, input_buf, scale_buf, output_buf,
                              colwise_output_buf, scale_inv_buf, colwise_scale_inv_buf, amax_buf,
-                             act_enum, scaling_mode, is_2x_int);
+                             act_enum, scaling_mode, is_2x_int, act_params);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuInitializeHandler, ActLuInitializeFFI,
@@ -179,7 +179,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuInitializeHandler, ActLuInitializeFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<int64_t>("act_enum")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"));
+                                  .Attr<bool>("is_2x")
+                                  .Attr<ActivationConfig>("act_params"));
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
@@ -460,11 +461,13 @@ Error_Type DActLuDBiasQuantizeInitializeFFI(cudaStream_t stream, Buffer_Type inp
                                             Result_Type colwise_scale_inv_buf, Result_Type amax_buf,
                                             Result_Type dbias_buf, Result_Type workspace_buf,
                                             JAXX_Scaling_Mode scaling_mode, int64_t act_enum,
-                                            bool is_2x, bool is_dbias) {
+                                            bool is_2x, bool is_dbias,
+                                            ActivationConfig act_params) {
   return wrapInStreamCapture(std::function(DActLuDBiasQuantizeFFI), stream, input_buf,
                              act_input_buf, scale_buf, output_buf, colwise_output_buf,
                              scale_inv_buf, colwise_scale_inv_buf, amax_buf, dbias_buf,
-                             workspace_buf, scaling_mode, act_enum, is_2x, is_dbias);
+                             workspace_buf, scaling_mode, act_enum, is_2x, is_dbias,
+                             act_params);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler,
@@ -484,7 +487,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("act_enum")
                                   .Attr<bool>("is_2x")
-                                  .Attr<bool>("is_dbias"));
+                                  .Attr<bool>("is_dbias")
+                                  .Attr<ActivationConfig>("act_params"));
 
 }  // namespace jax
 }  // namespace transformer_engine
