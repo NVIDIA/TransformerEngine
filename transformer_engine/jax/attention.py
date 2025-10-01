@@ -74,6 +74,7 @@ class AttnMaskType(Enum):
             AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
         ]
 
+
 class AttnSoftmaxType(Enum):
     """
     VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
@@ -81,6 +82,7 @@ class AttnSoftmaxType(Enum):
     LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
     where alpha is a learnable parameter in shape [H].
     """
+
     VANILLA_SOFTMAX = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
     OFF_BY_ONE_SOFTMAX = NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX
     LEARNABLE_SOFTMAX = NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX

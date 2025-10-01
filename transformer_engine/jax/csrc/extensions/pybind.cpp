@@ -121,7 +121,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
       .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
-  
+
   pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
       .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)
       .value("NVTE_OFF_BY_ONE_SOFTMAX", NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX)

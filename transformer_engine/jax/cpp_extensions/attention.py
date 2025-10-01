@@ -586,7 +586,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
 
-        output, softmax_aux, rng_state,  _ = FusedAttnFwdPrimitive.inner_primitive.bind(
+        output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
             k,
             v,
@@ -813,7 +813,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
         )
 
-        dsoftmax_offset_aval = q_aval.update(shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype)
+        dsoftmax_offset_aval = q_aval.update(
+            shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
+        )
 
         return dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, wkspace_aval
 
@@ -822,7 +824,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         Fused attention fwd outer primitive abstract
         """
-        dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, _ = FusedAttnBwdPrimitive.abstract(*args, **kwargs)
+        dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, _ = (
+            FusedAttnBwdPrimitive.abstract(*args, **kwargs)
+        )
         return dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval
 
     @staticmethod
@@ -1080,7 +1084,13 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
+        out_shardings = (
+            dq_sharding,
+            dk_sharding,
+            dv_sharding,
+            dbias_sharding,
+            dsoftmax_offset_sharding,
+        )
 
         def sharded_impl(
             q,
@@ -1101,25 +1111,27 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             _q_segment_pos,
             _kv_segment_pos,
         ):
-            local_dq, local_dk, local_dv, local_dbias, local_dsoftmax_offset = FusedAttnBwdPrimitive.impl(
-                q,
-                k,
-                v,
-                bias,
-                softmax_offset,
-                softmax_aux,
-                rng_state,
-                output,
-                doutput,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-                _q_segment_ids,
-                _kv_segment_ids,
-                _q_segment_pos,
-                _kv_segment_pos,
-                config=config,
+            local_dq, local_dk, local_dv, local_dbias, local_dsoftmax_offset = (
+                FusedAttnBwdPrimitive.impl(
+                    q,
+                    k,
+                    v,
+                    bias,
+                    softmax_offset,
+                    softmax_aux,
+                    rng_state,
+                    output,
+                    doutput,
+                    q_cu_seqlen,
+                    kv_cu_seqlen,
+                    q_seq_offsets,
+                    k_seq_offsets,
+                    _q_segment_ids,
+                    _kv_segment_ids,
+                    _q_segment_pos,
+                    _kv_segment_pos,
+                    config=config,
+                )
             )
             global_dbias = local_dbias
             if config.attn_bias_type is not AttnBiasType.NO_BIAS:
@@ -2648,11 +2660,13 @@ def fused_attn_fwd(
     if attn_bias_type == AttnBiasType.NO_BIAS:
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
-    
+
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            raise NotImplementedError("Off-by-one softmax is not supported when softmax_offset is None")
+            raise NotImplementedError(
+                "Off-by-one softmax is not supported when softmax_offset is None"
+            )
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
         else:
@@ -2789,7 +2803,9 @@ def fused_attn_bwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            raise NotImplementedError("Off-by-one softmax is not supported when softmax_offset is None")
+            raise NotImplementedError(
+                "Off-by-one softmax is not supported when softmax_offset is None"
+            )
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
         else:
