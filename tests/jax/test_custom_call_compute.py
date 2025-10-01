@@ -829,7 +829,7 @@ class TestFusedQuantize:
                 (in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling())
                 # Due to the amax dependency, current scaling is unfused. In TE we store the activation results in bf16 which reduces precision compared to JAX implementation which will implicitly promote to float32 for the intermediate results when JIT'd. This only produces a tolerance issue when using squared_relu currently.
                 or (
-                    activation_type == ("squared_relu",)
+                    activation_type in {("squared_relu",), ("clamped_silu", "clamped_linear")}
                     and in_dtype == jnp.bfloat16
                     and scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
                 )

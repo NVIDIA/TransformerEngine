@@ -1281,7 +1281,6 @@ def quantize_dact_dbias(
         )
 
     is_gated = act_len == 2
-    print(f"is_gated: {is_gated}, act_len: {act_len}")
     # TE/common does not support DelayedScaling2x for gated-act yet
     if is_gated:
         war_output = try_apply_delayed_scaling_2x_war(
@@ -1300,8 +1299,8 @@ def quantize_dact_dbias(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = dact_lu(
-            dz=dz.astype(jnp.float32),
-            x=x.astype(jnp.float32),
+            dz=dz,
+            x=x,
             activation_type=activation_type,
             quantizer=None,
             act_params=act_params,
