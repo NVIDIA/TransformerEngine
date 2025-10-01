@@ -1736,6 +1736,80 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantize_forward", (False, True))
+    @pytest.mark.parametrize("quantize_backward", (False, True))
+    def test_clamped_swiglu(
+        self,
+        *,
+        out_shape: Iterable[int] = (32, 32),
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantize_forward: bool,
+        quantize_backward: bool,
+        limit: float = 0.75,
+        alpha: float = 1.702,
+    ):
+        # Test SwiGLU variant used in GPT OSS.
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        in_shape[-1] *= 2
+
+        # Skip invalid configurations
+        quantized_compute = quantization is not None
+        if not quantized_compute and (quantize_forward or quantize_backward):
+            pytest.skip("Quantization scheme has not been provided")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x_glu, x_linear = x_ref.chunk(2, dim=-1)
+        x_glu = x_glu.clamp(min=None, max=limit)
+        x_linear = x_linear.clamp(min=-limit, max=limit)
+        out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+        y_ref = out_glu * (x_linear + 1)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        recipe = make_recipe(quantization)
+
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=quantize_backward),
+            te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
+            te_ops.Quantize(forward=quantize_forward, backward=False),
+        )
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = forward(x_test)
+
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if quantized_compute and quantization == "nvfp4":
+            tols = dtype_tols(tex.DType.kFloat4E2M1)
+        elif quantized_compute:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
     @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))
     @pytest.mark.parametrize("dtype", _dtypes)
