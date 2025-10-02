@@ -96,7 +96,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       softmax_offset_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
       nvte_set_tensor_param(&softmax_offset_aux, kNVTERowwiseData, &softmax_offset_aux_data);
     }
-    
+
     // Set final size
     tensor_pack->size = size;
   }
@@ -116,14 +116,16 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
                                         const size_t bias_heads, const size_t q_max_seqlen,
                                         const size_t kv_max_seqlen, DType dtype,
                                         NVTE_Fused_Attn_Backend backend, void *softmax_buf,
-                                        void *rng_state_buf, void *bias_buf, void *softmax_offset_buf = nullptr) {
+                                        void *rng_state_buf, void *bias_buf,
+                                        void *softmax_offset_buf = nullptr) {
   // Backward calls put everything into the tensor pack for every backend
   // so we set dummy bias_type and backend choices here to follow the correct code path
   auto dummy_bias_type = NVTE_Bias_Type::NVTE_POST_SCALE_BIAS;
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
-                                    dummy_backend, softmax_buf, rng_state_buf, bias_buf, softmax_offset_buf);
+                                    dummy_backend, softmax_buf, rng_state_buf, bias_buf,
+                                    softmax_offset_buf);
 
   // correct softmax shape for max512 sequence length kernel
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
@@ -191,15 +193,14 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
     auto ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
-      nvte_fused_attn_fwd(
-          q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
-          dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
-          q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
-          ragged_offset_tensor.data(), dummy_page_table_tensor.data(),
-          dummy_page_table_tensor.data(), dummy_rng_state_tensor.data(), q_max_seqlen,
-          kv_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout, bias_type,
-          mask_type, softmax_type, window_size_left, window_size_right,
-          query_workspace_tensor.data(), nullptr);
+    nvte_fused_attn_fwd(
+        q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
+        dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
+        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
+        ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
+        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, scaling_factor,
+        dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
+        window_size_right, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -287,7 +288,7 @@ static void FusedAttnForwardImpl(
 
   /* Call the underlying NVTE API */
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
-  
+
   // Prepare Q, K, V pointers and shapes based on layout
   // Python passes dummy tensors for unused slots, so we extract from the actual packed data
   void *q_ptr = q;
@@ -296,15 +297,15 @@ static void FusedAttnForwardImpl(
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
   auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
-  
+
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
     // Python passes: q=packed_qkv, k=dummy, v=dummy
     // Extract K and V pointers from the packed q data
     size_t stride = (typeToSize(dtype) * attn_heads * qk_head_dim);
     q_ptr = q;
-    k_ptr = static_cast<void*>(static_cast<int8_t*>(q) + stride);
-    v_ptr = static_cast<void*>(static_cast<int8_t*>(q) + 2 * stride);
+    k_ptr = static_cast<void *>(static_cast<int8_t *>(q) + stride);
+    v_ptr = static_cast<void *>(static_cast<int8_t *>(q) + 2 * stride);
     // For packed QKV, all have same shape since they're views into the same packed tensor
     k_shape = q_shape;
     v_shape = q_shape;
@@ -315,16 +316,16 @@ static void FusedAttnForwardImpl(
     size_t stride = (typeToSize(dtype) * num_gqa_groups * qk_head_dim);
     q_ptr = q;
     k_ptr = k;
-    v_ptr = static_cast<void*>(static_cast<int8_t*>(k) + stride);
+    v_ptr = static_cast<void *>(static_cast<int8_t *>(k) + stride);
     // V has same shape as K since they're views into the same packed tensor
     v_shape = k_shape;
   }
   // else NVTE_HD_HD_HD: pointers and shapes already correct
-  
+
   auto q_tensor = TensorWrapper(q_ptr, q_shape, dtype);
   auto k_tensor = TensorWrapper(k_ptr, k_shape, dtype);
   auto v_tensor = TensorWrapper(v_ptr, v_shape, dtype);
-  
+
   nvte_fused_attn_fwd(
       q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
       softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
@@ -471,7 +472,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
       softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX) {
     dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
   }
-  
+
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -480,7 +481,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
     auto dummy_ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
-    
+
     nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
                         doutput_tensor.data(),
                         s_tensor.data(),  // not used for F16
@@ -551,16 +552,16 @@ static void FusedAttnBackwardImpl(
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
   auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
-  
+
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
     size_t stride = (typeToSize(dtype) * attn_heads * qk_head_dim);
     q_ptr = q;
-    k_ptr = static_cast<void*>(static_cast<int8_t*>(q) + stride);
-    v_ptr = static_cast<void*>(static_cast<int8_t*>(q) + 2 * stride);
+    k_ptr = static_cast<void *>(static_cast<int8_t *>(q) + stride);
+    v_ptr = static_cast<void *>(static_cast<int8_t *>(q) + 2 * stride);
     dq_ptr = dq;
-    dk_ptr = static_cast<void*>(static_cast<int8_t*>(dq) + stride);
-    dv_ptr = static_cast<void*>(static_cast<int8_t*>(dq) + 2 * stride);
+    dk_ptr = static_cast<void *>(static_cast<int8_t *>(dq) + stride);
+    dv_ptr = static_cast<void *>(static_cast<int8_t *>(dq) + 2 * stride);
     k_shape = q_shape;
     v_shape = q_shape;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
@@ -568,48 +569,49 @@ static void FusedAttnBackwardImpl(
     size_t stride = (typeToSize(dtype) * num_gqa_groups * qk_head_dim);
     q_ptr = q;
     k_ptr = k;
-    v_ptr = static_cast<void*>(static_cast<int8_t*>(k) + stride);
+    v_ptr = static_cast<void *>(static_cast<int8_t *>(k) + stride);
     dq_ptr = dq;
     dk_ptr = dk;
-    dv_ptr = static_cast<void*>(static_cast<int8_t*>(dk) + stride);
+    dv_ptr = static_cast<void *>(static_cast<int8_t *>(dk) + stride);
     v_shape = k_shape;
   }
-  
+
   auto q_tensor = TensorWrapper(q_ptr, q_shape, dtype);
   auto k_tensor = TensorWrapper(k_ptr, k_shape, dtype);
   auto v_tensor = TensorWrapper(v_ptr, v_shape, dtype);
   auto dq_tensor = TensorWrapper(dq_ptr, q_shape, dtype);
   auto dk_tensor = TensorWrapper(dk_ptr, k_shape, dtype);
   auto dv_tensor = TensorWrapper(dv_ptr, v_shape, dtype);
-  
+
   if (is_ragged) {
     cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
     if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
       // For packed QKV, dq contains all gradients, so clear it once with full size
-      cudaMemsetAsync(static_cast<int8_t*>(dq) + transformer_engine::jax::product(q_shape) * typeToSize(dtype), 
-                      0, 2 * transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(
+          static_cast<int8_t *>(dq) + transformer_engine::jax::product(q_shape) * typeToSize(dtype),
+          0, 2 * transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
       cudaMemsetAsync(dk, 0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
       // For packed KV, dk contains both K and V gradients
-      cudaMemsetAsync(static_cast<int8_t*>(dk) + transformer_engine::jax::product(k_shape) * typeToSize(dtype),
-                      0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(
+          static_cast<int8_t *>(dk) + transformer_engine::jax::product(k_shape) * typeToSize(dtype),
+          0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
     } else {
       cudaMemsetAsync(dk, 0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
       cudaMemsetAsync(dv, 0, transformer_engine::jax::product(v_shape) * typeToSize(dtype), stream);
     }
   }
-  
-  nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-                      doutput_tensor.data(),
-                      s_tensor.data(),  // not used for F16
-                      s_tensor.data(),  // not used for F16
-                      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                      dbias_tensor.data(), dsoftmax_offset_tensor.data(),
-                      q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen,
-                      kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type,
-                      mask_type, softmax_type, window_size_left, window_size_right, deterministic,
-                      workspace_tensor.data(), stream);
+
+  nvte_fused_attn_bwd(
+      q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+      doutput_tensor.data(),
+      s_tensor.data(),  // not used for F16
+      s_tensor.data(),  // not used for F16
+      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(), dbias_tensor.data(),
+      dsoftmax_offset_tensor.data(), q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen,
+      scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
+      window_size_left, window_size_right, deterministic, workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }

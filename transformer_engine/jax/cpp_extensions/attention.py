@@ -820,9 +820,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
             )
         else:
-            dsoftmax_offset_aval = q_aval.update(
-                shape=(1, attn_heads, 1, 1), dtype=jnp.float32
-            )
+            dsoftmax_offset_aval = q_aval.update(shape=(1, attn_heads, 1, 1), dtype=jnp.float32)
 
         return dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, wkspace_aval
 
@@ -2671,7 +2669,7 @@ def fused_attn_fwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # Extract number of heads from qkv shape  
+            # Extract number of heads from qkv shape
             # For qkvpacked (BS3HD): shape is (..., seq, 3, heads, dim) → index -2
             # For separate/kvpacked (BSHD): shape is (..., seq, heads, dim) → index -2
             if qkv_layout.is_qkvpacked():
@@ -2816,7 +2814,7 @@ def fused_attn_bwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # Extract number of heads from qkv shape  
+            # Extract number of heads from qkv shape
             # For qkvpacked (BS3HD): shape is (..., seq, 3, heads, dim) → index -2
             # For separate/kvpacked (BSHD): shape is (..., seq, heads, dim) → index -2
             if qkv_layout.is_qkvpacked():

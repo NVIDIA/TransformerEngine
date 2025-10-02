@@ -107,7 +107,9 @@ def general_dot_product_attention(
         case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
             exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
-            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + 1.0)).astype(dtype)
+            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + 1.0)).astype(
+                dtype
+            )
         case AttnSoftmaxType.LEARNABLE_SOFTMAX:
             # Reshape softmax_offset from (1, h_q, 1, 1) to (1, h_kv, num_groups, 1, 1) to match logits
             # logits shape: (b, h_kv, num_groups, s_q, s_kv)
@@ -116,10 +118,12 @@ def general_dot_product_attention(
             else:
                 softmax_offset_reshaped = jnp.zeros((1, h_kv, num_groups, 1, 1), dtype=jnp.float32)
             exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
-            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + jnp.exp(softmax_offset_reshaped))).astype(dtype)
+            softmax_out = (
+                exp_logits
+                / (jnp.sum(exp_logits, axis=-1, keepdims=True) + jnp.exp(softmax_offset_reshaped))
+            ).astype(dtype)
         case _:
             raise NotImplementedError(f"Unknown {softmax_type=}")
-    
 
     if not deterministic and dropout_rate > 0.0:
         keep_prob = 1.0 - dropout_rate
@@ -287,9 +291,9 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs).astype(
-        query.dtype
-    )
+    return fused_attn(
+        qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
+    ).astype(query.dtype)
 
 
 class BiasShape(Enum):
@@ -485,9 +489,11 @@ class FusedAttnRunner:
             pad_ratio = 0.3
         else:
             pad_ratio = 0.0
-        
+
         if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            self.softmax_offset = jax.random.uniform(softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0)
+            self.softmax_offset = jax.random.uniform(
+                softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0
+            )
         else:
             self.softmax_offset = None
 
@@ -711,7 +717,9 @@ class FusedAttnRunner:
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
         # Softmax offset sharding (1, num_heads, 1, 1)
-        self.softmax_offset_pspec = PartitionSpec(None, self.mesh_resource.tpsp_resource, None, None)
+        self.softmax_offset_pspec = PartitionSpec(
+            None, self.mesh_resource.tpsp_resource, None, None
+        )
         self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
 
         self.dropout_rng_pspec = PartitionSpec(
@@ -874,7 +882,15 @@ class FusedAttnRunner:
         jitted_primitive = jit(
             value_and_grad(
                 lambda q, k, v, bias, softmax_offset, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, softmax_offset, *args, cp_reverse_out=True, **kwargs
+                    customcall_fused_dpa,
+                    q,
+                    k,
+                    v,
+                    bias,
+                    softmax_offset,
+                    *args,
+                    cp_reverse_out=True,
+                    **kwargs,
                 ),
                 arg_nums,
             ),
@@ -891,7 +907,9 @@ class FusedAttnRunner:
         )
         jitted_reference = jit(
             value_and_grad(
-                lambda q, k, v, bias, softmax_offset, *args: grad_func(jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs),
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs
+                ),
                 arg_nums,
             )
         )
@@ -1134,7 +1152,6 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_forward()
-        
 
     @staticmethod
     @pytest.mark.parametrize(
@@ -1188,4 +1205,3 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
-    
