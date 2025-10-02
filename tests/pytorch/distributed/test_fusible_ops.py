@@ -635,6 +635,204 @@ def _test_linear(
         torch.testing.assert_close(db_test, db_ref, **tols)
 
 
+def _test_mlp(
+    *,
+    bias: bool = True,
+    hidden_size: int = 32,
+    local_batch_size: int = 32,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device = "cuda",
+    quantization: Optional[str] = None,
+    quantized_weight: bool = False,
+    sequence_parallel: bool = False,
+) -> None:
+    """2-layer MLP
+
+    MLP includes GELU activation in order to test op fusions. Model
+    performs warmup steps in order to test inter-step logic.
+
+    """
+
+    # Skip invalid configurations
+    quantized_compute = quantization is not None
+    if not quantized_compute and quantized_weight:
+        return
+
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
+
+    # Tensor dimensions
+    mlp_size = hidden_size * world_size
+    batch_size = local_batch_size
+    if sequence_parallel:
+        batch_size *= world_size
+    in_shape = (batch_size, hidden_size)
+
+    # Random data
+    reset_rng()
+    x_ref, x_test = make_reference_and_test_tensors(
+        in_shape,
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+    )
+    w1_ref, w1_test = make_reference_and_test_tensors(
+        (mlp_size, hidden_size),
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+    )
+    b1_ref, b1_test = None, None
+    w2_ref, w2_test = make_reference_and_test_tensors(
+        (hidden_size, mlp_size),
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+    )
+    b2_ref, b2_test = None, None
+    if bias:
+        b1_ref, b1_test = make_reference_and_test_tensors(
+            (mlp_size,),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b2_ref, b2_test = make_reference_and_test_tensors(
+            (world_size, hidden_size),
+            test_dtype=dtype,
+            test_device=device,
+        )
+    dy_ref, dy_test = make_reference_and_test_tensors(
+        in_shape,
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+        requires_grad=False,
+    )
+
+    # Plain PyTorch implementation
+    y_ref = torch.nn.functional.gelu(x_ref, approximate="tanh")
+    y_ref = torch.nn.functional.linear(y_ref, w1_ref)
+    if bias:
+        y_ref += b1_ref
+    y_ref = torch.nn.functional.gelu(y_ref, approximate="tanh")
+    y_ref = torch.nn.functional.linear(y_ref, w2_ref)
+    if bias:
+        y_ref += b2_ref.sum(dim=0)
+    y_ref = torch.nn.functional.gelu(y_ref, approximate="tanh")
+    y_ref.backward(dy_ref)
+
+    # Convert to distributed tensors
+    with torch.no_grad():
+        local_mlp_size = mlp_size // world_size
+        local_mlp_slice = slice(rank * local_mlp_size, (rank + 1) * local_mlp_size)
+        dx_ref = x_ref.grad
+        dw1_ref = w1_ref.grad[local_mlp_slice, :]
+        w1_ref = w1_ref[local_mlp_slice, :]
+        w1_test = w1_test[local_mlp_slice, :]
+        dw2_ref = w2_ref.grad[:, local_mlp_slice]
+        w2_ref = w2_ref[:, local_mlp_slice]
+        w2_test = w2_test[:, local_mlp_slice]
+        if bias:
+            db1_ref = b1_ref.grad[local_mlp_slice]
+            b1_ref = b1_ref[local_mlp_slice]
+            b1_test = b1_test[local_mlp_slice]
+            db2_ref = b2_ref.grad[rank, :]
+            b2_ref = b2_ref[rank, :]
+            b2_test = b2_test[rank, :]
+        else:
+            db1_ref = None
+            db2_ref = None
+        if sequence_parallel:
+            local_batch_slice = slice(
+                rank * local_batch_size,
+                (rank + 1) * local_batch_size,
+            )
+            x_ref = x_ref[local_batch_slice, ...]
+            dx_ref = dx_ref[local_batch_slice, ...]
+            x_test = x_test[local_batch_slice, ...].clone()
+            y_ref = y_ref[local_batch_slice, ...]
+            dy_ref = dy_ref[local_batch_slice, ...]
+            dy_test = dy_test[local_batch_slice, ...].clone()
+    x_test.requires_grad_()
+
+    # Implementation with fusible operation
+    recipe = make_recipe(quantization)
+    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        model = te_ops.Sequential(
+            te_ops.GELU(),
+            te_ops.Linear(
+                hidden_size,
+                mlp_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                tensor_parallel_mode="column",
+                tensor_parallel_group=process_group,
+                sequence_parallel=sequence_parallel,
+            ),
+            te_ops.GELU(),
+            te_ops.Linear(
+                mlp_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                tensor_parallel_mode="row",
+                tensor_parallel_group=process_group,
+                sequence_parallel=sequence_parallel,
+            ),
+            te_ops.GELU(),
+        )
+    with torch.no_grad():
+        model[1].weight.copy_(w1_test)
+        model[3].weight.copy_(w2_test)
+        if bias:
+            model[1].bias.copy_(b1_test)
+            model[3].bias.copy_(b2_test)
+        del w1_test, w2_test, b1_test, b2_test
+
+    # Warmup steps
+    for _ in range(3):
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = model(x_test)
+        y_test.backward(dy_test)
+    x_test.grad = None
+    model[1].weight.grad = None
+    model[3].weight.grad = None
+    if bias:
+        model[1].bias.grad = None
+        model[3].bias.grad = None
+
+    # Forward and backward step
+    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        y_test = model(x_test)
+    y_test.backward(dy_test)
+
+    # Expected numerical error
+    tols = dtype_tols(dtype)
+    if dtype == torch.float32:
+        tols = dtype_tols(torch.float16)  # TF32 GEMM
+    if quantized_compute:
+        tols = quantization_tols(quantization)
+
+    # Check results
+    y_test = y_test.to(dtype=torch.float64, device="cpu")
+    dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+    dw1_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+    dw2_test = model[3].weight.grad.to(dtype=torch.float64, device="cpu")
+    torch.testing.assert_close(y_test, y_ref, **tols)
+    torch.testing.assert_close(dx_test, dx_ref, **tols)
+    torch.testing.assert_close(dw1_test, dw1_ref, **tols)
+    torch.testing.assert_close(dw2_test, dw2_ref, **tols)
+    if bias:
+        db1_test = model[1].bias.grad.to(dtype=torch.float64, device="cpu")
+        db2_test = model[3].bias.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(db1_test, db1_ref, **tols)
+        torch.testing.assert_close(db2_test, db2_ref, **tols)
+
+
 def _test_fp8_scale_update(
     *,
     amax_history_len: int = 31,
@@ -801,16 +999,31 @@ def run_parallel_tests() -> None:
     for config in itertools.product(
         quantization_list,
         ("column", "row"),
+        (False, True),
     ):
         if rank == 0:
             print(f"Running _test_linear with {config=}")
-        quantization, tensor_parallel_mode = config
+        quantization, tensor_parallel_mode, sequence_parallel = config
         dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
         _test_linear(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,
             quantization=quantization,
             tensor_parallel_mode=tensor_parallel_mode,
+            sequence_parallel=sequence_parallel,
+        )
+
+    # MLP
+    for config in itertools.product(quantization_list, (False, True)):
+        if rank == 0:
+            print(f"Running _test_mlp with {config=}")
+        quantization, sequence_parallel = config
+        dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
+        _test_mlp(
+            bias=True,  # bias=False is tested in _test_basic_linear
+            dtype=dtype,
+            quantization=quantization,
+            sequence_parallel=sequence_parallel,
         )
 
     # FP8 scale update
