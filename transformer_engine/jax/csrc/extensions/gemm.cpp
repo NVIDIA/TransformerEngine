@@ -222,7 +222,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       buffer_shape[1] = out_shape[1];
       out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
-    NVTE_CHECK(!fuse_bias && bias_size == out_shape[1], "bias_size=", bias_size,
+    NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
                ", out_shape[1]=", out_shape[1]);
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, collective_op);
