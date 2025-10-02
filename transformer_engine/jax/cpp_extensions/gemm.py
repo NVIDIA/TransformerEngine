@@ -1038,13 +1038,14 @@ class GemmPrimitive(BasePrimitive):
                 collective_op=collective_op,
             )
 
-            if reduce_spec is not None and not collective_op.is_reduce_scatter:
-                if is_all_reduce_in_float32():  # For unittest only
-                    outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(
-                        out_dtype
-                    )
-                else:
-                    outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
+            if reduce_spec is not None:
+                if not collective_op.is_reduce_scatter:
+                    if is_all_reduce_in_float32():  # For unittest only
+                        outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(
+                            out_dtype
+                        )
+                    else:
+                        outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 
                 if fuse_bias:  # TODO(Phuong): rename fuse_bias to has_bias
                     outputs[0] += bias
