@@ -1041,9 +1041,9 @@ class GemmPrimitive(BasePrimitive):
             if reduce_spec is not None:
                 if not collective_op.is_reduce_scatter:
                     if is_all_reduce_in_float32():  # For unittest only
-                        outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(
-                            out_dtype
-                        )
+                        outputs[0] = jax.lax.psum(
+                            outputs[0].astype(jnp.float32), reduce_spec
+                        ).astype(out_dtype)
                     else:
                         outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 
