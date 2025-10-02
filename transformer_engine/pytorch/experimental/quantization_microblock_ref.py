@@ -500,7 +500,7 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
             - sx: scale tensor for qx (if rowwise_usage), None otherwise
             - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
             - sx_t: scale tensor for qx_t (if columnwise_usage), None otherwise
-            - global_amax: global amax tensor
+            - global_amax_row, global_amax_col: global amax tensors
         """
         if self.pow_2_scales:
             assert self.quant_tile_shape == (
@@ -642,14 +642,15 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         if src.ndim > 2:
             src = src.view(-1, src.shape[-1])
 
-        qx, sx, qx_t, sx_t, global_amax = self._quantize(src)
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(src)
 
         # Update the destination with new data
         dst.data = qx
         dst.scale = sx
         dst.data_t = qx_t
         dst.scale_t = sx_t
-        dst.global_amax = global_amax
+        dst.global_amax_row = global_amax_row
+        dst.global_amax_col = global_amax_col
         dst.dtype = src.dtype
         dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
