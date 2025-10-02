@@ -16,8 +16,9 @@ from utils import assert_allclose, is_devices_enough
 
 
 def generate_configs():
+    configs = []
     if is_devices_enough(4):
-        return [
+        configs.append(
             pytest.param(
                 4,
                 (2, 2),
@@ -25,15 +26,16 @@ def generate_configs():
                 MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
                 id="n4_dp2_tp2",
             )
-        ]
+        )
 
     if is_devices_enough(2):
-        return [
-            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1"),
+        configs.append(
+            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
+        )
+        configs.append(
             pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2"),
-        ]
-
-    raise ValueError("At least 2 devices is required for distributed tests!")
+        )
+    return configs
 
 
 def generate_context_parallel_configs_for_attn():

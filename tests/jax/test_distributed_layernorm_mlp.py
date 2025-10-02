@@ -64,8 +64,9 @@ INTERMEDIATE = 256
 
 # Only test with FSDP and TPSP as DP is not used
 def generate_fsdp_and_tpsp_configs():
+    configs = []
     if is_devices_enough(4):
-        return [
+        configs.append(
             pytest.param(
                 4,
                 (2, 2),
@@ -73,17 +74,19 @@ def generate_fsdp_and_tpsp_configs():
                 MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
                 id="fsdp2_tpsp2",
             )
-        ]
+        )
 
     if is_devices_enough(2):
-        return [
+        configs.append(
             pytest.param(
                 2,
                 (1, 2),
                 ("fsdp", "tpsp"),
                 MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
                 id="fsdp1_tpsp2",
-            ),
+            )
+        )
+        configs.append(
             pytest.param(
                 2,
                 (2, 1),
@@ -91,8 +94,8 @@ def generate_fsdp_and_tpsp_configs():
                 MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
                 id="fsdp2_tpsp1",
             ),
-        ]
-    raise ValueError("At least 2 devices is required for distributed tests!")
+        )
+    return configs
 
 
 class TestDistributedLayernormMLP:
