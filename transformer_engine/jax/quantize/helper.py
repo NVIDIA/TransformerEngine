@@ -404,20 +404,20 @@ def fp8_autocast(
     This context manager enables FP8 quantization for the duration of its context.
         .. code-block:: python
 
-        mesh_shape = (4, 2)
-        dp_mesh_axis_name = 'data_parallel'
-        tp_mesh_axis_name = 'tensor_parallel'
-        devices = np.asarray(jax.devices()).reshape(*mesh_shape)
+            mesh_shape = (4, 2)
+            dp_mesh_axis_name = 'data_parallel'
+            tp_mesh_axis_name = 'tensor_parallel'
+            devices = np.asarray(jax.devices()).reshape(*mesh_shape)
 
-        with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
-            mesh_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
+            with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
+                mesh_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
 
-            with fp8_autocast(enabled=True, mesh_resource=mesh_resource):
-                rules = extend_logical_axis_rules(tuple())
-                transformer = TransformerLayer()
+                with fp8_autocast(enabled=True, mesh_resource=mesh_resource):
+                    rules = extend_logical_axis_rules(tuple())
+                    transformer = TransformerLayer()
 
-                with partitioning.axis_rules(rules):
-                    pjit(transformer.init, ...)(...)
+                    with partitioning.axis_rules(rules):
+                        pjit(transformer.init, ...)(...)
 
     .. note::
         We only support :attr:`margin`, :attr:`fp8_format`, :attr:`amax_history_len`,
