@@ -158,18 +158,18 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Bias input to forward pass or bias gradient output from backward pass
   void *bias_ptr = nullptr;
-  std::vector<size_t> bias_shape = {0};
+  size_t bias_size = 0;
   DType bias_dtype = out_dtype;
   if (fuse_bias) {
-    if (!grad) {
+    if (grad) {
       NVTE_CHECK(bias_grad->untyped_data() == bias.untyped_data(),
                  "Missing operand-output aliasing in GemmPrimitive: bias <-> bias_grad");
     }
-    bias_ptr = bias_grad->untyped_data();
-    bias_shape.at(0) = bias_grad->dimensions().front();
-    bias_dtype = convert_ffi_datatype_to_te_dtype(bias_grad->element_type());
+    bias_ptr = bias.untyped_data();
+    bias_size = product(bias.dimensions());
+    bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
   }
-  auto bias_ = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
+  auto bias_ = TensorWrapper(bias_ptr, std::vector<size_t>{bias_size}, bias_dtype);
 
   // Pre-GeLU output from forward pass or input to backward pass
   void *pre_gelu_ptr = nullptr;
@@ -202,6 +202,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
                to_string_like(out_shape), " but got ", output->element_count(), " elements ",
                to_string_like(output->dimensions()));
+    NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
+               ", out_shape[1]=", out_shape[1]);
 
     nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_.data(),
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
@@ -220,6 +222,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       buffer_shape[1] = out_shape[1];
       out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
+    NVTE_CHECK(!fuse_bias && bias_size == out_shape[1], "bias_size=", bias_size,
+               ", out_shape[1]=", out_shape[1]);
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, collective_op);
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {

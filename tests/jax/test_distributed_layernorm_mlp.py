@@ -48,7 +48,7 @@ if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 128, 256]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
@@ -59,21 +59,40 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-INTERMEDIATE = 64
+INTERMEDIATE = 256
 
 
 # Only test with FSDP and TPSP as DP is not used
 def generate_fsdp_and_tpsp_configs():
-    configs = []
-    if is_devices_enough(2):
-        configs.append(
-            [2, (1, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
-        )
     if is_devices_enough(4):
-        configs.append(
-            [4, (2, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
-        )
-    return configs
+        return [
+            pytest.param(
+                4,
+                (2, 2),
+                ("fsdp", "tpsp"),
+                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="fsdp2_tpsp2",
+            )
+        ]
+
+    if is_devices_enough(2):
+        return [
+            pytest.param(
+                2,
+                (1, 2),
+                ("fsdp", "tpsp"),
+                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="fsdp1_tpsp2",
+            ),
+            pytest.param(
+                2,
+                (2, 1),
+                ("fsdp", "tpsp"),
+                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="fsdp2_tpsp1",
+            ),
+        ]
+    raise ValueError("At least 2 devices is required for distributed tests!")
 
 
 class TestDistributedLayernormMLP:
@@ -129,7 +148,7 @@ class TestDistributedLayernormMLP:
         quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
 
         # out = ((x * kernel_1) + bias_1) * kernel_2 + bias_2
-        return jnp.mean(
+        return jnp.sum(
             layernorm_mlp(
                 x,
                 ln_scale,
