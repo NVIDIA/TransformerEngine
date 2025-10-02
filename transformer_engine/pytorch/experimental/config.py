@@ -10,9 +10,9 @@ import os
 from typing import Optional
 
 from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.experimental import quantization
 from transformer_engine.pytorch.experimental import quantization_microblock_ref
 from transformer_engine.pytorch.experimental.quantization import MMParams
+from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
 
 
 @dataclasses.dataclass()
@@ -22,9 +22,9 @@ class QLinearParams:
     Contains ready-to-use quantizers for input (x), weight (w), and gradient (g) tensors.
     """
 
-    x_quantizer: Optional[quantization.ExperimentalQuantizer] = None
-    w_quantizer: Optional[quantization.ExperimentalQuantizer] = None
-    g_quantizer: Optional[quantization.ExperimentalQuantizer] = None
+    x_quantizer: Optional[Quantizer] = None
+    w_quantizer: Optional[Quantizer] = None
+    g_quantizer: Optional[Quantizer] = None
 
     mm_fprop: Optional[MMParams] = None
     mm_dgrad: Optional[MMParams] = None
