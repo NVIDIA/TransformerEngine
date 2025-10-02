@@ -706,6 +706,7 @@ def _legacy_fused_attn(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -777,7 +778,7 @@ def _legacy_fused_attn(
     output = _fused_attn(
         qkv,
         bias,
-        None,
+        softmax_offset,
         SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
@@ -816,6 +817,7 @@ def fused_attn_thd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -853,7 +855,7 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
-        None,
+        softmax_offset,
         SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
@@ -1023,6 +1025,8 @@ def _fused_attn_bwd_rule(
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
+    if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        grad_softmax_offset = None
     return (
         grad_qkv,
         grad_bias,
@@ -1053,6 +1057,7 @@ def fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1087,6 +1092,9 @@ def fused_attn(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
+        softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
+            [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
+            If provided, this parameter will receive gradients during backpropagation.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1143,15 +1151,18 @@ def fused_attn(
             context_parallel_strategy=context_parallel_strategy,
             context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
             context_parallel_axis=context_parallel_axis,
+            softmax_offset=softmax_offset,
         )
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
+        softmax_type=softmax_type,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,

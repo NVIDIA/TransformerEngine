@@ -59,14 +59,16 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(5, 6, 7, 9))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
     value: ArrayLike,
+    softmax_offset: Optional[ArrayLike],
     bias: ArrayLike,
     mask: ArrayLike,
     deterministic: bool,
+    softmax_type: AttnSoftmaxType,
     scale_factor: float,
     dropout_rate: float,
     dropout_rng: ArrayLike,
@@ -99,7 +101,25 @@ def general_dot_product_attention(
             mask = jnp.expand_dims(mask, axis=-3)
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
-    softmax_out = jax.nn.softmax(logits).astype(dtype)
+    match softmax_type:
+        case AttnSoftmaxType.VANILLA_SOFTMAX:
+            softmax_out = jax.nn.softmax(logits).astype(dtype)
+        case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
+            exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
+            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + 1.0)).astype(dtype)
+        case AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # Reshape softmax_offset from (1, h_q, 1, 1) to (1, h_kv, num_groups, 1, 1) to match logits
+            # logits shape: (b, h_kv, num_groups, s_q, s_kv)
+            if softmax_offset is not None and softmax_offset.size > 0:
+                softmax_offset_reshaped = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
+            else:
+                softmax_offset_reshaped = jnp.zeros((1, h_kv, num_groups, 1, 1), dtype=jnp.float32)
+            exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
+            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + jnp.exp(softmax_offset_reshaped))).astype(dtype)
+        case _:
+            raise NotImplementedError(f"Unknown {softmax_type=}")
+    
 
     if not deterministic and dropout_rate > 0.0:
         keep_prob = 1.0 - dropout_rate
@@ -219,7 +239,7 @@ def _split_valid_and_invalid(primitive, reference, pad):
     return primitive_valid, primitive_invalid, reference_valid, reference_invalid
 
 
-def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
+def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs):
     """
     JAX native dot product attention implementation
     """
@@ -227,11 +247,13 @@ def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
         query,
         key,
         value,
+        softmax_offset,
         bias,
         mask,
         deterministic=not kwargs["is_training"],
         scale_factor=kwargs["scaling_factor"],
         dropout_rate=kwargs["dropout_probability"],
+        softmax_type=kwargs["softmax_type"],
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
     )
@@ -243,6 +265,7 @@ def customcall_fused_dpa(
     key,
     value,
     bias,
+    softmax_offset,
     sequence_descriptor,
     dropout_rng,
     **kwargs,
@@ -264,7 +287,7 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, **kwargs).astype(
+    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs).astype(
         query.dtype
     )
 
@@ -412,7 +435,7 @@ class FusedAttnRunner:
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         key = jax.random.PRNGKey(0)
-        q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
+        q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
         k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
@@ -462,6 +485,11 @@ class FusedAttnRunner:
             pad_ratio = 0.3
         else:
             pad_ratio = 0.0
+        
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            self.softmax_offset = jax.random.uniform(softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0)
+        else:
+            self.softmax_offset = None
 
         def gen_valid(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
@@ -682,6 +710,10 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
+        # Softmax offset sharding (1, num_heads, 1, 1)
+        self.softmax_offset_pspec = PartitionSpec(None, self.mesh_resource.tpsp_resource, None, None)
+        self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
+
         self.dropout_rng_pspec = PartitionSpec(
             None,
         )
@@ -701,7 +733,7 @@ class FusedAttnRunner:
         """
         self._setup_inputs()
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
@@ -711,6 +743,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
@@ -736,6 +769,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ],
@@ -796,7 +830,7 @@ class FusedAttnRunner:
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
         customcall_args = [
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
             # THD params once we support those features on CP.
@@ -804,6 +838,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
@@ -822,6 +857,7 @@ class FusedAttnRunner:
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
+        # arg positions: q=0, k=1, v=2, bias=3, softmax_offset=4
         if self.bias_shape == BiasShape._1HSS:
             arg_nums = (0, 1, 2, 3)
             grad_shardings = (
@@ -837,8 +873,8 @@ class FusedAttnRunner:
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    customcall_fused_dpa, q, k, v, bias, softmax_offset, *args, cp_reverse_out=True, **kwargs
                 ),
                 arg_nums,
             ),
@@ -847,6 +883,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
@@ -854,7 +891,7 @@ class FusedAttnRunner:
         )
         jitted_reference = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(jax_dpa, q, k, v, bias, *args, **kwargs),
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs),
                 arg_nums,
             )
         )
@@ -1097,6 +1134,7 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_forward()
+        
 
     @staticmethod
     @pytest.mark.parametrize(
@@ -1150,3 +1188,4 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+    

@@ -813,9 +813,16 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
         )
 
-        dsoftmax_offset_aval = q_aval.update(
-            shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
-        )
+        # dsoftmax_offset should always have shape [1, attn_heads, 1, 1] when softmax_type is not VANILLA_SOFTMAX
+        # This matches the cuDNN graph requirements and PyTorch implementation
+        if config.softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
+            dsoftmax_offset_aval = q_aval.update(
+                shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
+            )
+        else:
+            dsoftmax_offset_aval = q_aval.update(
+                shape=(1, attn_heads, 1, 1), dtype=jnp.float32
+            )
 
         return dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, wkspace_aval
 
@@ -2664,9 +2671,15 @@ def fused_attn_fwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            raise NotImplementedError(
-                "Off-by-one softmax is not supported when softmax_offset is None"
-            )
+            # Extract number of heads from qkv shape  
+            # For qkvpacked (BS3HD): shape is (..., seq, 3, heads, dim) → index -2
+            # For separate/kvpacked (BSHD): shape is (..., seq, heads, dim) → index -2
+            if qkv_layout.is_qkvpacked():
+                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BS3HD
+            else:
+                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BSHD
+            # Create properly-sized tensor [1, h, 1, 1] filled with zeros
+            softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
         else:
@@ -2803,9 +2816,15 @@ def fused_attn_bwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            raise NotImplementedError(
-                "Off-by-one softmax is not supported when softmax_offset is None"
-            )
+            # Extract number of heads from qkv shape  
+            # For qkvpacked (BS3HD): shape is (..., seq, 3, heads, dim) → index -2
+            # For separate/kvpacked (BSHD): shape is (..., seq, heads, dim) → index -2
+            if qkv_layout.is_qkvpacked():
+                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BS3HD
+            else:
+                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BSHD
+            # Create properly-sized tensor [1, h, 1, 1] filled with zeros
+            softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
         else:
