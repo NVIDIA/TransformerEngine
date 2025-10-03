@@ -50,6 +50,7 @@ def layernorm_mlp(
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
+    activation_params: dict = None,
     collective_op_sets: Tuple[tex.CollectiveOpSet] = (
         tex.noop_collective_op_set,
         tex.noop_collective_op_set,
@@ -138,13 +139,14 @@ def layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        activation_params,
         collective_op_sets,
         quantizer_sets,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -165,6 +167,7 @@ def _layernorm_mlp(
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
+    activation_params: dict,
     collective_op_sets: Tuple[tex.CollectiveOpSet],
     quantizer_sets,
 ):
@@ -220,6 +223,7 @@ def _layernorm_mlp(
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
+        activation_params,
         collective_op_sets,
         quantizer_sets,
     )
@@ -246,6 +250,7 @@ def _layernorm_mlp_fwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    activation_params,
     collective_op_sets,
     quantizer_sets,
 ):
@@ -335,6 +340,11 @@ def _layernorm_mlp_fwd_rule(
         dot_1_output,
         activation_type,
         quantizer=ffn2_quantizer_set.x,
+        act_params=(
+            tex.activation.ActivationParams.create(activation_type, **activation_params)
+            if activation_params
+            else None
+        ),
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
@@ -402,6 +412,7 @@ def _layernorm_mlp_bwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    activation_params,
     collective_op_sets,
     ctx,
     grad,
@@ -497,6 +508,11 @@ def _layernorm_mlp_bwd_rule(
         activation_type=activation_type,
         is_dbias=use_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
+        act_params=(
+            tex.activation.ActivationParams.create(activation_type, **activation_params)
+            if activation_params
+            else None
+        ),
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim

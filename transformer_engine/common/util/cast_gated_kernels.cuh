@@ -924,7 +924,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                     cudaStream_t stream) {
   checkCuDriverContext(stream);
 
@@ -1006,7 +1006,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                       cudaStream_t stream) {
   checkCuDriverContext(stream);
 
@@ -1138,7 +1138,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise, p);
-
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
@@ -1155,7 +1154,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-
                       scale_stride_colwise, p);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
@@ -1180,7 +1178,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
-void cast_gated(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t stream) {
+void cast_gated(const Tensor &input, Tensor *output, ParamOP p, cudaStream_t stream) {
   CheckInputTensor(input, "gated_act_input");
   CheckOutputTensor(*output, "gated_act_output");
   NVTE_CHECK(input.flat_last_dim() % 2 == 0,
@@ -1213,7 +1211,7 @@ void cast_gated(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t st
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP &p,
+void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP p,
                  cudaStream_t stream) {
   CheckInputTensor(grad, "dgated_act_grad");
   CheckInputTensor(input, "dgated_act_input");
@@ -1252,7 +1250,7 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamO
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP p,
                     cudaStream_t stream) {
   constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
@@ -1318,7 +1316,7 @@ namespace detail {
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
 void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, NVTETensor output,
-                           ParamOP &p, cudaStream_t stream) {
+                           ParamOP p, cudaStream_t stream) {
   using namespace gated_kernels;
   Tensor grad_empty_tensor;
   const Tensor &grad_tensor = IS_DGATED ? *(convertNVTETensorCheck(grad)) : grad_empty_tensor;
