@@ -1618,7 +1618,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         return out
 
     def _get_quantizers(self, fp8_output, fp8_grad):
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None] * 6
         grad_input_quantizer = None
         grad_weight_quantizer = None
