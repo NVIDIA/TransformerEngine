@@ -431,8 +431,8 @@ class TestDistributedLayernormMLP:
         jax_triton_gemm_precision_tolerance_update = (
             with_jax_gemm
             and (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling())
-            and dtype in jnp.bfloat16, jnp.float16
-            and activation_type == ("gelu", "linear")
+            and dtype in jnp.bfloat16,
+            jnp.float16 and activation_type == ("gelu", "linear"),
         )
         if jax_triton_gemm_precision_tolerance_update:
             atol = 0.025

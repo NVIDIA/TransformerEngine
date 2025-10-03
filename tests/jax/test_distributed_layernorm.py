@@ -76,7 +76,9 @@ class TestDistributedLayernorm:
         weight_count = 2 if ln_type == "layernorm" else 1
         allreduce_total_bytes += weight_count * shape[-1] * jax_dtype.itemsize
         return generate_collectives_count(
-            allreduce=allreduce_total_bytes * int(is_dp_enabled or is_tpsp_enabled), allgather=0, other=0,
+            allreduce=allreduce_total_bytes * int(is_dp_enabled or is_tpsp_enabled),
+            allgather=0,
+            other=0,
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
