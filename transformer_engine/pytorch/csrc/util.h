@@ -27,7 +27,7 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper> &inputs, bool rowwise);
 
-/*! \brief Convert a block scaling tensor to an mxfp8 tensor.
+/*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
  * If rowwise==false, the columnwise data will be reinterpreted as rowwise data to avoid
  * transposing it in memory. Due to differences in how block scaling and mxfp8 store data,

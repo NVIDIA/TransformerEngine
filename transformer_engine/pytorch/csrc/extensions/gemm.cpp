@@ -492,7 +492,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt
-  if (transformer_engine::cuda::sm_arch() > 90) {
+  if (transformer_engine::cuda::sm_arch() >= 100) {
     // Check if is using FP8 block scaling
     bool exists_tensor_using_fp8_block_scaling = false;
     bool exists_tensor_not_using_fp8_block_scaling = false;

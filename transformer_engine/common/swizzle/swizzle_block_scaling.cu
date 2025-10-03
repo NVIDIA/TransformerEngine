@@ -39,6 +39,9 @@ uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row
                                                               const uint32_t active_mask) {
   using cu = const uint32_t;
 
+  // Threads operate in groups of 4, and each thread stores 4 bytes at a time.
+  // The bytes in this 4x4 matrix are labeled in hex. We shuffle around bytes
+  // until we have transposed the 4x4 matrix.
   cu m_0123_4567_89ab_cdef = row;
   cu m_4567_0123_cdef_89ab = __shfl_xor_sync(active_mask, m_0123_4567_89ab_cdef, 1, 4);
   cu m_0426_4062_8cae_c8ea = __byte_perm(m_0123_4567_89ab_cdef, m_4567_0123_cdef_89ab, 0x6240);
@@ -142,10 +145,12 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
   const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
   const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
 
+  // Each 128x128 tile in the data corresponds to a 128x1 tile in the input scales
+  // and a 128x4 tile in the output scales. The input scales are in transposed order.
   const uint32_t input_scale_inv_cols = DIVUP(data_rows, 4u) * 4;
+  const uint32_t output_scale_inv_cols = tiles_x * 128 * 4;
   const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-
-  const uint32_t out_y_stride = tiles_x * 512;
+  const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
 
   const uint32_t first_oob = (input_scale_inv_cols % 128) / 4;
 
@@ -217,10 +222,12 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
   const dim3 grid_dim{DIVUP(tiles_x, WARPS_X_PER_TB), DIVUP(tiles_y, WARPS_Y_PER_TB), 1};
   const dim3 block_dim{WARP_SIZE, WARPS_Y_PER_TB, WARPS_X_PER_TB};
 
+  // Each 128x128 tile in the data corresponds to a 1x1 tile in the input scales
+  // and a 128x4 tile in the output scales.
   const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
+  const uint32_t output_scale_inv_cols = tiles_x * 128 * 4;
   const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
-
-  const uint32_t out_y_stride = tiles_x * 512;
+  const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
 
   swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
       in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
