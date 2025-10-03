@@ -451,20 +451,19 @@ class GemmPrimitive(BasePrimitive):
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
         # Validate bias
-        dbias_shape = (0,)
-        bias_dtype = out_dtype
         if fuse_bias:
             assert bias.shape == tuple(rhs_non_contracting_shape), (
                 "cuBLAS GEMM bias tensor has incorrect shape, "
-                f"expected {rhs_non_contracting_shape} but found {bias.shape}."
+                f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
             )
             assert bias.dtype == out_dtype, (
                 "cuBLAS GEMM bias tensor has incorrect data type, "
-                f"expected {bias_dtype} but found {bias.dtype}."
+                f"expected {out_dtype} but found {bias.dtype}."
             )
-            if grad:
-                dbias_shape = tuple(rhs_non_contracting_shape)
-        bias_grad = jax.core.ShapedArray(shape=dbias_shape, dtype=bias_dtype)
+        # WAR: allocate dbias regardless of fuse_bias so that the sharding propagation works as we
+        # change the fuse_bias value in the sharded_impl
+        dbias_shape = bias.shape if grad else (0,)
+        bias_grad = jax.core.ShapedArray(shape=dbias_shape, dtype=bias.dtype)
 
         # Validate pre-GeLU
         pre_gelu_shape = (0,)
@@ -545,7 +544,7 @@ class GemmPrimitive(BasePrimitive):
         }
 
         operand_output_aliases = {}
-        if fuse_bias and grad:
+        if grad:
             operand_output_aliases.update({4: 1})  # bias <-> bias_grad
         if fuse_gelu and grad:
             operand_output_aliases.update({5: 2})  # gelu_input <-> pre_gelu_out
@@ -924,7 +923,6 @@ class GemmPrimitive(BasePrimitive):
         del (
             out_dtype,
             scaling_mode,
-            grad,
             use_split_accumulator,
             result_infos,
             is_outer,
@@ -938,8 +936,8 @@ class GemmPrimitive(BasePrimitive):
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
-        # Discard bias gradient spec if there is no bias fusion
-        if not fuse_bias:
+        # Discard dbias gradient spec if there is no bias and grad fusion
+        if not (fuse_bias and grad):
             dbias_specs = (None,)
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
 
@@ -1005,8 +1003,8 @@ class GemmPrimitive(BasePrimitive):
         # Assemble output shardings
         out_shardings = [NamedSharding(mesh, PartitionSpec(*out_specs))]
 
-        # Discard bias gradient spec if there is no bias fusion
-        if not fuse_bias:
+        # Discard bias gradient spec if there is no bias and grad fusion
+        if not (fuse_bias and grad):
             dbias_specs = (None,)
         out_shardings.append(NamedSharding(mesh, PartitionSpec(*dbias_specs)))
 
@@ -1016,7 +1014,7 @@ class GemmPrimitive(BasePrimitive):
         out_shardings.append(NamedSharding(mesh, PartitionSpec(*pre_gelu_specs)))
 
         def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input):
-            # We should not fuse bias in AR or RS cases
+            # We should not fuse bias in the output reduction case
             sharded_fuse_bias = fuse_bias and reduce_spec is None
             outputs = GemmPrimitive.impl(
                 lhs,
@@ -1071,7 +1069,7 @@ class GemmPrimitive(BasePrimitive):
         operand_types,
         result_types,
     ):
-        del out_dtype, grad, use_split_accumulator
+        del out_dtype, use_split_accumulator
         del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer
 
         if not collective_op.is_none:
@@ -1115,7 +1113,8 @@ class GemmPrimitive(BasePrimitive):
         rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
         out_spec = (*lhs_non_cspec, *rhs_non_cspec)
         bias_spec = rhs_non_cspec if fuse_bias else ("…4",)
-        gelu_spec = out_spec if fuse_gelu else ("…5",)
+        dbias_spec = bias_spec if grad else ("…5")
+        gelu_spec = out_spec if fuse_gelu else ("…6",)
 
         return SdyShardingRule(
             operand_mappings=(
@@ -1128,7 +1127,7 @@ class GemmPrimitive(BasePrimitive):
             ),
             result_mappings=(
                 out_spec,
-                bias_spec,
+                dbias_spec,
                 gelu_spec,
             ),
         )
@@ -1232,7 +1231,7 @@ def _te_gemm(
         grad=grad,
         use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
-        sequence_dim=-1,  # Dummy value and will be set in the primitive
+        sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
         collective_op=collective_op,
     )
@@ -1651,7 +1650,6 @@ def gemm(
     )
 
     # Discard empty outputs
-
     grad = kwargs.get("grad", False)
     clean_outputs = outputs[0]  # first output is the final result and is never empty
     if (fuse_bias and grad) or (fuse_gelu and not grad):
