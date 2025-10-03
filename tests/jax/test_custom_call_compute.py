@@ -177,7 +177,6 @@ ACTIVATION_TYPES = {
     "L0": [
         ("gelu",),
         ("gelu", "linear"),
-        ("clamped_silu", "clamped_linear"),
     ],
     "L2": ALL_ACTIVATION_TYPES,
 }

@@ -336,9 +336,6 @@ def _layernorm_mlp_fwd_rule(
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     # (batch..., hidden_in) -> (batch..., hidden)
-    # At the moment the act_params is only used for ClampedSwiglu
-    # If there are more activations that require parameters in the future
-    # we might need to change it to a more generic parameter container
     casted_act_out = tex.act_lu(
         dot_1_output,
         activation_type,
