@@ -157,7 +157,7 @@ class TestDistributedLayernormMLP:
         quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
 
         # out = ((x * kernel_1) + bias_1) * kernel_2 + bias_2
-        return jnp.sum(
+        return jnp.mean(
             layernorm_mlp(
                 x,
                 ln_scale,
@@ -257,12 +257,10 @@ class TestDistributedLayernormMLP:
         fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
         bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
 
-        if fwd_test_type == jnp.float16 and use_bias:
-            assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type, atol=0.04, rtol=1.5)
-        else:
-            assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
+        assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
 
         for i in range(len(inputs)):
+            atol = rtol = None
             if multi_grads[i] is not None:
                 if isinstance(multi_grads[i], list):
                     assert isinstance(single_grads[i], list)
@@ -409,6 +407,7 @@ class TestDistributedLayernormMLP:
         assert_tree_like_allclose(params_sharded["params"], params_single["params"])
         assert_allclose(ln_out_sharded, ln_out_single, dtype=dtype)
 
+        # TODO(Phuong): check if these tols updates are still needed
         atol = None
         rtol = None
         l40_tolerance_update = (
