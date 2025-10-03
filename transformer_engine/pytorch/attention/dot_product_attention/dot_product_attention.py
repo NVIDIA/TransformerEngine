@@ -597,10 +597,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe in (
-            "",
-            "Float8CurrentScaling",
-        ):
+        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "Float8CurrentScaling":
             # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
             fake_recipe = DelayedScaling(
@@ -613,6 +610,16 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "":
+            # The FP8CS recipe for attention uses DS for 2 tensors (S, dP), which will
+            # trigger global amax reduction. Since this is a non-negligible performance
+            # overhead, we do not assume it as the default case and require explicit
+            # settings from the user.
+            assert not (
+                fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha
+            ), "For using FP8 attention with the current scaling recipe, please "
+            "set the environment variable NVTE_DPA_FP8_RECIPE to `DelayedScaling` "
+            "or `Float8CurrentScaling`. "
         elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
             # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
