@@ -472,6 +472,10 @@ class OperationFuser:
         # Attempt to fuse operations if neccesary
         self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
 
+        # Initialization before forward
+        for idx, op in enumerate(self._basic_ops):
+            op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
+
         # Fuser forward pass
         if is_grad_enabled:
             forward_func = _OperationFuserAutogradFunction.apply
