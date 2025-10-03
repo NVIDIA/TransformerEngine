@@ -1379,6 +1379,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 rowwise_usage=update_rowwise_usage,
                 columnwise_usage=update_columnwise_usage,
             )
+
+            if isinstance(quantizer, DebugQuantizer):
+                tensor = quantizer.wrap_quantized_tensor(tensor)
+
             return tensor
 
         # Try getting workspace from cache
@@ -1541,8 +1545,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not run_current:
             return True
 
-        if self.primary_weights_in_fp8:
-            raise RuntimeError("FP8 weights are not supported in debug mode.")
         return False
 
     def _validate_name(self):
