@@ -1723,7 +1723,7 @@ def gemm(
 def grouped_gemm_copy_group_sizes(
     group_sizes: jnp.ndarray,
     num_gemms: int,
-) -> None:
+) -> jnp.ndarray:
     """
     Async copy group sizes from device to host
 
