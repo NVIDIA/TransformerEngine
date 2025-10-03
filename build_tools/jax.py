@@ -38,7 +38,7 @@ def xla_path() -> str:
     except ImportError:
         print("Could not import jax. Looking for XLA source in $XLA_HOME or /opt/xla")
         if os.getenv("XLA_HOME"):
-            xla_home = Path(os.getenv("XLA_HOME"))
+            xla_home = Path(os.getenv("XLA_HOME").strip())
         else:
             xla_home = "/opt/xla"
     else:
