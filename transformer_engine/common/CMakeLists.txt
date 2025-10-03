@@ -127,6 +127,7 @@ list(APPEND transformer_engine_SOURCES
      util/multi_stream.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
+     swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
