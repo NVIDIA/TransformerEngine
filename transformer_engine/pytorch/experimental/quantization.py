@@ -13,7 +13,7 @@ from typing import Iterable, Optional, Tuple, Union
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase, Quantizer
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.experimental import utils
 
 
@@ -36,7 +36,7 @@ class MMParams:
 
 
 @dataclasses.dataclass
-class ExperimentalQuantizedTensor(QuantizedTensorBase):
+class ExperimentalQuantizedTensor(QuantizedTensorStorage):
     """Base class for experimental quantized tensor containers.
 
     An experimental container to hold quantization result, including quantized tensor, optional
@@ -187,7 +187,7 @@ class ExperimentalQuantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-    ) -> QuantizedTensorBase:
+    ) -> QuantizedTensorStorage:
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement make_empty function"
         )

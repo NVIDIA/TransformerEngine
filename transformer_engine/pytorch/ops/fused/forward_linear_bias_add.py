@@ -79,7 +79,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         input_requires_grad = linear_op_ctx.requires_grad
         weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
 
-        # FP8 metadata
+        # Quantizers
         input_quantizer = linear_op.get_quantizer("forward", 0)
         weight_quantizer = linear_op.get_quantizer("forward", 1)
         output_quantizer = None

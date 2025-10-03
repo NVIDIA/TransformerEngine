@@ -22,8 +22,12 @@ pybind11::dict Registrations() {
   pybind11::dict dict;
 
   // Activation
-  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_dact_dbias_quantize_ffi"] = EncapsulateFFI(DActLuDBiasQuantizeHandler);
+  dict["te_act_lu_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(ActLuInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(ActLuHandler));
+  dict["te_dact_dbias_quantize_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(DActLuDBiasQuantizeInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
@@ -44,9 +48,11 @@ pybind11::dict Registrations() {
   // Normalization
   dict["te_norm_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormForwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
   dict["te_norm_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention

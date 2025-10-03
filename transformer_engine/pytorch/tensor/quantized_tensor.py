@@ -5,7 +5,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import Callable, Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
 import warnings
@@ -13,12 +13,11 @@ import warnings
 import torch
 from torch.utils._pytree import tree_map
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 
-class QuantizedTensorBase:
-    r"""Base class for all *TensorBase classes.
+class QuantizedTensorStorage:
+    r"""Base class for all *TensorStorage classes.
 
     This class (and its subclasses) are optimization for when
     the full QuantizedTensor is not needed (when it is fully
@@ -26,9 +25,9 @@ class QuantizedTensorBase:
     PyTorch's autograd).
 
     When creating a new tensor type X one should create both
-    XTensorBase class inheriting from QuantizedTensorBase and
-    XTensor inheriting from XTensorBase and QuantizedTensor.
-    XTensorBase should contain all data members needed to
+    XTensorStorage class inheriting from QuantizedTensorStorage and
+    XTensor inheriting from XTensorStorage and QuantizedTensor.
+    XTensorStorage should contain all data members needed to
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (liek __torch_dispatch__)."""
@@ -59,7 +58,7 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement prepare_for_saving function"
@@ -73,6 +72,30 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement restore_from_saved function"
         )
 
+    def _get_quantizer(self) -> Quantizer:
+        """Get builder for quantized tensor
+
+        Quantizer can be used for in-place operations.
+
+        """
+        if self._quantizer is not None:
+            return self._quantizer
+        return self._build_default_quantizer()
+
+    def _build_default_quantizer(self) -> Quantizer:
+        """Build default quantizer for the tensor"""
+        raise ValueError(
+            f"{self.__class__.__name__} has no quantizer "
+            "and no default quantizer is available defined in the subclass."
+        )
+
+    def quantize_(
+        self, tensor: torch.Tensor, *, noop_flag: Optional[torch.Tensor] = None
+    ) -> QuantizedTensor:
+        """Quantize tensor in-place"""
+        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
+        return self
+
     def update_quantizer(self, quantizer: Quantizer):
         """Update quantizer for the tensor"""
         if self._quantizer is None:
@@ -83,13 +106,13 @@ class QuantizedTensorBase:
 
 
 def prepare_for_saving(
-    *tensors: Union[torch.Tensor, QuantizedTensorBase],
+    *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
-    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorBase]]
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorStorage]]
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal TensorBase types too."""
+    the internal *TensorStorage types too."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
@@ -104,12 +127,12 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorBase]]],
+    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorStorage]]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
 ) -> (
-    list[Optional[torch.Tensor | QuantizedTensorBase]]
-    | tuple[list[Optional[torch.Tensor | QuantizedTensorBase]], list[Optional[torch.Tensor]]]
+    list[Optional[torch.Tensor | QuantizedTensorStorage]]
+    | tuple[list[Optional[torch.Tensor | QuantizedTensorStorage]], list[Optional[torch.Tensor]]]
 ):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
@@ -178,7 +201,6 @@ class Quantizer(abc.ABC):
             ")"
         )
 
-    @abc.abstractmethod
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -187,6 +209,9 @@ class Quantizer(abc.ABC):
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Quantize tensor in-place"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_quantized"
+        )
 
     def quantize(
         self,
@@ -199,8 +224,14 @@ class Quantizer(abc.ABC):
         if out is not None:
             return self.update_quantized(tensor, out)
         if (not self.internal) and torch.is_grad_enabled():
-            return _QuantizeFunc.apply(tensor, self)
-        return _QuantizeFunc.forward(None, tensor, self)
+            return _QuantizeFunc.apply(tensor, self.quantize_impl)
+        return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement quantize_impl function"
+        )
 
     def multi_quantize(self, list_of_tensors):
         """Quantize multiple tensors"""
@@ -213,7 +244,6 @@ class Quantizer(abc.ABC):
         """Quantize tensor"""
         return self.quantize(tensor)
 
-    @abc.abstractmethod
     def make_empty(
         self,
         shape: Iterable[int],
@@ -222,8 +252,11 @@ class Quantizer(abc.ABC):
         device: Optional[torch.device] = None,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement make_empty function, "
+            "required for construction of unintialized quantized tensor"
+        )
 
-    @abc.abstractmethod
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
 
@@ -252,13 +285,21 @@ class Quantizer(abc.ABC):
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_quantize"
+        )
 
     def onnx_dequantize(self, tensor) -> torch.Tensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_dequantize"
+        )
 
-    @abc.abstractmethod
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Returns recipe class that is compatible with this quantizer"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_compatible_recipe"
+        )
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Returns True if the quantizer supports only rowwise all-gather"""
@@ -270,20 +311,21 @@ class Quantizer(abc.ABC):
 
 
 class _QuantizeFunc(torch.autograd.Function):
-    """Cast to FP8 from other dtype"""
+    """Quantize tensor"""
 
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
         tensor: torch.Tensor,
-        quantizer: Quantizer,
+        quantize_impl: Callable,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        return tex.quantize(tensor, quantizer)
+        return quantize_impl(tensor)
 
     @staticmethod
     def backward(
-        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision

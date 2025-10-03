@@ -164,6 +164,9 @@ else()
   message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
 endif()
 
+# Disable debug build for cutlass due to hang.
+set_source_files_properties("gemm/cutlass_grouped_gemm.cu" PROPERTIES COMPILE_FLAGS "-g0")
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas

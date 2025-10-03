@@ -13,8 +13,12 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
-from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+)
 from ..constants import dist_group_type
 
 aten = torch.ops.aten
@@ -89,6 +93,10 @@ class Float8Quantizer(Quantizer):
 
         return dst
 
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
+
     def make_empty(
         self,
         shape: Iterable[int],
@@ -147,7 +155,7 @@ class Float8Quantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=1 / self.scale,
                 fp8_dtype=self.dtype,
@@ -215,6 +223,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
     amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
+    """amax update options"""
+    use_existing_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -229,6 +239,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        use_existing_amax: bool = False,
         with_amax_reduction: bool = False,
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
@@ -238,6 +249,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.scale = torch.empty(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
+        self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -266,6 +278,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,
@@ -329,7 +345,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
@@ -384,7 +400,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         return True
 
 
-class Float8Tensor(Float8TensorBase, QuantizedTensor):
+class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -439,19 +455,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             return _FromFloat8Func.apply(self, dtype)
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self._quantizer is not None:
-            return self._quantizer
-        # Now the quantizer for Float8Tensor can be not just Float8Quantizer (delayed scaling)
-        raise ValueError(
-            "Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable"
-        )
-
     def quantize_(
         self,
         tensor: torch.Tensor,
@@ -470,8 +473,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def detach(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring

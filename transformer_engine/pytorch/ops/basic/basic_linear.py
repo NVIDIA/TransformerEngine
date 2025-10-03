@@ -29,7 +29,7 @@ from ...module.base import (
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -322,6 +322,20 @@ class BasicLinear(BasicOperation):
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        super().pre_fuser_forward(requires_grad=requires_grad)
+        if FP8GlobalStateManager.is_fp8_enabled():
+            # Configure quantizer usages
+            # Note: We cache the quantized input for backward pass,
+            # but discard the quantized weights.
+            weight_requires_grad = requires_grad and self.weight.requires_grad
+            input_quantizer = self.get_quantizer("forward", 0)
+            weight_quantizer = self.get_quantizer("forward", 1)
+            grad_output_quantizer = self.get_quantizer("backward", 0)
+            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            weight_quantizer.set_usage(rowwise=True, columnwise=False)
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
@@ -351,6 +365,35 @@ class BasicLinear(BasicOperation):
                 not FP8GlobalStateManager.with_fp8_parameters()
                 and not getattr(self, "_with_quantized_weight", False)
             )
+
+        # Recipe-specific configuration
+        # Note: This function may be called in base class constructor,
+        # before any basic linear attrs have been set.
+        if recipe is not None:
+            if recipe.float8_current_scaling():
+                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
+                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
+                if getattr(self, "sequence_parallel", False):
+                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
+                    if tensor_parallel_mode == "column":
+                        input_quantizer.with_amax_reduction = True
+                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                    elif tensor_parallel_mode == "row":
+                        grad_output_quantizer.with_amax_reduction = True
+                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+            if recipe.nvfp4():
+                if getattr(self, "sequence_parallel", False):
+                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
+                    if tensor_parallel_mode == "column":
+                        input_quantizer.with_amax_reduction = True
+                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                    elif tensor_parallel_mode == "row":
+                        grad_output_quantizer.with_amax_reduction = True
+                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
     @staticmethod
     def _functional_forward(
@@ -568,7 +611,7 @@ class BasicLinear(BasicOperation):
         # Prepare input tensor for backward pass
         if weight_requires_grad:
             if with_quantized_compute and is_quantized_tensor(x_local):
-                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
@@ -731,7 +774,7 @@ class BasicLinear(BasicOperation):
             if with_quantized_compute:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                input_quantizer.set_usage(columnwise=True)
+                input_quantizer.set_usage(rowwise=False, columnwise=True)
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -912,42 +955,13 @@ class BasicLinear(BasicOperation):
         input_requires_grad = ctx.requires_grad
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
 
-        # FP8 metadata
+        # Quantizers
         input_quantizer = self.get_quantizer("forward", 0)
         weight_quantizer = self.get_quantizer("forward", 1)
         output_quantizer = next_op_input_quantizer
         grad_output_quantizer = self.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        if with_quantized_compute:
-            # Configure quantizers
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
-
-            # Recipe-specific configuration
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if recipe.float8_current_scaling():
-                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                if self.sequence_parallel and self.tensor_parallel_mode == "column":
-                    input_quantizer.with_amax_reduction = True
-                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                if self.sequence_parallel and self.tensor_parallel_mode == "row":
-                    grad_output_quantizer.with_amax_reduction = True
-                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
-            if recipe.nvfp4():
-                if self.sequence_parallel and self.tensor_parallel_mode == "column":
-                    input_quantizer.with_amax_reduction = True
-                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                if self.sequence_parallel and self.tensor_parallel_mode == "row":
-                    grad_output_quantizer.with_amax_reduction = True
-                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
