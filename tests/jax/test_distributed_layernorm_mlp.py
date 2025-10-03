@@ -260,7 +260,6 @@ class TestDistributedLayernormMLP:
         assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
 
         for i in range(len(inputs)):
-            atol = rtol = None
             if multi_grads[i] is not None:
                 if isinstance(multi_grads[i], list):
                     assert isinstance(single_grads[i], list)
