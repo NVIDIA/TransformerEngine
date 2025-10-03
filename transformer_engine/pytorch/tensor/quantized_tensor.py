@@ -473,7 +473,10 @@ class QuantizedTensor(torch.Tensor):
                 dst.quantize_(src)
             else:
                 if isinstance(src, QuantizedTensor):
-                    src = src.dequantize()
+                    dtype = dst.dtype
+                    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                        dtype = torch.float32
+                    src = src.dequantize(dtype=dtype)
                 dst.copy_(src)
             return None
 
