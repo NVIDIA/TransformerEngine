@@ -170,6 +170,7 @@ ALL_ACTIVATION_TYPES = [
     ("quick_gelu", "linear"),
     ("squared_relu",),
     ("squared_relu", "linear"),
+    ("clamped_silu", "clamped_linear"),
 ]
 
 ACTIVATION_TYPES = {
@@ -182,17 +183,21 @@ ACTIVATION_TYPES = {
 
 
 class TestActivation:
-    def ref_act(self, x, activation_type):
-        return _jax_act_lu(x, activation_type).data
+    def ref_act(self, x, activation_type, act_params):
+        return _jax_act_lu(x, activation_type, act_params=act_params).data
 
-    def value_n_grad_ref_func(self, x, activation_type):
+    def value_n_grad_ref_func(self, x, activation_type, act_params):
         jitted_reference = jit(
-            value_and_grad(lambda out: jnp.mean(self.ref_act(out, activation_type)), (0,))
+            value_and_grad(
+                lambda out: jnp.mean(self.ref_act(out, activation_type, act_params)), (0,)
+            )
         )
         return jitted_reference(x)
 
-    def primitive_func(self, inputs, activation_type, quantizer):
-        out = activation(inputs, activation_type=activation_type, quantizer=quantizer)
+    def primitive_func(self, inputs, activation_type, quantizer, act_params):
+        out = activation(
+            inputs, activation_type=activation_type, quantizer=quantizer, act_params=act_params
+        )
         return jnp.mean(out)
 
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
@@ -209,12 +214,20 @@ class TestActivation:
         x = jnp.repeat(x, len(activation_type), axis=-2)
 
         value_n_grad_primitive_func = jit(
-            value_and_grad(self.primitive_func, (0,)), static_argnums=(1,)
+            value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
-
-        prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, None)
-        ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type)
-
+        act_args = (
+            {"limit": 0.75, "alpha": 1.702}
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else {}
+        )
+        act_params = (
+            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
+        prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, None, act_params)
+        ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type, act_params)
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
         assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
@@ -234,7 +247,8 @@ class TestActivation:
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(
-            value_and_grad(self.primitive_func, (0,)), static_argnums=(1,)
+            value_and_grad(self.primitive_func, (0,)),
+            static_argnums=(1, 3),
         )
 
         quantizer = QuantizerFactory.create(
@@ -242,9 +256,21 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
+        act_args = (
+            {"limit": 0.75, "alpha": 1.702}
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else {}
+        )
 
-        prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, quantizer)
-        ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type)
+        act_params = (
+            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
+        prim_out, (prim_grad,) = value_n_grad_primitive_func(
+            x, activation_type, quantizer, act_params
+        )
+        ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type, act_params)
 
         assert_allclose(prim_out, ref_out, dtype=output_type)
         assert_allclose(prim_grad, ref_grad, dtype=output_type)
@@ -273,10 +299,18 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=q_layout,
         )
-
-        te_output = tex.act_lu(x, activation_type, te_quantizer)
-        jax_output = _jax_act_lu(x, activation_type, jax_quantizer)
-
+        act_args = (
+            {"limit": 0.75, "alpha": 1.702}
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else {}
+        )
+        act_params = (
+            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
+        te_output = tex.act_lu(x, activation_type, te_quantizer, act_params)
+        jax_output = _jax_act_lu(x, activation_type, jax_quantizer, act_params)
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
@@ -296,10 +330,18 @@ class TestActivation:
         quantizer = QuantizerFactory.create(
             scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
-
-        output = tex.act_lu(x, activation_type, quantizer)
-        ref_out = self.ref_act(x, activation_type)
-
+        act_args = (
+            {"limit": 0.75, "alpha": 1.702}
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else {}
+        )
+        act_params = (
+            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
+            if activation_type == ("clamped_silu", "clamped_linear")
+            else None
+        )
+        output = tex.act_lu(x, activation_type, quantizer, act_params)
+        ref_out = self.ref_act(x, activation_type, act_params)
         assert_dequantized_scaled_tensor(output, ref_out)
 
 
@@ -734,6 +776,7 @@ class TestFusedQuantize:
     def _test_quantize_dact_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, activation_type, is_dbias, q_layout
     ):
+
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(subkeys[0], input_shape, in_dtype, -1, 1)
@@ -785,7 +828,7 @@ class TestFusedQuantize:
                 (in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling())
                 # Due to the amax dependency, current scaling is unfused. In TE we store the activation results in bf16 which reduces precision compared to JAX implementation which will implicitly promote to float32 for the intermediate results when JIT'd. This only produces a tolerance issue when using squared_relu currently.
                 or (
-                    activation_type == ("squared_relu",)
+                    activation_type in {("squared_relu",), ("clamped_silu", "clamped_linear")}
                     and in_dtype == jnp.bfloat16
                     and scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
                 )
