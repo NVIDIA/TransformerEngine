@@ -346,8 +346,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             max_seqlen_q <= max_seqlen_kv && dropout == 0.0 &&
             bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_THD)))) ||
+             qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) ||
          // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
          (cudnn_runtime_version >= 90600 &&
           ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
