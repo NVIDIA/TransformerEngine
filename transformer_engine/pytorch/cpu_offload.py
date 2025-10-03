@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .tensor.quantized_tensor import QuantizedTensorBase
+from .tensor.quantized_tensor import QuantizedTensorStorage
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -34,7 +34,7 @@ def mark_activation_offload(*tensors):
                 if tensor is not None:
                     tensor.activation_offloading = True
                     # This is a hack to force clear the tensor after it is offloaded.
-                    # It is needed, because .*TensorBase classes are saved in the ctx,
+                    # It is needed, because .*TensorStorage classes are saved in the ctx,
                     # and they contain the reference to their data tensors.
                     tensor.needs_force_clear = True
 
@@ -362,7 +362,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             ),
         )
 
-        is_quantized_tensor = isinstance(tensor, QuantizedTensorBase)
+        is_quantized_tensor = isinstance(tensor, QuantizedTensorStorage)
 
         if not torch_stray_tensor:
 
@@ -514,7 +514,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 if tensor_tag[0] == self.offloaded_group_count:
                     if hasattr(tensor_buf, "needs_force_clear"):
                         # Need to clear activation tensor - sometimes references persist in the code.
-                        # This is the case for example with the Float8TensorBase class,
+                        # This is the case for example with the Float8TensorStorage class,
                         # which is saved directly inside the ctx while its internal tensors are
                         # saved inside save_for_backward.
                         tensor_buf.data = torch.Tensor()
