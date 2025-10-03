@@ -463,7 +463,7 @@ class GemmPrimitive(BasePrimitive):
                 f"expected {bias_dtype} but found {bias.dtype}."
             )
             if grad:
-                dbias_shape = rhs_non_contracting_shape
+                dbias_shape = tuple(rhs_non_contracting_shape)
         bias_grad = jax.core.ShapedArray(shape=dbias_shape, dtype=bias_dtype)
 
         # Validate pre-GeLU

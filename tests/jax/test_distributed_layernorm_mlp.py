@@ -68,10 +68,12 @@ def generate_fsdp_and_tpsp_configs():
     if is_devices_enough(4):
         configs.append(
             pytest.param(
-                4,
-                (2, 2),
-                ("fsdp", "tpsp"),
-                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                [
+                    4,
+                    (2, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
                 id="fsdp2_tpsp2",
             )
         )
@@ -79,19 +81,23 @@ def generate_fsdp_and_tpsp_configs():
     if is_devices_enough(2):
         configs.append(
             pytest.param(
-                2,
-                (1, 2),
-                ("fsdp", "tpsp"),
-                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                [
+                    2,
+                    (1, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
                 id="fsdp1_tpsp2",
             )
         )
         configs.append(
             pytest.param(
-                2,
-                (2, 1),
-                ("fsdp", "tpsp"),
-                MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                [
+                    2,
+                    (2, 1),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
                 id="fsdp2_tpsp1",
             ),
         )
