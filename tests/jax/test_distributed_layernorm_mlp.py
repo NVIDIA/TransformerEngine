@@ -430,13 +430,14 @@ class TestDistributedLayernormMLP:
         # within tolerance to the float32 ground truth.
         jax_triton_gemm_precision_tolerance_update = (
             with_jax_gemm
-            and isinstance(fp8_recipe, recipe.Float8CurrentScaling)
-            and dtype == jnp.bfloat16
+            and (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling())
+            and dtype in jnp.bfloat16, jnp.float16
             and activation_type == ("gelu", "linear")
         )
         if jax_triton_gemm_precision_tolerance_update:
-            atol = 0.08
-            rtol = 15
+            atol = 0.025
+            rtol = 0.025
+        # Otherwise, atol = 0.00985 rtol = 0.00985
 
         assert_allclose(mlp_out_sharded, mlp_out_single, dtype=dtype, atol=atol, rtol=rtol)
 
