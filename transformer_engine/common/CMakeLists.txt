@@ -144,7 +144,8 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     ubnext.cu)
 
 if (NVTE_WITH_CUBLASMP)
 list(APPEND transformer_engine_SOURCES

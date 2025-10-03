@@ -260,12 +260,12 @@ void CommOverlapP2P::copy_into_buffer(const at::Tensor &input, bool local_chunk)
   // Userbuffers data
   void *dst_ptr;
   if (local_chunk) {
-    NVTE_CHECK(_ubufs[_tp_id].numel() == input_size,
+    NVTE_CHECK(_ubufs[_tp_id].numel() >= input_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
                "(input_size=", input_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
     dst_ptr = _ubufs[_tp_id].dptr();
   } else {
-    NVTE_CHECK(_ubuf.numel() == input_size,
+    NVTE_CHECK(_ubuf.numel() >= input_size,
                "Tried to copy an invalid tensor into a Userbuffers buffer ",
                "(input_size=", input_size, ", ubuf_size=", _ubuf.numel(), ")");
     dst_ptr = _ubuf.dptr();
@@ -282,11 +282,11 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   if (shape) {
     const size_t requested_size = transformer_engine::pytorch::product(*shape);
     if (local_chunk) {
-      NVTE_CHECK(requested_size == _ubufs[_tp_id].numel(),
+      NVTE_CHECK(requested_size <= _ubufs[_tp_id].numel(),
                  "Invalid shape for local chunk of a Userbuffers buffer (requested shape=", *shape,
                  ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
     } else {
-      NVTE_CHECK(requested_size == _ubuf.numel(),
+      NVTE_CHECK(requested_size <= _ubuf.numel(),
                  "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
                  ", ubuf_size=", _ubuf.numel(), ")");
     }
