@@ -228,7 +228,10 @@ def test_cp_with_fused_attention(
         if cp_comm_type == "all_gather":
             pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
         if cp_comm_type == "a2a+p2p":
-            pytest.skip("CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format yet!")
+            pytest.skip(
+                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+                " yet!"
+            )
     if dtype == "fp8" and cp_comm_type == "all_gather":
         pytest.skip(
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
