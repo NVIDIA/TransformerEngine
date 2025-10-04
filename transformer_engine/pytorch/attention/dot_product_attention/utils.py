@@ -469,10 +469,7 @@ def get_attention_backend(
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
-        if (
-            use_fused_attention
-            and fp8_recipe.float8_current_scaling()
-        ):
+        if use_fused_attention and fp8_recipe.float8_current_scaling():
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
