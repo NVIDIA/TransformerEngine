@@ -661,7 +661,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       int num_tiles_k = k / SF_TILE_DIM_K;
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
-      vec_load_size = std::min(vec_load_size, vec_load_size_i);
+      // vec_load_size = std::min(vec_load_size, vec_load_size_i);
+      vec_load_size = 1;
 
       const int pos = kernel_args.num_tensors;
       kernel_args.m_list[pos] = m;
