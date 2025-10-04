@@ -460,16 +460,16 @@ def _segment_ids_pos_to_seqlens_offsets(
         lambda x, y: jnp.equal(x, y) * x,
     )
     attn_mask = segment_mask
-    if attn_mask_type.is_causal():
-        causal_mask = make_attention_mask(
-            segment_pos_q,
-            segment_pos_kv,
-            jnp.greater_equal,
-        )
-        attn_mask = jnp.logical_and(segment_mask, causal_mask)
+    # if attn_mask_type.is_causal():
+    #     causal_mask = make_attention_mask(
+    #         segment_pos_q,
+    #         segment_pos_kv,
+    #         jnp.greater_equal,
+    #     )
+    #     attn_mask = jnp.logical_and(segment_mask, causal_mask)
 
-    swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
-    attn_mask = jnp.logical_and(attn_mask, swa_mask)
+    # swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    # attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
