@@ -17,14 +17,6 @@ from utils import assert_allclose, is_devices_enough
 
 def generate_configs():
     configs = []
-    if is_devices_enough(2):
-        configs.append(
-            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
-        )
-        configs.append(
-            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2")
-        )
-
     if is_devices_enough(4):
         configs.append(
             pytest.param(
@@ -32,10 +24,17 @@ def generate_configs():
                 (2, 2),
                 ("dp", "tpsp"),
                 MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
-                id=f"n4_dp2_tp2",
+                id="n4_dp2_tp2",
             )
         )
 
+    if is_devices_enough(2):
+        configs.append(
+            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
+        )
+        configs.append(
+            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2"),
+        )
     return configs
 
 
