@@ -661,8 +661,11 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       int num_tiles_k = k / SF_TILE_DIM_K;
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
-      // vec_load_size = std::min(vec_load_size, vec_load_size_i);
-      vec_load_size = 1;
+      // TODO(zhongbo): fix vec_load_size for NVFP4
+      // Current unit test won't capture this issue, but in E2E
+      // using vec_load_size = 1 other than 1 will lead to mis-aligned
+      // address error in MOE training
+      vec_load_size = all_nvfp4 ? 1 : std::min(vec_load_size, vec_load_size_i);
 
       const int pos = kernel_args.num_tensors;
       kernel_args.m_list[pos] = m;
