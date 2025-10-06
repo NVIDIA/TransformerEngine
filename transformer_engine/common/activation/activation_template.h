@@ -15,8 +15,7 @@
 #include <transformer_engine/activation.h>
 
 #include "../common.h"
-#include "../util/cast_gated_kernels.cuh"
-#include "../util/cast_kernels.cuh"
+#include "../cast/cast_everything.cuh"
 #include "../util/math.h"
 #include "../util/vectorized_pointwise.h"
 
@@ -32,7 +31,7 @@ void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
+  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
                                                         nullptr, stream);
 }
 
@@ -46,16 +45,14 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
+  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
                                                         nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>
 void gated_act_fn(const NVTETensor input, NVTETensor output, Param &p, cudaStream_t stream) {
   using namespace detail;
-  constexpr bool IS_DGATED = false;
-  constexpr NVTETensor grad = nullptr;
-  quantize_gated_helper<IS_DGATED, Param, ActOP, nullptr>(grad, input, output, p, stream);
+  dispatch::quantize_gated_helper<Param, ActOP>(input, output, p, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &),
@@ -63,8 +60,7 @@ template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType
 void dgated_act_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output, Param &p,
                    cudaStream_t stream) {
   using namespace detail;
-  constexpr bool IS_DGATED = true;
-  quantize_gated_helper<IS_DGATED, Param, ActOP, DActOP>(grad, input, output, p, stream);
+  dispatch::quantize_dgated_helper<Param, ActOP, DActOP>(grad, input, output, p, stream);
 }
 
 }  // namespace transformer_engine
