@@ -37,7 +37,6 @@ from ..quantize import (
     ScalingMode,
 )
 
-
 __all__ = [
     "layernorm_fwd",
     "layernorm_bwd",

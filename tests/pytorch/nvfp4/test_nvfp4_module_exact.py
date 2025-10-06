@@ -10,7 +10,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.common import recipe
 
-
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
 
 
@@ -214,9 +213,7 @@ def check_nvfp4_module_versus_reference(
         native_outputs.append(
             {
                 "output": y_native.detach().clone(),
-                "input_grad": (
-                    x_native.grad.detach().clone() if x_native.grad is not None else None
-                ),
+                "input_grad": x_native.grad.detach().clone() if x_native.grad is not None else None,
                 "weight_grad": (
                     native_module.weight.grad.detach().clone()
                     if native_module.weight.grad is not None
@@ -233,7 +230,7 @@ def check_nvfp4_module_versus_reference(
         ref_outputs.append(
             {
                 "output": y_ref.detach().clone(),
-                "input_grad": (x_ref.grad.detach().clone() if x_ref.grad is not None else None),
+                "input_grad": x_ref.grad.detach().clone() if x_ref.grad is not None else None,
                 "weight_grad": (
                     ref_module.weight.grad.detach().clone()
                     if ref_module.weight.grad is not None
@@ -441,9 +438,7 @@ def check_nvfp4_layernorm_linear_versus_reference(
             {
                 "output": y_native.detach().clone(),
                 "ln_out": ln_out_native.detach().clone(),
-                "input_grad": (
-                    x_native.grad.detach().clone() if x_native.grad is not None else None
-                ),
+                "input_grad": x_native.grad.detach().clone() if x_native.grad is not None else None,
                 "weight_grad": (
                     native_module.weight.grad.detach().clone()
                     if native_module.weight.grad is not None
@@ -460,7 +455,7 @@ def check_nvfp4_layernorm_linear_versus_reference(
             {
                 "output": y_ref.detach().clone(),
                 "ln_out": ln_out_ref.detach().clone(),
-                "input_grad": (x_ref.grad.detach().clone() if x_ref.grad is not None else None),
+                "input_grad": x_ref.grad.detach().clone() if x_ref.grad is not None else None,
                 "weight_grad": (
                     ref_module.weight.grad.detach().clone()
                     if ref_module.weight.grad is not None

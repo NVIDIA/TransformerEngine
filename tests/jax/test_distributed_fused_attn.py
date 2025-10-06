@@ -26,7 +26,6 @@ from transformer_engine.jax.attention import (
     ReorderStrategy,
 )
 
-
 DTYPES = [jnp.bfloat16]
 
 DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {

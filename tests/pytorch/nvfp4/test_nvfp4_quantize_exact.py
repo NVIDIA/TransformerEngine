@@ -16,7 +16,6 @@ from transformer_engine.pytorch.experimental.quantization_microblock_ref import 
 from transformer_engine.pytorch.experimental import utils
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp4_te_dtype
 
-
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
 
 

@@ -68,7 +68,7 @@ struct no_oob_tag_t {};
 constexpr no_oob_tag_t NO_OOB_TAG;
 
 template <typename OOBT>
-void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
     swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(
         const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
         const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride,
@@ -167,7 +167,7 @@ namespace swizzle_kernel_2d {
 constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
 constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 
-void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+void __global__ __launch_bounds__(WARPS_X_PER_TB * WARPS_Y_PER_TB * WARP_SIZE)
     swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(
         const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
         const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {

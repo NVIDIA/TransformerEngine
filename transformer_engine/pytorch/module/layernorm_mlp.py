@@ -2024,13 +2024,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
             "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
-            "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
-            * x.chunk(2, -1)[1],
+            "qgeglu": (
+                lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
+                * x.chunk(2, -1)[1]
+            ),
             "relu": torch.nn.functional.relu,
             "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
             "srelu": lambda x: torch.nn.functional.relu(x) ** 2,
-            "sreglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) ** 2
-            * x.chunk(2, -1)[1],
+            "sreglu": (
+                lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) ** 2 * x.chunk(2, -1)[1]
+            ),
             "silu": torch.nn.functional.silu,
             "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
         }

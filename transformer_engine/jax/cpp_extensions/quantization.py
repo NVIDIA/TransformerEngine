@@ -47,7 +47,6 @@ from ..quantize import (
     NoScaleTensor,
 )
 
-
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 
 

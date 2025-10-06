@@ -6,5 +6,4 @@
 
 from .config import set_qlinear_params, get_experimental_quantizers
 
-
 __all__ = ["set_qlinear_params", "get_experimental_quantizers"]

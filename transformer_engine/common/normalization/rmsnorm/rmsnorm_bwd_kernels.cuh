@@ -469,9 +469,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
 
 template <typename weight_t, typename compute_t, uint32_t WARPS_M, uint32_t WARPS_N,
           uint32_t BYTES_PER_LDG, uint32_t THREADS_PER_WARP>
-__global__
-__launch_bounds__(WARPS_M *WARPS_N *THREADS_PER_WARP) void rmsnorm_bwd_finalize_general_kernel(
-    BackwardKernelParams params) {
+__global__ __launch_bounds__(
+    WARPS_M * WARPS_N *
+    THREADS_PER_WARP) void rmsnorm_bwd_finalize_general_kernel(BackwardKernelParams params) {
   enum { NUM_ELTS = BYTES_PER_LDG / sizeof(compute_t) };
   using Wvec = Vec<weight_t, NUM_ELTS>;
   using Cvec = Vec<compute_t, NUM_ELTS>;
