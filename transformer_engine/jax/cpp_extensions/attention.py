@@ -609,7 +609,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
         assert FusedAttnFwdPrimitive.outer_primitive is not None
-        q_bdim, _, _, _, seed_bdim, *_ = batch_dims
+        q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, q_bdim, seed_bdim
         return (
@@ -675,7 +675,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[4] = seed_sharding
+        arg_shardings[5] = seed_sharding
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
@@ -1420,7 +1420,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[4] = seed_sharding
+        arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -1429,6 +1429,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             k,
             v,
             bias,
+            softmax_offset,
             seed,
             q_seqlen,
             kv_seqlen,
@@ -1448,7 +1449,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             # meeting the expectation of the SPMD model.
             # TODO(mgoldfarb-nvidia): When cuDNN supports we should be able to make use of a padding
             # mask/sequence length tensor to avoid this unrolled loop.
-            def _cross_attn(idx, q, k, v, bias, q_seqlen, kv_seqlen, seed):
+            def _cross_attn(idx, q, k, v, bias, softmax_offset, q_seqlen, kv_seqlen, seed):
                 kv_max_seqlen = k.shape[1]
                 kv_seqlen_per_subrank = kv_max_seqlen // (cp_size * 2)
                 assert kv_max_seqlen % cp_size == 0, "sequence length must evenly divide cp size"
@@ -1475,6 +1476,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         k_unmasked,
                         v_unmasked,
                         bias,
+                        softmax_offset,
                         seed,
                         q_seqlen_for_step,
                         kv_seqlen_for_step,
@@ -1497,7 +1499,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             k_ag, v_ag = helper.all_gather_kv(k, v)
 
             functions = [
-                partial(_cross_attn, idx, q, k_ag, v_ag, bias, q_seqlen, kv_seqlen, seed)
+                partial(_cross_attn, idx, q, k_ag, v_ag, bias, softmax_offset, q_seqlen, kv_seqlen, seed)
                 for idx in range(cp_size)
             ]
 
@@ -1572,6 +1574,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                 k,
                 v,
                 bias,
+                softmax_offset,
                 softmax_aux,
                 rng_state,
                 output,
@@ -1612,6 +1615,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                         k_unmasked,
                         v_unmasked,
                         bias,
+                        softmax_offset,
                         softmax_aux_split[sub_idx],
                         rng_state,
                         output_split[sub_idx],
@@ -1649,6 +1653,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     k_ag,
                     v_ag,
                     bias,
+                    softmax_offset,
                     softmax_aux,
                     rng_state,
                     output,
@@ -1828,7 +1833,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[4] = seed_sharding
+        arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2677,11 +2682,16 @@ def fused_attn_fwd(
             else:
                 num_heads = qkv[0].shape[-2]  # heads is at index -2 for BSHD
             # Create properly-sized tensor [1, h, 1, 1] filled with zeros
+            # Must be float32 because C++ expects float32 for softmax_offset
             softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
         else:
             raise NotImplementedError(f"Unknown {softmax_type=}")
+    else:
+        # softmax_offset must always be float32 (C++ expects float32)
+        if softmax_offset.dtype != jnp.float32:
+            softmax_offset = softmax_offset.astype(jnp.float32)
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

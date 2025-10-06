@@ -251,7 +251,7 @@ static void FusedAttnForwardImpl(
   /* Input tensors */
   auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
   auto softmax_offset_tensor =
-      TensorWrapper(softmax_offset, std::vector<size_t>{1}, DType::kFloat32);
+      TensorWrapper(softmax_offset, std::vector<size_t>{1, attn_heads, 1, 1}, DType::kFloat32);
 
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * v_head_dim;
@@ -269,9 +269,6 @@ static void FusedAttnForwardImpl(
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-
-  auto dummy_softmax_offset_tensor =
-      TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
 
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
@@ -470,7 +467,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
       softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX) {
-    dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
+    dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1, attn_heads, 1, 1}, DType::kFloat32);
   }
 
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {

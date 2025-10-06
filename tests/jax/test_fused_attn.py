@@ -104,24 +104,23 @@ def general_dot_product_attention(
     match softmax_type:
         case AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_out = jax.nn.softmax(logits).astype(dtype)
+            jax.debug.print("vanilla_softmax_out {softmax_out}", softmax_out=softmax_out)
         case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
-            exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
-            softmax_out = (exp_logits / (jnp.sum(exp_logits, axis=-1, keepdims=True) + 1.0)).astype(
-                dtype
-            )
+            # Append a zero logit, apply standard softmax, then remove last column
+            zero_logit = jnp.zeros(logits.shape[:-1] + (1,), dtype=logits.dtype)
+            logits_with_extra = jnp.concatenate([logits, zero_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
         case AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            # Reshape softmax_offset from (1, h_q, 1, 1) to (1, h_kv, num_groups, 1, 1) to match logits
+            # Reshape softmax_offset from (1, h_q, 1, 1) to (1, h_kv, num_groups, s_q, 1) to match logits
             # logits shape: (b, h_kv, num_groups, s_q, s_kv)
-            if softmax_offset is not None and softmax_offset.size > 0:
-                softmax_offset_reshaped = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
-            else:
-                softmax_offset_reshaped = jnp.zeros((1, h_kv, num_groups, 1, 1), dtype=jnp.float32)
-            exp_logits = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
-            softmax_out = (
-                exp_logits
-                / (jnp.sum(exp_logits, axis=-1, keepdims=True) + jnp.exp(softmax_offset_reshaped))
-            ).astype(dtype)
+            # Append learnable offset logit, apply standard softmax, then remove last column
+            learnable_logit = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
+            learnable_logit = jnp.broadcast_to(learnable_logit, logits.shape[:-1] + (1,))
+            logits_with_extra = jnp.concatenate([logits, learnable_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
         case _:
             raise NotImplementedError(f"Unknown {softmax_type=}")
 
@@ -494,6 +493,7 @@ class FusedAttnRunner:
             self.softmax_offset = jax.random.uniform(
                 softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0
             )
+            self.softmax_offset = jnp.ones((1, self.num_heads_q, 1, 1), dtype=jnp.float32) + 10
         else:
             self.softmax_offset = None
 
@@ -1105,7 +1105,7 @@ class TestFusedAttn:
             pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
         ],
     )
-    def _test_forward(
+    def test_forward(
         b,
         s_q,
         s_kv,
