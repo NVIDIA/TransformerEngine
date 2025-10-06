@@ -32,6 +32,7 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
+    run_length_fill,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
@@ -172,17 +173,35 @@ def make_mask(
             jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
         )
 
-    # causal mask
-    if attn_mask_type.is_causal():
+    if attn_mask_type.is_bottom_right(): # brcm
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.greater,
+        )
+        #jax.debug.print(f"run_length_out_q: {run_length_out_q} \n run_length_out_kv: {run_length_out_kv} \n ")
+        #jax.debug.breakpoint()
+        #TODO: Remove and just change the condition in make_attention_mask if possible
+        bottom_right_causal_mask_not = jnp.logical_not(bottom_right_causal_mask) 
+        #jax.debug.print(f"bottom_right_causal_mask: {bottom_right_causal_mask} \n bottom_right_causal_mask_not: {bottom_right_causal_mask_not} \n ")
+        inv_mask = combine_masks(bottom_right_causal_mask_not, inv_mask)
+        #jax.debug.print(f"inv_mask: {inv_mask[0,0]}")
+        #jax.debug.breakpoint()
+    elif attn_mask_type.is_causal():    # causal mask
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, jnp.bool_)
+    inv_swa_mask =  make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool, segment_ids_q=segment_ids_q, segment_ids_kv=segment_ids_kv) if attn_mask_type.is_bottom_right() else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    #jax.debug.print(f"inv_swa_mask: {inv_swa_mask}")
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
+    #jax.debug.print(f"inv_mask: {inv_mask}")
     mask = jnp.logical_not(inv_mask)
+    #jax.debug.breakpoint()
     return mask
 
 
@@ -337,6 +356,10 @@ class FusedAttnRunner:
         # TODO(rewang): probably adds this in is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
+
+        if self.qkv_layout.is_thd() and self.attn_mask_type.is_bottom_right():
+            if self.max_seqlen_q > self.max_seqlen_kv:
+                pytest.skip(f"BRCM requires cross attn type pattern")
 
         if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
