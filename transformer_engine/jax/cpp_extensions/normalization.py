@@ -119,7 +119,13 @@ class NormFwdPrimitive(BasePrimitive):
         """
         LayerNorm fwd inner primitive abstract
         """
-        del amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
+        del amax_scope, transpose_batch_sequence
+        assert not output_amax_when_no_scaling or (
+            scaling_mode == ScalingMode.NO_SCALING and not is_norm_fwd_cudnn_enabled(scaling_mode)
+        ), (
+            f"scaling_mode = {scaling_mode},"
+            f" use_cudnn_norm_fwd={is_norm_fwd_cudnn_enabled(scaling_mode)}"
+        )
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
