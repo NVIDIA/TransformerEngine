@@ -401,16 +401,33 @@ class NVFP4BlockScaling(Recipe):
     computed from the high precision input to avoid double quantization
     errors.
 
+    The default NVFP4 training recipe implements 3 techniques in order to
+    mitigate some downsides when quantizing to a narrow format (4-bit):
+
+    - Weight tensors we use a different variant of the NVFP4 quantization,
+      where a single scaling factor is shared by a 2D block of 16x16 elements.
+    - When quantizing gradients, we use stochastic rounding to avoid the bias
+      introduced by quantization. With this, values are rounded probabilistically
+      to one of their two nearest representable numbers, with probabilities
+      inversely proportional to their distances.
+    - When quantizing inputs and gradients, we apply random Hadamard transforms
+      (16x16 Hadamard matrix) to reshape the tensor distributions to be more
+      Gaussian-like in order to smooths outliers and them easier to represent
+      accurately in NVFP4.
+
+    These techniques are described more comprehensively in the NVFP4 paper titled
+    'Pretraining Large Language Models with NVFP4' (https://arxiv.org/abs/2509.25149v1).
+
     Parameters
     ----------
     fp4_format : {Format.E2M1}, default = Format.E2M1
              FP4 data type.
-    fp8_format : {Format.E4M3}, default = Format.E4M3
-             FP8 data type. Only E4M3 is supported.
-    fp8_dpa: bool, default = `False`
-             FP8 dot product attention. Not yet supported.
-    fp8_mha: bool, default = `False`
-             FP8 multi-head attention. Not yet supported.
+    disable_rht : bool, default = `False`
+             If set to `True`, random hadamard transforms are not applied to any tensor.
+    disable_stochastic_rounding : bool, default = `False`
+             If set to `True`, stochastic rounding is disabled during quantization for all tensors.
+    disable_2d_quantization : bool, default = `False`
+             If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     """
 
     # Configuration envvars
