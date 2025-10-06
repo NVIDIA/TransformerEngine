@@ -121,7 +121,8 @@ class NormFwdPrimitive(BasePrimitive):
         """
         del amax_scope, transpose_batch_sequence
         assert not output_amax_when_no_scaling or (
-            scaling_mode == ScalingMode.NO_SCALING and not is_norm_fwd_cudnn_enabled(scaling_mode)
+            scaling_mode == ScalingMode.NO_SCALING.value
+            and not is_norm_fwd_cudnn_enabled(scaling_mode)
         ), (
             f"scaling_mode = {scaling_mode},"
             f" use_cudnn_norm_fwd={is_norm_fwd_cudnn_enabled(scaling_mode)}"

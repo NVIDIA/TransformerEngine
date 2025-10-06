@@ -186,7 +186,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         del act_enum, act_params, amax_scope, transpose_batch_sequence
         assert (
-            not output_amax_when_no_scaling or scaling_mode == ScalingMode.NO_SCALING
+            not output_amax_when_no_scaling or scaling_mode == ScalingMode.NO_SCALING.value
         ), f"scaling_mode = {scaling_mode}"
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
