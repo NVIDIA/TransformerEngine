@@ -204,11 +204,14 @@ class ReorderStrategy(Enum):
     Striped = 1
 
 
+# Does this function have an implicit causality restrictions 
 def make_swa_mask(
     segment_pos_q: jnp.ndarray,
     segment_pos_kv: jnp.ndarray,
     window_size: Optional[Tuple[int, int]] = None,
     dtype: jax.typing.DTypeLike = jnp.float32,
+    segment_ids_q: jnp.ndarray = None,
+    segment_ids_kv: jnp.ndarray = None
 ):
     """
     Generate a sliding window mask (1 = attend, 0 = masked).
@@ -238,11 +241,34 @@ def make_swa_mask(
         left_window = right_window = jnp.inf
     left_window = jnp.inf if left_window < 0 else left_window
     right_window = jnp.inf if right_window < 0 else right_window
+    #jax.debug.breakpoint()
     pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
     pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
-    inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
-    inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
-    return inv_swa_mask.astype(dtype)
+    #jax.debug.breakpoint()
+    import sys
+    import numpy as np
+    with np.printoptions(threshold=sys.maxsize):
+        # For BRCM
+        if segment_ids_q != None and segment_ids_kv!= None:
+            run_length_q = run_length_fill(segment_ids_q)
+            run_length_kv = run_length_fill(segment_ids_kv)
+            run_length_q_exp = jnp.expand_dims(run_length_q, axis=-1)
+            run_length_kv_exp = jnp.expand_dims(run_length_kv, axis=-2)
+            #jax.debug.breakpoint()
+            bottom_right_inv_swa_mask = run_length_q_exp - pos_q + left_window >= run_length_kv_exp - pos_kv # no right window as causal ?
+            #jax.debug.print(f"bottom_right_inv_swa_mask: {bottom_right_inv_swa_mask}")
+            #jax.debug.breakpoint()
+            bottom_right_inv_swa_mask = jnp.expand_dims(bottom_right_inv_swa_mask, axis=-3)
+            return bottom_right_inv_swa_mask.astype(dtype)
+        # All other cases other than BRCM
+        else: 
+            inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
+            #jax.debug.breakpoint()
+            #jax.debug.print(f"inv_swa_mask: {inv_swa_mask}")
+            inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
+            #jax.debug.breakpoint()
+            #jax.debug.print(f"inv_swa_mask: {inv_swa_mask}")
+            return inv_swa_mask.astype(dtype)
 
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
@@ -419,6 +445,27 @@ def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
         segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
     )
 
+def run_length_fill_1d(arr):
+    ##jax.debug.breakpoint()
+    #boundary = jnp.concatenate([jnp.array([True]), arr[1:] != arr[:-1]])
+    boundary = jnp.concatenate([jnp.broadcast_to(True, (1,)), arr[1:] != arr[:-1]])
+    run_ids = jnp.cumsum(boundary) - 1
+    max_runs = arr.shape[-1]  # each element could, in worst case, start a run
+    counts = jnp.bincount(run_ids, length=max_runs)
+    # Fill in the missing values
+    output = counts[run_ids]
+    output = jnp.where(arr == 0, 0, output)
+    return output
+def run_length_fill(arr):
+    # arr is shape (batch, 1, q_length, kv_length)
+    # Flattern before vmap run length
+    orig_shape = arr.shape
+    arr_flat = arr.reshape(-1, orig_shape[-1])
+    #jax.debug.breakpoint()
+    out_shape = jax.vmap(run_length_fill_1d, in_axes=0)(arr_flat)
+    #jax.debug.breakpoint()      
+    return out_shape.reshape(orig_shape)
+
 
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
@@ -443,7 +490,8 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
-    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+    #jax.debug.breakpoint()
+    if (attn_mask_type.is_causal() and window_size is None) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
@@ -459,8 +507,25 @@ def _segment_ids_pos_to_seqlens_offsets(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    #jax.debug.print(f"segment_mask_with_id: {segment_mask_with_id[0,0]}")
+    # TE JAX expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
     attn_mask = segment_mask
-    if attn_mask_type.is_causal():
+    if attn_mask_type.is_bottom_right():
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        #jax.debug.breakpoint()
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.greater,
+        )
+        #jax.debug.breakpoint()
+        #TODO: Remove and just change the condition in make_attention_mask if possible
+        bottom_right_causal_mask_not = jnp.logical_not(bottom_right_causal_mask) 
+        attn_mask = jnp.logical_and(segment_mask, bottom_right_causal_mask_not)
+        #jax.debug.breakpoint()
+        #jax.debug.print(f"attn_mask: {attn_mask[0,0]}")
+    elif attn_mask_type.is_causal():
         causal_mask = make_attention_mask(
             segment_pos_q,
             segment_pos_kv,
@@ -468,7 +533,9 @@ def _segment_ids_pos_to_seqlens_offsets(
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
 
-    swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    # TODO : Is this really needed ?    
+    swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool, segment_ids_q=segment_ids_q, segment_ids_kv=segment_ids_kv) if attn_mask_type.is_bottom_right() else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    #jax.debug.print(f"swa_mask: {swa_mask[0,0]}")
     attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
