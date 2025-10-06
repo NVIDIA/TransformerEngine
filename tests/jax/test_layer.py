@@ -82,6 +82,7 @@ _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
 _KEY_OF_WINDOW_SIZE = "window_size"
+_KEY_OF_SOFTMAX_TYPE = "softmax_type"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -274,6 +275,47 @@ ATTRS = [
     {
         _KEY_OF_RELATIVE_EMBEDDING: True,
         _KEY_OF_SELF_ATTN_BIAS_TYPE: "post_scale_bias",
+    },
+    # attrs31: Test off-by-one softmax with causal mask
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+    },
+    # attrs32: Test learnable softmax with causal mask
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+    },
+    # attrs33: Test off-by-one softmax with no_mask
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "no_mask",
+    },
+    # attrs34: Test learnable softmax with padding mask and transpose_batch_sequence=True
+    {
+        _KEY_OF_TRANSPOSE_BS: True,
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+    },
+    # attrs35: Test learnable softmax with GQA
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_NUM_GQA_GROUPS: 4,
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+    },
+    # attrs36: Test off-by-one softmax with RoPE
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_ENABLE_ROPE: True,
+        _KEY_OF_ROPE_GROUP_METHOD: "consecutive",
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
     },
 ]
 

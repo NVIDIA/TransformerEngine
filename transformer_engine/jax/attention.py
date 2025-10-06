@@ -297,6 +297,7 @@ def is_fused_attn_kernel_available(
     qkv_layout,
     attn_bias_type,
     attn_mask_type,
+    softmax_type,
     dropout_probability,
     q_num_heads,
     kv_num_heads,
@@ -309,6 +310,7 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
+    window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
@@ -318,6 +320,7 @@ def is_fused_attn_kernel_available(
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_probability,
             q_num_heads,
             kv_num_heads,
@@ -325,7 +328,7 @@ def is_fused_attn_kernel_available(
             kv_max_seqlen,
             head_dim_qk,
             head_dim_v,
-            (-1, -1) if window_size is None else window_size,
+            window_size_tuple,
         )
 
     return make_helper(attn_mask_type).is_fused_attn_kernel_available()

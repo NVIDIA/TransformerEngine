@@ -269,7 +269,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_aval,
         v_aval,
         bias_aval,
-        softmax_offset_aval,
+        _softmax_offset_aval,
         seed_aval,
         q_seqlen_or_cu_seqlen_aval,
         kv_seqlen_or_cu_seqlen_aval,
@@ -1273,6 +1273,11 @@ class _FusedAttnCPWithAllGatherHelper:
         if self.config.dropout_probability != 0.0:
             raise ValueError(f"{header} does not support dropout")
 
+        if self.config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            raise ValueError(
+                f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
+            )
+
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
         if self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK:
@@ -1284,6 +1289,7 @@ class _FusedAttnCPWithAllGatherHelper:
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
+            softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
             dropout_probability=self.config.dropout_probability,
@@ -1612,7 +1618,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen // (cp_size * 2)) * num_kv_chunks
 
-                    dq_local, dk_local, dv_local, dbias_local = FusedAttnBwdPrimitive.impl(
+                    dq_local, dk_local, dv_local, dbias_local, _ = FusedAttnBwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
                         v_unmasked,
@@ -1731,6 +1737,11 @@ class _FusedAttnCPWithP2PHelper:
         if self.config.dropout_probability != 0.0:
             raise ValueError(f"{header} does not support dropout")
 
+        if self.config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            raise ValueError(
+                f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
+            )
+
         # We want to encourage use of scan loop to minimize unrolling and ensure more
         # predictable scheduling from XLA. The unrolled flavor will be supported but
         # not the prefered implementation.
@@ -1755,6 +1766,7 @@ class _FusedAttnCPWithP2PHelper:
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=attn_mask_type,
+            softmax_type=self.config.softmax_type,
             qkv_layout=QKVLayout.BSHD_BS2HD,
             scaling_factor=self.config.scaling_factor,
             dropout_probability=self.config.dropout_probability,
@@ -1844,6 +1856,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             k,
             v,
             bias,
+            _softmax_offset,
             seed,
             q_seqlen,
             kv_seqlen,
@@ -1855,6 +1868,8 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_pos,
         ):
             _not_used = jnp.zeros(0, dtype=v.dtype)
+            # Ring attention does not support softmax offset
+            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -1889,6 +1904,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -1914,6 +1930,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv_part,
                         _not_used,
                         bias,
+                        softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -1936,6 +1953,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -2054,6 +2072,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
             k,
             v,
             bias,
+            _softmax_offset,
             softmax_aux,
             rng_state,
             output,
@@ -2068,6 +2087,8 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
             _kv_segment_pos,
         ):
             _not_used = jnp.zeros(0, dtype=output.dtype)
+            # Ring attention does not support softmax offset
+            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2097,11 +2118,12 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                 def mask_compute(attn_mask_type):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx)
-                    dq_per_step, dk_dv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
+                    dq_per_step, dk_dv_per_step, _, dbias_per_step, _ = FusedAttnBwdPrimitive.impl(
                         q,
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,
@@ -2125,11 +2147,12 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx) // 2
                     kv_part = lax.slice_in_dim(kv, 0, kv_max_seqlen // 2, axis=1)
-                    dq_per_step, dk_dv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
+                    dq_per_step, dk_dv_per_step, _, dbias_per_step, _ = FusedAttnBwdPrimitive.impl(
                         q,
                         kv_part,
                         _not_used,
                         bias,
+                        softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,
@@ -2163,11 +2186,12 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         softmax_aux, q_max_seqlen // 2, q_max_seqlen, axis=2
                     )
 
-                    dq_per_step, dk_dv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
+                    dq_per_step, dk_dv_per_step, _, dbias_per_step, _ = FusedAttnBwdPrimitive.impl(
                         q_part,
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         softmax_aux_part,
                         rng_state,
                         output_part,
@@ -2325,6 +2349,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             k,
             v,
             bias,
+            _softmax_offset,
             seed,
             q_seqlen,
             kv_seqlen,
@@ -2339,6 +2364,8 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
 
             _not_used = jnp.zeros(0, dtype=v.dtype)
+            # Ring attention does not support softmax offset
+            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2376,6 +2403,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         seed,
                         q_seqlen,
                         kv_seqlen,
@@ -2385,7 +2413,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         kv_segment_ids,
                         q_segment_pos,
                         kv_segment_pos,
-                        config,
+                        config=config,
                     )
 
                 if config.window_size != (-1, -1):
@@ -2467,6 +2495,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             k,
             v,
             bias,
+            _softmax_offset,
             softmax_aux,
             rng_state,
             output,
@@ -2485,6 +2514,8 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
 
             _not_used = jnp.zeros(0, dtype=output.dtype)
+            # Ring attention does not support softmax offset
+            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2514,11 +2545,12 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
 
                 def compute(config):
-                    dq_per_step, dkv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
+                    dq_per_step, dkv_per_step, _, dbias_per_step, _ = FusedAttnBwdPrimitive.impl(
                         q,
                         kv,
                         _not_used,
                         bias,
+                        softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,
