@@ -430,6 +430,7 @@ class TestDistributedLayernormMLP:
         # within tolerance to the float32 ground truth.
         jax_triton_gemm_precision_tolerance_update = (
             with_jax_gemm
+            and fp8_recipe is not None
             and (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling())
             and dtype in (jnp.bfloat16, jnp.float16)
             and activation_type == ("gelu", "linear"),
