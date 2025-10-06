@@ -766,7 +766,7 @@ def _quantize_dbias_impl(
         dbias = _jax_dbias(x.data, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
 
-    scale = jnp.empty((), jnp.float32)
+    scale = jnp.empty((1,), jnp.float32)
     amax = None
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Globally reduce amax across all devices for current scaling so we have a single global scale.

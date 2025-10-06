@@ -1400,7 +1400,7 @@ def quantize_dact_dbias(
         f" {x.shape} and act_len {act_len}"
     )
 
-    scale = jnp.empty((), jnp.float32)
+    scale = jnp.empty((1,), jnp.float32)
     amax = jnp.zeros((1,), jnp.float32)  # need to init with zero and shape=(1,)
     act_type_id = ActivationEnum[activation_type]
     PrimitiveClass = DActLuDBiasQuantizePrimitive if is_dbias else DActLuQuantizePrimitive
@@ -1409,7 +1409,7 @@ def quantize_dact_dbias(
     ):
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer, act_params)
     if quantizer is None:
-        output, _, _, _, _, updated_amax = PrimitiveClass.outer_primitive.bind(
+        output, _, _, _, updated_amax, _ = PrimitiveClass.outer_primitive.bind(
             dz,
             x,
             scale,
