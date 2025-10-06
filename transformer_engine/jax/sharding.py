@@ -365,6 +365,21 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
+def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh):
+    """Perform all-reduce sum operation along data parallelism and sequence parallelism axes.
+
+    Args:
+        x: Input tensor to reduce
+        mesh: JAX mesh for distributed computation
+
+    Returns:
+        Reduced tensor
+    """
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().tpsp_resource, mesh)
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+
+
 def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
     """Perform all-reduce max operation along all axes except pipeline parallelism.
 
