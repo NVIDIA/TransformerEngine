@@ -467,7 +467,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
       softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX) {
-    dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1, attn_heads, 1, 1}, DType::kFloat32);
+    dummy_d_softmax_offset_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{1, attn_heads, 1, 1}, DType::kFloat32);
   }
 
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {

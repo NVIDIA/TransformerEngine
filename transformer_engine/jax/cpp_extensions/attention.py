@@ -1499,7 +1499,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             k_ag, v_ag = helper.all_gather_kv(k, v)
 
             functions = [
-                partial(_cross_attn, idx, q, k_ag, v_ag, bias, softmax_offset, q_seqlen, kv_seqlen, seed)
+                partial(
+                    _cross_attn, idx, q, k_ag, v_ag, bias, softmax_offset, q_seqlen, kv_seqlen, seed
+                )
                 for idx in range(cp_size)
             ]
 
