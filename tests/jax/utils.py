@@ -267,7 +267,7 @@ class DotProductAttention(nn.Module):
             # softmax_offset shape: [1, h, 1, 1], attn_weights shape: [b, h, q, k]
             extra_col = jnp.broadcast_to(
                 softmax_offset,
-                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1)
+                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1),
             )
             attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
 

@@ -242,13 +242,15 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             # softmax_offset shape: [1, h, 1, 1], attn_weights shape: [b, h, q, k]
             extra_col = jnp.broadcast_to(
                 softmax_offset,
-                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1)
+                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1),
             )
             attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
 
             # Pad mask if present to match new shape
             if mask is not None:
-                mask = jnp.pad(mask, ((0, 0), (0, 0), (0, 0), (0, 1)), mode='constant', constant_values=0)
+                mask = jnp.pad(
+                    mask, ((0, 0), (0, 0), (0, 0), (0, 1)), mode="constant", constant_values=0
+                )
 
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusion"""
@@ -1069,7 +1071,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Softmax type as described in this paper:
         `Efficient Streaming Language Models with Attention Sinks
         <https://arxiv.org/abs/2309.17453>`_.
-        
+
         * vanilla: Standard softmax normalization.
         * off_by_one: Adds a learnable scalar offset column (initialized to zero) before softmax,
           modifying the denominator to :math:`1 + \sum exp(logits)`.

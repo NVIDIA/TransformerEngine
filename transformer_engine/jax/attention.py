@@ -99,7 +99,7 @@ class AttnSoftmaxType(Enum):
         if result is None:
             raise ValueError(
                 f"Unknown softmax_type: {softmax_type}. "
-                f"Valid options: 'vanilla', 'off_by_one', 'learnable'"
+                "Valid options: 'vanilla', 'off_by_one', 'learnable'"
             )
         return result
 
