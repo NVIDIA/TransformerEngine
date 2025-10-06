@@ -191,6 +191,7 @@ class ActLuPrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert amax_aval is None or amax_aval.dtype == jnp.float32
         assert x_aval.shape[-2] == act_len, (
             "activation input should be replicated by act_len in the -2 axis, got input shape"
             f" {x_aval.shape} and act_len {act_len}"
@@ -242,7 +243,7 @@ class ActLuPrimitive(BasePrimitive):
         """
         te_gated_act_lu_p lowering rules
         """
-        del out_dtype, scale_dtype, act_len, is_outer
+        del out_dtype, scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence
         x_aval, scale_aval, amax_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
@@ -647,7 +648,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p abstract
         """
-        del act_enum, act_params
+        del act_enum, act_params, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
         dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_dtype
@@ -656,6 +657,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
             f" {x_aval.shape} and act_len {act_len}"
         )
         assert scale_aval.dtype == jnp.float32
+        assert amax_aval.dtype == jnp.float32
 
         assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
             "Current tensor scaling is not supported for fused dact and quantization. Please do"
@@ -1254,6 +1256,8 @@ def act_lu(
         If quantizer is provided:
             A ScaledTensor containing the quantized activated input.
     """
+    # TODO(Phuong): remove the output_amax_when_no_scaling exposure by introducing _act_lu_impl()
+    # Do the same with dact_dbias_quantize() and layernorm_fwd()
     act_type_id = ActivationEnum[activation_type].value
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
@@ -1418,7 +1422,6 @@ def quantize_dact_dbias(
             scale,
             amax,
             # outputs float32 for dbias accumulation
-            # TODO: remove this upcast
             out_dtype=(jnp.float32 if is_dbias else x.dtype),
             # default value for no scaling, TE/common ignore this value when scale is unset
             scaling_mode=ScalingMode.NO_SCALING.value,

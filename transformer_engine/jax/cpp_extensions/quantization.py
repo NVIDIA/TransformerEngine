@@ -544,6 +544,7 @@ class AmaxScope(Enum):
     FSDP = 3
 
     def all_reduce_amax_along_TPSP_and_FSDP(self, amax, data_spec, transpose_batch_sequence, mesh):
+        """Reduce the amax based on its scope"""
         gmesh = global_mesh_resource()
         sequence_dim = 0 if transpose_batch_sequence else 1
         # Run AR across TPSP only when tensor-sequence is detected in the input spec
