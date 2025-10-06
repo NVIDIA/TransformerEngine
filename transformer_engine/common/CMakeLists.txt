@@ -119,7 +119,7 @@ list(APPEND transformer_engine_SOURCES
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     util/cast.cu
+     cast/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
      util/cuda_nvml.cpp
@@ -267,7 +267,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   set_source_files_properties(activation/gelu.cu
                               activation/relu.cu
                               activation/swiglu.cu
-                              util/cast.cu
+                              cast/cast.cu
                               PROPERTIES
                               COMPILE_OPTIONS "--use_fast_math")
 endif()
