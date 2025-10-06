@@ -1041,32 +1041,6 @@ class RelativePositionBiases(nn.Module):
         return values[jnp.newaxis, ...]
 
 
-def convert_softmax_type_str_to_enum(softmax_type: str) -> AttnSoftmaxType:
-    """Convert softmax_type string to AttnSoftmaxType enum.
-    
-    Args:
-        softmax_type: String representation of softmax type.
-            One of "vanilla", "off_by_one", "learnable".
-    
-    Returns:
-        AttnSoftmaxType enum value.
-    
-    Raises:
-        ValueError: If softmax_type is not a valid option.
-    """
-    if softmax_type == "vanilla":
-        return AttnSoftmaxType.VANILLA_SOFTMAX
-    elif softmax_type == "off_by_one":
-        return AttnSoftmaxType.OFF_BY_ONE_SOFTMAX
-    elif softmax_type == "learnable":
-        return AttnSoftmaxType.LEARNABLE_SOFTMAX
-    else:
-        raise ValueError(
-            f"Unknown softmax_type: {softmax_type}. "
-            f"Valid options: 'vanilla', 'off_by_one', 'learnable'"
-        )
-
-
 def apply_swa_mask(
     attn_mask_type: str,
     original_mask: Array,
@@ -1175,7 +1149,7 @@ class EncoderLayer(nn.Module):
             x = inputs
 
         # Convert softmax_type string to AttnSoftmaxType enum
-        attn_softmax_type = convert_softmax_type_str_to_enum(self.softmax_type)
+        attn_softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
 
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         x = MultiHeadAttention(
@@ -1359,7 +1333,7 @@ class DecoderLayer(nn.Module):
             x = inputs
 
         # Convert softmax_type string to AttnSoftmaxType enum
-        attn_softmax_type = convert_softmax_type_str_to_enum(self.softmax_type)
+        attn_softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
 
         # Self-attention block
         x = MultiHeadAttention(

@@ -87,6 +87,22 @@ class AttnSoftmaxType(Enum):
     OFF_BY_ONE_SOFTMAX = NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX
     LEARNABLE_SOFTMAX = NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX
 
+    @classmethod
+    def from_str(cls, softmax_type: str) -> "AttnSoftmaxType":
+        """Convert string to AttnSoftmaxType: 'vanilla', 'off_by_one', or 'learnable'."""
+        softmax_type_map = {
+            "vanilla": cls.VANILLA_SOFTMAX,
+            "off_by_one": cls.OFF_BY_ONE_SOFTMAX,
+            "learnable": cls.LEARNABLE_SOFTMAX,
+        }
+        result = softmax_type_map.get(softmax_type)
+        if result is None:
+            raise ValueError(
+                f"Unknown softmax_type: {softmax_type}. "
+                f"Valid options: 'vanilla', 'off_by_one', 'learnable'"
+            )
+        return result
+
 
 class QKVFormat(Enum):
     """

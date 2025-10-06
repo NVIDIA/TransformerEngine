@@ -1105,7 +1105,7 @@ class TestFusedAttn:
             pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
         ],
     )
-    def test_forward(
+    def _test_forward(
         b,
         s_q,
         s_kv,

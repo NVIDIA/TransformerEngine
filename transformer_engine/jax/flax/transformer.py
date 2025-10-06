@@ -23,7 +23,13 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, AttnSoftmaxType, QKVLayout, SequenceDescriptor
+from ..attention import (
+    AttnBiasType,
+    AttnMaskType,
+    AttnSoftmaxType,
+    QKVLayout,
+    SequenceDescriptor,
+)
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
@@ -646,7 +652,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
         qkv_layout = QKVLayout[self.qkv_layout.upper()]
-        softmax_type = AttnSoftmaxType[self.softmax_type.upper()]
+        softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
         del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
 
         if attn_bias_type == AttnBiasType.NO_BIAS:
@@ -677,6 +683,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             self.attention_dropout,
             self.num_attention_heads,
             self.num_gqa_groups,
@@ -1058,6 +1065,16 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Deprecated. Please refer `fuse_qkv_params`
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
+    softmax_type: str = {'vanilla', 'off_by_one', 'learnable'}, default = 'vanilla'
+        Softmax type as described in this paper:
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/abs/2309.17453>`_.
+        
+        * vanilla: Standard softmax normalization.
+        * off_by_one: Adds a learnable scalar offset column (initialized to zero) before softmax,
+          modifying the denominator to :math:`1 + \sum exp(logits)`.
+        * learnable: Adds a learnable vector offset column (one value per head) before softmax,
+          modifying the denominator to :math:`exp(\\alpha_h) + \sum exp(logits)`.
     """
 
     head_dim: int
@@ -1089,6 +1106,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scaled_query_init: bool = True
     float32_logits: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: str = "vanilla"
 
     # Deprecated parameters
     num_heads: Optional[int] = None

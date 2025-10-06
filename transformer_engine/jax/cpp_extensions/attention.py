@@ -2630,7 +2630,7 @@ def fused_attn_fwd(
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
-    softmax_type: str,
+    softmax_type: AttnSoftmaxType,
     qkv_layout: QKVLayout,
     scaling_factor: float,
     dropout_probability: float,
@@ -2665,7 +2665,7 @@ def fused_attn_fwd(
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
-        softmax_type (str): Type of softmax.
+        softmax_type (AttnSoftmaxType): Type of softmax.
         qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
