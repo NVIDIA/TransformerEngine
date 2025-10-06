@@ -12,6 +12,7 @@ import transformer_engine as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import Float8BlockScaling
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
@@ -32,6 +33,7 @@ tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DU
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scaling_available()
+recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 
 class GetRecipes:
@@ -218,6 +220,12 @@ def check_quantization_block_tiling_versus_reference(
     pow_2_scales: bool,
     tile_size: Tuple[int, int],
 ) -> None:
+    if recipe_emulated and not pow_2_scales:
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
+
     te_dtype = TE_DType[quant_dtype]
     if tile_size == (1, 128):
         block_scaling_dim = 1
@@ -409,6 +417,12 @@ def test_quantization_block_tiling_extrema_versus_reference(
     tile_size: Tuple[int, int],
     extrema_high: bool,
 ) -> None:
+    if recipe_emulated and not pow_2_scales:
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
+
     # This test runs a single tile through a quantizer as a way to test
     # branch coverage of scale computation.
     te_dtype = TE_DType[quant_dtype]
