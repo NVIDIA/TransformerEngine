@@ -179,7 +179,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
         print(
-            "Usage: python test_gemm.py --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]"
+            "Usage: python test_gemm.py --num-processes <num> --process-id <id> [--local-device-ids"
+            " <ids>] [other args]"
         )
         sys.exit(1)
 
