@@ -411,9 +411,8 @@ class NVFP4BlockScaling(Recipe):
       to one of their two nearest representable numbers, with probabilities
       inversely proportional to their distances.
     - When quantizing inputs and gradients, random Hadamard transforms are applied
-      (16x16 Hadamard matrix) to reshape the tensor distributions to be more
-      Gaussian-like in order to smooth outliers and make them easier to represent
-      accurately in NVFP4.
+      (16x16 Hadamard matrix) to smooth outliers in the tensor distributions
+      and make them easier to represent accurately in NVFP4.
 
     These techniques are described more comprehensively in the NVFP4 paper titled
     'Pretraining Large Language Models with NVFP4' (https://arxiv.org/abs/2509.25149v1).
