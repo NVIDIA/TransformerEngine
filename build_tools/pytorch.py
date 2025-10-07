@@ -19,7 +19,7 @@ def install_requirements() -> List[str]:
 
 def test_requirements() -> List[str]:
     """Test dependencies for TE/JAX extensions."""
-    return ["numpy", "torchvision", "transformers"]
+    return ["numpy", "torchvision", "transformers", "torchao==0.13"]
 
 
 def setup_pytorch_extension(
