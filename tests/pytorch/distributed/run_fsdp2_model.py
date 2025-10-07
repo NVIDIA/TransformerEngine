@@ -9,7 +9,7 @@ import sys
 import argparse
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
+from transformer_engine.common.recipe import Format, DelayedScaling
 
 import torch
 import torch.distributed as dist

@@ -5,7 +5,6 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-import os
 from typing import Callable, Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
