@@ -404,7 +404,7 @@ class NVFP4BlockScaling(Recipe):
     The default NVFP4 training recipe implements 3 techniques for quantizing
     to a narrow format (4-bit):
 
-    - For weight tensors we use a different variant of the NVFP4 quantization,
+    - For weight tensors a variant of the NVFP4 quantization is used,
       where a single scaling factor is shared by a 2D block of 16x16 elements.
     - When quantizing gradients, stochastic rounding is applied to avoid the bias
       introduced by quantization. With this, values are rounded probabilistically
