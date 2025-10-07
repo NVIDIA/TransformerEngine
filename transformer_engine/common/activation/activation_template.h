@@ -15,9 +15,8 @@
 #include <transformer_engine/activation.h>
 
 #include "../common.h"
-#include "../cast/cast_everything.cuh"
-#include "../util/math.h"
-#include "../util/vectorized_pointwise.h"
+#include "../cast/dispatch/quantize.cuh"
+#include "../cast/dispatch/gated.cuh"
 
 namespace transformer_engine {
 
