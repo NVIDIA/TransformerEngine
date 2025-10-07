@@ -357,9 +357,14 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
-        if self.qkv_layout.is_thd() and self.attn_mask_type.is_bottom_right():
-            if self.max_seqlen_q > self.max_seqlen_kv:
+        if self.attn_mask_type.is_bottom_right():
+            #TODO: Test for BSHD and modify condition accordingly
+            if self.max_seqlen_q > self.max_seqlen_kv and self.qkv_layout.is_thd():
                 pytest.skip(f"BRCM requires cross attn type pattern")
+            if self.attn_bias_type is not AttnBiasType.NO_BIAS:
+                pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
+            if self.dropout_prob is not 0.0:
+                pytest.skip(f"cuDNN does not support non-zero dropoouts for BRCM")
 
         if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
