@@ -5,6 +5,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
+import os
 from typing import Callable, Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
@@ -495,6 +496,10 @@ class QuantizedTensor(torch.Tensor):
                 and schema_arg.alias_info.is_write
             ):
                 arg.quantize_(new_arg)
+            elif isinstance(arg, list) and isinstance(new_arg, list):
+                # Recursively handle for lists of tensors
+                for a, na in zip(arg, new_arg):
+                    maybe_update_inplace(a, na, schema_arg)
 
         # In-place op: dequantize, perform op, and quantize
         if func._schema.is_mutable:

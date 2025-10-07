@@ -9,7 +9,7 @@ import sys
 import argparse
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
 
 import torch
 import torch.distributed as dist
@@ -104,24 +104,19 @@ def _train(args):
     # FP8 Configuration
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
-
+    build_model_context_args = {}
     if not args.fp8_init:
         # Build model context (FP8 init)
         build_model_context = nullcontext
-        build_model_context_args = {}
-
+    else:
         from transformer_engine.pytorch import fp8_model_init
-
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
-
-        # Build the model with the specified context
-        with build_model_context(**build_model_context_args):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    else:
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
+        build_model_context_args["recipe"] = fp8_recipe
     # Move the model to the correct device
-
+    # Build the model with the specified context
+    with build_model_context(**build_model_context_args):
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
     model.to(device)
 
     if LOCAL_RANK == 0:
@@ -163,13 +158,14 @@ def _train(args):
         # Zero the parameter gradients
         optimizer.zero_grad()
         input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        output = model(input_data)
+        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+            output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
         if LOCAL_RANK == 0:
-            print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
+            print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed with loss {loss.item()}")
 
     dist.destroy_process_group()
     if LOCAL_RANK == 0:
