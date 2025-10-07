@@ -410,7 +410,7 @@ class NVFP4BlockScaling(Recipe):
       introduced by quantization. With this, values are rounded probabilistically
       to one of their two nearest representable numbers, with probabilities
       inversely proportional to their distances.
-    - When quantizing inputs and gradients, we apply random Hadamard transforms
+    - When quantizing inputs and gradients, random Hadamard transforms are applied
       (16x16 Hadamard matrix) to reshape the tensor distributions to be more
       Gaussian-like in order to smooth outliers and make them easier to represent
       accurately in NVFP4.
