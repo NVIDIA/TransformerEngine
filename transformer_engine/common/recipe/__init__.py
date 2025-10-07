@@ -406,7 +406,7 @@ class NVFP4BlockScaling(Recipe):
 
     - For weight tensors we use a different variant of the NVFP4 quantization,
       where a single scaling factor is shared by a 2D block of 16x16 elements.
-    - When quantizing gradients, we use stochastic rounding to avoid the bias
+    - When quantizing gradients, stochastic rounding is applied to avoid the bias
       introduced by quantization. With this, values are rounded probabilistically
       to one of their two nearest representable numbers, with probabilities
       inversely proportional to their distances.
