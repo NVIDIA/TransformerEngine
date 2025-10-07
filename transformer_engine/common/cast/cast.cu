@@ -9,22 +9,17 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/multi_stream.h>
-
-#include <cfloat>
-#include <limits>
-#include <mutex>
-#include <string>
+#include "transformer_engine/activation.h"
+#include "transformer_engine/transpose.h"
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
 #include "../util/multi_stream.h"
-#include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
-#include "../util/math.h"
-#include "../util/ptx.cuh"
-#include "cast_everything.cuh"
-#include "transformer_engine/activation.h"
-#include "transformer_engine/transpose.h"
+
+#include "dispatch/quantize.cuh"
+#include "dispatch/dequantize.cuh"
+#include "dispatch/gated.cuh"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
