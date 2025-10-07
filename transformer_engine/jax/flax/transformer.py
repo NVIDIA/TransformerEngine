@@ -1207,6 +1207,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="qkv",
                     dtype=self.dtype,
                 )(inputs_q)
@@ -1234,6 +1235,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="query",
                 )(inputs_q)
 
@@ -1252,6 +1254,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     enable_low_rank_adaptation=lora_scope.qkv_proj,
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="kv",
                     dtype=self.dtype,
                 )(inputs_kv)
@@ -1292,6 +1295,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
                 dot_input_axes=inputs_logical_axes_no_sp,
+                transpose_batch_sequence=self.transpose_batch_sequence,
                 name="query",
             )(inputs_q)
 
@@ -2070,6 +2074,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             layernorm_input_axes=(*generate_batch_seqlen_logical_axes(), HIDDEN_AXES),
             dot_1_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES),
             dot_2_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_TP_AXES),
+            transpose_batch_sequence=self.transpose_batch_sequence,
             name="mlp",
         )(mlp_input, deterministic=deterministic)
 
