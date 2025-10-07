@@ -359,8 +359,8 @@ class FusedAttnRunner:
 
         if self.attn_mask_type.is_bottom_right():
             #TODO: Test for BSHD and modify condition accordingly
-            if self.max_seqlen_q > self.max_seqlen_kv and self.qkv_layout.is_thd():
-                pytest.skip(f"BRCM requires cross attn type pattern")
+            if self.max_seqlen_q > self.max_seqlen_kv:
+                pytest.skip(f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q")
             if self.attn_bias_type is not AttnBiasType.NO_BIAS:
                 pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
             if self.dropout_prob is not 0.0:
