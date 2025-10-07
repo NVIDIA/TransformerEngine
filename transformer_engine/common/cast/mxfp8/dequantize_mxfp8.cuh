@@ -25,6 +25,7 @@ namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace dequantize_kernel {
+
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;

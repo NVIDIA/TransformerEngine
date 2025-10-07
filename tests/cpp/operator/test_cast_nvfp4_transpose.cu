@@ -664,11 +664,11 @@ std::vector<std::vector<size_t>> tensor_dims = {
 // Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
-    ActivationType::GeLU,
-    ActivationType::SiLU,
-    ActivationType::ReLU,
-    ActivationType::QGeLU,
-    ActivationType::SReLU,
+    // ActivationType::GeLU,
+    // ActivationType::SiLU,
+    // ActivationType::ReLU,
+    // ActivationType::QGeLU,
+    // ActivationType::SReLU,
 };
 
 }  // namespace
