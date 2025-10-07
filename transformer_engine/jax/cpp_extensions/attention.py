@@ -1142,11 +1142,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             global_dbias = local_dbias
             if config.attn_bias_type is not AttnBiasType.NO_BIAS:
                 global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
-            
+
             global_dsoftmax_offset = local_dsoftmax_offset
             if config.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
                 global_dsoftmax_offset = all_reduce_sum_along_dp_fsdp(local_dsoftmax_offset, mesh)
-            
+
             return local_dq, local_dk, local_dv, global_dbias, global_dsoftmax_offset
 
         return mesh, sharded_impl, out_shardings, arg_shardings
