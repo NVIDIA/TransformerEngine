@@ -110,6 +110,7 @@ def _train(args):
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
+
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
