@@ -422,7 +422,7 @@ class NVFP4BlockScaling(Recipe):
     fp4_format : {Format.E2M1}, default = Format.E2M1
              FP4 data type.
     disable_rht : bool, default = `False`
-             If set to `True`, random hadamard transforms are not applied to any tensor.
+             If set to `True`, random Hadamard transforms are not applied to any tensor.
     disable_stochastic_rounding : bool, default = `False`
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
     disable_2d_quantization : bool, default = `False`
