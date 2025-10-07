@@ -40,7 +40,6 @@ from ..distributed import (
 from ..constants import dist_group_type
 from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -1229,8 +1228,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                # TODO(ksivaman): Re-add fusion once kernel is available.
-                if isinstance(quantizer, (Float8BlockQuantizer, NVFP4Quantizer)):
+                if isinstance(quantizer, Float8BlockQuantizer):
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
