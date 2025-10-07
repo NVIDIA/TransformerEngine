@@ -363,7 +363,7 @@ class FusedAttnRunner:
                 pytest.skip(f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q")
             if self.attn_bias_type is not AttnBiasType.NO_BIAS:
                 pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
-            if self.dropout_prob is not 0.0:
+            if self.dropout_prob != 0.0:
                 pytest.skip(f"cuDNN does not support non-zero dropoouts for BRCM")
 
         if self.qkv_layout.is_qkvpacked():
