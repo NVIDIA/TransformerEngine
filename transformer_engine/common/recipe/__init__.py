@@ -404,7 +404,7 @@ class NVFP4BlockScaling(Recipe):
     The default NVFP4 training recipe implements 3 techniques in order to
     mitigate some downsides when quantizing to a narrow format (4-bit):
 
-    - Weight tensors we use a different variant of the NVFP4 quantization,
+    - For weight tensors we use a different variant of the NVFP4 quantization,
       where a single scaling factor is shared by a 2D block of 16x16 elements.
     - When quantizing gradients, we use stochastic rounding to avoid the bias
       introduced by quantization. With this, values are rounded probabilistically
@@ -412,7 +412,7 @@ class NVFP4BlockScaling(Recipe):
       inversely proportional to their distances.
     - When quantizing inputs and gradients, we apply random Hadamard transforms
       (16x16 Hadamard matrix) to reshape the tensor distributions to be more
-      Gaussian-like in order to smooths outliers and them easier to represent
+      Gaussian-like in order to smooth outliers and make them easier to represent
       accurately in NVFP4.
 
     These techniques are described more comprehensively in the NVFP4 paper titled
