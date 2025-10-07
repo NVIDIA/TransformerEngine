@@ -155,18 +155,12 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-  set_source_files_properties(
-    "gemm/cutlass_grouped_gemm.cu"
-    PROPERTIES
-    COMPILE_FLAGS
-    "-gencode arch=compute_90a,code=sm_90a")
-else()
-  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
-endif()
-
-# Disable debug build for cutlass due to hang.
-set_source_files_properties("gemm/cutlass_grouped_gemm.cu" PROPERTIES COMPILE_FLAGS "-g0")
+# CUTLASS kernels require SM90a and cause hang in debug build
+set_property(
+  SOURCE gemm/cutlass_grouped_gemm.cu
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC

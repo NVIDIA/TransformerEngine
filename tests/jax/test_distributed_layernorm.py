@@ -66,18 +66,19 @@ class TestDistributedLayernorm:
         self, mesh_resource, ln_type, shape, dtype, mesh_axes, fp8_recipe
     ):
         jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
+        # TODO(Phuong) is_dp_enabled = dp mesh axis size > 1
         is_dp_enabled = mesh_resource.dp_resource is not None
+        is_tpsp_enabled = mesh_resource.tpsp_resource is not None
         assert ln_type in ["layernorm", "rmsnorm"]
-        all_reduce_loss_bytes = 4  # 1 * FP32
-        # for loss, dgamma and dbeta
-        # TODO(Jeremy): debug this check because layernorm should always have 2x weights regardless of dp
-        weight_count = 2 if (ln_type == "layernorm" and "dp" in mesh_axes) else 1
-        allreduce_total_bytes = (
-            all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
-        )
-        other_bytes = 0
+        # loss, 1 FP32
+        allreduce_total_bytes = 4 if is_dp_enabled else 0
+        # dgamma and dbeta
+        weight_count = 2 if ln_type == "layernorm" else 1
+        allreduce_total_bytes += weight_count * shape[-1] * jax_dtype.itemsize
         return generate_collectives_count(
-            allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
+            allreduce=allreduce_total_bytes * int(is_dp_enabled or is_tpsp_enabled),
+            allgather=0,
+            other=0,
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())

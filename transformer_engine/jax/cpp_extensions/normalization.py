@@ -28,7 +28,7 @@ from .misc import (
     get_cudnn_version,
 )
 from .quantization import _quantize_dbias_impl, AmaxScope
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp_tpsp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
@@ -801,9 +801,9 @@ class NormBwdPrimitive(BasePrimitive):
                 norm_type=norm_type,
                 zero_centered_gamma=zero_centered_gamma,
             )
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
+            global_dgamma = all_reduce_sum_along_dp_fsdp_tpsp(local_dgamma, mesh)
             if norm_type == NVTE_Norm_Type.LayerNorm:
-                global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta, mesh)
+                global_dbeta = all_reduce_sum_along_dp_fsdp_tpsp(local_dbeta, mesh)
             else:
                 global_dbeta = local_dbeta
             return local_dx, global_dgamma, global_dbeta
