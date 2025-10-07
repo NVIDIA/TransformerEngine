@@ -401,8 +401,8 @@ class NVFP4BlockScaling(Recipe):
     computed from the high precision input to avoid double quantization
     errors.
 
-    The default NVFP4 training recipe implements 3 techniques in order to
-    mitigate some downsides when quantizing to a narrow format (4-bit):
+    The default NVFP4 training recipe implements 3 techniques for quantizing
+    to a narrow format (4-bit):
 
     - For weight tensors we use a different variant of the NVFP4 quantization,
       where a single scaling factor is shared by a 2D block of 16x16 elements.
