@@ -166,7 +166,7 @@ def test_dot_product_attention(
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        unfused_attn_fwd, max_score, unfused_attn_bwd = _run_dot_product_attention(
+        unfused_attn_fwd, unfused_max_score, unfused_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "UnfusedDotProductAttention",
@@ -180,7 +180,7 @@ def test_dot_product_attention(
     # FusedAttention backend
     if fused_attn_supported:
         if len(fused_attn_backends) == 1:
-            fused_attn_fwd, max_score, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, fused_max_score, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -192,7 +192,7 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-            fused_attn_fwd, max_score, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, fused_max_score, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -203,7 +203,7 @@ def test_dot_product_attention(
                 is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            fused_attn_fwd_1, max_score_1, fused_attn_bwd_1 = _run_dot_product_attention(
+            fused_attn_fwd_1, fused_max_score_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -216,7 +216,7 @@ def test_dot_product_attention(
 
     # FlashAttention backend
     if flash_attn_supported:
-        flash_attn_fwd, max_score, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, flash_max_score, flash_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "FlashAttention",
@@ -231,16 +231,22 @@ def test_dot_product_attention(
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
+        if config.return_max_score:
+            torch.testing.assert_close(flash_max_score, unfused_max_score, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if unfused_attn_supported and fused_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        if config.return_max_score:
+            torch.testing.assert_close(fused_max_score, unfused_max_score, **tols)
         for i, _ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
+        if config.return_max_score:
+            torch.testing.assert_close(fused_max_score, flash_max_score, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backends) == 2:
