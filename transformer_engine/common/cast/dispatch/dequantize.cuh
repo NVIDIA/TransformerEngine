@@ -51,4 +51,3 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_DISPATCH_DEQUANTIZE_CUH_
-

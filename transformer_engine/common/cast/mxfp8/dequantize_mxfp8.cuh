@@ -17,9 +17,9 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -219,7 +219,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-}   // namespace dequantize_kernel
+}  // namespace dequantize_kernel
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   using namespace dequantize_kernel;
@@ -311,4 +311,3 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
-

@@ -17,10 +17,10 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../../util/vectorized_pointwise.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../util/vectorized_pointwise.h"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -273,12 +273,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-}   // namespace kernel
+}  // namespace kernel
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
-                           cudaStream_t stream) {
+void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+                           ParamOP &p, cudaStream_t stream) {
   using namespace kernel;
   checkCuDriverContext(stream);
 
@@ -347,7 +347,8 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           auto kernel = cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>;
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                               shmem_size));
 
           kernel<<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
@@ -379,9 +380,8 @@ void cast_gated(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t st
               reinterpret_cast<const fp32 *>(output->scale.dptr),
               reinterpret_cast<fp32 *>(output->amax.dptr),
               reinterpret_cast<fp32 *>(output->scale_inv.dptr), input.flat_first_dim(),
-              output->flat_last_dim(), p, stream);
-      );  // NOLINT(*)
-  );      // NOLINT(*)
+              output->flat_last_dim(), p, stream););  // NOLINT(*)
+  );                                                  // NOLINT(*)
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
@@ -414,9 +414,8 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamO
               reinterpret_cast<const fp32 *>(output->scale.dptr),
               reinterpret_cast<fp32 *>(output->amax.dptr),
               reinterpret_cast<fp32 *>(output->scale_inv.dptr), grad.flat_first_dim(),
-              grad.flat_last_dim(), p, stream);
-      );  // NOLINT(*)
-  );      // NOLINT(*)
+              grad.flat_last_dim(), p, stream););  // NOLINT(*)
+  );                                               // NOLINT(*)
 }
 }  // namespace fp8
 }  // namespace dispatch

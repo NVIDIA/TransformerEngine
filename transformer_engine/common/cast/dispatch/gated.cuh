@@ -60,11 +60,12 @@ void quantize_gated_helper(const NVTETensor nvte_input, NVTETensor nvte_output, 
 
   const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 32 == 0;
 
-  switch(scaling_mode) {
+  switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       if (use_tma_kernels) {
         Tensor dummy_tensor;  // grad
-        fp8::cast_gated_dgated_tma<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p, stream);
+        fp8::cast_gated_dgated_tma<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p,
+                                                                   stream);
       } else {
         fp8::cast_gated<ParamOP, ActOP>(input, output, p, stream);
       }
@@ -73,7 +74,8 @@ void quantize_gated_helper(const NVTETensor nvte_input, NVTETensor nvte_output, 
     case NVTE_MXFP8_1D_SCALING: {
       if (use_tma_kernels) {
         Tensor dummy_tensor;  // grad
-        mxfp8::quantize_gated_dgated<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p, stream);
+        mxfp8::quantize_gated_dgated<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p,
+                                                                     stream);
       } else {
         NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
                    "by 32, got input of shape ", input.data.shape);
@@ -85,7 +87,7 @@ void quantize_gated_helper(const NVTETensor nvte_input, NVTETensor nvte_output, 
   }
 }
 
-template <typename ParamOP, float (*ActOP)(float, const ParamOP &), 
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
 void quantize_dgated_helper(const NVTETensor nvte_grad, const NVTETensor nvte_gated_input,
                             NVTETensor nvte_output, ParamOP &p, cudaStream_t stream) {
@@ -133,10 +135,11 @@ void quantize_dgated_helper(const NVTETensor nvte_grad, const NVTETensor nvte_ga
 
   const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && (cols % 32 == 0);
 
-  switch(scaling_mode) {
+  switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       if (use_tma_kernels) {
-        fp8::cast_gated_dgated_tma<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
+        fp8::cast_gated_dgated_tma<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
+                                                                 stream);
       } else {
         fp8::cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
       }
@@ -144,10 +147,11 @@ void quantize_dgated_helper(const NVTETensor nvte_grad, const NVTETensor nvte_ga
     }
     case NVTE_MXFP8_1D_SCALING: {
       if (use_tma_kernels) {
-        mxfp8::quantize_gated_dgated<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
+        mxfp8::quantize_gated_dgated<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
+                                                                   stream);
       } else {
         NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                  "by 32, got input of shape ", gated_input.data.shape);
+                   "by 32, got input of shape ", gated_input.data.shape);
       }
       break;
     }

@@ -72,7 +72,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   }
   stg_vec.store_to(thread_out_base);
 }
-} // namespace kernel
+}  // namespace kernel
 
 template <typename IType>
 void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,

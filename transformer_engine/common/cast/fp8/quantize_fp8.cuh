@@ -14,23 +14,23 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/activation.h>
-#include <transformer_engine/transpose.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/transpose.h>
 
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 
-#include "../core/common.cuh"
 #include "../../common.h"
-#include "../../util/vectorized_pointwise.h"
 #include "../../transpose/cast_transpose.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../util/vectorized_pointwise.h"
+#include "../../utils.cuh"
+#include "../core/common.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -232,7 +232,7 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   destroy_barriers<FP8_ITERATIONS>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-} // namespace quantize_2D_kernel
+}  // namespace quantize_2D_kernel
 
 namespace quantize_1D_kernel {
 using namespace quantize_2D_kernel;
@@ -350,8 +350,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   destroy_barriers<ITERATIONS>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-} // namespace quantize_1D_kernel
-
+}  // namespace quantize_1D_kernel
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
@@ -564,7 +563,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
     if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
       // zhongboz: should we just ignore IS_ACT here?
       NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-                " or IS_DBIAS=true" + " on GPU with compute capability < 10.0.");
+                 " or IS_DBIAS=true" + " on GPU with compute capability < 10.0.");
     }
     if (!IS_DACT) {
       CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
