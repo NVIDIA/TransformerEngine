@@ -19,21 +19,22 @@ from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
 
-# Needs to stay consistent with .pre-commit-config.yaml
-python_min_version = (3, 10, 0)
-python_min_version_str = ".".join(map(str, python_min_version))
-if sys.version_info < python_min_version:
-    print(
-        f"You are using Python {platform.python_version()}. Python >={python_min_version_str} is"
-        " required."
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
     )
-    sys.exit(-1)
-
-
-@functools.lru_cache(maxsize=None)
-def get_min_python_version_str() -> str:
-    """Returns the minimum supported python version"""
-    return python_min_version_str
 
 
 @functools.lru_cache(maxsize=None)
