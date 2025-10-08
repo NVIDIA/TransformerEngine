@@ -9,17 +9,16 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/multi_stream.h>
-#include "transformer_engine/activation.h"
-#include "transformer_engine/transpose.h"
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
 #include "../util/multi_stream.h"
 #include "../utils.cuh"
-
-#include "dispatch/quantize.cuh"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/gated.cuh"
+#include "dispatch/quantize.cuh"
+#include "transformer_engine/activation.h"
+#include "transformer_engine/transpose.h"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
@@ -33,7 +32,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   constexpr const NVTETensor grad = nullptr;
 
   dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(input, grad, output, dbias,
-                                                                     workspace, nullptr, stream);
+                                                                       workspace, nullptr, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -151,7 +150,8 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activat
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dequantize);
   using namespace transformer_engine;
-  dispatch::dequantize_helper(*convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream);
+  dispatch::dequantize_helper(*convertNVTETensorCheck(input), convertNVTETensorCheck(output),
+                              stream);
 }
 
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,

@@ -16,22 +16,22 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include "core_nvfp4.cuh"
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../utils.cuh"
+#include "core_nvfp4.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
 namespace quantize_transpose_kernel_ns {
-  
+
 using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
-  
+
 #if CUDA_VERSION > 12080
 
 constexpr size_t SCALE_DIM = 16;  // NVFP4 block (x16 elts)
@@ -1159,7 +1159,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           bool use_2d_quantization>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
-                              const QuantizationConfig *quant_config, cudaStream_t stream) {
+                        const QuantizationConfig *quant_config, cudaStream_t stream) {
   using namespace quantize_transpose_kernel_ns;
   using namespace ptx;
 #if CUDA_VERSION > 12080
@@ -1260,14 +1260,13 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE,
-      {
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
         auto kernel = quantize_transpose_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                             USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
 
         if constexpr (use_2d_quantization) {
           kernel = quantize_transpose_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                             USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
         }
 
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
@@ -1275,9 +1274,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
             tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
             scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
             scale_stride, scale_stride_transpose, rng_state);
-      }
-    );
-  );
+      }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION > 12080
