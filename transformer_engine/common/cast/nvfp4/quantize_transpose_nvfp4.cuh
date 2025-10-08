@@ -112,8 +112,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
                                     const __grid_constant__ CUtensorMap tensor_map_output_t,
-                                    nvfp4_scale_t *const scales_ptr, nvfp4_scale_t *const scales_t_ptr,
-                                    const float *noop, const float *const amax_rowwise_ptr,
+                                    nvfp4_scale_t *const scales_ptr,
+                                    nvfp4_scale_t *const scales_t_ptr, const float *noop,
+                                    const float *const amax_rowwise_ptr,
                                     const float *const amax_colwise_ptr, const size_t rows,
                                     const size_t cols, const size_t scale_stride,
                                     const size_t scale_stride_t, const size_t *rng_state) {
@@ -1262,7 +1263,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
         auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
 
         if constexpr (use_2d_quantization) {
           kernel = quantize_transpose_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
