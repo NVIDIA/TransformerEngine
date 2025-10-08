@@ -30,10 +30,11 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-#if CUDA_VERSION > 12080
+using nvfp4_scale_t = fp8e4m3;
 
 namespace quantization_and_transposition_SF {
-using nvfp4_scale_t = fp8e4m3;
+#if CUDA_VERSION > 12080
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 // Used in transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
@@ -49,9 +50,13 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   const float S_dec_b = block_amax / fp4_max * S_enc;
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 }
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // CUDA_VERSION > 12080
 }  // namespace quantization_and_transposition_SF
 
 namespace quantization_SF {
+#if CUDA_VERSION > 12080
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 // Used in non-transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
@@ -62,9 +67,14 @@ __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float b
   // return S_dec_b_fp8;
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
 }
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // CUDA_VERSION > 12080
 }  // namespace quantization_SF
 
 namespace core {
+
+#if CUDA_VERSION > 12080
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
                      curanddx::SM<800>() + curanddx::Thread());
@@ -97,8 +107,6 @@ __device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int
   const uint32_t rbits = rbits_arr[rnd_idx++];
   return rbits;
 }
-
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
