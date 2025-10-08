@@ -1366,14 +1366,22 @@ class TestGroupedDense:
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
         )
+        num_gemms = input_shape[0]
+        _ = jax.jit(tex.grouped_gemm_copy_group_sizes, static_argnames=("num_gemms",))(
+            group_sizes,
+            num_gemms=num_gemms,
+        )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
-        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+        prim_out = jax.jit(
+            tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
+        )(
             lhs,
             rhs,
             group_sizes,
             contracting_dims,
+            use_async_d2h_group_sizes=True,
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
