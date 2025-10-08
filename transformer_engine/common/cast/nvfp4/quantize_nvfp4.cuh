@@ -652,25 +652,25 @@ void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStrea
                   scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr, noop_ptr, amax_ptr,
                   nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
-}
-case ScalingType::BIDIMENSIONAL: {
-  auto kernel = quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
-                                      CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            }
+            case ScalingType::BIDIMENSIONAL: {
+              auto kernel = quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
+                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-  kernel<<<grid, block_size, dshmem_size, stream>>>(
-      tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
-      scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr, noop_ptr, amax_ptr,
-      nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
-  break;
-}
-}  // namespace nvfp4
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
+                  scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr, noop_ptr, amax_ptr,
+                  nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+              break;
+            } // NOLINT(*)
+          } // NOLINT(*)
       );  // NOLINT(*)
-  );      // NOLINT(*)
-  }  // namespace dispatch
+  ); // NOLINT(*)
+} // NOLINT(*)
 
-  }  // namespace transformer_engine
-  }  // namespace dispatch
-  }  // namespace transformer_engine
+}  // namespace nvfp4 // NOLINT(*)            
+}  // namespace dispatch  // NOLINT(*)
+}  // namespace transformer_engine  // NOLINT(*)
 
 #endif  // TRANSFORMER_ENGINE_QUANTIZE_NVFP4_CUH_
