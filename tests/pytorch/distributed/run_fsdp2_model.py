@@ -18,6 +18,7 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
 
 
@@ -36,10 +37,14 @@ class SimpleNet(nn.Module):
 def save_custom_attrs(module):
     custom_attrs = {}
     for name, param in module.named_parameters():
+        if isinstance(param, QuantizedTensor):
+            # Ignore FP8 metadata attributes
+            ignore_keys = ["_" + k for k in param.get_metadata().keys()]
+        else:
+            ignore_keys = []
         attrs = vars(param)
-        custom_attrs[name] = {k: v for k, v in attrs.items()}
+        custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
     return custom_attrs
-
 
 def restore_custom_attrs(module, custom_attrs):
     for name, param in module.named_parameters():
@@ -142,7 +147,6 @@ def _train(args):
         )
     else:
         assert False
-
     # Apply FSDP/HSDP
     custom_attrs = save_custom_attrs(model)
     for sub_module in model.modules():
