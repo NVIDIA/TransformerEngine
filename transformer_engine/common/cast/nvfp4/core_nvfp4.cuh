@@ -30,6 +30,8 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
+#if CUDA_VERSION > 12080
+
 namespace quantization_and_transposition_SF {
 using nvfp4_scale_t = fp8e4m3;
 // Used in transpose variant
@@ -64,7 +66,6 @@ __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float b
 
 namespace core {
 
-#if CUDA_VERSION > 12080
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
                      curanddx::SM<800>() + curanddx::Thread());
 
