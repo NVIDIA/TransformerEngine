@@ -14,9 +14,9 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/activation.h>
 
-#include "../common.h"
-#include "../cast/dispatch/quantize.cuh"
 #include "../cast/dispatch/gated.cuh"
+#include "../cast/dispatch/quantize.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
 
@@ -30,8 +30,8 @@ void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
-                                                        nullptr, stream);
+  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias,
+                                                                  workspace, nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
@@ -44,8 +44,8 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace,
-                                                        nullptr, stream);
+  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias,
+                                                                  workspace, nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>

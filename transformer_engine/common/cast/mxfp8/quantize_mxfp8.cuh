@@ -16,11 +16,11 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include "../core/common.cuh"
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../utils.cuh"
+#include "../core/common.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -582,12 +582,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t scale_stride_colwise =
       use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
 
-  e8m0_t *const scales_rowwise_ptr = use_rowwise_scaling
-                                     ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr)
-                                     : nullptr;
-  e8m0_t *const scales_colwise_ptr = use_colwise_scaling
-                                     ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
-                                     : nullptr;
+  e8m0_t *const scales_rowwise_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
@@ -651,8 +649,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
           constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
           constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
-          constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
-          constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
           constexpr size_t elt_input_mem = buff_size_aligned_in;
           constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
@@ -666,10 +666,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
-              auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                                                  IType, OType, true, false, CHUNK_DIM_Y,
-                                                  CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              auto kernel =
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
@@ -679,10 +680,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               break;
             }
             case ScalingType::COLWISE: {
-              auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                                                  IType, OType, false, true, CHUNK_DIM_Y,
-                                                  CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              auto kernel =
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
+                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
@@ -692,10 +694,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               break;
             }
             case ScalingType::BIDIMENSIONAL: {
-              auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                                                  IType, OType, true, true, CHUNK_DIM_Y,
-                                                  CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              auto kernel =
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
@@ -708,8 +711,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
           if constexpr (IS_DBIAS) {
             common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-          }
-      );  // NOLINT(*)
+          });  // NOLINT(*)
   );           // NOLINT(*)
 }
 

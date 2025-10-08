@@ -17,9 +17,9 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../utils.cuh"
 
 #if CUDA_VERSION > 12080
 #include <cuda_fp4.h>
@@ -68,7 +68,7 @@ __global__ void __launch_bounds__(512)
   }
 }
 #endif  // CUDA_VERSION
-}   // namespace dequantize_kernel
+}  // namespace dequantize_kernel
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
 #if CUDA_VERSION >= 12080
@@ -109,4 +109,3 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_DEQUANTIZE_NVFP4_CUH_
-

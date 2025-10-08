@@ -18,51 +18,49 @@
 #include <limits>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
-
+#include "../../utils.cuh"
 #include "curanddx.hpp"
 #if CUDA_VERSION > 12080
 #include <cuda_fp4.h>
 #endif  // CUDA_VERSION > 12080
-
 
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
 namespace quantization_and_transposition_SF {
-  using nvfp4_scale_t = fp8e4m3;
-  // Used in transpose variant
-  // Compute per-block E4M3 encoding/decoding scaling factor
-  __device__ __forceinline__ nvfp4_scale_t
-  compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
-    // constexpr float rcp_6f = 1.0f / 6.0f;
-    // const float S_dec_b = block_amax * rcp_6f;
-    // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
-    // return S_dec_b_fp8;
-    // NOTE: Divide by 6.0f is not elegant and not efficient.
-    // However, this is part of the emulation code to ensure exact match.
-    using namespace detail;
-    constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-    const float S_dec_b = block_amax / fp4_max * S_enc;
-    return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
-  }
+using nvfp4_scale_t = fp8e4m3;
+// Used in transpose variant
+// Compute per-block E4M3 encoding/decoding scaling factor
+__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
+                                                                         const float S_enc) {
+  // constexpr float rcp_6f = 1.0f / 6.0f;
+  // const float S_dec_b = block_amax * rcp_6f;
+  // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
+  // return S_dec_b_fp8;
+  // NOTE: Divide by 6.0f is not elegant and not efficient.
+  // However, this is part of the emulation code to ensure exact match.
+  using namespace detail;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
+  const float S_dec_b = block_amax / fp4_max * S_enc;
+  return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 }
+}  // namespace quantization_and_transposition_SF
 
 namespace quantization_SF {
-  // Used in non-transpose variant
-  // Compute per-block E4M3 encoding/decoding scaling factor
-  __device__ __forceinline__ fp8e4m3
-  compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
-    constexpr float rcp_6f = 1.0f / 6.0f;
-    // const float S_dec_b = block_amax * rcp_6f;
-    // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
-    // return S_dec_b_fp8;
-    return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
-  }
+// Used in non-transpose variant
+// Compute per-block E4M3 encoding/decoding scaling factor
+__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
+                                                                   const float S_enc) {
+  constexpr float rcp_6f = 1.0f / 6.0f;
+  // const float S_dec_b = block_amax * rcp_6f;
+  // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+  // return S_dec_b_fp8;
+  return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
 }
+}  // namespace quantization_SF
 
 namespace core {
 
@@ -73,8 +71,7 @@ using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::Phi
 using namespace ptx;
 
 // Compute the global encode scale factor for a given global amax
-__device__ __forceinline__ float
-compute_global_encode_scaling_factor_FP4(const float global_amax) {
+__device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
@@ -88,8 +85,7 @@ compute_global_encode_scaling_factor_FP4(const float global_amax) {
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     curanddx::uniform_bits dist;
@@ -103,8 +99,8 @@ get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
 
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
+    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
 #if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
   asm volatile(
@@ -142,8 +138,9 @@ mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(const uint64_t in_4x, const floa
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
+                                                                    const float2 scale,
+                                                                    const uint32_t rbits) {
   // NOTE: rbits unused for rn.
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
 #if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
@@ -187,8 +184,9 @@ mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x, const float2 scale, const u
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x,
+                                                            const float2 scale,
+                                                            const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(in_4x, scale, rbits);
   } else {
@@ -196,9 +194,8 @@ mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x, const float2 scale, const uint32_t 
   }
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(const float2 in01, const float2 in23,
-                                                const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+    const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
 #if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
   asm volatile(
@@ -231,9 +228,10 @@ mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(const float2 in01, const float2 
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01, const float2 in23,
-                               const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+                                                                    const float2 in23,
+                                                                    const float2 scale,
+                                                                    const uint32_t rbits) {
   // NOTE: rbits unused for rn.
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
 #if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
@@ -272,9 +270,9 @@ mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01, const float2 in23,
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
-                       const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
+                                                            const float2 scale,
+                                                            const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, scale, rbits);
   } else {

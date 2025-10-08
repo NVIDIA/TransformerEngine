@@ -13,11 +13,10 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include "../../util/vectorized_pointwise.h"
-#include "../../transpose/cast_transpose.h"
-
-#include "../core/common.cuh"
 #include "../../common.h"
+#include "../../transpose/cast_transpose.h"
+#include "../../util/vectorized_pointwise.h"
+#include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"

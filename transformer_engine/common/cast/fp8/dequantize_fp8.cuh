@@ -17,9 +17,9 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/math.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../../utils.cuh"
-#include "../../util/math.h"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -44,17 +44,15 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           output->data.dtype, OType,
 
           constexpr int nvec = 32 / sizeof(OType);
-          DequantizeParam p;
-          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
+          DequantizeParam p; p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
           VectorizedUnaryKernelLauncher<nvec, DequantizeParam, dequantize_func>(
               reinterpret_cast<const IType *>(input.data.dptr), nullptr,
               reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }
-} // namespace fp8
+}  // namespace fp8
 }  // namespace dispatch
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_DEQUANTIZE_FP8_CUH_
-
