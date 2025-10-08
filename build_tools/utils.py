@@ -12,10 +12,28 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml
+python_min_version = (3, 10, 0)
+python_min_version_str = ".".join(map(str, python_min_version))
+if sys.version_info < python_min_version:
+    print(
+        f"You are using Python {platform.python_version()}. Python >={python_min_version_str} is"
+        " required."
+    )
+    sys.exit(-1)
+
+
+@functools.lru_cache(maxsize=None)
+def get_min_python_version_str() -> str:
+    """Returns the minimum supported python version"""
+    return python_min_version_str
 
 
 @functools.lru_cache(maxsize=None)
