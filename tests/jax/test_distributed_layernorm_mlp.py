@@ -48,7 +48,7 @@ if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 128, 256]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
@@ -59,19 +59,47 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-INTERMEDIATE = 64
+INTERMEDIATE = 256
 
 
 # Only test with FSDP and TPSP as DP is not used
 def generate_fsdp_and_tpsp_configs():
     configs = []
-    if is_devices_enough(2):
-        configs.append(
-            [2, (1, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
-        )
     if is_devices_enough(4):
         configs.append(
-            [4, (2, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
+            pytest.param(
+                [
+                    4,
+                    (2, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp2_tpsp2",
+            )
+        )
+
+    if is_devices_enough(2):
+        configs.append(
+            pytest.param(
+                [
+                    2,
+                    (1, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp1_tpsp2",
+            )
+        )
+        configs.append(
+            pytest.param(
+                [
+                    2,
+                    (2, 1),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp2_tpsp1",
+            ),
         )
     return configs
 
@@ -229,10 +257,7 @@ class TestDistributedLayernormMLP:
         fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
         bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
 
-        if fwd_test_type == jnp.float16 and use_bias:
-            assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type, atol=0.04, rtol=1.5)
-        else:
-            assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
+        assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
 
         for i in range(len(inputs)):
             if multi_grads[i] is not None:
@@ -381,6 +406,7 @@ class TestDistributedLayernormMLP:
         assert_tree_like_allclose(params_sharded["params"], params_single["params"])
         assert_allclose(ln_out_sharded, ln_out_single, dtype=dtype)
 
+        # TODO(Phuong): check if these tols updates are still needed
         atol = None
         rtol = None
         l40_tolerance_update = (
@@ -404,9 +430,10 @@ class TestDistributedLayernormMLP:
         # within tolerance to the float32 ground truth.
         jax_triton_gemm_precision_tolerance_update = (
             with_jax_gemm
-            and isinstance(fp8_recipe, recipe.Float8CurrentScaling)
-            and dtype == jnp.bfloat16
-            and activation_type == ("gelu", "linear")
+            and fp8_recipe is not None
+            and (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling())
+            and dtype in (jnp.bfloat16, jnp.float16)
+            and activation_type == ("gelu", "linear"),
         )
         if jax_triton_gemm_precision_tolerance_update:
             atol = 0.08
