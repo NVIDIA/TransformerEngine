@@ -22,8 +22,12 @@ pybind11::dict Registrations() {
   pybind11::dict dict;
 
   // Activation
-  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_dact_dbias_quantize_ffi"] = EncapsulateFFI(DActLuDBiasQuantizeHandler);
+  dict["te_act_lu_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(ActLuInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(ActLuHandler));
+  dict["te_dact_dbias_quantize_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(DActLuDBiasQuantizeInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
@@ -44,9 +48,11 @@ pybind11::dict Registrations() {
   // Normalization
   dict["te_norm_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormForwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
   dict["te_norm_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention
@@ -63,6 +69,9 @@ pybind11::dict Registrations() {
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
   // Grouped GEMM
+  dict["te_grouped_gemm_d2h_group_sizes_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler));
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
@@ -137,6 +146,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
       .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .value("CLAMPED_SWIGLU", NVTE_Activation_Type::CLAMPED_SWIGLU)
       .export_values();
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())

@@ -22,6 +22,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     NVFP4BlockScaling,
+    CustomRecipe,
 )
 
 from .constants import dist_group_type
@@ -63,13 +64,12 @@ def check_nvfp4_support() -> Tuple[bool, str]:
 
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
-    if (
-        get_device_compute_capability() >= (9, 0)
-        and get_device_compute_capability() < (10, 0)
-        and float(torch.version.cuda) >= 12.9
-    ):
+    if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
-    return False, "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
+    return (
+        False,
+        "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
+    )
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -866,6 +866,8 @@ class RecipeState(abc.ABC):
             cls = Float8BlockScalingRecipeState
         elif recipe.nvfp4():
             cls = NVFP4BlockScalingRecipeState
+        elif recipe.custom():
+            cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -970,7 +972,9 @@ class Float8CurrentScalingRecipeState(RecipeState):
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         return [
-            Float8CurrentScalingQuantizer(self.dtype, device=self.device)
+            Float8CurrentScalingQuantizer(
+                self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
+            )
             for i in range(self.num_quantizers)
         ]
 
@@ -1189,3 +1193,56 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             ]
 
         raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+
+
+class CustomRecipeState(RecipeState):
+    """State for CustomRecipe: produce quantizers per tensor."""
+
+    recipe: CustomRecipe
+    mode: str
+    num_quantizers: int
+    device: Optional[torch.device]
+
+    def __init__(
+        self,
+        recipe: CustomRecipe,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+        if getattr(recipe, "qfactory", None) is None:
+            raise ValueError("CustomRecipe requires `qfactory`.")
+
+    def make_quantizers(self) -> list:
+        qfactory = self.recipe.qfactory
+        out = []
+
+        # TODO(negvet): make_quantizers() should take roles from the operation
+        # Hardcode linear-specific roles for now
+        roles: List[str]
+        if self.mode == "forward":
+            roles = [
+                ("linear_input", "linear_weight", "linear_output")[i % 3]
+                for i in range(self.num_quantizers)
+            ]
+        elif self.mode == "backward":
+            roles = [
+                ("linear_grad_output", "linear_grad_input")[i % 2]
+                for i in range(self.num_quantizers)
+            ]
+        else:
+            roles = ["unknown"] * self.num_quantizers
+
+        for i in range(self.num_quantizers):
+            # Get quantizer from the user defined factory
+            quantizer = qfactory(roles[i])
+            out.append(quantizer)
+        return out

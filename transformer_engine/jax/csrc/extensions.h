@@ -36,21 +36,34 @@
 namespace transformer_engine {
 namespace jax {
 
+struct ClampedSwigluConfig {
+  float limit;
+  float alpha;
+};
+
+struct ActivationConfig {
+  ClampedSwigluConfig clamped_swiglu;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler);
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
                                                    JAXX_Scaling_Mode scaling_mode, bool is_2x);
 
 // Normalization
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardHandler);
 
 pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
@@ -122,6 +135,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
 // Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
 // Cudnn helpers
@@ -132,6 +146,14 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConfig,
+                                      ::xla::ffi::StructMember<float>("limit"),
+                                      ::xla::ffi::StructMember<float>("alpha"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::ActivationConfig,
+    ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);

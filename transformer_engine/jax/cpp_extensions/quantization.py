@@ -543,6 +543,18 @@ class AmaxScope(Enum):
     TPSP = 2
     FSDP = 3
 
+    def all_reduce_amax_along_TPSP_and_FSDP(self, amax, data_spec, transpose_batch_sequence, mesh):
+        """Reduce the amax based on its scope"""
+        gmesh = global_mesh_resource()
+        sequence_dim = 0 if transpose_batch_sequence else 1
+        # Run AR across TPSP only when tensor-sequence is detected in the input spec
+        if self is AmaxScope.TPSP and data_spec[sequence_dim] == gmesh.tpsp_resource:
+            return lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
+        # Run AR across FSDP
+        if self is AmaxScope.FSDP:
+            return lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
+        return amax
+
 
 class AmaxCalculationPrimitive(BasePrimitive):
     """
@@ -551,7 +563,10 @@ class AmaxCalculationPrimitive(BasePrimitive):
 
     name = "jax_local_amax"
     multiple_results = False
-    impl_static_args = (1,)  # amax_scope
+    impl_static_args = (
+        1,
+        2,
+    )  # amax_scope, transpose_batch_sequence
     inner_primitive = None
     outer_primitive = None
 
@@ -560,11 +575,12 @@ class AmaxCalculationPrimitive(BasePrimitive):
         x_aval,
         *,
         amax_scope,
+        transpose_batch_sequence,
     ):
         """
         amax calcuation abstract
         """
-        del amax_scope
+        del amax_scope, transpose_batch_sequence
 
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -576,17 +592,19 @@ class AmaxCalculationPrimitive(BasePrimitive):
     def impl(
         x,
         amax_scope,
+        transpose_batch_sequence,
     ):
         """
         amax calcuation implementation
         """
-        del amax_scope
+        del amax_scope, transpose_batch_sequence
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32).reshape((1,))
         return amax
 
     @staticmethod
     def infer_sharding_from_operands(
         amax_scope,
+        transpose_batch_sequence,
         mesh,
         arg_infos,
         result_infos,
@@ -594,7 +612,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
         """
         amax calcuation infer_sharding_from_operands
         """
-        del (amax_scope, arg_infos, result_infos)  # Unused.
+        del (amax_scope, transpose_batch_sequence, arg_infos, result_infos)  # Unused.
         amax_sharding = NamedSharding(
             mesh,
             PartitionSpec(None),
@@ -605,6 +623,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
     @staticmethod
     def partition(
         amax_scope,
+        transpose_batch_sequence,
         mesh,
         arg_infos,
         result_infos,
@@ -613,26 +632,22 @@ class AmaxCalculationPrimitive(BasePrimitive):
         amax calcuation partition
         """
         del result_infos
-
+        x_spec = get_padded_spec(arg_infos[0])
         amax_sharding = NamedSharding(
             mesh,
             PartitionSpec(None),
-            desc="AmaxCalculationPrimitive.out_sharding",
+            desc="AmaxCalculation.amax_sharding",
         )
 
         def sharded_impl(x):
             amax = AmaxCalculationPrimitive.impl(
                 x,
                 amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
             )
-            if amax_scope is AmaxScope.TPSP:  # Run AR across TP/SP
-                gmesh = global_mesh_resource()
-                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tp_resource, mesh)
-                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
-
-            if amax_scope is AmaxScope.FSDP:  # Run AR across FSDP
-                gmesh = global_mesh_resource()
-                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
+            amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
+                amax, x_spec, transpose_batch_sequence, mesh
+            )
 
             return amax
 
@@ -640,11 +655,11 @@ class AmaxCalculationPrimitive(BasePrimitive):
         return mesh, sharded_impl, amax_sharding, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(amax_scope, mesh, value_types, result_types):
+    def shardy_sharding_rule(amax_scope, transpose_batch_sequence, mesh, value_types, result_types):
         """
         amax calcuation shardy_sharding_rule
         """
-        del amax_scope, mesh, result_types
+        del amax_scope, transpose_batch_sequence, mesh, result_types
         prefix = "AmaxCal"
         input_spec = tuple(f"{prefix}_{i}" for i in range(len(value_types[0].shape)))
         output_spec = (f"{prefix}_amax",)
@@ -701,6 +716,7 @@ def _quantize_dbias_impl(
     dq_dtype: Optional[jnp.dtype] = None,
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,  # Only works when using current-scaling
+    transpose_batch_sequence: bool = False,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -745,11 +761,13 @@ def _quantize_dbias_impl(
             quantizer=quantizer,
             dq_dtype=dq_dtype,
             flatten_axis=flatten_axis,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         dbias = _jax_dbias(x.data, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
 
-    scale = jnp.empty((), jnp.float32)
+    scale = jnp.empty((1,), jnp.float32)
     amax = None
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Globally reduce amax across all devices for current scaling so we have a single global scale.
@@ -760,6 +778,7 @@ def _quantize_dbias_impl(
             amax = AmaxCalculationPrimitive.outer_primitive.bind(
                 x.data,
                 amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
             )
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
@@ -833,6 +852,7 @@ def quantize(
     quantizer: Quantizer,
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
+    transpose_batch_sequence: bool = False,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -853,6 +873,7 @@ def quantize(
         quantizer=quantizer,
         flatten_axis=flatten_axis,
         amax_scope=amax_scope,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     return out
 
@@ -863,6 +884,7 @@ def quantize_dbias(
     is_dbias: bool = True,
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
+    transpose_batch_sequence: bool = False,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -889,6 +911,7 @@ def quantize_dbias(
         is_dbias=is_dbias,
         flatten_axis=flatten_axis,
         amax_scope=amax_scope,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
 
