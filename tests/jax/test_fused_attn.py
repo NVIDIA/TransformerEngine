@@ -173,35 +173,25 @@ def make_mask(
             jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
         )
 
-    if attn_mask_type.is_bottom_right(): # brcm
+    if attn_mask_type.is_bottom_right():
         run_length_out_q = run_length_fill(segment_ids_q)
         run_length_out_kv = run_length_fill(segment_ids_kv)
         bottom_right_causal_mask = make_attention_mask(
             run_length_out_q - segment_pos_q,
             run_length_out_kv - segment_pos_kv,
-            jnp.greater,
+            jnp.less_equal,
         )
-        #jax.debug.print(f"run_length_out_q: {run_length_out_q} \n run_length_out_kv: {run_length_out_kv} \n ")
-        #jax.debug.breakpoint()
-        #TODO: Remove and just change the condition in make_attention_mask if possible
-        bottom_right_causal_mask_not = jnp.logical_not(bottom_right_causal_mask) 
-        #jax.debug.print(f"bottom_right_causal_mask: {bottom_right_causal_mask} \n bottom_right_causal_mask_not: {bottom_right_causal_mask_not} \n ")
-        inv_mask = combine_masks(bottom_right_causal_mask_not, inv_mask)
-        #jax.debug.print(f"inv_mask: {inv_mask[0,0]}")
-        #jax.debug.breakpoint()
-    elif attn_mask_type.is_causal():    # causal mask
+        inv_mask = combine_masks(bottom_right_causal_mask, inv_mask)
+    elif attn_mask_type.is_causal():
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask =  make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool, segment_ids_q=segment_ids_q, segment_ids_kv=segment_ids_kv) if attn_mask_type.is_bottom_right() else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
-    #jax.debug.print(f"inv_swa_mask: {inv_swa_mask}")
+    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool, segment_ids_q=segment_ids_q, segment_ids_kv=segment_ids_kv) if attn_mask_type.is_bottom_right() else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
-    #jax.debug.print(f"inv_mask: {inv_mask}")
     mask = jnp.logical_not(inv_mask)
-    #jax.debug.breakpoint()
     return mask
 
 
@@ -358,7 +348,6 @@ class FusedAttnRunner:
             pytest.skip("THD format requires padding masks.")
 
         if self.attn_mask_type.is_bottom_right():
-            #TODO: Test for BSHD and modify condition accordingly
             if self.max_seqlen_q > self.max_seqlen_kv:
                 pytest.skip(f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q")
             if self.attn_bias_type is not AttnBiasType.NO_BIAS:
@@ -542,7 +531,7 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
+            self.num_segments_per_seq = 3
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -554,13 +543,19 @@ class FusedAttnRunner:
                 self.pad_kv = self.pad_q
             else:
                 # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
-                min_segment_len = None if self.window_size is None else self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
-                    self.batch_size,
-                    self.max_seqlen_kv,
-                    self.num_segments_per_seq,
-                    seed=2024,
-                    min_segment_len=min_segment_len,
+                min_segment_len = None
+                if (
+                    self.window_size is not None or self.attn_mask_type.is_bottom_right()
+                ):  # SWA or BRCM requires kv_len >= q_len
+                    min_segment_len = self.seqlens_q
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                    generate_random_segment_ids(
+                        self.batch_size,
+                        self.max_seqlen_kv,
+                        self.num_segments_per_seq,
+                        seed=2024,
+                        min_segment_len=min_segment_len,
+                    )
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
@@ -989,14 +984,14 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            2048,
+            512,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-64-BF16-CROSS",
+            id="2-512-1024-12-12-64-64-BF16-CROSS",
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
