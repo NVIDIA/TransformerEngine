@@ -42,7 +42,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O,
     META_QKV,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype, FP8GlobalStateManager
+from transformer_engine.pytorch.quantize import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (

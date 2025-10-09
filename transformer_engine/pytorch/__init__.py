@@ -46,8 +46,14 @@ from transformer_engine.pytorch.permutation import (
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
 )
-from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.fp8 import fp8_model_init
+from transformer_engine.pytorch.quantize import fp8_autocast
+from transformer_engine.pytorch.quantize import fp8_model_init
+from transformer_engine.pytorch.quantize import autocast
+from transformer_engine.pytorch.quantize import model_init
+from transformer_engine.pytorch.quantize import is_fp8_available
+from transformer_engine.pytorch.quantize import is_mxfp8_available
+from transformer_engine.pytorch.quantize import is_fp8_block_scaling_available
+from transformer_engine.pytorch.quantize import is_nvfp4_available
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.distributed import checkpoint
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
