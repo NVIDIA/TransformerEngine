@@ -172,11 +172,19 @@ class StatsBuffers:
         if self.at_least_one_layer_fed:
             return True
         iteration = TEDebugState.get_iteration()
-        for _, next_iter in self.layers_to_next_iter.items():
+        layers_to_remove = []
+        for layer_name, next_iter in self.layers_to_next_iter.items():
+            # When next_iter is None the feature will no longer run.
+            if next_iter is None:
+                layers_to_remove.append(layer_name)
+                continue
             # Note that layer can be not run for many iterations,
             # in this case we will synchronize until every step until we get any information from it.
             if iteration >= next_iter:
                 return True
+
+        for layer_name in layers_to_remove:
+            self.layers_to_next_iter.pop(layer_name, None)
         return False
 
     def reset(self):
