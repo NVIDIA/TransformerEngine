@@ -58,8 +58,8 @@ void quantize_gated_helper(const NVTETensor nvte_input, NVTETensor nvte_output, 
     NVTE_CHECK(output->flat_last_dim() == cols, "Wrong dimension of the output.");
   }
 
-  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output
-                               && (cols % 32 == 0) && is_supported_by_CC_100();
+  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && (cols % 32 == 0) &&
+                               is_supported_by_CC_100();
 
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -134,8 +134,8 @@ void quantize_dgated_helper(const NVTETensor nvte_grad, const NVTETensor nvte_ga
     NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
-  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output
-                               && (cols % 32 == 0) && is_supported_by_CC_100();
+  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && (cols % 32 == 0) &&
+                               is_supported_by_CC_100();
 
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {

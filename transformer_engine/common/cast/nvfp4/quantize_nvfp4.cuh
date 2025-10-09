@@ -603,15 +603,15 @@ void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStrea
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
           alignas(64) CUtensorMap tensor_map_output_colwise{};
 
-          create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y,
-                               BUFF_DIM_X, cols, 0, sizeof(IType) * 8);
+          create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
+                               cols, 0, sizeof(IType) * 8);
 
-          create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                               BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
+          create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols, BUFF_DIM_Y,
+                               BUFF_DIM_X, cols, 0, 4);
 
           if (use_colwise_scaling) {
-              create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
-                                   rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(OType) * 8);
+            create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
+                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(OType) * 8);
           }
 
           constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
@@ -643,31 +643,35 @@ void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStrea
 
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
-              auto kernel = quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false,
-                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+              auto kernel =
+                  quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false,
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
                   scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr, noop_ptr, amax_ptr,
-                  nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise,
+                  scale_stride_colwise);
               break;
             }
             case ScalingType::BIDIMENSIONAL: {
-              auto kernel = quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
-                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+              auto kernel =
+                  quantize_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
                   scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr, noop_ptr, amax_ptr,
-                  nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  nvfp4_second_stage_scale_ptr, rows, cols, scale_stride_rowwise,
+                  scale_stride_colwise);
               break;
             }
-          }
-          NVTE_CHECK_CUDA(cudaGetLastError());
-      );  // NOLINT(*)
-  ); // NOLINT(*)
+          } NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                                // NOLINT(*)
 }
 
 }  // namespace nvfp4
