@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file quantize_nvfp4.cuh
- *  \brief NVFP4 quantize.
+ *  \brief CUDA kernels to cast to NVFP4.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_NVFP4_CUH_
