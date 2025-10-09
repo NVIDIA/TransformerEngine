@@ -210,7 +210,7 @@ def make_swa_mask(
     window_size: Optional[Tuple[int, int]] = None,
     dtype: jax.typing.DTypeLike = jnp.float32,
     segment_ids_q: jnp.ndarray = None,
-    segment_ids_kv: jnp.ndarray = None
+    segment_ids_kv: jnp.ndarray = None,
 ):
     """
     Generate a sliding window mask (1 = attend, 0 = masked).
@@ -443,7 +443,9 @@ def run_length_fill_1d(segment_ids_1d) -> jnp.ndarray:
     """
     Returns an array of run-lengths of the 1d segment ids
     """
-    boundary = jnp.concatenate([jnp.broadcast_to(True, (1,)), segment_ids_1d[1:] != segment_ids_1d[:-1]])
+    boundary = jnp.concatenate(
+        [jnp.broadcast_to(True, (1,)), segment_ids_1d[1:] != segment_ids_1d[:-1]]
+    )
     run_ids = jnp.cumsum(boundary) - 1
     max_runs = segment_ids_1d.shape[-1]  # each element could, in worst case, start a run
     counts = jnp.bincount(run_ids, length=max_runs)
@@ -525,7 +527,7 @@ def _segment_ids_pos_to_seqlens_offsets(
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
 
-    # TODO(KshitijLakhani): Evaluate if swa_mask is needed to procure seqlen and offsets 
+    # TODO(KshitijLakhani): Evaluate if swa_mask is needed to procure seqlen and offsets
     swa_mask = (
         make_swa_mask(
             segment_pos_q,

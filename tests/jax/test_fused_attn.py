@@ -189,7 +189,18 @@ def make_mask(
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool, segment_ids_q=segment_ids_q, segment_ids_kv=segment_ids_kv) if attn_mask_type.is_bottom_right() else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    inv_swa_mask = (
+        make_swa_mask(
+            segment_pos_q,
+            segment_pos_kv,
+            window_size,
+            dtype=jnp.bool,
+            segment_ids_q=segment_ids_q,
+            segment_ids_kv=segment_ids_kv,
+        )
+        if attn_mask_type.is_bottom_right()
+        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    )
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
@@ -349,7 +360,9 @@ class FusedAttnRunner:
 
         if self.attn_mask_type.is_bottom_right():
             if self.max_seqlen_q > self.max_seqlen_kv:
-                pytest.skip(f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q")
+                pytest.skip(
+                    f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
+                )
             if self.attn_bias_type is not AttnBiasType.NO_BIAS:
                 pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
             if self.dropout_prob != 0.0:
@@ -548,14 +561,12 @@ class FusedAttnRunner:
                     self.window_size is not None or self.attn_mask_type.is_bottom_right()
                 ):  # SWA or BRCM requires kv_len >= q_len
                     min_segment_len = self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
-                    generate_random_segment_ids(
-                        self.batch_size,
-                        self.max_seqlen_kv,
-                        self.num_segments_per_seq,
-                        seed=2024,
-                        min_segment_len=min_segment_len,
-                    )
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
+                    self.batch_size,
+                    self.max_seqlen_kv,
+                    self.num_segments_per_seq,
+                    seed=2024,
+                    min_segment_len=min_segment_len,
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
