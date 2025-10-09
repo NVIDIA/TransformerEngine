@@ -155,3 +155,108 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler,
 
 }  // namespace jax
 }  // namespace transformer_engine
+// FFI Handler Initialization Wrappers for Softmax
+namespace transformer_engine {
+namespace jax {
+
+Error_Type ScaledSoftmaxForwardInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
+                                             Result_Type output_buf, double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledSoftmaxForwardFFI), stream, input_buf, output_buf,
+                             scale_factor_);
+}
+
+Error_Type ScaledMaskedSoftmaxForwardInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
+                                                   Buffer_Type mask_buf, Result_Type output_buf,
+                                                   double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledMaskedSoftmaxForwardFFI), stream, input_buf,
+                             mask_buf, output_buf, scale_factor_);
+}
+
+Error_Type ScaledUpperTriangMaskedSoftmaxForwardInitializeFFI(cudaStream_t stream,
+                                                              Buffer_Type input_buf,
+                                                              Result_Type output_buf,
+                                                              double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledUpperTriangMaskedSoftmaxForwardFFI), stream,
+                             input_buf, output_buf, scale_factor_);
+}
+
+Error_Type ScaledSoftmaxBackwardInitializeFFI(cudaStream_t stream, Buffer_Type grad_output_buf,
+                                              Buffer_Type softmax_output_buf, Result_Type dgrad_buf,
+                                              double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledSoftmaxBackwardFFI), stream, grad_output_buf,
+                             softmax_output_buf, dgrad_buf, scale_factor_);
+}
+
+Error_Type ScaledUpperTriangMaskedSoftmaxBackwardInitializeFFI(cudaStream_t stream,
+                                                               Buffer_Type grad_output_buf,
+                                                               Buffer_Type softmax_output_buf,
+                                                               Result_Type dgrad_buf,
+                                                               double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledUpperTriangMaskedSoftmaxBackwardFFI), stream,
+                             grad_output_buf, softmax_output_buf, dgrad_buf, scale_factor_);
+}
+
+// The backward of ScaledMaskedSoftmax is equivalent to ScaledSoftmax
+Error_Type ScaledMaskedSoftmaxBackwardInitializeFFI(cudaStream_t stream,
+                                                    Buffer_Type grad_output_buf,
+                                                    Buffer_Type softmax_output_buf,
+                                                    Result_Type dgrad_buf, double scale_factor_) {
+  return wrapInStreamCapture(std::function(ScaledSoftmaxBackwardFFI), stream, grad_output_buf,
+                             softmax_output_buf, dgrad_buf, scale_factor_);
+}
+
+// FFI Handler Symbols for Initialization
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledSoftmaxForwardInitializeHandler,
+                              ScaledSoftmaxForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<double>("scale_factor"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardInitializeHandler,
+                              ScaledMaskedSoftmaxForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // mask
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<double>("scale_factor"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler,
+                              ScaledUpperTriangMaskedSoftmaxForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<double>("scale_factor"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledSoftmaxBackwardInitializeHandler,
+                              ScaledSoftmaxBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // grad_output
+                                  .Arg<Buffer_Type>()      // softmax_output
+                                  .Ret<Buffer_Type>()      // dgrad
+                                  .Attr<double>("scale_factor"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardInitializeHandler,
+                              ScaledMaskedSoftmaxBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // grad_output
+                                  .Arg<Buffer_Type>()      // softmax_output
+                                  .Ret<Buffer_Type>()      // dgrad
+                                  .Attr<double>("scale_factor"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler,
+                              ScaledUpperTriangMaskedSoftmaxBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // grad_output
+                                  .Arg<Buffer_Type>()      // softmax_output
+                                  .Ret<Buffer_Type>()      // dgrad
+                                  .Attr<double>("scale_factor"));
+
+}  // namespace jax
+}  // namespace transformer_engine
