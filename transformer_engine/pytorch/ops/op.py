@@ -595,6 +595,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 extra[key] = val
             state[mode]["extra_fp8_variables"] = extra
 
+        if not state:
+            return torch.empty(0, dtype=torch.uint8)
+
         # Serialize state into byte tensor
         torch.cuda.synchronize()
         state_serialized = bytearray(pickle.dumps(state))
