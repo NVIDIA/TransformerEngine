@@ -205,12 +205,15 @@ To install the latest stable version with pip:
 
     # For PyTorch integration
     pip install --no-build-isolation transformer_engine[pytorch]
-    
+
     # For JAX integration
     pip install --no-build-isolation transformer_engine[jax]
-    
+
     # For both frameworks
     pip install --no-build-isolation transformer_engine[pytorch,jax]
+
+    # For CUDA 13 support
+    pip install --no-build-isolation transformer_engine[pytorch_cu13,jax_cu13]
 
 Alternatively, install directly from the GitHub repository:
 
@@ -233,7 +236,7 @@ To install the latest stable version with conda from conda-forge:
 
     # For PyTorch integration
     conda install -c conda-forge transformer-engine-torch
-    
+
     # JAX integration (coming soon)
 
 Source Installation
