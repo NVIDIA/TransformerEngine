@@ -12,10 +12,29 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
