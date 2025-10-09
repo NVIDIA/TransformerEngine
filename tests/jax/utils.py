@@ -1544,6 +1544,12 @@ def dtype_tols(
         rtol = eps_relaxed
     if atol is None:
         atol = max(ulp, eps_relaxed)
+
+    # Manually set tols for nvfp4
+    if dtype == jnp.float4_e2m1fn:
+        atol = 0.05
+        rtol = 0.1
+
     return {"rtol": rtol, "atol": atol}
 
 

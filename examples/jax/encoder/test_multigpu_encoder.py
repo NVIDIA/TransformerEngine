@@ -19,17 +19,18 @@ from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
-from common import is_bf16_supported, get_fp8_recipe_from_name_string
+from common import is_bf16_supported, get_quantization_recipe_from_name_string
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
 
 DEVICE_DP_AXIS = "data"
 PARAMS_KEY = "params"
 PARAMS_AXES_KEY = PARAMS_KEY + "_axes"
 DROPOUT_KEY = "dropout"
+SR_KEY = "sr_rng"
 INPUT_KEY = "input_rng"
 
 
@@ -97,6 +98,8 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, train_fn):
     epoch_accuracy = []
 
     for perm in perms:
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_inputs = train_ds["sentence"][perm, ...]
         batch_masks = train_ds["mask"][perm, ...]
         batch_labels = train_ds["label"][perm, ...]
@@ -111,11 +114,11 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, train_fn):
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_step(state, inputs, masks, labels, var_collect):
+def eval_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
         one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -126,7 +129,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
     return loss, accuracy
 
 
-def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
+def eval_model(state, test_ds, batch_size, var_collect, eval_fn, rngs):
     """Evaluation loop."""
     test_ds_size = len(test_ds["sentence"])
     num_steps = test_ds_size // batch_size
@@ -135,11 +138,13 @@ def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
     all_accuracy = []
 
     for batch_start in range(0, valid_size, batch_size):
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_end = batch_start + batch_size
         batch_inputs = test_ds["sentence"][batch_start:batch_end]
         batch_masks = test_ds["mask"][batch_start:batch_end]
         batch_labels = test_ds["label"][batch_start:batch_end]
-        loss, accuracy = eval_fn(state, batch_inputs, batch_masks, batch_labels, var_collect)
+        loss, accuracy = eval_fn(state, batch_inputs, batch_masks, batch_labels, var_collect, rngs)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -199,7 +204,7 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
-    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0), SR_KEY: jax.random.PRNGKey(0)}
     func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
     assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
@@ -254,7 +259,7 @@ def train_and_evaluate(args):
         ), "Test batch size needs to be multiple of 32 for MXFP8"
 
     if args.use_fp8:
-        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+        fp8_recipe = get_quantization_recipe_from_name_string(args.fp8_recipe)
     else:
         fp8_recipe = None
 
@@ -270,6 +275,7 @@ def train_and_evaluate(args):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
         rng, dropout_rng = jax.random.split(rng)
+        rng, sr_rng = jax.random.split(rng)
         init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
 
         input_shape = [args.batch_size, args.max_seq_len]
@@ -322,7 +328,14 @@ def train_and_evaluate(args):
                 train_step, in_shardings=in_shardings, out_shardings=out_shardings
             )
 
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (None, None)
             jit_eval_step = jax.jit(
                 eval_step, in_shardings=in_shardings, out_shardings=out_shardings
@@ -334,22 +347,24 @@ def train_and_evaluate(args):
 
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                rngs = {DROPOUT_KEY: dropout_rng}
+                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
                 jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
                 return None
 
             for epoch in range(1, args.epochs + 1):
+                # Split and reassign to 'rng' to ensure unique rng for each step
                 rng, input_rng = jax.random.split(rng)
                 rng, dropout_rng = jax.random.split(rng)
-                rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+                rng, sr_rng = jax.random.split(rng)
+                rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
                 state, train_loss, train_accuracy, var_collect = train_epoch(
                     state, train_ds, args.batch_size, rngs, var_collect, jit_train_step
                 )
 
                 test_loss, test_accuracy = eval_model(
-                    state, test_ds, args.test_batch_size, var_collect, jit_eval_step
+                    state, test_ds, args.test_batch_size, var_collect, jit_eval_step, rngs
                 )
 
                 print(
@@ -369,16 +384,16 @@ def encoder_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=512,
         metavar="N",
-        help="input batch size for training (default: 256)",
+        help="input batch size for training (default: 512)",
     )
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=256,
+        default=512,
         metavar="N",
-        help="input batch size for testing (default: 256)",
+        help="input batch size for testing (default: 512)",
     )
     parser.add_argument(
         "--max-seq-len",
@@ -430,8 +445,9 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+    is_fp8_supported, fp8_reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
+    is_nvfp4_supported, nvfp4_reason = is_scaling_mode_supported(ScalingMode.NVFP4_1D_SCALING)
 
     def setUp(self):
         """Run 5 epochs for testing"""
@@ -441,7 +457,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.75
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -449,7 +465,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.75
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8(self):
@@ -457,13 +473,21 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.749
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.51 and actual[1] > 0.75
+
+    @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
+    def test_te_nvfp4(self):
+        """Test Transformer Engine with NVFP4"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "NVFP4BlockScaling"
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.52 and actual[1] > 0.74
 
@@ -472,7 +496,7 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.75
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_shardy(self):
@@ -481,7 +505,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.75
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8_shardy(self):
@@ -490,17 +514,23 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.52 and actual[1] > 0.74
+        assert actual[0] < 0.51 and actual[1] > 0.749
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    @unittest.skipIf(
-        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
-    )
     def test_te_mxfp8_shardy(self):
         """Test Transformer Engine with MXFP8"""
         self.args.enable_shardy = True
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.51 and actual[1] > 0.75
+
+    @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
+    def test_te_nvfp4_shardy(self):
+        """Test Transformer Engine with NVFP4"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "NVFP4BlockScaling"
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.52 and actual[1] > 0.74
 
