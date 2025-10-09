@@ -1037,11 +1037,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
-                    # TODO(ksivaman): Re-add fusion once kernel is available.
                     if (
-                        isinstance(
-                            ctx.fc1_grad_output_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
-                        )
+                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
