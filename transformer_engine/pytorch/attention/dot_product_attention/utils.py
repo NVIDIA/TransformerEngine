@@ -35,8 +35,8 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
