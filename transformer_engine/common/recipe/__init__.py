@@ -363,6 +363,7 @@ class Float8BlockScaling(Recipe):
         assert (
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
 
     def __repr__(self) -> str:
         return (
