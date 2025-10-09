@@ -26,7 +26,6 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from run_layer_with_overlap import _compare_tensors
 
-
 BATCH_SIZE, HIDDEN_SIZE, OUT_SIZE = 128, 256, 128
 WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None

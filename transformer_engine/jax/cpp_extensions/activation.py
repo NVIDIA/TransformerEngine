@@ -37,7 +37,6 @@ from ..quantize import (
     ScalingMode,
 )
 
-
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
 

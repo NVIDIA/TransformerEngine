@@ -12,7 +12,6 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.experimental.quantization_microblock_ref import NVFP4QuantizerRef
 from transformer_engine.pytorch.experimental import utils
 
-
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
 
 

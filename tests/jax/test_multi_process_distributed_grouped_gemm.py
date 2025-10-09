@@ -16,7 +16,6 @@ from transformer_engine.jax.quantize import (
 
 from utils import assert_allclose, dtype_tols
 
-
 N_GROUP = 8
 MESH_AXIS_NAME = "fsdp"
 

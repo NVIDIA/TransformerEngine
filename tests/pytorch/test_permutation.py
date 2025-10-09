@@ -775,8 +775,8 @@ def _test_moe_chunk_sort(
     BENCHMARK=False,
 ):
     print(
-        "chunk permute:"
-        f" token:{num_tokens} hidden_size:{hidden_size} num_expert:{num_expert} tp_size:{tp_size} {te_dtype}"
+        f"chunk permute: token:{num_tokens} hidden_size:{hidden_size} num_expert:{num_expert}"
+        f" tp_size:{tp_size} {te_dtype}"
     )
 
     # Convert TE dtypes to PyTorch dtypes

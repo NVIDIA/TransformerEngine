@@ -16,7 +16,6 @@ from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
 from ..softmax import SoftmaxType
 
-
 __all__ = [
     "scaled_softmax_fwd",
     "scaled_softmax_bwd",

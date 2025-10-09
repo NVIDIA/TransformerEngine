@@ -51,7 +51,6 @@ from ..sharding import (
     dp_or_fsdp_axis_size,
 )
 
-
 __all__ = [
     "CollectiveOp",
     "CollectiveOpSet",

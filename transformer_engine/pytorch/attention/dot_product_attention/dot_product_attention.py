@@ -61,7 +61,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FlashAttention,
 )
 
-
 # Setup Attention Logging
 attn_log.setup_logging()
 

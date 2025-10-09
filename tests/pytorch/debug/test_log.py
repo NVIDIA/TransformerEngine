@@ -15,7 +15,6 @@ import os
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
-
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (

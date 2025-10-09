@@ -29,7 +29,6 @@ import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
-
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"
 NAMED_BROADCAST_AXIS = "my_broadcast_axis"

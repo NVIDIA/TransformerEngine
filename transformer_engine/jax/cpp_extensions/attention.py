@@ -47,7 +47,6 @@ from ..sharding import (
     with_sharding_constraint,
 )
 
-
 __all__ = [
     "FusedAttnHelper",
     "fused_attn_fwd",
