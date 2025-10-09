@@ -247,7 +247,7 @@ def make_swa_mask(
     pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
     pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
     # For Bottom Right Causal Mask (BRCM)
-    if segment_ids_q != None and segment_ids_kv != None:
+    if segment_ids_q is not None and segment_ids_kv is not None:
         run_length_q = run_length_fill(segment_ids_q)
         run_length_kv = run_length_fill(segment_ids_kv)
         run_length_q_exp = jnp.expand_dims(run_length_q, axis=-1)
@@ -258,10 +258,9 @@ def make_swa_mask(
         bottom_right_inv_swa_mask = jnp.expand_dims(bottom_right_inv_swa_mask, axis=-3)
         return bottom_right_inv_swa_mask.astype(dtype)
     # All other cases other than BRCM
-    else:
-        inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
-        inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
-        return inv_swa_mask.astype(dtype)
+    inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
+    inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
+    return inv_swa_mask.astype(dtype)
 
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
