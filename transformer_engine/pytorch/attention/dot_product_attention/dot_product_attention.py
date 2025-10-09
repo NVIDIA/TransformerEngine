@@ -30,7 +30,7 @@ from transformer_engine.pytorch.fp8 import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
