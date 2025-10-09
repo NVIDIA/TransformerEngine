@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file quantize_fp8.cuh
- *  \brief FP8 quantize.
+ *  \brief CUDA kernels to quantize to FP8.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_FP8_CUH_

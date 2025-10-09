@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file gated_fp8.cuh
- *  \brief Gated FP8.
+ *  \brief CUDA kernels to cast to FP8 with gated activations.
  */
 
 #ifndef TRANSFORMER_ENGINE_GATED_FP8_CUH_

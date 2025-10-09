@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file dequantize_mxfp8.cuh
- *  \brief MXFP8 dequantize.
+ *  \brief CUDA kernels to dequantize from MXFP8.
  */
 
 #ifndef TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_

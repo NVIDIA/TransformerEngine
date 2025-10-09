@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file quantize_nvfp4.cuh
- *  \brief NVFP4 quantize.
+/*! \file quantize_transpose_nvfp4.cuh
+ *  \brief CUDA kernels to cast to NVFP4 and transpose.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_

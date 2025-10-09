@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file gated_mxfp8.cuh
- *  \brief Gated MXFP8.
+ *  \brief CUDA kernels to cast to MXFP8 with gated activations.
  */
 
 #ifndef TRANSFORMER_ENGINE_GATED_MXFP8_CUH_

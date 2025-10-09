@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file dequantize_fp8.cuh
- *  \brief FP8 dequantize.
+ *  \brief CUDA kernels to dequantize from FP8.
  */
 
 #ifndef TRANSFORMER_ENGINE_DEQUANTIZE_FP8_CUH_

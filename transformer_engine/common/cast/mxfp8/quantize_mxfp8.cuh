@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file quantize_mxfp8.cuh
- *  \brief MXFP8 quantize.
+ *  \brief CUDA kernels to quantize to MXFP8.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_MXFP8_CUH_
