@@ -134,10 +134,7 @@ class LogTensorStats(BaseLogTensorStats):
         end_step = config.get("end_step", None)
         start_end_list = config.get("start_end_list", None)
         if start_end_list is not None:
-            start_end_list = tuple(
-                tuple(int(x) for x in interval)
-                for interval in start_end_list
-            )
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
 
         options = (
             start_step,
