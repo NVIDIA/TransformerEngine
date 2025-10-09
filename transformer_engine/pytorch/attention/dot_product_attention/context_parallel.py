@@ -3593,7 +3593,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         else:
             dout = dout.view(*ctx.out_shape)
 
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, out.device)
+        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
         dout = flash_attn_a2a_communicate(
             dout, chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream,
             before_attn=True, qkv_format=qkv_format, cu_seqlens=cu_seqlens_q_padded
