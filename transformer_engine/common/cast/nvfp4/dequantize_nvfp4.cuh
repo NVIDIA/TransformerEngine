@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file dequantize_nvfp4.cuh
- *  \brief NVFP4 dequantize.
+ *  \brief CUDA kernels to dequantize from NVFP4.
  */
 
 #ifndef TRANSFORMER_ENGINE_DEQUANTIZE_NVFP4_CUH_
