@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-from .cpp_extensions.quantization import AmaxScope
+from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
     ScalingMode,
