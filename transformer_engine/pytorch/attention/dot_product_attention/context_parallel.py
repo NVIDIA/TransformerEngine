@@ -259,7 +259,7 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim = 0):
+def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim=0):
     """
     Reorder sequence chunks for A2A communication that happens after attention
     compute.
@@ -298,22 +298,19 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
              ]
     """
     total_slices_of_any_sequence = 2 * cp_size
-    slice_sizes = (
-        cu_seqlens[1:] - cu_seqlens[:-1]
-    ) // total_slices_of_any_sequence
+    slice_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]) // total_slices_of_any_sequence
 
     indices = [
         (
             # 1st segment
             torch.arange(
-                seq_start + (cp_rank * slice_size),
-                seq_start + ((cp_rank + 1) * slice_size)
+                seq_start + (cp_rank * slice_size), seq_start + ((cp_rank + 1) * slice_size)
             ),
             # 2nd segment
             torch.arange(
                 seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
-                seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size)
-            )
+                seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
+            ),
         )
         for cp_rank in range(cp_size)
         for slice_size, seq_start in zip(slice_sizes, cu_seqlens[:-1])
@@ -325,9 +322,7 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
     return x.index_select(seq_dim, indices)
 
 
-def reorder_seq_chunks_after_a2a_before_attn_thd(
-        x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim = 0
-    ):
+def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
     """
     Reorder sequence chunks for A2A communication that happens before attention
     compute.
@@ -374,17 +369,23 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(
     """
 
     max_cum_seqlen_per_cp_rank = cu_seqlens[-1] // cp_size
-    cu_seqlens_on_any_cp_rank = cu_seqlens//cp_size
+    cu_seqlens_on_any_cp_rank = cu_seqlens // cp_size
 
     # Go through all the sequence segments (the sizes should be the same from all the ranks)
     indices = [
         torch.arange(
             # Calculate 'left' boundary
-            start + max_cum_seqlen_per_cp_rank * (chunk_id // 2) if loc < cp_size
-            else (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2),
+            (
+                start + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+                if loc < cp_size
+                else (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+            ),
             # Calculate 'right' boundary
-            (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2) if loc < cp_size
-            else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+            (
+                (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+                if loc < cp_size
+                else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+            ),
         )
         for start, end in zip(cu_seqlens_on_any_cp_rank[:-1], cu_seqlens_on_any_cp_rank[1:])
         for loc, chunk_id in enumerate(seq_chunk_ids)
@@ -428,8 +429,10 @@ def flash_attn_a2a_communicate(
                         )
                         # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn]
                         # or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-                        a2a_outputs[i - 2] = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
-                    else: # qkv_format == "thd"
+                        a2a_outputs[i - 2] = x.view(
+                            *x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]
+                        )
+                    else:  # qkv_format == "thd"
                         # [cp, t, np//cp, hn] -> [cp*t, np//cp, hn]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
@@ -464,7 +467,7 @@ def flash_attn_a2a_communicate(
                     a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
                         x, chunk_ids_for_a2a, seq_dim, cp_size
                     )
-                else: # qkv_format == "thd"
+                else:  # qkv_format == "thd"
                     # reorder the sequence chunks
                     x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size)
                     # [cp*t, np//cp, hn] -> [cp, t, np//cp, hn]
@@ -3244,7 +3247,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
-        assert not padding or qkv_format == "thd", f"{attn_mask_type} mask type is not supported for BSHD and SBHD!"
+        assert (
+            not padding or qkv_format == "thd"
+        ), f"{attn_mask_type} mask type is not supported for BSHD and SBHD!"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -3300,7 +3305,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if qkv_format in ["bshd", "sbhd"]:
             batch_dim = qkv_format.index("b")
             seq_dim = qkv_format.index("s")
-        else: # qkv_format == "thd"
+        else:  # qkv_format == "thd"
             batch_dim = seq_dim = qkv_format.index("t")
 
         assert (
@@ -3347,8 +3352,15 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate(
-            [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream,
-            before_attn=True, qkv_format=qkv_format, cu_seqlens=cu_seqlens_q_padded
+            [q, k, v],
+            chunk_ids_for_a2a,
+            seq_dim,
+            cp_size,
+            cp_group,
+            cp_stream,
+            before_attn=True,
+            qkv_format=qkv_format,
+            cu_seqlens=cu_seqlens_q_padded,
         )
         if softmax_type != "vanilla":
             softmax_offset = flash_attn_a2a_communicate_softmax_offset(
@@ -3437,8 +3449,15 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out_.device)
         out_ = flash_attn_a2a_communicate(
-            out_, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream,
-            before_attn=False, qkv_format=qkv_format, cu_seqlens=cu_seqlens_q_padded
+            out_,
+            chunk_ids_for_a2a,
+            seq_dim,
+            cp_size,
+            cp_group,
+            cp_stream,
+            before_attn=False,
+            qkv_format=qkv_format,
+            cu_seqlens=cu_seqlens_q_padded,
         )
 
         if use_fused_attention:
@@ -3556,7 +3575,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if qkv_format in ["bshd", "sbhd"]:
             seq_dim = qkv_format.index("s")
-        else: # qkv_format == "thd"
+        else:  # qkv_format == "thd"
             seq_dim = qkv_format.index("t")
 
         bwd_nominal_dtype = ctx.fwd_nominal_dtype
@@ -3595,8 +3614,15 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
         dout = flash_attn_a2a_communicate(
-            dout, chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream,
-            before_attn=True, qkv_format=qkv_format, cu_seqlens=cu_seqlens_q_padded
+            dout,
+            chunk_ids_for_a2a,
+            seq_dim,
+            cp_size,
+            ctx.cp_group,
+            ctx.cp_stream,
+            before_attn=True,
+            qkv_format=qkv_format,
+            cu_seqlens=cu_seqlens_q_padded,
         )
 
         flash_attn_bwd = None
@@ -3706,8 +3732,15 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dq.device)
         dq, dk, dv = flash_attn_a2a_communicate(
-            [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream,
-            before_attn=False, qkv_format=qkv_format, cu_seqlens=cu_seqlens_q_padded
+            [dq, dk, dv],
+            chunk_ids_for_a2a,
+            seq_dim,
+            cp_size,
+            ctx.cp_group,
+            ctx.cp_stream,
+            before_attn=False,
+            qkv_format=qkv_format,
+            cu_seqlens=cu_seqlens_q_padded,
         )
 
         if qkv_format == "bshd":
