@@ -560,7 +560,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                                                   stream);
     }
   } else {
-    if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+    if (IS_DBIAS) {
       // zhongboz: should we just ignore IS_ACT here?
       NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
                  " or IS_DBIAS=true" + " on GPU with compute capability < 10.0.");
