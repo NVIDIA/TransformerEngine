@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""NVFP4 implementations for experimental middleware between Transformer Engine and Kitchen."""
+"""NVFP4 recipe reference implementation."""
 
 import dataclasses
 from typing import Optional, Tuple, Union
@@ -12,6 +12,39 @@ import torch
 from transformer_engine.pytorch.experimental import quantization
 from transformer_engine.pytorch.experimental import utils
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage, Quantizer
+
+
+def nvfp4_ref_rht_2d_quantizer_factory(role):
+    """
+    Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
+
+    Usage with CustomRecipe and fp8_autocast:
+        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+        with fp8_autocast(fp8_recipe=custom_recipe):
+            output = model(input)
+    """
+    if role == "linear_input":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
+    elif role == "linear_weight":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(16, 16),
+            pow_2_scales=False,
+            with_rht=False,
+        )
+    elif role == "linear_grad_output":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
+    return None
 
 
 def cast_to_fp4x2(x):
