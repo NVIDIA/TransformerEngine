@@ -1332,7 +1332,7 @@ class FusedAttnFunc(torch.autograd.Function):
         return out_ret, max_score
 
     @staticmethod
-    def backward(ctx, *args):
+    def backward(ctx, d_out, *args):
         # pylint: disable=missing-function-docstring
 
         # d_out is expected to be in FP8 if is_output_fp8=True,
@@ -1574,6 +1574,7 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             d_softmax_offset,
+            None,
             None,
             None,
         )

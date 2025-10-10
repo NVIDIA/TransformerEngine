@@ -252,8 +252,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          .set_name("flash_attention")
                          .set_is_inference(false)
                          .set_generate_stats(generate_stats)
-                         .set_generate_max(generate_max_sum_exp)
-                         .set_generate_sum_exp(generate_max_sum_exp)
                          .set_causal_mask(is_causal)
                          .set_causal_mask_bottom_right(is_bottom_right)
                          .set_attn_scale(attn_scale);
@@ -327,15 +325,23 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         sdpa_options.set_sink_token(softmax_offset);
       }
 
-      auto sdpa_outputs = mha_graph->sdpa_internal(Q, K, V, std::move(sdpa_options));
-      std::shared_ptr<fe::graph::Tensor_attributes> O, Stats, Max, Sum_Exp;
-      O = sdpa_outputs.O;
+      std::shared_ptr<fe::graph::Tensor_attributes> Max, Sum_Exp;
       if (generate_max_sum_exp) {
-        Max = sdpa_outputs.Max;
-        Sum_Exp = sdpa_outputs.Sum_exp;
-      } else {
-        Stats = sdpa_outputs.Stats;
+	Max = mha_graph->tensor(fe::graph::Tensor_attributes()
+                               .set_name("Max")
+                               .set_dim({b, h, s_q, 1})
+                               .set_stride({h * s_q, s_q, 1, 1})
+                               .set_data_type(fe::DataType_t::FLOAT));
+        sdpa_options.set_logit_max(Max);
+	Sum_Exp = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("Sum_Exp")
+                                         .set_dim({b, h, s_q, 1})
+                                         .set_stride({h * s_q, s_q, 1, 1})
+                                         .set_data_type(fe::DataType_t::FLOAT));
+        sdpa_options.set_score_sum_exp(Sum_Exp);
       }
+
+      auto [O, Stats] = mha_graph->sdpa(Q, K, V, std::move(sdpa_options));
 
       std::vector<int64_t> o_stride(4);
       generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(), layout,
@@ -350,28 +356,19 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         O->set_ragged_offset(offset_o);
       }
 
-      if (generate_max_sum_exp) {
-        Max->set_output(true)
-            .set_data_type(fe::DataType_t::FLOAT)
-            .set_dim({b, h, s_q, 1})
-            .set_stride({h * s_q, s_q, 1, 1});
-        Sum_Exp->set_output(true)
-            .set_data_type(fe::DataType_t::FLOAT)
-            .set_dim({b, h, s_q, 1})
-            .set_stride({h * s_q, s_q, 1, 1});
+      if (!generate_max_sum_exp) {
+      Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
+      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+        offset_stats =
+            mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("offset_stats")
+                                  .set_dim({b + 1, 1, 1, 1})
+                                  .set_stride({1, 1, 1, 1})
+                                  .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+        Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
       } else {
-        Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
-        if (is_ragged_q && cudnn_runtime_version >= 90600) {
-          offset_stats =
-              mha_graph->tensor(fe::graph::Tensor_attributes()
-                                    .set_name("offset_stats")
-                                    .set_dim({b + 1, 1, 1, 1})
-                                    .set_stride({1, 1, 1, 1})
-                                    .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
-          Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
-        } else {
-          Stats->set_stride({h * s_q, s_q, 1, 1});
-        }
+        Stats->set_stride({h * s_q, s_q, 1, 1});
+      }
       }
 
       std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
@@ -1171,7 +1168,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   fused_attn_arbitrary_seqlen_fwd_impl(
       batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim, head_dim,
       max_batch_size, max_tokens, max_tokens, 0, 0, 0, 0, 0, 0, bias_b, bias_h, is_training,
-      attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
+      return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
       window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1,
       devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlens, devPtrCuSeqlens,
       nullptr, nullptr, devPtrSeqOffsets, devPtrSeqOffsets, get_cudnn_fe_dtype(QKV_type),
@@ -1435,7 +1432,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, head_dim,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
-      attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
+      return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
       window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1,
       devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
       devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
@@ -1703,7 +1700,7 @@ void fused_attn_arbitrary_seqlen_fwd(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
-      attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
+      return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
       window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1,
       devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
       devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
