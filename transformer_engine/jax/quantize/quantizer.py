@@ -67,7 +67,7 @@ def compute_scale_from_amax(
     sf = (fp8_max / amax) / (2 ** get_quantize_config().MARGIN)
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
-    assert sf.shape == (1,)
+    assert sf.shape == (1,), f"Expected sf.shape == (1,), but got {sf.shape}"
     return sf
 
 
