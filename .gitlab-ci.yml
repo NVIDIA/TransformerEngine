@@ -68,6 +68,9 @@ variables:
       description: Base for container tags (<TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>)
     SEND_SLACK_MESSAGE:
       description: Send Slack message with the pipeline status
+      value: 1
+    SLACK_PING_TEST_OWNERS:
+      description: Must be paired with SEND_SLACK_MESSAGE=1. If enabled, will ping test owners on Slack if any failures occur instead of the user who launched the pipeline. Use case, scheduled CI runs on 'main'.
       value: 0
 
     VIRTUAL: 0
@@ -244,6 +247,7 @@ before_script:
             --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
             --form "variables[CODE_VERSION]=${CODE_VERSION}" \
             --form "variables[SEND_SLACK_MESSAGE]=${SEND_SLACK_MESSAGE}" \
+            --form "variables[SLACK_PING_TEST_OWNERS]=${SLACK_PING_TEST_OWNERS}" \
             --form "variables[githubData]=${githubData}" \
             https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
           echo "\n" | cat ${tmp_file} -
@@ -950,9 +954,27 @@ send_result_to_slack:
         curl --header "PRIVATE-TOKEN: $GITLAB_JOB_QUERY_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs?per_page=100"
     }
 
+    function get_slack_ping_string_for_test_owners() {
+        RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        JAX_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("jax"))] | length')
+        PYTORCH_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("pytorch"))] | length')
+        CORE_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("cppunittest"))] | length')
+
+        if [[ "$JAX_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "JAX test failures: $(get_slack_user_id_from_nvidia_username jberchtold@nvidia.com) $(get_slack_user_id_from_nvidia_username phuonguyen@nvidia.com) $(get_slack_user_id_from_nvidia_username klakhani@nvidia.com) $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com)"
+        fi
+        if [[ "$PYTORCH_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "PyTorch test failures: $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com) $(get_slack_user_id_from_nvidia_username tmoon@nvidia.com) $(get_slack_user_id_from_nvidia_username ksivamani@nvidia.com)"
+        fi
+        if [[ "$CORE_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "Core test failures: $(get_slack_user_id_from_nvidia_username ogoncharov@nvidia.com) $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com)"
+        fi
+    }
+
     # Prepare the pipeline status message to be sent to Slack.
     function get_pipeline_status_message() {
-        local slack_user_id="$1"
+        local slack_ping_string="$1"
         local RESPONSE=$(get_gitlab_pipeline_jobs)
 
         local FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success")] | length')
@@ -964,13 +986,12 @@ send_result_to_slack:
 
         echo "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed."
 
-        echo "Triggered by: $slack_user_id"
+        echo "$slack_ping_string"
 
         echo "$(get_github_pr_info_as_markdown)"
     }
 
     function get_pipeline_job_summary_message() {
-        local slack_user_id="$1"
         local RESPONSE=$(get_gitlab_pipeline_jobs)
 
         echo "Jobs Summary:"
@@ -1003,9 +1024,18 @@ send_result_to_slack:
     echo "Nvidia username: ${NV_USERNAME}"
     SLACK_USER_ID=$(get_slack_user_id_from_nvidia_username "${NV_USERNAME}")
     echo "Slack user ID: ${SLACK_USER_ID}"
-    thread_id=$(sendSlackMessage "$(get_pipeline_status_message ${SLACK_USER_ID})")
+
+    echo "SLACK_PING_TEST_OWNERS=${SLACK_PING_TEST_OWNERS}"
+
+    if [[ "$SLACK_PING_TEST_OWNERS" != "0" ]]; then
+      SLACK_PING_STRING="$(get_slack_ping_string_for_test_owners)"
+      echo "Overriding Slack ping string to: ${SLACK_PING_STRING}"
+    else
+      SLACK_PING_STRING="Triggered by: ${SLACK_USER_ID}"
+    fi
+    thread_id=$(sendSlackMessage "$(get_pipeline_status_message "${SLACK_PING_STRING}")")
     # Send job status in thread
-    sendSlackMessage "$(get_pipeline_job_summary_message ${SLACK_USER_ID})" "${thread_id}"
+    sendSlackMessage "$(get_pipeline_job_summary_message)" "${thread_id}"
   rules:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
