@@ -950,7 +950,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(fc1_weight, "overwrite_main_grad")
+                        if not getattr(fc1_weight, "overwrite_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
@@ -1195,7 +1195,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(fc2_weight, "overwrite_main_grad")
+                        if not getattr(fc2_weight, "overwrite_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
@@ -1492,7 +1492,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True 
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
