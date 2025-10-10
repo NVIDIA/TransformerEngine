@@ -76,6 +76,11 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
 
+  // Amax
+  dict["te_rht_amax_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
+
   return dict;
 }
 
@@ -106,7 +111,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("kFloat16", DType::kFloat16)
       .value("kBFloat16", DType::kBFloat16)
       .value("kFloat8E4M3", DType::kFloat8E4M3)
-      .value("kFloat8E5M2", DType::kFloat8E5M2);
+      .value("kFloat8E5M2", DType::kFloat8E5M2)
+      .value("kFloat8E8M0", DType::kFloat8E8M0)
+      .value("kFloat4E2M1", DType::kFloat4E2M1);
 
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
@@ -165,6 +172,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
       .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
       .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING)
+      .value("NVFP4_1D_SCALING", JAXX_Scaling_Mode::NVFP4_1D_SCALING)
+      .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
       .export_values();
 
   pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",

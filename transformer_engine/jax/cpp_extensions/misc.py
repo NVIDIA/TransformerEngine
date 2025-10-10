@@ -6,8 +6,6 @@
 import os
 import functools
 from typing import Tuple
-from importlib.metadata import version as get_pkg_version
-from packaging.version import Version as PkgVersion
 
 import numpy as np
 
@@ -75,7 +73,8 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.int64.dtype: TEDType.kInt64,
         jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
         jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
-        jnp.uint8.dtype: TEDType.kByte,
+        jnp.float8_e8m0fnu.dtype: TEDType.kFloat8E8M0,
+        jnp.float4_e2m1fn.dtype: TEDType.kFloat4E2M1,
     }
 
     if jax_dtype not in converter:
@@ -149,16 +148,6 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
-
-
-@functools.lru_cache(maxsize=None)
-def jax_version_meet_requirement(version: str):
-    """
-    Helper function checking if required JAX version is available
-    """
-    jax_version = PkgVersion(get_pkg_version("jax"))
-    jax_version_required = PkgVersion(version)
-    return jax_version >= jax_version_required
 
 
 def get_xla_flag(flag: str, default=None, cast=str):

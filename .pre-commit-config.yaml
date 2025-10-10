@@ -38,3 +38,9 @@ repos:
         entry: clang-format -i
         args: ["-style=file"]
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
+
+  - repo: https://github.com/netromdk/vermin
+    rev: c75aca72f4e85c6e47252139e8695f1c8b5f9ae3
+    hooks:
+      - id: vermin
+        args: ['-t=3.10', '--violations']

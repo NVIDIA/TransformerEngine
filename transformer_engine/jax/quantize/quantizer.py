@@ -19,6 +19,7 @@ from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
+from .hadamard import apply_rht, should_use_rht
 from .tensor import (
     ScaledTensor,
     ScaledTensor1x,
@@ -28,7 +29,7 @@ from .tensor import (
 )
 from .helper import (
     get_quantize_config,
-    get_quantize_config_class,
+    get_quantize_config_with_recipe,
     AmaxComputeAlgo,
     TensorSource,
 )
@@ -66,6 +67,7 @@ def compute_scale_from_amax(
     sf = (fp8_max / amax) / (2 ** get_quantize_config().MARGIN)
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
+    assert sf.shape == (1,)
     return sf
 
 
@@ -155,7 +157,7 @@ class Quantizer(ABC):
         """
 
     def quantize(
-        self, x, is_rowwise=False, is_colwise=False, dq_dtype=None, flatten_axis=-1, **kwargs
+        self, x, is_rowwise=None, is_colwise=None, dq_dtype=None, flatten_axis=-1, **kwargs
     ) -> ScaledTensor:
         """Quantize a tensor using the internal _quantize_func().
 
@@ -170,6 +172,18 @@ class Quantizer(ABC):
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         del kwargs
+
+        is_rowwise = (
+            is_rowwise
+            if is_rowwise is not None
+            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
+        )
+        is_colwise = (
+            is_colwise
+            if is_colwise is not None
+            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
+        )
+
         if (is_rowwise and is_colwise) or self.is_2x2x():
             rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
             colwise_tensor = self._quantize_func(
@@ -380,6 +394,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
         scale_inv = 1.0 / self.scale
         amax = x.amax or jnp.max(jnp.abs(x.data)).reshape((1,))
+        # Note, this updating of amax here will only be called once because the "quantize" method impl inherited from CurrentScaleQuantizer only calls _quantize_func once then transposes the result for colwise quantization. So we don't have to worry about update being called twice for 2x2x quantization.
         self.update(amax)
         return ScaledTensorFactory.create_1x(
             data=clipped_scaled_x,
@@ -494,7 +509,7 @@ class BlockScaleQuantizer(Quantizer):
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         x_shape = x.shape
         scale_shape = self.scaling_mode.get_scale_shape(
-            x_shape, is_colwise, is_padded=False, flatten_axis=flatten_axis
+            x_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
         scale_dtype = self.scaling_mode.get_scale_dtype()
         x = x.reshape(
@@ -561,6 +576,221 @@ class BlockScaleQuantizer(Quantizer):
         near_zero_value = 2**-15 if dtype == jnp.float16 else 2**-127
         new_x = jnp.where(new_x == 0, jnp.array(near_zero_value, jnp.float32), new_x)
         return new_x.astype(dtype)
+
+
+@register_pytree_node_class
+@dataclass
+class NVFP4Quantizer(Quantizer):
+    """Quantizer implementation using current scaling.
+
+    This quantizer uses current scaling mode with float32 scales
+
+    Attributes:
+        scaling_mode: Set to NVFP4_1D_SCALING or NVFP4_2D_SCALING
+        q_layout: Quantization axis
+        data_layout: Data layout string (default: "NT")
+        stochastic_rounding_rng_state: RNG state for stochastic rounding, must be of shape (4,) and dtype uint32. If None, stochastic rounding is disabled.
+    """
+
+    scaling_mode: ScalingMode = ScalingMode.NVFP4_1D_SCALING
+    q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+    data_layout: str = "NT"
+    stochastic_rounding_rng_state: Optional[jnp.ndarray] = None
+
+    def __post_init__(self):
+        assert (
+            self.q_dtype == jnp.float4_e2m1fn
+        ), "NVFP4 quantization must use a q_dtype of float4_e2m1fn"
+        assert self.scaling_mode.is_nvfp4_scaling, "NVFP4Quantizer must use NVFP4 scaling modes"
+
+    def _apply_stochastic_rounding(self, x):
+        assert (
+            self.stochastic_rounding_rng_state is not None
+        ), "Stochastic rounding RNG state is not initialized"
+        assert self.stochastic_rounding_rng_state.shape == (
+            4,
+        ), "Stochastic rounding RNG state must be of shape (4,)"
+        assert (
+            self.stochastic_rounding_rng_state.dtype == jnp.uint32
+        ), "Stochastic rounding RNG state must be of dtype uint32"
+
+        # Default RNG state in JAX expects 2x 32-bit integers, use first 2 uint32s for initial state and fold in the other 2 uint32s
+        key_bits = jnp.array(
+            [
+                self.stochastic_rounding_rng_state[0],
+                self.stochastic_rounding_rng_state[1],
+            ],
+            dtype=jnp.uint32,
+        )
+        key = jax.random.wrap_key_data(key_bits)
+        key = jax.jit(jax.random.fold_in)(key, self.stochastic_rounding_rng_state[2])
+        key = jax.jit(jax.random.fold_in)(key, self.stochastic_rounding_rng_state[3])
+
+        abs_x = jnp.abs(x)
+        sign_x = jnp.sign(x)
+
+        floor = (
+            (abs_x >= 0.5) * 0.5
+            + (abs_x >= 1) * 0.5
+            + (abs_x >= 2)
+            + (abs_x >= 3)
+            + (abs_x >= 4)
+            + (abs_x >= 6) * 2
+        )
+        ceil = (
+            0.5
+            + (abs_x > 0.5) * 0.5
+            + (abs_x > 1) * 1
+            + (abs_x > 2)
+            + (abs_x > 3)
+            + (abs_x > 4) * 2
+        )
+        frac = (abs_x - floor) / (ceil - floor)
+
+        rand = jax.random.uniform(key, abs_x.shape)
+        return sign_x * jnp.where(frac >= rand, ceil, floor)
+
+    def _quantize_func(self, x, is_colwise=False, dq_dtype=None, flatten_axis=-1) -> ScaledTensor1x:
+        """Quantize function helper for block scaling FP8.
+
+        Args:
+            x: Input tensor to quantize
+            is_colwise: Whether to use column-wise quantization
+            dq_dtype: Data type for dequantized values
+            flatten_axis: The quantization axis for the tensor
+
+        Returns:
+            A ScaledTensor1x containing the quantized data
+        """
+        # TODO(Phuong): use quantize_func from JAX
+        if flatten_axis < 0:
+            flatten_axis = x.ndim + flatten_axis
+        assert (
+            0 <= flatten_axis < x.ndim
+        ), f"Invalid flatten_axis: {flatten_axis} for tensor of shape {x.shape}"
+
+        should_apply_rht = self.scaling_mode == ScalingMode.NVFP4_1D_SCALING and is_colwise
+
+        global_amax = None
+        if isinstance(x, NoScaleTensor):
+            global_amax = (
+                x.amax if not should_apply_rht else None
+            )  # RHT changes the amax so don't use precalculated amax for colwise 1D nvfp4 quantization with RHT
+            x = x.data
+
+        # Transpose if required
+        rowwise_flatten_axis = flatten_axis
+        data_layout = self.data_layout[0]
+        if is_colwise:
+            x = jnp.transpose(x, (*range(flatten_axis, x.ndim), *range(flatten_axis)))
+            data_layout = self.data_layout[1]
+            # convert flatten_axis from N layout to T layout
+            flatten_axis = x.ndim - flatten_axis
+        x_shape = x.shape
+
+        if should_use_rht(self.scaling_mode, is_colwise=is_colwise):
+            # We only apply RHT for 1D colwise nvfp4
+            x = apply_rht(x)
+
+        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        scale_shape = self.scaling_mode.get_scale_shape(
+            x_shape,
+            data_layout=data_layout,
+            is_colwise=is_colwise,
+            is_padded=False,
+            flatten_axis=rowwise_flatten_axis,
+        )
+        scale_dtype = self.scaling_mode.get_scale_dtype()
+        x = x.reshape(
+            *x_shape[: flatten_axis - 1],
+            scale_shape[flatten_axis - 1],
+            int(x_shape[flatten_axis - 1] / scale_shape[flatten_axis - 1]),
+            *x_shape[flatten_axis:-1],
+            scale_shape[-1],
+            int(x_shape[-1] / scale_shape[-1]),
+        )
+
+        # Dtype max constants
+        DATA_DTYPE_MAX = jnp.finfo(self.q_dtype).max.astype(jnp.float32)
+        SCALE_DTYPE_MAX = jnp.finfo(scale_dtype).max.astype(jnp.float32)
+
+        # Level 1: Current Tensor Scaling
+        global_amax = (
+            global_amax
+            if global_amax is not None
+            else jnp.max(jnp.abs(x)).reshape((1,)).astype(jnp.float32)
+        )
+        tensor_scale = DATA_DTYPE_MAX * SCALE_DTYPE_MAX / global_amax
+        tensor_scale = jnp.minimum(
+            tensor_scale, jnp.array(jnp.finfo(jnp.float32).max, dtype=jnp.float32)
+        )
+        tensor_scale = jnp.where(
+            tensor_scale == jnp.array(0.0, dtype=jnp.float32),
+            jnp.array(1.0, dtype=jnp.float32),
+            tensor_scale,
+        )
+        tensor_scale_inv = 1.0 / tensor_scale
+
+        # Level 2: Block Scaling
+        block_amax = jnp.max(jnp.abs(x), axis=(flatten_axis + 2 - 2, -1), keepdims=True).astype(
+            jnp.float32
+        )
+        block_scale_inv = jnp.divide(block_amax, DATA_DTYPE_MAX)
+        block_scale_inv = block_scale_inv * tensor_scale
+        block_scale_inv = jnp.minimum(
+            block_scale_inv, jnp.array(jnp.finfo(jnp.float32).max, dtype=jnp.float32)
+        )
+        block_scale_inv = jnp.clip(block_scale_inv, -SCALE_DTYPE_MAX, SCALE_DTYPE_MAX)
+        # We cast block_scale_inv to scale_dtype here to account for any rounding during the cast. This will ensure the quantized data incorporates the rounded scale value into its computation so dequantization is accurate.
+        block_scale_inv = block_scale_inv.astype(scale_dtype)
+        # Note, with JIT jax removes this intermediate cast leading to slightly incorrect results during DQ and worse convergence to the original tensor during many samples of Q+SR->DQ. So we use reduce_precision to simulate the cast to scale_dtype.
+        assert scale_dtype == jnp.float8_e4m3fn, "Only float8_e4m3fn is supported for scale_dtype"
+        block_scale_inv = jax.lax.reduce_precision(block_scale_inv, 4, 3)
+        block_scale = jnp.minimum(
+            jnp.divide(1.0, block_scale_inv.astype(jnp.float32) * tensor_scale_inv),
+            jnp.array(jnp.finfo(jnp.float32).max, dtype=jnp.float32),
+        )
+
+        # Apply scaling
+        scaled_x = x.astype(jnp.float32) * block_scale
+        if self.stochastic_rounding_rng_state is not None:
+            scaled_x = self._apply_stochastic_rounding(scaled_x)
+        clipped_x = jnp.clip(scaled_x, -DATA_DTYPE_MAX, DATA_DTYPE_MAX)
+
+        # Cast to the right dtype
+        quantized_data = clipped_x.reshape(x_shape).astype(self.q_dtype)
+        block_scale_inv = block_scale_inv.reshape(scale_shape).astype(scale_dtype)
+
+        # In the 2D scaling mode, the scale shape is 2D but it needs to be broadcasted to 1D for GEMM.
+        # TODO(Phuong): expose this broadcast_2d_scale_shape_to_1d option to the
+        # quantizer.quantize() API
+        broadcasted_1d_scale_shape = self.scaling_mode.get_scale_shape(
+            x_shape,
+            data_layout=data_layout,
+            is_colwise=is_colwise,
+            is_padded=False,
+            flatten_axis=rowwise_flatten_axis,
+            broadcast_2d_scale_shape_to_1d=True,
+        )
+
+        # Broadcast and tile x to match the target shape
+        def repeat_to_shape(x, target_shape):
+            x_shape = x.shape
+            reps = [int(t // s) for s, t in zip(x_shape, target_shape)]
+            return jnp.tile(x, reps)
+
+        block_scale_inv = repeat_to_shape(block_scale_inv, broadcasted_1d_scale_shape)
+
+        return ScaledTensorFactory.create_1x(
+            data=quantized_data,
+            data_layout=data_layout,
+            is_colwise=is_colwise,
+            scale_inv=block_scale_inv,
+            amax=global_amax,
+            scaling_mode=self.scaling_mode,
+            dq_dtype=dq_dtype,
+            flatten_axis=rowwise_flatten_axis,
+        )
 
 
 @register_pytree_node_class
@@ -801,6 +1031,8 @@ class QuantizerFactory:
         ScalingMode.DELAYED_TENSOR_SCALING: DelayedScaleQuantizer,
         ScalingMode.CURRENT_TENSOR_SCALING: CurrentScaleQuantizer,
         ScalingMode.MXFP8_1D_SCALING: BlockScaleQuantizer,
+        ScalingMode.NVFP4_1D_SCALING: NVFP4Quantizer,
+        ScalingMode.NVFP4_2D_SCALING: NVFP4Quantizer,
     }
 
     @staticmethod
@@ -826,7 +1058,6 @@ class QuantizerFactory:
         Returns:
             A single quantizer or tuple of quantizers
         """
-        # (Phuong): add this assert back when NVTE_NO_SCALING is fully implememted
         assert isinstance(scaling_mode, ScalingMode), "Invalid scaling_mode type"
         if n_groups:
             if n_quantizers != 1:
@@ -887,18 +1118,9 @@ class QuantizerFactory:
 
         if "quantize_meta_set" in kwargs:
             quantize_meta_set = kwargs.get("quantize_meta_set")
-            args_x = {
-                "scale": quantize_meta_set.x.scale,
-                "amax_history": quantize_meta_set.x.amax_history,
-            }
-            args_kernel = {
-                "scale": quantize_meta_set.kernel.scale,
-                "amax_history": quantize_meta_set.kernel.amax_history,
-            }
-            args_grad = {
-                "scale": quantize_meta_set.grad.scale,
-                "amax_history": quantize_meta_set.grad.amax_history,
-            }
+            args_x = quantize_meta_set.x.get_kwargs_dictionary()
+            args_kernel = quantize_meta_set.kernel.get_kwargs_dictionary()
+            args_grad = quantize_meta_set.grad.get_kwargs_dictionary()
         else:
             args_x = args_kernel = args_grad = {}
 
@@ -919,6 +1141,7 @@ class QuantizerFactory:
         bwd_dtype: jnp.dtype = None,
         is_2x2x: bool = None,
         n_groups: int = None,
+        # TODO(jberchtold): rename fp8_recipe to quantization_recipe
         fp8_recipe: Optional[recipe.Recipe] = None,
         **kwargs,
     ) -> tuple[Union[tuple[Quantizer], None]]:
@@ -946,21 +1169,24 @@ class QuantizerFactory:
         )
 
         if fp8_recipe is not None:
-            quantize_config = get_quantize_config_class(fp8_recipe)()
+            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
             x_scaling_mode = quantize_config.get_scaling_mode(TensorSource.X)
             kernel_scaling_mode = quantize_config.get_scaling_mode(TensorSource.KERNEL)
             grad_scaling_mode = quantize_config.get_scaling_mode(TensorSource.DGRAD)
-        elif scaling_mode is not None:
-            x_scaling_mode = scaling_mode
-            kernel_scaling_mode = scaling_mode
-            grad_scaling_mode = scaling_mode
+            fwd_dtype = quantize_config.FWD_DTYPE
+            bwd_dtype = quantize_config.BWD_DTYPE
         else:
-            x_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.X)
-            kernel_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.KERNEL)
-            grad_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.DGRAD)
+            if scaling_mode is not None:
+                x_scaling_mode = scaling_mode
+                kernel_scaling_mode = scaling_mode
+                grad_scaling_mode = scaling_mode
+            else:
+                x_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.X)
+                kernel_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.KERNEL)
+                grad_scaling_mode = get_quantize_config().get_scaling_mode(TensorSource.DGRAD)
 
-        fwd_dtype = fwd_dtype or get_quantize_config().FWD_DTYPE
-        bwd_dtype = bwd_dtype or get_quantize_config().BWD_DTYPE
+            fwd_dtype = fwd_dtype or get_quantize_config().FWD_DTYPE
+            bwd_dtype = bwd_dtype or get_quantize_config().BWD_DTYPE
         if is_2x2x is None:
             # TODO(Jeremy): check x, kernel, grad separately for 2x
             if x_scaling_mode.is_1d_block_scaling():
