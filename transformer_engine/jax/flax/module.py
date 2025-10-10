@@ -15,7 +15,6 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from transformer_engine.common import recipe
 
 from ..dense import dense
 
@@ -35,10 +34,9 @@ from ..cpp_extensions import (
 from ..quantize import (
     QuantizerFactory,
     get_quantize_config,
-    QuantizeMeta,
     QuantizeMetaSet,
-    ScalingMode,
     TensorSource,
+    get_quantize_config_with_recipe,
 )
 
 PRNGKey = Any
@@ -353,40 +351,32 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         Generate a set of FP8 meta for a GEMM.
         """
 
-        def generate_quantize_meta(quantizer_name: str):
-            collection_name = (
-                variable_collection
-                if variable_collection is not None
-                else get_quantize_config().COLLECTION_NAME
-            )
-            scale = self.variable(
-                collection_name,
-                f"{quantizer_name}{postfix}_scale",
-                jnp.ones,
-                (1,),
-                jnp.float32,
-            ).value
-            amax_history = self.variable(
-                collection_name,
-                f"{quantizer_name}{postfix}_amax_history",
-                jnp.zeros,
-                (get_quantize_config().AMAX_HISTORY_LEN,),
-                jnp.float32,
-            ).value
-            return QuantizeMeta(scale=scale, amax_history=amax_history)
+        collection_name = (
+            variable_collection
+            if variable_collection is not None
+            else get_quantize_config().COLLECTION_NAME
+        )
 
-        if get_quantize_config().get_scaling_mode(
-            TensorSource.X
-        ) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(fp8_recipe, recipe.DelayedScaling):
-            x_meta = generate_quantize_meta("x")
-            kernel_meta = generate_quantize_meta("kernel")
-            grad_meta = generate_quantize_meta("grad")
-            quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
-            kwargs = {"quantize_meta_set": quantize_meta_set}
+        if fp8_recipe is None:
+            quantize_config = get_quantize_config()
         else:
-            kwargs = {}
+            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
 
-        quantizer_set = QuantizerFactory.create_set(fp8_recipe=fp8_recipe, **kwargs)
+        x_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.X, "x"
+        )
+        kernel_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.KERNEL, "kernel"
+        )
+        grad_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.DGRAD, "grad"
+        )
+
+        quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
+
+        quantizer_set = QuantizerFactory.create_set(
+            fp8_recipe=fp8_recipe, quantize_meta_set=quantize_meta_set
+        )
         return quantizer_set
 
 
@@ -432,6 +422,8 @@ class DenseGeneral(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
+    transpose_batch_sequence: bool, default = False
+        Indicate whether to transpose the batch and sequence dimensions of the input tensor.
     """
 
     features: Union[Iterable[int], int]
@@ -446,6 +438,7 @@ class DenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     input_axes: Tuple[str, ...] = ()
+    transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -512,6 +505,7 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
+            transpose_batch_sequence=self.transpose_batch_sequence,
         )
 
         if self.enable_low_rank_adaptation:
@@ -632,6 +626,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     depth_scaling: float, default = None
         The factor to scale the output from `DenseGeneral`. It should be a float
         value or None. When None is set, then no scaling is applied.
+    transpose_batch_sequence: bool, default = False
+        Indicate whether to transpose the batch and sequence dimensions of the input tensor.
     """
 
     features: Union[Iterable[int], int]
@@ -657,6 +653,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     layernorm_input_axes: Tuple[str, ...] = None
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
+    transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -768,6 +765,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 dot_input_axes=self.dot_input_axes,
                 kernel_axes=self.kernel_axes,
                 quantizer_set=quantizer_set,
+                transpose_batch_sequence=self.transpose_batch_sequence,
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
@@ -775,6 +773,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 y,
                 kernel,
                 contracting_dims=(axis, contract_ind),
+                transpose_batch_sequence=self.transpose_batch_sequence,
                 input_axes=self.dot_input_axes,
                 kernel_axes=self.kernel_axes,
                 quantizer_set=quantizer_set,
@@ -898,6 +897,10 @@ class LayerNormMLP(TransformerEngineBase):
     activations: Sequence[Union[str, Callable]], default = ('relu',)
         The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
+    activation_params: dict, default = None
+        The parameters needed(if any) by the activation functions specified in :attr:`activations`.
+        At the moment only ('clamped_silu', 'clamped_linear') which is clamped_swiglu used in GPT OSS
+        need additional parameters.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
     intermediate_dropout_rate: float, default = 0.1
@@ -936,6 +939,8 @@ class LayerNormMLP(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
+    transpose_batch_sequence: bool, default = False
+        Indicate whether to transpose the batch and sequence dimensions of the input tensor.
     """
 
     intermediate_dim: int = 2048
@@ -956,6 +961,7 @@ class LayerNormMLP(TransformerEngineBase):
     bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    activation_params: dict = None
     intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.1
     intermediate_hidden_dropout_dims: Sequence[int] = ()
@@ -969,6 +975,7 @@ class LayerNormMLP(TransformerEngineBase):
     dot_2_input_axes: Tuple[str, ...] = None
     ffn1_ckpt_name: str = "ffn1"
     ffn2_ckpt_name: str = "ffn2"
+    transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -1023,6 +1030,7 @@ class LayerNormMLP(TransformerEngineBase):
             ("relu", "linear"),
             ("quick_gelu", "linear"),
             ("squared_relu", "linear"),
+            ("clamped_silu", "clamped_linear"),
         ]
         act_pool = [("gelu",), ("silu",), ("relu",), ("quick_gelu",), ("squared_relu",)]
         normalized_acts = []
@@ -1031,7 +1039,9 @@ class LayerNormMLP(TransformerEngineBase):
                 return False
             normalized_acts.append(act.lower())
         normalized_acts = tuple(
-            reversed(normalized_acts) if normalized_acts[0] == "linear" else normalized_acts
+            reversed(normalized_acts)
+            if (normalized_acts[0] == "linear" or normalized_acts[0] == "clamped_linear")
+            else normalized_acts
         )
 
         is_act_implemented = normalized_acts in (gated_act_pool + act_pool)
@@ -1150,7 +1160,9 @@ class LayerNormMLP(TransformerEngineBase):
                 ffn1_ckpt_name=self.ffn1_ckpt_name,
                 ffn2_ckpt_name=self.ffn2_ckpt_name,
                 activation_type=normalized_acts,
+                activation_params=self.activation_params,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
+                transpose_batch_sequence=self.transpose_batch_sequence,
             )
             out = out.reshape(*inputs.shape[: self.axis], *hidden_size_tuple)
 
@@ -1169,6 +1181,7 @@ class LayerNormMLP(TransformerEngineBase):
                     dot_input_axes=self.dot_1_input_axes,
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                 )
             else:
                 y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
@@ -1179,6 +1192,7 @@ class LayerNormMLP(TransformerEngineBase):
                     input_axes=self.dot_1_input_axes,
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                 )
 
             if self.enable_low_rank_adaptation:
@@ -1251,6 +1265,7 @@ class LayerNormMLP(TransformerEngineBase):
                 input_axes=self.dot_2_input_axes,
                 kernel_axes=self.kernel_axes_2,
                 quantizer_set=ffn2_quantizer_set,
+                transpose_batch_sequence=self.transpose_batch_sequence,
             )
 
             if self.enable_low_rank_adaptation:
@@ -1287,4 +1302,4 @@ class LayerNormMLP(TransformerEngineBase):
             out = checkpoint_name(out, self.ffn2_ckpt_name)
 
         assert out.dtype == input_dtype
-        return out, ln_output  # Output, layner_norm_output
+        return out, ln_output  # Output, layer_norm_output
