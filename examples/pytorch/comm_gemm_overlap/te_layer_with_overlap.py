@@ -68,7 +68,7 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
     parser.add_argument(
-        "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+        "--fp8", action="store_true", default=False, help="Enables the te.autocast() context."
     )
     parser.add_argument(
         "--no-comm-overlap",
@@ -299,7 +299,7 @@ def _train(opts):
 
         dist_print("    |-- Forward pass", group=tp_group, debug=True)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            with te.fp8_autocast(enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=nccl_world):
+            with te.autocast(enabled=opts.fp8, recipe=fp8_recipe, amax_reduction_group=nccl_world):
                 y = model(x)
                 if isinstance(y, tuple):
                     out, *_ = y

@@ -34,7 +34,7 @@ class RunConfiguration:
         # FP8 precision settings
         self.fp8 = False
         self.fp8_model_weights_filename = None
-        self.fp8_model_init = False
+        self.quantized_model_init = False
 
         # Cuda graphs
         self.generation_cuda_graphs = False

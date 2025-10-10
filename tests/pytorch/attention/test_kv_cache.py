@@ -16,7 +16,7 @@ import torch
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import fp8_autocast, fp8_model_init
+from transformer_engine.pytorch import autocast, quantized_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
@@ -238,7 +238,7 @@ def get_model(
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 TransformerLayer(
                     hidden_size=hidden_size,
@@ -261,7 +261,7 @@ def get_model(
                 for layer_number in range(1, num_layers + 1)
             ]
     if module == "DotProductAttention":
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 DotProductAttention(
                     kv_channels=config.head_dim_qk,
@@ -654,7 +654,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
         incremental_output = incremental_inputs
-        with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
+        with autocast(enabled=is_fp8, recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
                     *incremental_output,

@@ -23,7 +23,7 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     get_quantize_config_with_recipe,
 )
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.flax import LayerNormMLP
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 from transformer_engine.jax.sharding import (
@@ -210,9 +210,9 @@ class TestDistributedLayernormMLP:
             )
 
             # Single GPU
-            with fp8_autocast(
+            with autocast(
                 enabled=quantization_recipe is not None,
-                fp8_recipe=quantization_recipe,
+                recipe=quantization_recipe,
                 mesh_resource=MeshResource(),
             ):
                 single_jitter = jax.jit(
@@ -224,9 +224,9 @@ class TestDistributedLayernormMLP:
             # Multi GPUs
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
-            with mesh, fp8_autocast(
+            with mesh, autocast(
                 enabled=quantization_recipe is not None,
-                fp8_recipe=quantization_recipe,
+                recipe=quantization_recipe,
                 mesh_resource=mesh_resource,
             ):
                 k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tpsp"))
@@ -381,8 +381,8 @@ class TestDistributedLayernormMLP:
 
         with use_jax_gemm(enabled=with_jax_gemm):
             # Single GPUs
-            with fp8_autocast(
-                enabled=use_fp8, fp8_recipe=quantization_recipe, mesh_resource=MeshResource()
+            with autocast(
+                enabled=use_fp8, recipe=quantization_recipe, mesh_resource=MeshResource()
             ):
                 ln_mlp_single = LayerNormMLP(
                     layernorm_type=layernorm_type,
@@ -399,8 +399,8 @@ class TestDistributedLayernormMLP:
             device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
-            with mesh, fp8_autocast(
-                enabled=use_fp8, fp8_recipe=quantization_recipe, mesh_resource=mesh_resource
+            with mesh, autocast(
+                enabled=use_fp8, recipe=quantization_recipe, mesh_resource=mesh_resource
             ):
                 ln_mlp_sharded = LayerNormMLP(
                     layernorm_type=layernorm_type,

@@ -15,7 +15,7 @@ from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
 from utils import pytest_parametrize_wrapper
 
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
@@ -133,7 +133,7 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
+        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
             beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
@@ -209,7 +209,7 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
+        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
 

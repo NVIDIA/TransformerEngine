@@ -7,6 +7,7 @@ Config module for quantization metadata management
 This module provides configuration and helper functions for managing quantization metadata
 in JAX, including support for different scaling modes and datatypes.
 """
+
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,7 +24,14 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
 from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
-from transformer_engine.common import recipe
+from transformer_engine.common.recipe import (
+    Recipe,
+    DelayedScaling,
+    Format,
+    MXFP8BlockScaling,
+    Float8CurrentScaling,
+    NVFP4BlockScaling,
+)
 from transformer_engine.jax.sharding import (
     global_shard_guard,
     MeshResource,
@@ -39,6 +47,7 @@ from .device_utils import get_device_compute_capability
 __all__ = [
     "get_quantize_config",
     "get_quantize_config_with_recipe",
+    "autocast",
     "fp8_autocast",
     "is_fp8_available",
     "is_scaling_mode_supported",
@@ -51,8 +60,6 @@ __all__ = [
     "TensorSource",
 ]
 
-_is_fp8_available = None
-_reason_for_no_fp8 = ""
 _is_scaling_mode_supported = None
 _reason_for_no_scaling_mode = ""
 Collection = Union[Dict, FrozenDict]
@@ -195,22 +202,22 @@ def get_supported_scaling_modes() -> List[ScalingMode]:
     ]
 
 
-def get_supported_quantization_recipes() -> List[recipe.Recipe]:
+def get_supported_quantization_recipes() -> List[Recipe]:
     """Get all supported quantization recipes."""
     # We don't support all the recipes TE/Common supports yet
     # return [get_quantize_config_class(recipe)() for recipe in recipe.Recipe.__subclasses__()]
     all_recipes = [
-        recipe.DelayedScaling(),
-        recipe.Float8CurrentScaling(),
-        recipe.MXFP8BlockScaling(),
-        recipe.NVFP4BlockScaling(),
+        DelayedScaling(),
+        Float8CurrentScaling(),
+        MXFP8BlockScaling(),
+        NVFP4BlockScaling(),
     ]
     return [
         recipe for recipe in all_recipes if get_quantize_config_class(recipe)().is_supported()[0]
     ]
 
 
-def _format2dtypes(format_: recipe.Format):
+def _format2dtypes(format_: Format):
     """Convert recipe.Format.dtype to corresponding JAX dtypes.
 
     Args:
@@ -219,13 +226,13 @@ def _format2dtypes(format_: recipe.Format):
     Returns:
         A tuple of (forward_dtype, backward_dtype) for the given format
     """
-    if format_ == recipe.Format.E4M3:
+    if format_ == Format.E4M3:
         return jnp.float8_e4m3fn, jnp.float8_e4m3fn
-    if format_ == recipe.Format.E5M2:
+    if format_ == Format.E5M2:
         return jnp.float8_e5m2, jnp.float8_e5m2
-    if format_ == recipe.Format.HYBRID:
+    if format_ == Format.HYBRID:
         return jnp.float8_e4m3fn, jnp.float8_e5m2
-    if format_ == recipe.Format.E2M1:
+    if format_ == Format.E2M1:
         return jnp.float4_e2m1fn, jnp.float4_e2m1fn
     return jnp.bfloat16, jnp.bfloat16
 
@@ -289,7 +296,7 @@ class BaseQuantizeConfig(ABC):
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize the quantization configuration from a given recipe.
 
         Args:
@@ -359,7 +366,7 @@ class BaseQuantizeConfig(ABC):
 class NoOpQuantizeConfig(BaseQuantizeConfig):
     """Configuration class higher-precision non-quantized operation."""
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize no-op configuration."""
         raise NotImplementedError(
             "NoOpQuantizeConfig cannot be initialize from a recipe as it represents"
@@ -399,7 +406,7 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
     FP8 quantization mode.
     """
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize delayed scaling FP8 configuration.
 
         Args:
@@ -477,7 +484,7 @@ class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
     FP8 quantization mode.
     """
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize current scaling FP8 configuration.
 
         Args:
@@ -519,7 +526,7 @@ class BlockScalingQuantizeConfig(BaseQuantizeConfig):
     FP8 quantization mode.
     """
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize block scaling FP8 configuration.
 
         Args:
@@ -560,7 +567,7 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
     This class provides specific initialization and finalization for NVFP4 scaling quantization mode.
     """
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize block scaling FP8 configuration.
 
         Args:
@@ -622,12 +629,12 @@ _QUANTIZE_CONFIG = NoOpQuantizeConfig()
 
 
 def get_quantize_config():
-    """Global instance of BaseQuantizeConfig set by fp8_autocast context."""
+    """Global instance of BaseQuantizeConfig set by autocast context."""
     return _QUANTIZE_CONFIG
 
 
 def get_quantize_config_class(
-    fp8_recipe: recipe.Recipe,
+    fp8_recipe: Recipe,
 ) -> Type[BaseQuantizeConfig]:
     """Get the quantization configuration class based on the FP8 recipe.
 
@@ -636,18 +643,18 @@ def get_quantize_config_class(
     Returns:
         The quantization config class corresponding to the given recipe.
     """
-    if isinstance(fp8_recipe, recipe.DelayedScaling):
+    if isinstance(fp8_recipe, DelayedScaling):
         return DelayedScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+    if isinstance(fp8_recipe, MXFP8BlockScaling):
         return BlockScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+    if isinstance(fp8_recipe, Float8CurrentScaling):
         return CurrentScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.NVFP4BlockScaling):
+    if isinstance(fp8_recipe, NVFP4BlockScaling):
         return NVFP4ScalingQuantizeConfig
     raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
 
 
-def get_quantize_config_with_recipe(fp8_recipe: recipe.Recipe):
+def get_quantize_config_with_recipe(fp8_recipe: Recipe):
     """Get the quantization configuration object based on the FP8 recipe."""
     config = get_quantize_config_class(fp8_recipe)()
     config.initialize_from_recipe(fp8_recipe)
@@ -655,14 +662,14 @@ def get_quantize_config_with_recipe(fp8_recipe: recipe.Recipe):
 
 
 @contextmanager
-def fp8_autocast(
+def autocast(
     enabled: bool = False,
-    fp8_recipe: Optional[recipe.Recipe] = None,
+    recipe: Optional[Recipe] = None,
     mesh_resource: Optional[MeshResource] = None,
 ) -> None:
-    r"""Context manager for FP8 automatic mixed precision.
+    r"""Context manager for FP8 or FP4 usage.
 
-    This context manager enables FP8 quantization for the duration of its context.
+    This context manager enables quantization for the duration of its context.
         .. code-block:: python
 
             mesh_shape = (4, 2)
@@ -673,7 +680,7 @@ def fp8_autocast(
             with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
                 mesh_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
 
-                with fp8_autocast(enabled=True, mesh_resource=mesh_resource):
+                with autocast(enabled=True, mesh_resource=mesh_resource):
                     rules = extend_logical_axis_rules(tuple())
                     transformer = TransformerLayer()
 
@@ -690,15 +697,15 @@ def fp8_autocast(
     ----------
     enabled: bool, default = False
         Whether or not to enable fp8
-    fp8_recipe: recipe.DelayedScaling, default = None
-        Recipe used for FP8 training.
+    recipe: recipe.DelayedScaling, default = None
+            recipe used for low precision quantization.
     mesh_resource: MeshResource, default = None
         Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then no data or tensor parallelism will be used.
 
     """
-    if fp8_recipe is None:
-        fp8_recipe = recipe.DelayedScaling()
+    if recipe is None:
+        recipe = DelayedScaling()
 
     global _QUANTIZE_CONFIG
 
@@ -709,13 +716,43 @@ def fp8_autocast(
     try:
         with global_shard_guard(mesh_resource):
             if enabled:
-                _QUANTIZE_CONFIG = get_quantize_config_class(fp8_recipe)()
+                _QUANTIZE_CONFIG = get_quantize_config_class(recipe)()
                 is_supported, reason = _QUANTIZE_CONFIG.is_supported()
                 assert is_supported, reason
-                _QUANTIZE_CONFIG.initialize_from_recipe(fp8_recipe)
+                _QUANTIZE_CONFIG.initialize_from_recipe(recipe)
             yield
     finally:
         _QUANTIZE_CONFIG = old_quantize_config
+
+
+@contextmanager
+def fp8_autocast(
+    enabled: bool = False,
+    fp8_recipe: Optional[Recipe] = None,
+    mesh_resource: Optional[MeshResource] = None,
+) -> None:
+    """
+    .. warning::
+
+       fp8_autocast is deprecated and will be removed in a future release.
+       Use autocast(enabled=..., recipe=..., mesh_resource=...) instead.
+
+    """
+
+    warnings.warn(
+        "fp8_autocast is deprecated and will be removed in a future release. "
+        "Use autocast(enabled=..., recipe=..., mesh_resource=...) instead.",
+        category=DeprecationWarning,
+        stacklevel=2,
+    )
+
+    # Call new implementation.
+    with autocast(
+        enabled=enabled,
+        recipe=fp8_recipe,
+        mesh_resource=mesh_resource,
+    ):
+        yield
 
 
 def update_collections(new: Collection, original: Collection) -> Collection:

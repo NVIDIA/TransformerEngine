@@ -15,8 +15,8 @@ from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from .fp8 import (
-    fp8_autocast,
+from .quantize import (
+    autocast,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -913,7 +913,7 @@ def make_graphed_callables(
                         Whether or not to cache FP8 weights across microbatches. if set to `True`,
                         the `is_first_microbatch` boolean argument must be passed into the forward
                         method for TransformerEngine modules. When storing primary weights in FP8
-                        using TE's `fp8_model_init` API and using an FP8 aware optimizer, this arg
+                        using TE's `quantized_model_init` API and using an FP8 aware optimizer, this arg
                         must be set to `False` if calculating weight transposes' outside TE, e.g.,
                         in the optimizer step.
 
@@ -954,11 +954,11 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            with fp8_autocast(
+            with autocast(
                 enabled=module_uses_fp8.get(id(self), False),
                 calibrating=fp8_calibrating,
-                fp8_recipe=fp8_recipe,
-                fp8_group=fp8_group,
+                recipe=fp8_recipe,
+                amax_reduction_group=fp8_group,
                 _graph=True,
             ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)

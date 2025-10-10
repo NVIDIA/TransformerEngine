@@ -316,15 +316,15 @@ def _apply_models(
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
     input_single_node.requires_grad_()
     input_distributed.requires_grad_()
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
+        recipe=quantization_recipe(),
     ):
         output_single_node = model_single_node(input_single_node, **kwargs)
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
-        fp8_group=NCCL_WORLD,
+        recipe=quantization_recipe(),
+        amax_reduction_group=NCCL_WORLD,
     ):
         output_distributed = model_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed

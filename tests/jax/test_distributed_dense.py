@@ -15,7 +15,7 @@ from distributed_test_base import generate_configs
 from utils import assert_allclose, pytest_parametrize_wrapper
 
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.dense import dense
 
 
@@ -127,7 +127,7 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))  # Contract on hidden_in dimension
 
-        with mesh, fp8_autocast(enabled=False, mesh_resource=mesh_resource):
+        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
             # TE GEMM result
             te_result = _jitted_gemm(
                 x_sharded,
@@ -209,7 +209,7 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))
 
-        with mesh, fp8_autocast(enabled=False, mesh_resource=mesh_resource):
+        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
             # Test gradients w.r.t. all inputs
             te_grad_func = jax.jit(
                 jax.value_and_grad(self._te_sum_dense, argnums=(0, 1, 2)),
