@@ -14,7 +14,7 @@ from torch.amp import autocast
 import transformer_engine as te
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
 from transformer_engine.common.recipe import Format, DelayedScaling
-from transformer_engine.pytorch.fp8 import get_default_fp8_recipe
+from transformer_engine.pytorch.quantize import get_default_fp8_recipe
 import transformers
 from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConfig, GemmaModel
 
@@ -461,8 +461,8 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
 
         # Both autocasts are needed: FP8 for operations that can run in lower
         # precision and BF16 for those that cannot.
-        with autocast("cuda", dtype=torch.bfloat16, cache_enabled=False), te.pytorch.fp8_autocast(
-            enabled=self.config.fp8, fp8_recipe=self.fp8_recipe if self.config.fp8 else None
+        with autocast("cuda", dtype=torch.bfloat16, cache_enabled=False), te.pytorch.autocast(
+            enabled=self.config.fp8, recipe=self.fp8_recipe if self.config.fp8 else None
         ):
             lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze()
             # If padding is at the beginning, then shift it to the end

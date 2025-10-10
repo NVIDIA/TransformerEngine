@@ -13,11 +13,11 @@ from transformer_engine.pytorch import (
     Linear,
     MultiheadAttention,
     TransformerLayer,
-    fp8_autocast,
-    fp8_model_init,
+    autocast,
+    quantized_model_init,
     make_graphed_callables,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.quantize import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
@@ -201,7 +201,7 @@ def _test_cuda_graphs(
         fp8_weight_caching = False
 
     # Create modules.
-    with fp8_model_init(enabled=fp8_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
         if module == "transformer":
             modules = [
                 TransformerLayer(
@@ -311,7 +311,7 @@ def _test_cuda_graphs(
         for grad_accumulation_step in range(2):
             input_ = generate_data(model_config, dtype)
             grad_output = generate_data(model_config, dtype, requires_grad=False)
-            with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
+            with autocast(enabled=fp8, recipe=fp8_recipe):
                 kwargs = {}
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0

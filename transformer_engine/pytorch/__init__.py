@@ -49,7 +49,7 @@ from transformer_engine.pytorch.permutation import (
 from transformer_engine.pytorch.quantize import fp8_autocast
 from transformer_engine.pytorch.quantize import fp8_model_init
 from transformer_engine.pytorch.quantize import autocast
-from transformer_engine.pytorch.quantize import model_init
+from transformer_engine.pytorch.quantize import quantized_model_init
 from transformer_engine.pytorch.quantize import is_fp8_available
 from transformer_engine.pytorch.quantize import is_mxfp8_available
 from transformer_engine.pytorch.quantize import is_fp8_block_scaling_available

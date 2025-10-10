@@ -9,14 +9,11 @@ import pathlib
 import pytest
 import torch
 import transformer_engine as te
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import Float8BlockScaling
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
-    Float8BlockwiseQTensor,
 )
 from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
@@ -32,7 +29,7 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scaling_available()
+recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available()
 recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 

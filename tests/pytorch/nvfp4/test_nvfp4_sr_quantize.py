@@ -4,10 +4,10 @@
 
 import pytest
 import torch
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
 
 seed = 12345
 torch.manual_seed(seed)

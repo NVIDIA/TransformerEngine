@@ -31,7 +31,7 @@ from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
 
-__all__ = ["autocast", "model_init", "is_fp8_available", "is_mxfp8_available", "is_fp8_block_scaling_available", "is_nvfp4_available"]
+__all__ = ["autocast", "quantized_model_init", "is_fp8_available", "is_mxfp8_available", "is_fp8_block_scaling_available", "is_nvfp4_available"]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
@@ -176,7 +176,7 @@ class FP8GlobalStateManager:
     HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
-    FP8_AUTOCAST_DEPTH = 0
+    AUTOCAST_DEPTH = 0
     global_amax_buffer = {}
     global_amax_history_buffer = {}
     global_scale_buffer = {}
@@ -203,7 +203,7 @@ class FP8GlobalStateManager:
         cls.HIGH_PRECISION_INIT_VAL = False
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_GRAPH_CAPTURING = False
-        cls.FP8_AUTOCAST_DEPTH = 0
+        cls.AUTOCAST_DEPTH = 0
         cls.global_amax_buffer = {}
         cls.global_amax_history_buffer = {}
         cls.global_scale_buffer = {}
@@ -380,7 +380,7 @@ class FP8GlobalStateManager:
     @classmethod
     def is_first_fp8_module(cls):
         """Returns `True` only the first time when called multiple
-        times from within the same `fp8_autocast` context.
+        times from within the same `autocast` context.
         """
         tmp = cls.IS_FIRST_FP8_MODULE
         cls.IS_FIRST_FP8_MODULE = False
@@ -399,7 +399,7 @@ class FP8GlobalStateManager:
         return cls.FP8_DISTRIBUTED_GROUP
 
     @classmethod
-    def get_fp8_autocast_state(cls) -> Tuple[bool, bool, Recipe, dist_group_type, bool]:
+    def get_autocast_state(cls) -> Tuple[bool, bool, Recipe, dist_group_type, bool]:
         """FP8 autocast state getter"""
         return (
             cls.FP8_ENABLED,
@@ -411,7 +411,7 @@ class FP8GlobalStateManager:
         )
 
     @classmethod
-    def set_fp8_autocast_state(
+    def set_autocast_state(
         cls, fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool]
     ) -> None:
         """FP8 autocast state setter"""
@@ -522,9 +522,9 @@ class FP8GlobalStateManager:
         cls.FP8_DISTRIBUTED_GROUP = fp8_group
         cls.FP8_GRAPH_CAPTURING = _graph
 
-        if cls.FP8_AUTOCAST_DEPTH == 0:
+        if cls.AUTOCAST_DEPTH == 0:
             cls.IS_FIRST_FP8_MODULE = True
-        cls.FP8_AUTOCAST_DEPTH += 1
+        cls.AUTOCAST_DEPTH += 1
 
         if enabled:
             fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
@@ -542,11 +542,11 @@ class FP8GlobalStateManager:
     @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
-        cls.FP8_AUTOCAST_DEPTH -= 1
+        cls.AUTOCAST_DEPTH -= 1
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
+        if enabled and cls.AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
@@ -617,18 +617,19 @@ def fp8_model_init(
     preserve_high_precision_init_val: bool = False,
 ) -> None:
     """
-    DEPRECATED: use `model_init(...)` instead.
+    DEPRECATED: use `quantized_model_init(...)` instead.
     """
 
     warnings.warn(
         "fp8_model_init is deprecated and will be removed in a future release. "
-        "Use model_init(enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.",
+        "Use quantized_model_init("
+                        "enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.",
         category=DeprecationWarning,
         stacklevel=2,
     )
 
     # Call new implementation.
-    with model_init(
+    with quantized_model_init(
         enabled=enabled,
         recipe=recipe,
         preserve_high_precision_init_val=preserve_high_precision_init_val,
@@ -637,23 +638,23 @@ def fp8_model_init(
 
 
 @contextmanager
-def model_init(
+def quantized_model_init(
     enabled: bool = True,
     recipe: Optional[Recipe] = None,
     preserve_high_precision_init_val: bool = False,
 ) -> None:
     """
-    Context manager for FP8 initialization of parameters.
+    Context manager for initialization of quantized parameters.
 
     Example usage:
 
     .. code-block:: python
 
-        with fp8_model_init(enabled=True):
+        with quantized_model_init(enabled=True):
             model = transformer_engine.pytorch.Linear(768, 768)
 
         # Preserving high precision initial value to initialize master weight
-        with fp8_model_init(enabled=True, preserve_high_precision_init_val=True):
+        with quantized_model_init(enabled=True, preserve_high_precision_init_val=True):
             model = transformer_engine.pytorch.Linear(768, 768)
         master_weight = model.weight.get_high_precision_init_val()
         model.weight.clear_high_precision_init_val()
@@ -661,25 +662,25 @@ def model_init(
     Parameters
     ----------
     enabled: bool, default = `True`
-             when enabled, Transformer Engine modules created inside this `fp8_model_init`
-             region will hold only FP8 copies of its parameters, as opposed to the default
-             behavior where both higher precision and FP8 copies are present. Setting this
+             when enabled, Transformer Engine modules created inside this `quantized_model_init`
+             region will hold only quantized copies of its parameters, as opposed to the default
+             behavior where both higher precision and quantized copies are present. Setting this
              option to `True` may result in lower memory consumption and is especially
              useful for scenarios like:
 
              * full model training using optimizer with master weights, where the high
                precision copies of weights are already present in the optimizer.
-             * inference, where only the FP8 copies of the parameters are used.
+             * inference, where only the quantized copies of the parameters are used.
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
     recipe: transformer_engine.common.recipe.Recipe, default = `None`
-            Recipe used to create the parameters. If left to None, it uses the default FP8 recipe.
+            Recipe used to create the parameters. If left to None, it uses the default recipe.
     preserve_high_precision_init_val: bool, default = `False`
-             when enabled, store the high precision tensor used to initialize FP8 parameters
+             when enabled, store the high precision tensor used to initialize quantized parameters
              in CPU memory, and add two function attributes named `get_high_precision_init_val()`
-             and `clear_high_precision_init_val()` to FP8 parameters to get/clear this high
+             and `clear_high_precision_init_val()` to quantized parameters to get/clear this high
              precision tensor. The purpose is that users can use this high-precision copy
              to initialize master weights, avoiding the loss of precision that can occur when
-             using FP8 parameters directly. Note that after the master weights are initialized,
+             using quantized parameters directly. Note that after the master weights are initialized,
              users should call `clear_high_precision_init_val()` to release this CPU memory.
 
              This functionality is *EXPERIMENTAL*.
@@ -754,9 +755,9 @@ def autocast(
     .. note::
 
         When :attr:`fp8_recipe.reduce_amax==True`, any module must not be invoked more than once
-        inside a single `fp8_autocast` region. This is unsupported behavior because the amax
-        reduction is handled during the exit of the `fp8_autocast` context. Calling the same
-        module more than once inside an `fp8_autocast` region overrides the amax tensors
+        inside a single `autocast` region. This is unsupported behavior because the amax
+        reduction is handled during the exit of the `autocast` context. Calling the same
+        module more than once inside an `autocast` region overrides the amax tensors
         before reduction can occur.
 
     Parameters
@@ -779,7 +780,7 @@ def autocast(
         check_recipe_support(recipe)
 
     # Save current state so we always restore it on exit.
-    fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
+    fp8_state = FP8GlobalStateManager.get_autocast_state()
 
     FP8GlobalStateManager.autocast_enter(
         enabled=enabled,
@@ -791,7 +792,7 @@ def autocast(
     try:
         yield
     finally:
-        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state)
+        FP8GlobalStateManager.set_autocast_state(fp8_state)
         FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
 
 

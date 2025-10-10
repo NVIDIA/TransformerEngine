@@ -17,7 +17,7 @@ import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.pytorch.fp8 import _default_sf_compute
+from transformer_engine.pytorch.quantized import _default_sf_compute
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -27,9 +27,9 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_WGRAD,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import is_fp8_available
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available()
 
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID
@@ -250,7 +250,7 @@ def _init_model(weight):
 
 
 def _run_forward_backward(x, model, loss_scale=1.0, is_first_microbatch=None, fp8=True):
-    with tepytorch.fp8_autocast(enabled=fp8, fp8_recipe=FP8_RECIPE):
+    with tepytorch.autocast(enabled=fp8, recipe=FP8_RECIPE):
         y = model(x, is_first_microbatch=is_first_microbatch)
     (y.sum() * loss_scale).backward()
     debug_api.step()
@@ -547,7 +547,7 @@ def run_per_tensor_scaling(
 
     LOSS_MULTIPLIER = 100
 
-    with tepytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with tepytorch.autocast(enabled=True, recipe=FP8_RECIPE):
         y = model(x, is_first_microbatch=True)
         model.zero_grad()
         y.retain_grad()

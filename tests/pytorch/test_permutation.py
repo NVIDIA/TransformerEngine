@@ -8,6 +8,7 @@ import torch
 import pytest
 from typing import Dict, List
 
+import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     moe_permute as te_permute,
@@ -17,7 +18,6 @@ from transformer_engine.pytorch import (
     moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1239,10 +1239,10 @@ def test_permutation_mask_map_alongside_probs_empty_input(te_dtype):
 
 
 # Only run FP8 tests on H100.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+    te.is_fp8_block_scaling_available()
 )
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),

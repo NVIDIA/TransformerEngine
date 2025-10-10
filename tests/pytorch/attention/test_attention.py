@@ -10,8 +10,9 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
+from transformer_engine.pytorch.quantize import FP8GlobalStateManager
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
+from transformer_engine.pytorch import TransformerLayer, autocast, fp8_model_init
 from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
     _attention_backends,
@@ -29,7 +30,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -56,7 +56,7 @@ from utils import (
 )
 
 # Check if hardware supports FP8
-fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 # Reset RNG seed and states
 seed = 1234
@@ -67,7 +67,7 @@ reset_rng_states()
 @pytest.fixture(autouse=True)
 def reset_global_fp8_state():
     yield
-    fp8.FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.reset()
 
 
 # Define F16 data types to test
@@ -1609,7 +1609,7 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
 
     block = get_model(dtype, config)
     for i in range(steps // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+        with autocast(enabled=fp8_enabled, recipe=fp8_recipe):
             output = block(hidden_states, None)
             loss = output.sum()
             loss.backward()
@@ -1644,7 +1644,7 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
         assert not param_grads, "Oops!"
 
     for i in range((steps + 1) // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+        with autocast(enabled=fp8_enabled, recipe=fp8_recipe):
             output = block(hidden_states, None)
             loss = output.sum()
             loss.backward()
@@ -1892,7 +1892,7 @@ def _run_mha_fp8_vs_f16(
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
 
-    with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
+    with autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,
             attn_mask_type=config.attn_mask_type,
@@ -2202,7 +2202,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
-    with fp8_autocast(enabled=fp8_dpa, fp8_recipe=fp8_recipe):
+    with autocast(enabled=fp8_dpa, recipe=fp8_recipe):
         out = dpa(
             inp[0],
             inp[1],
@@ -2343,7 +2343,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
-    with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+    with autocast(enabled=True, recipe=fp8_recipe):
         out = mha(inp, cu_seqlens, config.max_seqlen_q)
     out.backward(out_grad)
 

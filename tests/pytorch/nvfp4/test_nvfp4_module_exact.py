@@ -5,13 +5,11 @@
 import os
 import pytest
 import torch
-import transformer_engine as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.distributed import fp8_autocast
+import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 
 
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
 
 
 class GetRecipes:
@@ -118,16 +116,16 @@ def check_nvfp4_module_versus_reference(
 
     # Create native module
     print("\nCreate native module")
-    if module_class == te.pytorch.Linear:
-        native_module = te.pytorch.Linear(
+    if module_class == te.Linear:
+        native_module = te.Linear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
             device=device,
             params_dtype=x_dtype,
         )
-    elif module_class == te.pytorch.LayerNormLinear:
-        native_module = te.pytorch.LayerNormLinear(
+    elif module_class == te.LayerNormLinear:
+        native_module = te.LayerNormLinear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
@@ -143,16 +141,16 @@ def check_nvfp4_module_versus_reference(
 
     # Create reference module
     print("Create reference module")
-    if module_class == te.pytorch.Linear:
-        ref_module = te.pytorch.Linear(
+    if module_class == te.Linear:
+        ref_module = te.Linear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
             device=device,
             params_dtype=x_dtype,
         )
-    elif module_class == te.pytorch.LayerNormLinear:
-        ref_module = te.pytorch.LayerNormLinear(
+    elif module_class == te.LayerNormLinear:
+        ref_module = te.LayerNormLinear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
@@ -197,15 +195,15 @@ def check_nvfp4_module_versus_reference(
 
         # Native forward/backward
         cleanup_environment()
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             # enable weight cache by giving is_first_microbatch
             y_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
         setup_environment_for_reference(with_rht, with_2d_quantization)
-        with fp8_autocast(
-            enabled=True, fp8_recipe=nvfp4_recipe
+        with te.autocast(
+            enabled=True, recipe=nvfp4_recipe
         ):  # Exact recipe does not play a role here
             y_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
@@ -332,7 +330,7 @@ def test_nvfp4_linear_versus_reference(
         pytest.skip("RHT is only supported for bfloat16 input")
 
     check_nvfp4_module_versus_reference(
-        module_class=te.pytorch.Linear,
+        module_class=te.Linear,
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -366,7 +364,7 @@ def check_nvfp4_layernorm_linear_versus_reference(
     reset_rng_states()
 
     # Native module
-    native_module = te.pytorch.LayerNormLinear(
+    native_module = te.LayerNormLinear(
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -379,7 +377,7 @@ def check_nvfp4_layernorm_linear_versus_reference(
     # Reference module
     setup_environment_for_reference(with_rht, with_2d_quantization)
     reset_rng_states()
-    ref_module = te.pytorch.LayerNormLinear(
+    ref_module = te.LayerNormLinear(
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -427,13 +425,13 @@ def check_nvfp4_layernorm_linear_versus_reference(
 
         # Native forward/backward
         cleanup_environment()
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_native, ln_out_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
         setup_environment_for_reference(with_rht, with_2d_quantization)
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_ref, ln_out_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
 

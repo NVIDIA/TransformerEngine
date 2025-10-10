@@ -7,8 +7,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 import io
 import math
-import pathlib
-import sys
 from typing import Optional
 
 import pytest
@@ -17,7 +15,6 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -30,11 +27,10 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
@@ -43,9 +39,9 @@ import transformer_engine_torch as tex
 from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
 
 # Check for supported quantization schemes
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available()
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -404,7 +400,7 @@ class TestFuser:
             )
 
             # Training step
-            with te.fp8_autocast(fp8_recipe=recipe):
+            with te.autocast(recipe=recipe):
                 y = model(x)
             y.backward(dy)
             with torch.no_grad():
@@ -540,7 +536,7 @@ class TestFuser:
             device=device,
             requires_grad=True,
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 y = op(x)
         y.backward(torch.zeros_like(y))
@@ -553,7 +549,7 @@ class TestFuser:
             x.grad = None
             op.weight.grad = None
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                with te.autocast(enabled=quantized_compute, recipe=recipe):
                     y = op(x)
             y.backward(torch.zeros_like(y))
             assert y.dtype == autocast_dtype
@@ -803,7 +799,7 @@ class TestBasicOps:
         # Implementation with fusible operation
         op = te_ops.Quantize(forward=cast_forward, backward=cast_backward)
         recipe = make_recipe(quantization)
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = op(x_test)
         y_test.backward(dy_test)
 
@@ -914,7 +910,7 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1091,7 +1087,7 @@ class TestBasicOps:
             del b_test
             for param in op.parameters():
                 param.requires_grad_(requires_grad=weight_requires_grad)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = op(x_test)
         if input_requires_grad or weight_requires_grad:
             y_test.backward(dy_test)
@@ -1192,7 +1188,7 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1354,7 +1350,7 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1654,7 +1650,7 @@ class TestBasicOps:
             make_op(cache_quantized_input=cache_quantized_input),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1721,7 +1717,7 @@ class TestBasicOps:
             te_ops.SwiGLU(),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1792,7 +1788,7 @@ class TestBasicOps:
             te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
 
         y_test.backward(dy_test)
@@ -2018,7 +2014,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -2129,7 +2125,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -2234,7 +2230,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -2325,7 +2321,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].bias.copy_(b_test)
             del b_test
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -2517,7 +2513,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y1_test, y2_test = model(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -2612,7 +2608,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         (y_test * dy_test).sum().backward()
 
@@ -2683,7 +2679,7 @@ class TestCheckpointing:
             x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
             dy = torch.randn(out_shape, dtype=dtype, device=device)
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(x)
             y.backward(dy)
             optim_save.step()
@@ -2712,7 +2708,7 @@ class TestCheckpointing:
         ys_save = []
         for i in range(post_checkpoint_steps):
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(xs_save[i])
             y.backward(dys[i])
             optim_save.step()
@@ -2732,7 +2728,7 @@ class TestCheckpointing:
         ys_load = []
         for i in range(post_checkpoint_steps):
             optim_load.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_load(xs_load[i])
             y.backward(dys[i])
             optim_load.step()
@@ -2850,6 +2846,6 @@ class TestSequentialModules:
                 dtype=dtype,
             )
         forward = te_ops.Sequential(norm, ffn1, act, ffn2)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)

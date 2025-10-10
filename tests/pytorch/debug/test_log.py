@@ -8,18 +8,22 @@ import transformer_engine.pytorch as te
 import torch
 import tempfile
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.fp8 import RecipeState
+from transformer_engine.pytorch.quantize import RecipeState
 import pytest
 import contextlib
 import os
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.quantized import (
+    is_fp8_available,
+    is_mxfp8_available,
+    is_fp8_block_scaling_available,
+)
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+    is_fp8_block_scaling_available()
 )
 
 LOG_QUANTIZED_CONFIG_BASE = """
@@ -128,7 +132,7 @@ def test_sanity(feature_dirs):
         inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
 
         for _ in range(10):
-            with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
+            with te.autocast(recipe=recipe.DelayedScaling()):
                 output = model(inp)
             loss = output.sum()
             loss.backward()

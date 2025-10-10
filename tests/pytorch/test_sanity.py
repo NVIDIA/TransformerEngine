@@ -9,8 +9,8 @@ import pytest
 import os
 
 import transformer_engine.pytorch
-from transformer_engine.pytorch.fp8 import (
-    fp8_autocast,
+from transformer_engine.pytorch.quantized import (
+    autocast,
     FP8GlobalStateManager,
     fp8_model_init,
 )
@@ -160,7 +160,7 @@ def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
 
     use_fp8 = fp8_recipe is not None
     with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        with autocast(enabled=use_fp8, recipe=fp8_recipe):
             te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
         loss = te_out.sum()
 
@@ -199,7 +199,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             p.main_grad = torch.zeros_like(p)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -227,7 +227,7 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states)
     loss = te_out.sum()
     loss.backward()
@@ -253,7 +253,7 @@ def _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -285,7 +285,7 @@ def _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -314,7 +314,7 @@ def _test_sanity_common(
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         if not microbatching:
             te_out = block(te_inp)
         else:
@@ -463,7 +463,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
@@ -512,7 +512,7 @@ def test_sanity_grouped_linear(
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
 
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
@@ -1051,7 +1051,7 @@ def test_linear_frozen_weights_memory_default_recipe():
     linear.weight.requires_grad = False
 
     # Forward and backward pass with FP8
-    with fp8_autocast():
+    with autocast():
         o = linear(x)
         g_o = torch.randn_like(o)
 
@@ -1140,6 +1140,6 @@ def test_inference_mode(
         kwargs = {}
         if module_name == "GroupedLinear":
             kwargs["m_splits"] = [sequence_length]
-        with fp8_autocast(enabled=with_quantization, fp8_recipe=quantization_recipe):
+        with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()

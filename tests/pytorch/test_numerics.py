@@ -12,9 +12,9 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import (
+from transformer_engine.pytorch.quantized import (
     FP8GlobalStateManager,
-    fp8_autocast,
+    autocast,
     fp8_model_init,
 )
 from transformer_engine.pytorch.utils import (
@@ -575,7 +575,7 @@ def _test_e2e_selective_recompute(
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -665,7 +665,7 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
                 block,
@@ -1088,7 +1088,7 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False,
     )
     inp_hidden_states.retain_grad()
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         out = block(inp_hidden_states)
         if isinstance(out, (List, Tuple)):
             out = out[0]
@@ -1758,7 +1758,7 @@ def _test_grouped_linear_accuracy(
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
             out = block(inp_hidden_states, m_splits.tolist())
@@ -2110,7 +2110,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 
     m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
             out = block(inp_hidden_states, m_splits)
         else:
@@ -2417,7 +2417,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=True, fp8_recipe=recipe):
+    with autocast(enabled=True, recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
