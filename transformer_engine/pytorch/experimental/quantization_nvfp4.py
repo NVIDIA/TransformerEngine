@@ -30,14 +30,14 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
             pow_2_scales=False,
             with_rht=True,
         )
-    elif role == "linear_weight":
+    if role == "linear_weight":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
-    elif role == "linear_grad_output":
+    if role == "linear_grad_output":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(1, 16),
@@ -774,7 +774,7 @@ class NVFP4QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,
+        m_params: quantization.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
@@ -785,6 +785,7 @@ class NVFP4QuantizerRef(Quantizer):
         qresult_x: QuantizedTensorStorage | None = None,
         qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
+        """Python implementation of microblock FP4 GEMM."""
         assert bias is None, "Bias is implemented for FP4 GEMM."
 
         high_precision_x = cast_from_fp4x2(qx, out_dtype)

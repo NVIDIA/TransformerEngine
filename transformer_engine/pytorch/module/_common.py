@@ -11,10 +11,8 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from .. import cpp_extensions as tex
-from .. import experimental
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
-from ..tensor.utils import is_experimental
 from ..utils import get_default_init_method
 
 
