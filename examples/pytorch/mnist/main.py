@@ -52,7 +52,7 @@ def train(args, model, device, train_loader, optimizer, epoch, use_fp8):
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=use_fp8):
+        with te.autocast(enabled=use_fp8):
             output = model(data)
         loss = F.nll_loss(output, target)
         loss.backward()
@@ -76,7 +76,7 @@ def calibrate(model, device, test_loader, fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.fp8_autocast(enabled=fp8, calibrating=True):
+            with te.autocast(enabled=fp8, calibrating=True):
                 output = model(data)
 
 
@@ -88,7 +88,7 @@ def test(model, device, test_loader, use_fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.fp8_autocast(enabled=use_fp8):
+            with te.autocast(enabled=use_fp8):
                 output = model(data)
             test_loss += F.nll_loss(output, target, reduction="sum").item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability

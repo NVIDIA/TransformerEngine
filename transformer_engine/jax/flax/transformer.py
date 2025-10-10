@@ -66,7 +66,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         for 1D-sharding tensor parallelism.
 
     .. warning::
-        Please make sure ShardingResource is set via fp8_autocast before calling this function.
+        Please make sure ShardingResource is set via autocast before calling this function.
 
     .. note::
         This function is only needed when using TransformerLayer. For  other modules, such as

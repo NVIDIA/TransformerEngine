@@ -165,7 +165,7 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
-        "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+        "--fp8", action="store_true", default=False, help="Enables the te.autocast() context."
     )
     parser.add_argument(
         "--quantization",
@@ -473,7 +473,9 @@ def _train(opts):
 
     layer_contexts = [
         (
-            partial(te.fp8_autocast, enabled=opts.fp8, fp8_recipe=fp8_recipe, fp8_group=nccl_world)
+            partial(
+                te.autocast, enabled=opts.fp8, recipe=fp8_recipe, amax_reduction_group=nccl_world
+            )
             if opts.num_layers_at_start_in_bf16 <= i
             and i < (opts.num_layers - opts.num_layers_at_end_in_bf16)
             else nullcontext

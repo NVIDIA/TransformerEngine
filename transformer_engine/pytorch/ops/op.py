@@ -17,7 +17,7 @@ from transformer_engine.common.recipe import Recipe
 from ..quantize import (
     FP8GlobalStateManager,
     RecipeState,
-    fp8_autocast,
+    autocast,
 )
 from ..tensor import Quantizer
 
@@ -634,7 +634,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Get op's quantizer state, initializing if needed
             if self._fp8_metas is None or self._fp8_metas[mode] is None:
-                with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
+                with autocast(recipe=state[mode]["recipe"]):
                     self.reset_recipe_state(recipe=state[mode]["recipe"])
             fp8_meta = self._fp8_metas[mode]
 

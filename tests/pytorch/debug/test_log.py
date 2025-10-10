@@ -234,7 +234,7 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
         for i in range(20):
             x = torch.randn(4, 128, 128).cuda()
-            with te.fp8_autocast(enabled=True):
+            with te.autocast(enabled=True):
                 y = model(x)
             y.sum().backward()
             debug_api.step()

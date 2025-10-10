@@ -15,7 +15,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
 from utils import make_causal_mask, make_self_mask
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 DTYPES = [jnp.float16, jnp.bfloat16]
@@ -102,7 +102,7 @@ class TestDistributedSoftmax:
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(mesh_resource=mesh_resource):
+        with mesh, autocast(mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             mask_ = jax.device_put(mask, NamedSharding(mesh, mask_pspec))
 

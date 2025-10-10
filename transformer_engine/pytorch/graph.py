@@ -16,7 +16,7 @@ from torch._C import _graph_pool_handle
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from .quantize import (
-    fp8_autocast,
+    autocast,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -954,11 +954,11 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            with fp8_autocast(
+            with autocast(
                 enabled=module_uses_fp8.get(id(self), False),
                 calibrating=fp8_calibrating,
-                fp8_recipe=fp8_recipe,
-                fp8_group=fp8_group,
+                recipe=fp8_recipe,
+                amax_reduction_group=fp8_group,
                 _graph=True,
             ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)

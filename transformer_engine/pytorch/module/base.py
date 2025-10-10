@@ -1574,7 +1574,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         - MXFP8BlockScaling → MXFP8Tensor
         - Float8BlockScaling → Float8BlockTensor
 
-        Example case to check: recipe is DelayedScaling (DelayedScaling is set in fp8_autocast()),
+        Example case to check: recipe is DelayedScaling (DelayedScaling is set in autocast()),
         but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in quantized_model_init()).
         """
         if not self.fp8 and not self.fp8_calibration:
@@ -1597,5 +1597,5 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe"
                         f" {compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}."
                         " Please check the recipes assigned during quantized_model_init() and"
-                        " fp8_autocast() calls."
+                        " autocast() calls."
                     )

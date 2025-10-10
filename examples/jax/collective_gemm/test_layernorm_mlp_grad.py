@@ -24,7 +24,7 @@ from common import (
 
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
-from transformer_engine.jax.quantize import fp8_autocast
+from transformer_engine.jax.quantize import autocast
 from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveOpSet,
     CollectiveOp,
@@ -151,12 +151,12 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     collective_op_sets = (collective_op_set_1, collective_op_set_2)
     noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
-    with mesh, fp8_autocast(
+    with mesh, autocast(
         enabled=False,
-        fp8_recipe=None,
+        recipe=None,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
-        # Get the base axis rules and extend them with TE's rules. This must be done inside fp8_autocast
+        # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)

@@ -28,7 +28,7 @@ from transformer_engine.jax.quantize import (
     is_fp8_available,
     update_collections,
     TensorSource,
-    fp8_autocast,
+    autocast,
 )
 from transformer_engine.jax.sharding import MeshResource
 
@@ -507,14 +507,14 @@ class BaseTester:
         """Test normal datatype forward"""
         # Ensure FP8 disabled.
         # Empty MeshResource is used as we are running on a single device
-        with fp8_autocast(enabled=False, mesh_resource=MeshResource()):
+        with autocast(enabled=False, mesh_resource=MeshResource()):
             self.runner(attrs).test_forward(data_shape, dtype)
 
     def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
         # Ensure FP8 disabled.
         # Empty MeshResource is used as we are running on a single device
-        with fp8_autocast(enabled=False, mesh_resource=MeshResource()):
+        with autocast(enabled=False, mesh_resource=MeshResource()):
             self.runner(attrs).test_backward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -522,7 +522,7 @@ class BaseTester:
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
             self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -530,7 +530,7 @@ class BaseTester:
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
             self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
 
 

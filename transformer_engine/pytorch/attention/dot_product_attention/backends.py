@@ -1074,7 +1074,7 @@ class FusedAttnFunc(torch.autograd.Function):
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
         nvtx_range_push(f"{nvtx_label}")
 
-        # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
+        # recipe passed in through autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:

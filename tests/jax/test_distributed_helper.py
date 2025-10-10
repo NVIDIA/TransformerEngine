@@ -9,7 +9,7 @@ import numpy as np
 
 from utils import pytest_parametrize_wrapper, is_devices_enough
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 
 
 def generate_mesh_configs():
@@ -26,10 +26,10 @@ def generate_mesh_configs():
 
 
 class TestMeshResource(unittest.TestCase):
-    def test_fp8_autocast_with_mesh_resource(self):
+    def test_autocast_with_mesh_resource(self):
         for mesh_config in generate_mesh_configs():
             device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = jax.sharding.Mesh(devices, mesh_axes)
-            with mesh, fp8_autocast(enabled=False, mesh_resource=mesh_resource):
+            with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
                 self.assertEqual(mesh_resource, global_mesh_resource())

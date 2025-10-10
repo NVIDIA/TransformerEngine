@@ -36,7 +36,7 @@ from .utils import (
     needs_quantized_gemm,
 )
 from .constants import dist_group_type
-from .quantize import FP8GlobalStateManager, fp8_autocast
+from .quantize import FP8GlobalStateManager, autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
@@ -419,8 +419,8 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
-        ), fp8_autocast(
-            enabled=ctx.fp8, fp8_recipe=ctx.fp8_recipe
+        ), autocast(
+            enabled=ctx.fp8, recipe=ctx.fp8_recipe
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
@@ -754,8 +754,8 @@ def checkpoint(
     def recompute_fn(*args, **kwargs):
         with torch.autograd.enable_grad(), (
             te_recompute_ctx
-        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, fp8_autocast(
-            enabled=fp8, fp8_recipe=fp8_recipe
+        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, autocast(
+            enabled=fp8, recipe=fp8_recipe
         ):
             function(*args, **kwargs)
 

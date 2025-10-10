@@ -475,17 +475,17 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
 
-        with te.fp8.fp8_autocast(
+        with te.autocast(
             enabled=quantization is not None,
-            fp8_recipe=quantization_recipe(quantization),
-            fp8_group=mock_group,
+            recipe=quantization_recipe(quantization),
+            amax_reduction_group=mock_group,
         ):
             y_fp8 = model_fp8(x)
 
-        with te.fp8_autocast(
+        with te.autocast(
             enabled=quantization is not None,
-            fp8_recipe=quantization_recipe(quantization),
-            fp8_group=mock_group,
+            recipe=quantization_recipe(quantization),
+            amax_reduction_group=mock_group,
         ):
             y = model(x)
 
@@ -615,17 +615,17 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
 
-        with te.fp8.fp8_autocast(
+        with te.autocast(
             enabled=quantization is not None,
-            fp8_recipe=quantization_recipe(quantization),
-            fp8_group=mock_group,
+            recipe=quantization_recipe(quantization),
+            amax_reduction_group=mock_group,
         ):
             y_fp8 = model_fp8(x)
 
-        with te.fp8_autocast(
+        with te.autocast(
             enabled=quantization is not None,
-            fp8_recipe=quantization_recipe(quantization),
-            fp8_group=mock_group,
+            recipe=quantization_recipe(quantization),
+            amax_reduction_group=mock_group,
         ):
             y = model(x)
 

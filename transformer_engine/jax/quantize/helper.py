@@ -629,7 +629,7 @@ _QUANTIZE_CONFIG = NoOpQuantizeConfig()
 
 
 def get_quantize_config():
-    """Global instance of BaseQuantizeConfig set by fp8_autocast context."""
+    """Global instance of BaseQuantizeConfig set by autocast context."""
     return _QUANTIZE_CONFIG
 
 

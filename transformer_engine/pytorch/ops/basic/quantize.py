@@ -18,8 +18,8 @@ from ...tensor import Quantizer
 class Quantize(BasicOperation):
     """Quantize tensor data
 
-    Uses FP8 recipe from `fp8_autocast` context. When called outside
-    of an `fp8_autocast` context, this is an identity operation.
+    Uses recipe from `autocast` context. When called outside
+    of an `autocast` context, this is an identity operation.
 
     Parameters
     ----------
