@@ -80,7 +80,9 @@ class BasicLinear(BasicOperation):
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
         meaningful. This is primarily intented to integrate with
-        Megatron-LM.
+        Megatron-LM. This argument along with weight tensor having
+        attribute 'overwrite_main_grad' set to True will overwrite
+        `main_grad` instead of accumulating.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -1019,6 +1021,7 @@ class BasicLinear(BasicOperation):
             weight_param = self.weight
             if hasattr(weight_param, "__fsdp_param__"):
                 weight_param.main_grad = weight_param.get_main_grad()
+            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
             if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
