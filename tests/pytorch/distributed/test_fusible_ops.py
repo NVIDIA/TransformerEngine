@@ -426,7 +426,7 @@ def _test_basic_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         op = te_ops.BasicLinear(
             in_features,
             out_features,
@@ -592,7 +592,7 @@ def _test_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.Linear(
                 in_features,
@@ -758,7 +758,7 @@ def _test_mlp(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.GELU(),
             te_ops.Linear(

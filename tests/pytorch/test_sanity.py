@@ -12,7 +12,7 @@ import transformer_engine.pytorch
 from transformer_engine.pytorch.quantized import (
     autocast,
     FP8GlobalStateManager,
-    fp8_model_init,
+    quantized_model_init,
 )
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -455,7 +455,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
             pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
-    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_linear = Linear(
             config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
@@ -496,7 +496,7 @@ def test_sanity_grouped_linear(
             pytest.skip("NVFP4 not supported for grouped linear")
 
     use_fp8 = fp8_recipe is not None
-    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_grouped_linear = GroupedLinear(
             num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
@@ -976,9 +976,9 @@ def test_replace_raw_data_for_float8tensor():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_fp8_model_init_high_precision_init_val():
-    """Test fp8_model_init with preserve_high_precision_init_val=True"""
-    with fp8_model_init(preserve_high_precision_init_val=True):
+def test_quantized_model_init_high_precision_init_val():
+    """Test quantized_model_init with preserve_high_precision_init_val=True"""
+    with quantized_model_init(preserve_high_precision_init_val=True):
         model = Linear(768, 768)
 
     weight = model.weight
@@ -1105,7 +1105,7 @@ def test_inference_mode(
     # Construct module
     module = None
     with torch.no_grad():
-        with fp8_model_init(enabled=with_quantization, recipe=quantization_recipe):
+        with quantized_model_init(enabled=with_quantization, recipe=quantization_recipe):
             if module_name == "Linear":
                 module = Linear(hidden_size, hidden_size)
             elif module_name == "LayerNormLinear":

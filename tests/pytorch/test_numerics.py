@@ -15,7 +15,7 @@ from torch.nn import Parameter
 from transformer_engine.pytorch.quantized import (
     FP8GlobalStateManager,
     autocast,
-    fp8_model_init,
+    quantized_model_init,
 )
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -548,7 +548,7 @@ def _test_e2e_selective_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -637,7 +637,7 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1304,7 +1304,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         te_linear_ref = Linear(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1820,7 +1820,7 @@ def test_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -1956,7 +1956,7 @@ def test_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2158,7 +2158,7 @@ def test_padding_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2169,7 +2169,7 @@ def test_padding_grouped_linear_accuracy(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2229,7 +2229,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2240,7 +2240,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2390,7 +2390,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,

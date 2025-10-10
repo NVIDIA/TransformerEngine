@@ -110,9 +110,9 @@ def _train(args):
         build_model_context = nullcontext
         build_model_context_args = {}
 
-        from transformer_engine.pytorch import fp8_model_init
+        from transformer_engine.pytorch import quantized_model_init
 
-        build_model_context = fp8_model_init
+        build_model_context = quantized_model_init
         build_model_context_args["enabled"] = True
 
         # Build the model with the specified context

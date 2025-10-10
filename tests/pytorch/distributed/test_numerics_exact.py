@@ -25,9 +25,7 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    te.is_fp8_block_scaling_available()
-)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available()
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()

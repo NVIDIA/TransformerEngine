@@ -31,7 +31,14 @@ from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
 
-__all__ = ["autocast", "quantized_model_init", "is_fp8_available", "is_mxfp8_available", "is_fp8_block_scaling_available", "is_nvfp4_available"]
+__all__ = [
+    "autocast",
+    "quantized_model_init",
+    "is_fp8_available",
+    "is_mxfp8_available",
+    "is_fp8_block_scaling_available",
+    "is_nvfp4_available",
+]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
@@ -136,30 +143,40 @@ def is_fp8_available() -> Tuple[bool, str]:
     and per tensor current scaling recipe.
     """
     if FP8GlobalStateManager.fp8_available is None:
-        FP8GlobalStateManager.fp8_available, FP8GlobalStateManager.reason_for_no_fp8 = check_fp8_support()
+        FP8GlobalStateManager.fp8_available, FP8GlobalStateManager.reason_for_no_fp8 = (
+            check_fp8_support()
+        )
     return FP8GlobalStateManager.fp8_available, FP8GlobalStateManager.reason_for_no_fp8
 
 
 def is_mxfp8_available() -> Tuple[bool, str]:
     """Return if MXFP8 recipe support is available."""
     if FP8GlobalStateManager.mxfp8_available is None:
-        FP8GlobalStateManager.mxfp8_available, FP8GlobalStateManager.reason_for_no_mxfp8 = check_mxfp8_support()
+        FP8GlobalStateManager.mxfp8_available, FP8GlobalStateManager.reason_for_no_mxfp8 = (
+            check_mxfp8_support()
+        )
     return FP8GlobalStateManager.mxfp8_available, FP8GlobalStateManager.reason_for_no_mxfp8
 
 
 def is_fp8_block_scaling_available() -> Tuple[bool, str]:
     """Return if FP8 block scaling support is available."""
     if FP8GlobalStateManager.fp8_block_scaling_available is None:
-        FP8GlobalStateManager.fp8_block_scaling_available, FP8GlobalStateManager.reason_for_no_fp8_block_scaling = (
-            check_fp8_block_scaling_support()
-        )
-    return FP8GlobalStateManager.fp8_block_scaling_available, FP8GlobalStateManager.reason_for_no_fp8_block_scaling
+        (
+            FP8GlobalStateManager.fp8_block_scaling_available,
+            FP8GlobalStateManager.reason_for_no_fp8_block_scaling,
+        ) = check_fp8_block_scaling_support()
+    return (
+        FP8GlobalStateManager.fp8_block_scaling_available,
+        FP8GlobalStateManager.reason_for_no_fp8_block_scaling,
+    )
 
 
 def is_nvfp4_available() -> Tuple[bool, str]:
     """Return if NVFP4 support is available."""
     if FP8GlobalStateManager.nvfp4_available is None:
-        FP8GlobalStateManager.nvfp4_available, FP8GlobalStateManager.reason_for_no_nvfp4 = check_nvfp4_support()
+        FP8GlobalStateManager.nvfp4_available, FP8GlobalStateManager.reason_for_no_nvfp4 = (
+            check_nvfp4_support()
+        )
     return FP8GlobalStateManager.nvfp4_available, FP8GlobalStateManager.reason_for_no_nvfp4
 
 
@@ -611,7 +628,7 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_model_init(
+def quantized_model_init(
     enabled: bool = True,
     recipe: Optional[Recipe] = None,
     preserve_high_precision_init_val: bool = False,
@@ -621,9 +638,9 @@ def fp8_model_init(
     """
 
     warnings.warn(
-        "fp8_model_init is deprecated and will be removed in a future release. "
+        "quantized_model_init is deprecated and will be removed in a future release. "
         "Use quantized_model_init("
-                        "enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.",
+        "enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.",
         category=DeprecationWarning,
         stacklevel=2,
     )

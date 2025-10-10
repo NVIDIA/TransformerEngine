@@ -301,7 +301,7 @@ class BasicLinear(BasicOperation):
                     "Tried to quantize weight with deferred initialization "
                     "due to meta device, but no quantizer was available. "
                     "This is most likely because the weight was initialized "
-                    "within fp8_model_init, but the forward pass was not "
+                    "within quantized_model_init, but the forward pass was not "
                     "performed within fp8_autocast."
                 )
             quantizer.set_usage(

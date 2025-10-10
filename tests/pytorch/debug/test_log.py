@@ -22,9 +22,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    is_fp8_block_scaling_available()
-)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scaling_available()
 
 LOG_QUANTIZED_CONFIG_BASE = """
 log:

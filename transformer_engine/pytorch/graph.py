@@ -913,7 +913,7 @@ def make_graphed_callables(
                         Whether or not to cache FP8 weights across microbatches. if set to `True`,
                         the `is_first_microbatch` boolean argument must be passed into the forward
                         method for TransformerEngine modules. When storing primary weights in FP8
-                        using TE's `fp8_model_init` API and using an FP8 aware optimizer, this arg
+                        using TE's `quantized_model_init` API and using an FP8 aware optimizer, this arg
                         must be set to `False` if calculating weight transposes' outside TE, e.g.,
                         in the optimizer step.
 

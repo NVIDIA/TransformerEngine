@@ -16,7 +16,7 @@ import torch
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import fp8_autocast, fp8_model_init
+from transformer_engine.pytorch import fp8_autocast, quantized_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
@@ -238,7 +238,7 @@ def get_model(
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 TransformerLayer(
                     hidden_size=hidden_size,
@@ -261,7 +261,7 @@ def get_model(
                 for layer_number in range(1, num_layers + 1)
             ]
     if module == "DotProductAttention":
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 DotProductAttention(
                     kv_channels=config.head_dim_qk,

@@ -368,7 +368,7 @@ class TestFuser:
         )
 
         # Construct model
-        with te.fp8_model_init(recipe=recipe):
+        with te.quantized_model_init(recipe=recipe):
             model = te_ops.basic.BasicLinear(
                 size,
                 size,
@@ -469,7 +469,7 @@ class TestFuser:
         )
 
         # Construct operation
-        with te.fp8_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
+        with te.quantized_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=init_dtype)
         with torch.no_grad():
             op.weight.copy_(w_test)
@@ -526,7 +526,7 @@ class TestFuser:
 
         # Construct operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weights, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weights, recipe=recipe):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=model_dtype)
 
         # Check forward and backward pass
@@ -893,7 +893,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.BasicLinear(
                 in_features,
                 out_features,
@@ -1071,7 +1071,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.Linear(
                 in_features,
                 out_features,
@@ -1998,7 +1998,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2108,7 +2108,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2214,7 +2214,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2499,7 +2499,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
@@ -2594,7 +2594,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2668,7 +2668,7 @@ class TestCheckpointing:
 
         # Construct model
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_save = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2715,7 +2715,7 @@ class TestCheckpointing:
             ys_save.append(y)
 
         # Load checkpoint
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_load = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2815,7 +2815,7 @@ class TestSequentialModules:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             if normalization == "LayerNorm":
                 norm = te_ops.LayerNorm(
                     hidden_size,

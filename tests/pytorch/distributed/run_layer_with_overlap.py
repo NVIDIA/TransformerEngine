@@ -438,7 +438,7 @@ def _train(opts):
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
     )
 
-    with te.fp8_model_init(enabled=opts.fp8_init):
+    with te.quantized_model_init(enabled=opts.fp8_init):
         test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
     if WORLD_RANK == 0:
@@ -450,7 +450,7 @@ def _train(opts):
     ref_args, ref_kwargs, _ = _get_layer_args(
         opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True
     )
-    with te.fp8_model_init(enabled=opts.fp8_init):
+    with te.quantized_model_init(enabled=opts.fp8_init):
         ref_model = multi_module_model(opts.layer_type, opts.num_layers, *ref_args, **ref_kwargs)
     dist_print("Initialized reference model...", debug=True)
     for test_param, ref_param in zip(test_model.parameters(), ref_model.parameters()):

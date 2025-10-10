@@ -16,7 +16,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
-    fp8_model_init,
+    quantized_model_init,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
@@ -392,7 +392,7 @@ class TestFP8Recipe:
         ],
     )
     def test_check_for_weight_tensor_and_recipe_correspondence(self, model_init_recipe):
-        with fp8_model_init(enabled=True, recipe=model_init_recipe):
+        with quantized_model_init(enabled=True, recipe=model_init_recipe):
             linear = Linear(32, 32).cuda()
 
         x = torch.randn(32, 32, device="cuda")
@@ -484,7 +484,7 @@ class TestFP8Recipe:
         batch_size = 32
 
         recipe = DelayedScaling(amax_history_len=1024)
-        with fp8_model_init(recipe=recipe):
+        with quantized_model_init(recipe=recipe):
             if module_class == GroupedLinear:
                 module = module_class(1, in_features, out_features).cuda()
             else:

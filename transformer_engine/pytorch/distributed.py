@@ -1969,7 +1969,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
         if hasattr(fsdp_root, "primary_weights_in_fp8"):
             assert not fsdp_root.primary_weights_in_fp8, (
                 "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                "Please initialize your model without the te.fp8_model_init(...) context."
+                "Please initialize your model without the te.quantized_model_init(...) context."
             )
         root_state = _get_module_fsdp_state(fsdp_root)
         assert root_state is not None, "Root module does not have a valid _FSDPState."
@@ -1982,7 +1982,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
             if hasattr(fsdp_module.module, "primary_weights_in_fp8"):
                 assert not fsdp_module.module.primary_weights_in_fp8, (
                     "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                    "Please initialize your model without the te.fp8_model_init(...) context."
+                    "Please initialize your model without the te.quantized_model_init(...) context."
                 )
             setattr(fsdp_module.module, "fsdp_group", state.process_group)
 

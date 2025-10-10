@@ -15,8 +15,8 @@ Here, we take the `MultiheadAttention` module as an example. Its FP8 attention m
 
 .. code-block:: python
 
-    >>> from transformer_engine.pytorch import MultiheadAttention, fp8_model_init
-    >>> with fp8_model_init(enabled=True):
+    >>> from transformer_engine.pytorch import MultiheadAttention, quantized_model_init
+    >>> with quantized_model_init(enabled=True):
     ...     mha = MultiheadAttention(
     ...         hidden_size=1024,
     ...         num_attention_heads=16,

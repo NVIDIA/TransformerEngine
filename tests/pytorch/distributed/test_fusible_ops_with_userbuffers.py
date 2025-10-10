@@ -301,7 +301,7 @@ def _test_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
         ops = []
         linear_op = None
         bias_op = None

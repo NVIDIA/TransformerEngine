@@ -18,9 +18,7 @@ if torch.cuda.device_count() < 2:
     pytest.skip("cast_master_weights_to_fp8 test needs at least 2 GPUs.")
 
 fp8_available, reason_for_no_fp8 = is_fp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    is_fp8_block_scaling_available()
-)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scaling_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(2, torch.cuda.device_count())

@@ -439,7 +439,7 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
     }
 
     # Create model with FP8 weights
-    with te.fp8.fp8_model_init(
+    with te.fp8.quantized_model_init(
         enabled=quantization is not None,
         recipe=quantization_recipe(quantization),
         preserve_high_precision_init_val=True,
@@ -573,7 +573,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
     linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
 
     # Create model with FP8 weights
-    with te.fp8.fp8_model_init(
+    with te.fp8.quantized_model_init(
         enabled=quantization is not None,
         recipe=quantization_recipe(quantization),
         preserve_high_precision_init_val=True,

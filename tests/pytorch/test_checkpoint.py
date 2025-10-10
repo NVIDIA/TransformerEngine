@@ -65,16 +65,16 @@ class TestLoadCheckpoint:
         if name == "ops_linear":
             return te.ops.Linear(1, 1)
         if name == "linear.fp8":
-            with te.fp8_model_init(recipe=make_recipe("fp8")):
+            with te.quantized_model_init(recipe=make_recipe("fp8")):
                 return te.Linear(16, 16)
         if name == "ops_linear.fp8":
-            with te.fp8_model_init(recipe=make_recipe("fp8")):
+            with te.quantized_model_init(recipe=make_recipe("fp8")):
                 return te.ops.Linear(16, 16)
         if name == "linear.mxfp8":
-            with te.fp8_model_init(recipe=make_recipe("mxfp8")):
+            with te.quantized_model_init(recipe=make_recipe("mxfp8")):
                 return te.Linear(32, 32)
         if name == "ops_linear.mxfp8":
-            with te.fp8_model_init(recipe=make_recipe("mxfp8")):
+            with te.quantized_model_init(recipe=make_recipe("mxfp8")):
                 return te.ops.Linear(32, 32)
         raise ValueError(f"Unrecognized module name ({name})")
 

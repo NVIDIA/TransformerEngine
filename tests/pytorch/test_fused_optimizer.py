@@ -12,7 +12,7 @@ from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
-from transformer_engine.pytorch import fp8_model_init
+from transformer_engine.pytorch import quantized_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
@@ -187,7 +187,7 @@ class TestFusedAdam(TestFusedOptimizer):
         build_model_context = nullcontext
         build_model_context_args = {}
         if use_fp8_params:
-            build_model_context = fp8_model_init
+            build_model_context = quantized_model_init
             build_model_context_args["enabled"] = True
 
         with build_model_context(**build_model_context_args):
@@ -467,7 +467,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
-        with fp8_model_init(enabled=True, recipe=DelayedScaling()):
+        with quantized_model_init(enabled=True, recipe=DelayedScaling()):
             model = MultiheadAttention(
                 hidden_size=1024,
                 num_attention_heads=16,

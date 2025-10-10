@@ -12,7 +12,7 @@ import torch
 
 from transformer_engine.pytorch.quantize import FP8GlobalStateManager
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import TransformerLayer, autocast, fp8_model_init
+from transformer_engine.pytorch import TransformerLayer, autocast, quantized_model_init
 from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
     _attention_backends,
@@ -1592,7 +1592,7 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
         init_method = init_method_normal(sigma)
         output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-        with fp8_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
+        with quantized_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
             block = TransformerLayer(
                 config.hidden_size,
                 4 * config.hidden_size,
@@ -1820,7 +1820,7 @@ def _run_mha_fp8_vs_f16(
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+    with quantized_model_init(enabled=fp8_mha, recipe=fp8_recipe):
         rotary_pos_emb = None
         if RoPE:
             PE = RotaryPositionEmbedding(dim=config.head_dim_qk)
@@ -2110,7 +2110,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    with fp8_model_init(enabled=fp8_dpa):
+    with quantized_model_init(enabled=fp8_dpa):
         dpa = DotProductAttention(
             config.num_heads,
             config.head_dim_qk,
