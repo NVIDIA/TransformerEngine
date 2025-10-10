@@ -199,7 +199,7 @@ def make_mask(
             segment_ids_kv=segment_ids_kv,
         )
         if attn_mask_type.is_bottom_right()
-        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool_)
     )
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
