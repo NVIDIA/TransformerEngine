@@ -229,6 +229,8 @@ class AttentionParams:
         Inference-related parameters. See InferenceParams for details.
     softmax_type: str, default = "vanilla"
         The type of softmax operation. See DotProductAttention for details.
+    return_max_score: bool, default = `False`
+        Whether to output max_score.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -257,6 +259,7 @@ class AttentionParams:
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
     softmax_type: str = "vanilla"
+    return_max_score: bool = False
 
     def __eq__(self, other):
         """
@@ -330,6 +333,7 @@ def get_attention_backend(
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
     softmax_type = attention_params.softmax_type
+    return_max_score = attention_params.return_max_score
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -476,6 +480,23 @@ def get_attention_backend(
         ):
             logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
             use_fused_attention = False
+
+    # Filter: Return max_score
+    if return_max_score:
+        if context_parallel:
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
+            logger.debug("Disabling all backends for max_score with context parallelism")
+        if use_flash_attention:
+            use_flash_attention = False
+            logger.debug("Disabling FlashAttention for max_score")
+        # if use_flash_attention and not (attention_dropout == 0.0 or not is_training):
+        #    use_flash_attention = False
+        #    logger.debug("Disabling FlashAttention for max_score with dropout")
+        # if use_flash_attention and fp8 and fp8_meta["recipe"].fp8_dpa:
+        #    use_flash_attention = False
+        #    logger.debug("Disabling FlashAttention for max_score with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -913,6 +934,7 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            return_max_score,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")

@@ -139,6 +139,7 @@ def fused_attn_fwd(
     window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
     softmax_offset: torch.Tensor = None,
+    return_max_score: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -216,6 +217,8 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor, default = None
                 softmax offset tensor in shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
+    return_max_score: bool, default = False
+                      whether to return the maximum attention score
 
     Returns
     ----------
@@ -246,6 +249,7 @@ def fused_attn_fwd(
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
+    max_score: float if return_max_score = True, otherwise None
     """
 
     if attn_scale is None:
@@ -315,10 +319,20 @@ def fused_attn_fwd(
         softmax_offset,
         rng_gen,
         rng_elts_per_thread,
+        return_max_score,
     )
 
+    if return_max_score:
+        # output_tensors: out [b, sq, h, d] or [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        stats = output_tensors[1] + torch.log(output_tensors[2])
+        max_score = output_tensors[1].squeeze(-1).to(dtype=output_tensors[0].dtype)
+        max_score = torch.max(max_score, dim=-1)[0]
+        max_score = torch.max(max_score, dim=0)[0]
+        # return out [b, sq, h, d] or [sq, b, h, d], stats [b, h, sq, 1], max_score [h]
+        return output_tensors[0], stats, max_score
+
     # out, aux_ctx_tensors
-    return output_tensors[0], output_tensors[1:]
+    return output_tensors[0], output_tensors[1:], None
 
 
 def fused_attn_bwd(

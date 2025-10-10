@@ -255,6 +255,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                  where alpha is a learnable parameter in shape [h].
                  'off-by-one' and 'learnable' softmax types are also called sink attention
                  ('zero sink' and 'learnable sink').
+    return_max_score: Optional[bool], default = `False`
+                     If true, returns the maximum attention score, max_score = max(S), where
+                     S = Q*K^T and in shape [b, h, s_q, s_kv]. max_score can be used to rescale
+                     the Q and K projection weights in a MuonClip optimizer (see
+                     `Muon is Scalable for LLM Training <https://arxiv.org/pdf/2502.16982>`_).
 
     Parallelism parameters
     ----------------------
@@ -311,6 +316,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
+        return_max_score: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -394,6 +400,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
+        self.return_max_score = return_max_score
 
         self.softmax_type = softmax_type
         if self.softmax_type == "vanilla":
@@ -412,6 +419,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
+            "return_max_score": return_max_score,
         }
 
         self.flash_attention = FlashAttention(
