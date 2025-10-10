@@ -370,20 +370,15 @@ def get_rhs_axis_boundary(rhs_cdims, is_transposed):
     return min(rhs_cdims) if is_transposed else max(rhs_cdims) + 1
 
 
-def assert_cublas_requirements(shape, scaling_mode, axis_boundary, tensor_name):
+def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
     """Assert that the given tensor shape and layout meet the requirements for cuBLAS GEMM."""
     if scaling_mode != ScalingMode.NO_SCALING:
         # Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
         alignment = 32 if scaling_mode.is_nvfp4_scaling else 16
 
-        shape_2d = (
-            reduce(operator.mul, shape[:axis_boundary], 1),
-            reduce(operator.mul, shape[axis_boundary:], 1),
-        )
-
-        assert shape_2d[0] % alignment == 0 and shape_2d[1] % alignment == 0, (
-            f"cuBLAS GEMM {tensor_name} tensor's outer and inner dimensions must be a multiple of"
-            f" {alignment} when using quantized inputs. Got shape={shape}, shape_2d={shape_2d}"
+        assert contracting_size % alignment == 0, (
+            f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
+            f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
         )
 
 
@@ -479,16 +474,26 @@ class GemmPrimitive(BasePrimitive):
                 f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
             )
 
-        assert_cublas_requirements(
-            lhs.shape,
-            scaling_mode,
-            get_lhs_axis_boundary(lhs_contracting_dims, lhs_is_transposed),
-            "LHS",
+        lhs_axis_boundary = get_lhs_axis_boundary(lhs_contracting_dims, lhs_is_transposed)
+        lhs_contracting_size = (
+            reduce(operator.mul, lhs.shape[lhs_axis_boundary:])
+            if lhs_is_transposed
+            else reduce(operator.mul, lhs.shape[:lhs_axis_boundary])
         )
         assert_cublas_requirements(
-            rhs.shape,
             scaling_mode,
-            get_rhs_axis_boundary(rhs_contracting_dims, rhs_is_transposed),
+            lhs_contracting_size,
+            "LHS",
+        )
+        rhs_axis_boundary = get_rhs_axis_boundary(rhs_contracting_dims, rhs_is_transposed)
+        rhs_contracting_size = (
+            reduce(operator.mul, rhs.shape[:rhs_axis_boundary])
+            if rhs_is_transposed
+            else reduce(operator.mul, rhs.shape[rhs_axis_boundary:])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            rhs_contracting_size,
             "RHS",
         )
 

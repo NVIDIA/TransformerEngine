@@ -144,8 +144,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
     if (is_fp8_dtype(ret.Atype)) {
       // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
-      NVTE_CHECK((is_A_transposed ? m : k) % 16 == 0,
-                 "Outer dimension requirement on A for FP8 GEMM. Caller must pad.");
       NVTE_CHECK(ret.lda % 16 == 0,
                  "Inner dimension requirement on A for FP8 GEMM. Caller must pad.");
     }
@@ -227,8 +225,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
     if (is_fp8_dtype(ret.Atype)) {
       // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
-      NVTE_CHECK((is_B_transposed ? k : n) % 16 == 0,
-                 "Outer dimension requirement on B for FP8 GEMM. Caller must pad.");
       NVTE_CHECK(ret.ldb % 16 == 0,
                  "Inner dimension requirement on B for FP8 GEMM. Caller must pad.");
     }
