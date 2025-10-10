@@ -281,6 +281,8 @@ model_configs_max_score = {
     "max_score_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
     "max_score_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
 }
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_max_score])
@@ -288,10 +290,10 @@ model_configs_max_score = {
 def test_dpa_max_score(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
-    config.return_max_score=True
+    config.return_max_score = True
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
-    
+
 model_configs_softmax = {
     # test: ModelConfig(b, sq, hq, dqk)
     "softmax_1_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8),
@@ -1136,7 +1138,7 @@ def _run_dot_product_attention(
         fast_zero_fill=True,
     )
     if is_training:
-        out.backward((d_out, torch.zeros(1,device="cuda")))
+        out.backward((d_out, torch.zeros(1, device="cuda")))
 
     if config.return_max_score:
         out = (out, max_score)

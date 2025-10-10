@@ -49,7 +49,8 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
       bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups,
-      max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right, return_max_sum_exp);
+      max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
+      return_max_sum_exp);
   return fused_attention_backend;
 }
 
@@ -228,8 +229,9 @@ std::vector<py::object> fused_attn_fwd(
         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
+        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
+        softmax_type, window_size[0], window_size[1], workspace.data(),
+        at::cuda::getCurrentCUDAStream());
   });
 
   // allocate memory for workspace and auxiliary output tensors
@@ -287,8 +289,9 @@ std::vector<py::object> fused_attn_fwd(
         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
+        return_max_sum_exp, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
+        softmax_type, window_size[0], window_size[1], workspace.data(),
+        at::cuda::getCurrentCUDAStream());
   });
 
   // destroy tensor wrappers, but not allocated memory

@@ -205,7 +205,7 @@ class ModelConfig:
         window_size: Tuple[int, int] = (-1, -1),
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
-        return_max_score = False,
+        return_max_score=False,
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,

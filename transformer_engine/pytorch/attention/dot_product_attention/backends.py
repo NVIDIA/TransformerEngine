@@ -432,7 +432,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         max_score = None
         if self.return_max_score:
             # matmul_result [b, np, sq, dk], max_score [np]
-            max_score = matmul_result.view(*matmul_result.shape[:2],-1)
+            max_score = matmul_result.view(*matmul_result.shape[:2], -1)
             max_score = torch.max(max_score, dim=-1)[0]
             max_score = torch.max(max_score, dim=0)[0]
 
@@ -538,7 +538,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # quantize O
             if fp8_output:
                 context_layer = O_quantizer(context_layer)
-                
+
         if self.return_max_score:
             return context_layer, max_score
 
@@ -920,7 +920,7 @@ class FlashAttention(torch.nn.Module):
                         **fa_optional_forward_kwargs,
                         return_attn_probs=self.return_max_score,
                     )
-                    #if self.return_max_score and (self.attention_dropout == 0.0 or not self.training):
+                    # if self.return_max_score and (self.attention_dropout == 0.0 or not self.training):
                     #    output, _, S_dmask = output
                     #    max_score = torch.max(S_dmask)
                 else:
