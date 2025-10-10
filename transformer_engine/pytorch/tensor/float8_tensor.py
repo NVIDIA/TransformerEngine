@@ -4,6 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
+import os
 from typing import Optional, Tuple, Iterable, Union
 import warnings
 
@@ -537,8 +538,34 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         self._transpose = None
 
     @classmethod
-    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+    def make_like(
+        cls,
+        tensor: QuantizedTensor,
+        *,
+        shape: Optional[Iterable[int]] = None,
+        dtype: Optional[torch.dtype] = None,
+        requires_grad: bool = False,
+        data: Optional[torch.Tensor] = None,
+    ) -> Float8Tensor:
+        """Create new Float8 tensor
+        By default, new tensor has the same attributes and underlying
+        data.
 
+        """
+        if shape is None:
+            shape = data.shape if data is not None else tensor.shape
+        dtype = dtype if dtype is not None else tensor.dtype
+        kwargs = tensor.get_metadata()
+        if data is not None:
+            kwargs["data"] = data
+            # TODO: Move common code to Base class and just update metadata here.
+            fp8_scale_inv = tensor._scale_inv.detach().clone()
+            kwargs["fp8_scale_inv"] = fp8_scale_inv
+
+        return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
         # View op
         if func == aten.view.default:
             tensor = args[0]
