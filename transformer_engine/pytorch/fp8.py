@@ -6,6 +6,8 @@
 DEPRECATED in favor of `transformer_engine.pytorch.quantize.py`.
 """
 
+# pylint: disable=wrong-import-position,unused-import
+
 import warnings
 
 warnings.warn(

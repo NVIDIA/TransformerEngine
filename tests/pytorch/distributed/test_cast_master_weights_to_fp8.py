@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch.quantized import (
+from transformer_engine.pytorch.quantize import (
     is_fp8_available,
     is_fp8_block_scaling_available,
 )

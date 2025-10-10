@@ -8,11 +8,11 @@ import transformer_engine.pytorch as te
 import torch
 import tempfile
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.quantize import RecipeState
 import pytest
 import contextlib
 import os
-from transformer_engine.pytorch.quantized import (
+from transformer_engine.pytorch.quantize import (
+    RecipeState,
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,

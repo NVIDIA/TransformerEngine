@@ -9,7 +9,7 @@ import pytest
 import os
 
 import transformer_engine.pytorch
-from transformer_engine.pytorch.quantized import (
+from transformer_engine.pytorch.quantize import (
     autocast,
     FP8GlobalStateManager,
     quantized_model_init,

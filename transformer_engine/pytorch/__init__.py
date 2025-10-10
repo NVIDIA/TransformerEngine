@@ -47,7 +47,7 @@ from transformer_engine.pytorch.permutation import (
     moe_sort_chunks_by_index_with_probs,
 )
 from transformer_engine.pytorch.quantize import fp8_autocast
-from transformer_engine.pytorch.quantize import quantized_model_init
+from transformer_engine.pytorch.quantize import fp8_model_init
 from transformer_engine.pytorch.quantize import autocast
 from transformer_engine.pytorch.quantize import quantized_model_init
 from transformer_engine.pytorch.quantize import is_fp8_available

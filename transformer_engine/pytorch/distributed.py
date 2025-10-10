@@ -36,7 +36,7 @@ from .utils import (
     needs_quantized_gemm,
 )
 from .constants import dist_group_type
-from .fp8 import FP8GlobalStateManager, fp8_autocast
+from .quantized import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer

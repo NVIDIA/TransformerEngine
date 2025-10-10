@@ -22,7 +22,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
-from ..fp8 import (
+from ..quantized import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,

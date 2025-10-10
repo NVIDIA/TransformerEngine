@@ -16,7 +16,7 @@ import transformer_engine
 import transformer_engine_torch as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-from transformer_engine.pytorch.quantized import FP8GlobalStateManager
+from transformer_engine.pytorch.quantize import FP8GlobalStateManager
 
 from test_numerics import (
     _emulate_linear,

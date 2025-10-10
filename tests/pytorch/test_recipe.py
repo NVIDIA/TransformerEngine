@@ -13,7 +13,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.quantized import (
+from transformer_engine.pytorch.quantize import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
     quantized_model_init,

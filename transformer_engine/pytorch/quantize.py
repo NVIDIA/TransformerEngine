@@ -628,7 +628,7 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def quantized_model_init(
+def fp8_model_init(
     enabled: bool = True,
     recipe: Optional[Recipe] = None,
     preserve_high_precision_init_val: bool = False,
@@ -638,7 +638,7 @@ def quantized_model_init(
     """
 
     warnings.warn(
-        "quantized_model_init is deprecated and will be removed in a future release. "
+        "fp8_model_init is deprecated and will be removed in a future release. "
         "Use quantized_model_init("
         "enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.",
         category=DeprecationWarning,

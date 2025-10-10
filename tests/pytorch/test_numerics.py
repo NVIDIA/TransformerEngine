@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.quantized import (
+from transformer_engine.pytorch.quantize import (
     FP8GlobalStateManager,
     autocast,
     quantized_model_init,

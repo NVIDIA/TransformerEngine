@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from ..fp8 import (
+from ..quantized import (
     FP8GlobalStateManager,
     RecipeState,
     fp8_autocast,
