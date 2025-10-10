@@ -12,7 +12,7 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.nvfp4_tensor import (
     NVFP4Quantizer,
 )
-from transformer_engine.pytorch.experimental.quantization_microblock_ref import NVFP4QuantizerRef
+from transformer_engine.pytorch.experimental.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.experimental import utils
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp4_te_dtype
 
