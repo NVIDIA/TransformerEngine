@@ -190,7 +190,7 @@ def high_precision_gemm_ref(
 @dataclasses.dataclass
 class NVFP4TensorRef(QuantizedTensorStorage):
     """NVFP4 tensor for middleware between Transformer Engine and Kitchen.
-    
+
     Custom container to hold quantization result, including quantized tensor, optional
     transposed quantized tensor, and corresponding decoding scales.
 
@@ -748,9 +748,7 @@ class NVFP4QuantizerRef(Quantizer):
         """
         return False
 
-    def transpose_qresult(
-        self, qresult: QuantizedTensorStorage
-    ) -> QuantizedTensorStorage:
+    def transpose_qresult(self, qresult: QuantizedTensorStorage) -> QuantizedTensorStorage:
         """Convert row-wise data to column-wise data (?)
 
         TODO(etsykunov): Confirm docstring is correct.

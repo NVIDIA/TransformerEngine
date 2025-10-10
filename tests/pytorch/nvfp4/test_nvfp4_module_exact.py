@@ -69,17 +69,18 @@ class GetRecipes:
 def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bool = False):
     """
     Create a quantizer factory for NVFP4 reference implementation.
-    
+
     This factory returns NVFP4QuantizerRef instances based on the role and configuration.
     Used with CustomRecipe to create reference quantizers.
-    
+
     Args:
         with_rht: Whether to enable random Hadamard transform
         with_2d_quantization: Whether to use 2D quantization (16x16 tiles for weights)
-    
+
     Returns:
         A factory function that takes a role string and returns a quantizer instance
     """
+
     def factory(role):
         if role == "linear_input":
             return quantization_nvfp4.NVFP4QuantizerRef(

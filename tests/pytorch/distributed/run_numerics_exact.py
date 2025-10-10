@@ -61,6 +61,7 @@ def get_nvfp4_quantizer_factory():
     Returns:
         A factory function that takes a role string and returns a quantizer instance
     """
+
     def factory(role):
         if role == "linear_input":
             return quantization_nvfp4.NVFP4QuantizerRef(
