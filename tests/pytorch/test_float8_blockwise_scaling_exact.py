@@ -8,7 +8,7 @@ import os
 import pathlib
 import pytest
 import torch
-import transformer_engine as te
+import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
