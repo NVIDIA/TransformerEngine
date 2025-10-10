@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
-from transformer_engine.pytorch.quantize import FP8GlobalStateManager
+from transformer_engine.pytorch.quantize import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, autocast, quantized_model_init
 from transformer_engine.pytorch.attention.dot_product_attention import (
@@ -2541,7 +2541,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             )
 
             proj_dgrad = ctx.dO_quantizer(grad_output)
-            fp8_dtype_backward = fp8.get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+            fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
             dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_s,

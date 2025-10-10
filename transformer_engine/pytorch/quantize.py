@@ -634,7 +634,11 @@ def fp8_model_init(
     preserve_high_precision_init_val: bool = False,
 ) -> None:
     """
-    DEPRECATED: use `quantized_model_init(...)` instead.
+    .. warning::
+
+       fp8_model_init is deprecated and will be removed in a future release. Use
+       quantized_model_init(enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.
+
     """
 
     warnings.warn(
@@ -726,7 +730,11 @@ def fp8_autocast(
     _graph: bool = False,
 ) -> None:
     """
-    DEPRECATED: use `autocast(...)` instead.
+    .. warning::
+
+       fp8_autocast is deprecated and will be removed in a future release.
+       Use autocast(enabled=..., calibrating=..., recipe=..., group=..., _graph=...) instead.
+
     """
 
     warnings.warn(
@@ -756,7 +764,7 @@ def autocast(
     _graph: bool = False,
 ) -> None:
     """
-    Context manager for FP8 usage.
+    Context manager for FP8 or FP4 usage.
 
     .. code-block:: python
 
@@ -771,7 +779,7 @@ def autocast(
 
     .. note::
 
-        When :attr:`fp8_recipe.reduce_amax==True`, any module must not be invoked more than once
+        When :attr:`recipe.reduce_amax==True`, any module must not be invoked more than once
         inside a single `autocast` region. This is unsupported behavior because the amax
         reduction is handled during the exit of the `autocast` context. Calling the same
         module more than once inside an `autocast` region overrides the amax tensors
@@ -780,14 +788,14 @@ def autocast(
     Parameters
     ----------
     enabled: bool, default = `True`
-             whether or not to enable fp8
+             whether or not to enable low precision quantization (FP8/FP4).
     calibrating: bool, default = `False`
                  calibration mode allows collecting statistics such as amax and scale
-                 data of fp8 tensors even when executing without fp8 enabled. This is
-                 useful for saving an inference ready fp8 checkpoint while training
+                 data of quantized tensors even when executing without quantization enabled.
+                 This is useful for saving an inference ready checkpoint while training
                  using a higher precision.
-    fp8_recipe: recipe.Recipe, default = `None`
-                recipe used for FP8 training.
+    recipe: recipe.Recipe, default = `None`
+            recipe used for low precision quantization.
     amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
                           distributed group over which amaxes for the quantized tensors
                           are reduced at the end of each training step.

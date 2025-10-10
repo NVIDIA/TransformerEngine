@@ -37,9 +37,13 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
+.. autoapifunction:: transformer_engine.pytorch.fp8_autocast
+
+.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
+
 .. autoapifunction:: transformer_engine.pytorch.autocast
 
-.. autoapifunction:: transformer_engine.pytorch.model_init
+.. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
 

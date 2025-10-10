@@ -12,13 +12,15 @@ import pathlib
 import pytest
 import torch
 
+from typing import Optional
+
 import transformer_engine.pytorch as te
 
 from utils import make_recipe
 
 # Check supported quantization schemes
-fp8_available, reason_for_no_fp8 = te.fp8.FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.fp8.FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.quantize.FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = te.quantize.FP8GlobalStateManager.is_mxfp8_available()
 
 
 # Test cases for loading checkpoint files
