@@ -385,7 +385,6 @@ def assert_cublas_requirements(shape, scaling_mode, axis_boundary, tensor_name):
             f"cuBLAS GEMM {tensor_name} tensor's outer and inner dimensions must be a multiple of"
             f" {alignment} when using quantized inputs. Got shape={shape}, shape_2d={shape_2d}"
         )
-        return
 
 
 class GemmPrimitive(BasePrimitive):
