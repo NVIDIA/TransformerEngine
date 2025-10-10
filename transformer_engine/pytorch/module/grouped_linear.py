@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..quantized import FP8GlobalStateManager
+from ..quantize import FP8GlobalStateManager
 from ..utils import (
     divide,
     cast_if_needed,

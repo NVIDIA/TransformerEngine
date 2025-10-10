@@ -10,7 +10,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from ..quantized import FP8GlobalStateManager
+from ..quantize import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
 
 

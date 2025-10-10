@@ -26,7 +26,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import noop_cat, WeightGradStore, get_module_quantizers
-from ..quantized import FP8GlobalStateManager
+from ..quantize import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
