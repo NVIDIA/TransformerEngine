@@ -14,7 +14,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
-from ..softmax import SoftmaxType
+from ..softmax import SoftmaxFusion
 
 
 __all__ = [
@@ -32,7 +32,7 @@ __all__ = [
 
 
 def is_softmax_kernel_available(
-    softmax_type: SoftmaxType,
+    softmax_fusion: SoftmaxFusion,
     batch: int,
     heads: int,
     q_seqlen: int,
@@ -40,15 +40,15 @@ def is_softmax_kernel_available(
     dtype: jnp.dtype,
 ):
     """check softmax available"""
-    if softmax_type is SoftmaxType.SCALED:
+    if softmax_fusion is SoftmaxFusion.SCALED:
         return ScaledSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_MASKED:
+    if softmax_fusion is SoftmaxFusion.SCALED_MASKED:
         return ScaledMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+    if softmax_fusion is SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED:
         return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
