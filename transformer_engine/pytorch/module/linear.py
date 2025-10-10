@@ -835,7 +835,7 @@ class _Linear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not hasattr(weight, "__fsdp_param__")
+                        if not hasattr(weight, "overwrite_main_grad")
                         else False
                     ),
                     "layout": "NT",
