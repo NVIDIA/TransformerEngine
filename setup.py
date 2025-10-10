@@ -20,6 +20,7 @@ from build_tools.utils import (
     cuda_version,
     get_frameworks,
     remove_dups,
+    min_python_version_str,
 )
 
 frameworks = get_frameworks()
@@ -190,7 +191,7 @@ if __name__ == "__main__":
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8",
+        python_requires=f">={min_python_version_str()}",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),

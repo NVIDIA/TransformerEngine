@@ -20,6 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     AttentionParams,
     AttentionLogging,
+    check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
@@ -72,6 +73,8 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 
     # Transformer Engine dtypes
     if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat4E2M1:
+            return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
             tex.DType.kByte: torch.uint8,
             tex.DType.kInt32: torch.int32,
@@ -94,8 +97,23 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     if dtype == torch.float8_e4m3fn:
         return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
     if dtype == torch.float8_e5m2:
-        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.125
     raise ValueError(f"Unsupported dtype ({dtype})")
+
+
+def quantization_tols(name: str) -> dict[str, float]:
+    """Estimated numerical error for a quantization scheme"""
+    if name in (
+        "fp8",
+        "fp8_delayed_scaling",
+        "fp8_current_scaling",
+        "mxfp8",
+        "mxfp8_block_scaling",
+    ):
+        return dtype_tols(tex.DType.kFloat8E4M3)
+    if name == "nvfp4":
+        return dtype_tols(tex.DType.kFloat4E2M1)
+    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def make_recipe(name: Optional[str]) -> Optional[Recipe]:
@@ -117,6 +135,12 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling()
+    if name == "nvfp4":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+        )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
@@ -137,6 +161,31 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
+def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
+    if not is_fp8:
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+        return
+
+    try:
+        if a.dtype != b.dtype:
+            a = a.to(b.dtype)
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+    except Exception as e:
+        logging.debug(e)
+
+    rmse = torch.sqrt((a - b).square().mean()).item()
+    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
+    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+    assert rmse < rmse_tol * rmse_range, (
+        name_a
+        + " vs "
+        + name_b
+        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+        )
+    )
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -147,12 +196,15 @@ class ModelConfig:
         max_seqlen_kv: int = None,
         num_gqa_groups: int = None,
         head_dim_v: int = None,
+        softmax_type: str = "vanilla",
         dropout_p: float = 0.0,
         attn_mask_type: str = "no_mask",
         attn_bias_type: str = "no_bias",
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        context_parallel: bool = False,
+        cp_comm_type: str = "p2p",
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,
@@ -171,13 +223,16 @@ class ModelConfig:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = self.num_heads * self.head_dim_qk
         self.hidden_size_kv = self.num_gqa_groups * self.head_dim_v
+        self.softmax_type = softmax_type
         self.dropout_p = dropout_p
         self.attn_mask_type = attn_mask_type
         self.attn_bias_type = attn_bias_type
         self.alibi_type = alibi_type
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
-        self.window_size = window_size
+        self.window_size = check_set_window_size(self.attn_mask_type, window_size)
+        self.context_parallel = context_parallel
+        self.cp_comm_type = cp_comm_type
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
         self.num_layers = num_layers
@@ -198,9 +253,7 @@ def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
     qkv_layout: str,
-    window_size: Tuple[int, int] = (-1, -1),
     pad_between_seqs: bool = False,
-    context_parallel: bool = False,
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
@@ -250,19 +303,21 @@ def get_available_attention_backends(
             head_dim_qk=config.head_dim_qk,
             head_dim_v=config.head_dim_v,
             attn_mask_type=config.attn_mask_type,
-            window_size=window_size,
+            window_size=config.window_size,
             alibi_slopes_shape=alibi_slopes_shape,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias_shape=core_attention_bias_shape,
             core_attention_bias_requires_grad=core_attention_bias_requires_grad,
             pad_between_seqs=pad_between_seqs,
             attention_dropout=config.dropout_p,
-            context_parallel=context_parallel,
+            context_parallel=config.context_parallel,
+            cp_comm_type=config.cp_comm_type,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
             is_training=is_training,
             inference_params=inference_params,
+            softmax_type=config.softmax_type,
         )
         (
             use_flash_attention,
