@@ -219,10 +219,15 @@ class _GroupedLinear(torch.autograd.Function):
 
             if fine_grained_activation_offloading and cpu_offloading:
                 raise ValueError(
-                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
+                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same"
+                    f" time."
                 )
 
-            if fine_grained_activation_offloading and weights[0].requires_grad and fuse_wgrad_accumulation:
+            if (
+                fine_grained_activation_offloading
+                and weights[0].requires_grad
+                and fuse_wgrad_accumulation
+            ):
                 grad_added_to_main_grad_list = []
                 for weight in weights:
                     if weight.requires_grad and hasattr(weight, "grad_added_to_main_grad"):
@@ -292,7 +297,9 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
-            if (ctx.cpu_offloading or ctx.fine_grained_activation_offloading) and ctx.fuse_wgrad_accumulation:
+            if (
+                ctx.cpu_offloading or ctx.fine_grained_activation_offloading
+            ) and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
                     origin_weights[i].main_grad = main_grads[i]
                     origin_weights[i].grad_added_to_main_grad = ctx.grad_added_to_main_grad_list[i]
