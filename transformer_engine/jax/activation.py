@@ -11,10 +11,9 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-
 from . import cpp_extensions as tex
 
-from .quantize.tensor import ScaledTensor
+from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
 
@@ -22,7 +21,8 @@ def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-) -> Union[jnp.ndarray, ScaledTensor]:
+    act_params: Optional[tex.activation.ActivationParams] = None,
+) -> jnp.ndarray:
     """Apply activation functions to input tensor with optional quantization.
 
     This function applies a sequence of activation functions to the input tensor.
@@ -32,17 +32,19 @@ def activation(
         x: Input tensor to apply activations to
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer for quantizing the output
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Activated output tensor
     """
     assert x.shape[-1] % len(activation_type) == 0
-    output = _activation(x, activation_type, quantizer)
+    output = _activation(x, activation_type, quantizer, act_params)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _activation(x, activation_type, quantizer):
+@partial(jax.custom_vjp, nondiff_argnums=(1, 3))
+def _activation(x, activation_type, quantizer, act_params):
     """Internal implementation of activation with custom VJP.
 
     This function implements the core activation logic with support for
@@ -52,36 +54,42 @@ def _activation(x, activation_type, quantizer):
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Activated tensor
     """
-    _output, _ = _activation_fwd_rule(x, activation_type, quantizer)
+    _output, _ = _activation_fwd_rule(x, activation_type, quantizer, act_params)
     return _output
 
 
-def _activation_fwd_rule(x, activation_type, quantizer):
+def _activation_fwd_rule(x, activation_type, quantizer, act_params):
     """Forward pass rule for activation function.
 
     Args:
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
 
     Returns:
         Tuple of (output, context) for backward pass
     """
-    fwd_output = tex.act_lu(x, activation_type, quantizer)
-    if isinstance(fwd_output, ScaledTensor):
-        fwd_output = fwd_output.dequantize()
+    fwd_output = tex.act_lu(x, activation_type, quantizer, act_params)
+    # This is a no-op for higher-precision tensors
+    fwd_output = fwd_output.dequantize()
     return fwd_output, (x, quantizer)
 
 
-def _activation_bwd_rule(activation_type, ctx, g):
+def _activation_bwd_rule(activation_type, act_params, ctx, g):
     """Backward pass rule for activation function.
 
     Args:
         activation_type: Sequence of activation functions
+        act_params: Optional activation parameters. Currently used
+        just for ClampedSwiGLU.
         ctx: Context from forward pass
         g: Gradient from upstream
 
@@ -90,7 +98,11 @@ def _activation_bwd_rule(activation_type, ctx, g):
     """
     (x, _) = ctx
     assert x.dtype == g.dtype
-    dx = tex.dact_lu(g, x, activation_type)
+    dx = tex.dact_lu(g, x, activation_type, act_params=act_params)
+    # No quantization is used in this VJP backward, so the output should
+    # always be a NoScaleTensor
+    assert isinstance(dx, NoScaleTensor)
+    dx = dx.data
     return (dx, None)
 
 

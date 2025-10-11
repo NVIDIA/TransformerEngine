@@ -16,12 +16,14 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
+from .cpp_extensions.amax import AmaxScope
 
 from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
+    get_quantize_config,
 )
 
 
@@ -34,6 +36,7 @@ def layernorm_dense(
     norm_type: str = "layernorm",
     zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
+    transpose_batch_sequence: bool = False,
     layernorm_input_axes: Tuple[str, ...] = None,
     dot_input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
@@ -54,6 +57,7 @@ def layernorm_dense(
         norm_type: Type of normalization ("layernorm" or "rmsnorm")
         zero_centered_gamma: Whether to use zero-centered gamma for normalization
         epsilon: Small constant for numerical stability in normalization
+        transpose_batch_sequence: Whether to transpose the batch and sequence dimensions
         layernorm_input_axes: Logical axes for sharding the layernorm input
         dot_input_axes: Logical axes for sharding the matrix multiplication input
         kernel_axes: Logical axes for sharding the weight matrix
@@ -68,6 +72,11 @@ def layernorm_dense(
         - The function supports automatic differentiation through JAX's custom VJP
         - Quantization is applied to both the normalized input and kernel
     """
+
+    if not get_quantize_config().is_fp8_enabled():
+        input_dtype = x.dtype
+        kernel = kernel.astype(input_dtype)
+
     output = _layernorm_dense(
         x,
         kernel,
@@ -77,6 +86,7 @@ def layernorm_dense(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        transpose_batch_sequence,
         layernorm_input_axes,
         dot_input_axes,
         kernel_axes,
@@ -94,6 +104,7 @@ def layernorm_dense(
         8,
         9,
         10,
+        11,
     ),
 )
 def _layernorm_dense(
@@ -105,6 +116,7 @@ def _layernorm_dense(
     norm_type: str,
     zero_centered_gamma: bool,
     epsilon: float,
+    transpose_batch_sequence: bool,
     layernorm_input_axes: Tuple[str, ...],
     dot_input_axes: Tuple[str, ...],
     kernel_axes: Tuple[str, ...],
@@ -125,6 +137,7 @@ def _layernorm_dense(
         norm_type: Type of normalization
         zero_centered_gamma: Whether to use zero-centered gamma
         epsilon: Small constant for numerical stability
+        transpose_batch_sequence: Whether to transpose the batch and sequence dimensions
         layernorm_input_axes: Logical axes for layernorm sharding
         dot_input_axes: Logical axes for matrix multiplication sharding
         quantizer_set: Set of quantizers
@@ -141,6 +154,7 @@ def _layernorm_dense(
         norm_type,
         zero_centered_gamma,
         epsilon,
+        transpose_batch_sequence,
         layernorm_input_axes,
         dot_input_axes,
         kernel_axes,
@@ -158,6 +172,7 @@ def _layernorm_dense_fwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    transpose_batch_sequence,
     layernorm_input_axes,
     dot_input_axes,
     kernel_axes,
@@ -188,14 +203,19 @@ def _layernorm_dense_fwd_rule(
         epsilon,
         norm_type,
         quantizer=quantizer_set.x,
-        noop_scaled_tensor=True,
+        amax_scope=AmaxScope.TPSP,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
     # Kernel in (hidden_in, hidden_out...)
     flatten_axis = 1 - len(kernel.shape)
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel, noop_scaled_tensor=True
+        kernel,
+        flatten_axis=flatten_axis,
+        quantizer=quantizer_set.kernel,
+        amax_scope=AmaxScope.FSDP,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -206,6 +226,7 @@ def _layernorm_dense_fwd_rule(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=transpose_batch_sequence,
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
     )
@@ -238,6 +259,7 @@ def _layernorm_dense_bwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
+    transpose_batch_sequence,
     layernorm_input_axes,
     dot_input_axes,
     kernel_axes,
@@ -278,7 +300,8 @@ def _layernorm_dense_bwd_rule(
         is_dbias=use_bias,
         flatten_axis=flatten_axis,
         quantizer=quantizer_set.dgrad,
-        noop_scaled_tensor=True,
+        amax_scope=AmaxScope.TPSP,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
@@ -295,6 +318,7 @@ def _layernorm_dense_bwd_rule(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel,
         contracting_dims=(g_constracting_dim, k_constracting_dim),
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
@@ -308,6 +332,7 @@ def _layernorm_dense_bwd_rule(
         casted_ln_out,
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_constracting_dim, g_constracting_dim),
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)

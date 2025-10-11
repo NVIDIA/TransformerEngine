@@ -24,6 +24,7 @@ using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 using Dictionary = xla::ffi::Dictionary;
 
 constexpr auto FFI_Prepare = xla::ffi::ExecutionStage::kPrepare;
+constexpr auto FFI_Initialize = xla::ffi::ExecutionStage::kInitialize;
 constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);
@@ -101,9 +102,25 @@ inline static size_t te_dtype_bytes(const DType& type) {
       return 1;
     case DType::kFloat8E8M0:
       return 1;
+    case DType::kFloat4E2M1:
+      return 1;
     default:
       NVTE_ERROR("Unsupported DType: ", static_cast<int>(type));
   }
+}
+
+template <typename... Args>
+Error_Type wrapInStreamCapture(std::function<Error_Type(cudaStream_t, Args...)> func,
+                               cudaStream_t stream, Args... args) {
+  cudaGraph_t graph{};
+  NVTE_CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+
+  Error_Type error = func(stream, std::forward<Args>(args)...);
+
+  NVTE_CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
+  NVTE_CHECK_CUDA(cudaGraphDestroy(graph));
+
+  return error;
 }
 
 }  // namespace jax

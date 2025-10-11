@@ -6,8 +6,6 @@
 import os
 import functools
 from typing import Tuple
-from importlib.metadata import version as get_pkg_version
-from packaging.version import Version as PkgVersion
 
 import numpy as np
 
@@ -75,7 +73,8 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.int64.dtype: TEDType.kInt64,
         jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
         jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
-        jnp.uint8.dtype: TEDType.kByte,
+        jnp.float8_e8m0fnu.dtype: TEDType.kFloat8E8M0,
+        jnp.float4_e2m1fn.dtype: TEDType.kFloat4E2M1,
     }
 
     if jax_dtype not in converter:
@@ -151,16 +150,6 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     return (major, minor, patch)
 
 
-@functools.lru_cache(maxsize=None)
-def jax_version_meet_requirement(version: str):
-    """
-    Helper function checking if required JAX version is available
-    """
-    jax_version = PkgVersion(get_pkg_version("jax"))
-    jax_version_required = PkgVersion(version)
-    return jax_version >= jax_version_required
-
-
 def get_xla_flag(flag: str, default=None, cast=str):
     """
     Returns the value of a flag/option in XLA_FLAGS environment variable if present or returns the default value.
@@ -188,6 +177,16 @@ def get_min_device_compute_capability():
     Returns the minimum compute capability of all local devices.
     """
     return min(
+        transformer_engine_jax.get_device_compute_capability(local_gpu_id)
+        for local_gpu_id in range(len(jax.local_devices()))
+    )
+
+
+def get_all_device_compute_capability():
+    """
+    Returns a list of compute capability of all local devices.
+    """
+    return tuple(
         transformer_engine_jax.get_device_compute_capability(local_gpu_id)
         for local_gpu_id in range(len(jax.local_devices()))
     )
@@ -283,3 +282,11 @@ class NamedSharding(jax.sharding.NamedSharding):
         Create a new NamedSharding with the same mesh and spec but with a new description.
         """
         return NamedSharding(self.mesh, self.spec, desc=desc)
+
+
+@functools.lru_cache(maxsize=1)
+def is_all_reduce_in_float32():
+    """
+    Check if all-reduce is in float32
+    """
+    return os.getenv("NVTE_JAX_ALL_REDUCE_IN_FP32", "0") == "1"
