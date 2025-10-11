@@ -190,8 +190,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   const std::vector<size_t> meta_shape{1};
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
-  auto scale_inv_dtype =
-      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
+  auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
+                         : (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat8E4M3
+                                                                   : DType::kFloat32;
   ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
   ret.set_columnwise_scale_inv(columnwise_scale_inv_ptr, scale_inv_dtype,
                                columnwise_scale_inv_shape);

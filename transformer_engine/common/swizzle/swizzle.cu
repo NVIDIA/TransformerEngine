@@ -332,11 +332,9 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
 }  // namespace
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
-  NVTE_CHECK(input->scaling_mode == NVTE_MXFP8_1D_SCALING ||
-                 input->scaling_mode == NVTE_BLOCK_SCALING_1D ||
-                 input->scaling_mode == NVTE_BLOCK_SCALING_2D ||
-                 input->scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
+  NVTE_CHECK(
+      input->scaling_mode == NVTE_MXFP8_1D_SCALING || input->scaling_mode == NVTE_NVFP4_1D_SCALING,
+      "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
   NVTE_CHECK(is_fp8_dtype(input->dtype()) || is_fp4_dtype(input->dtype()),
              "Input tensor has invalid dtype (", to_string(input->dtype()), ").");
 
@@ -583,16 +581,19 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-// TODO(nvfp4): Add NVFP4 support.
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
   auto num_tensors = input.size();
   bool all_has_data = true;
   bool all_has_columnwise_data = true;
+  bool all_nvfp4 = true;
   for (size_t i = 0; i < num_tensors; i++) {
-    if (!is_fp8_dtype(input[i]->dtype()) || !is_mxfp_scaling(input[i]->scaling_mode)) {
-      NVTE_ERROR("Not implemented caling mode " + to_string(input[i]->scaling_mode) + ".");
-    }
+    auto scaling_mode = input[i]->scaling_mode;
+    auto is_fp8 = is_fp8_dtype(input[i]->dtype());
+    auto is_fp4 = is_fp4_dtype(input[i]->dtype());
+    NVTE_CHECK(
+        (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
+        "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     // We don't allow empty tensors. They should be filtered out before calling this function.
     if (input[i]->data.numel() == 0) {
       NVTE_ERROR("Tensor input[" + std::to_string(i) + "] is empty.");
@@ -601,13 +602,17 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]");
     all_has_data &= input[i]->has_data();
     all_has_columnwise_data &= input[i]->has_columnwise_data();
+    all_nvfp4 &= is_nvfp4_scaling(scaling_mode);
   }
   NVTE_CHECK(all_has_data || all_has_columnwise_data,
              "All tensors should have data or columnwise data.");
 
+  const bool rowwise_swizzle = all_has_data || all_nvfp4;
+  const bool columnwise_swizzle = all_has_columnwise_data && !all_nvfp4;
+
   constexpr int SF_TILE_DIM_M = 128;
   constexpr int SF_TILE_DIM_K = 4;
-  if (all_has_data) {
+  if (rowwise_swizzle) {
     MultiSwizzleArgs kernel_args;
     kernel_args.num_tensors = 0;
     kernel_args.block_range[0] = 0;
@@ -623,29 +628,60 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args.num_tensors = 0;
         vec_load_size = 4;
       }
-      const int m = input[i]->scale_inv.shape[0];
-      const int k = input[i]->scale_inv.shape[1];
+
+      int m, k;
+
+      if (all_has_data) {
+        m = input[i]->scale_inv.shape[0];
+        k = input[i]->scale_inv.shape[1];
+      } else {
+        NVTE_CHECK(all_nvfp4, "When doing rowwise swizzle with rowwise data, it has to be NVFP4");
+        m = input[i]->columnwise_scale_inv.shape[0];
+        k = input[i]->columnwise_scale_inv.shape[1];
+      }
 
       NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
       NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
       NVTE_CHECK(k > 0, "Input scale inverse should be 2D!");
-      NVTE_CHECK(
-          m * k == std::accumulate(output[i]->scale_inv.shape.begin(),
-                                   output[i]->scale_inv.shape.end(), 1, std::multiplies<int>()),
-          "Input.scale_inv size is not equal to Output.scale_inv size!");
+
+      if (output[i]->has_data()) {
+        NVTE_CHECK(
+            m * k == std::accumulate(output[i]->scale_inv.shape.begin(),
+                                     output[i]->scale_inv.shape.end(), 1, std::multiplies<int>()),
+            "Input.scale_inv size is not equal to Output.scale_inv size!");
+      }
+      if (output[i]->has_columnwise_data()) {
+        NVTE_CHECK(m * k == std::accumulate(output[i]->columnwise_scale_inv.shape.begin(),
+                                            output[i]->columnwise_scale_inv.shape.end(), 1,
+                                            std::multiplies<int>()),
+                   "Input.columnwise_scale_inv size is not equal to "
+                   "Output.columnwise_scale_inv size!");
+      }
 
       int num_tiles_k = k / SF_TILE_DIM_K;
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
-      vec_load_size = std::min(vec_load_size, vec_load_size_i);
+      // TODO(zhongbo): fix vec_load_size for NVFP4
+      // Current unit test won't capture this issue, but in E2E
+      // using vec_load_size = 1 other than 1 will lead to mis-aligned
+      // address error in MOE training
+      vec_load_size = all_nvfp4 ? 1 : std::min(vec_load_size, vec_load_size_i);
 
       const int pos = kernel_args.num_tensors;
-      kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
-      kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
-      kernel_args.original_m_list[pos] = input[i]->flat_first_dim();
-      kernel_args.original_k_list[pos] = input[i]->flat_last_dim() / MXFP8_BLOCK_SIZE;
+      if (!all_nvfp4 || all_has_data) {
+        int block_scale_size = all_nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
+        kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
+        kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
+        kernel_args.original_m_list[pos] = input[i]->flat_first_dim();
+        kernel_args.original_k_list[pos] = input[i]->flat_last_dim() / block_scale_size;
+      } else {
+        kernel_args.input_list[pos] = const_cast<void*>(input[i]->columnwise_scale_inv.dptr);
+        kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
+        kernel_args.original_m_list[pos] = input[i]->flat_last_dim();
+        kernel_args.original_k_list[pos] = input[i]->flat_first_dim() / NVFP4_BLOCK_SIZE;
+      }
       kernel_args.num_tensors++;
     }
     // Launch the remaining tensors
@@ -655,7 +691,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args, vec_load_size, true, stream);
   }
 
-  if (all_has_columnwise_data) {
+  if (columnwise_swizzle) {
+    // NVFP4 shouldn't end up here because it only needs rowwise swizzle
+    NVTE_CHECK(!all_nvfp4, "NVFP4 shouldn't end up here because it only needs rowwise swizzle");
+
     MultiSwizzleArgs kernel_args;
     kernel_args.num_tensors = 0;
     kernel_args.block_range[0] = 0;
