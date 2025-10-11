@@ -294,11 +294,8 @@ class _GroupedLinear(torch.autograd.Function):
 
             if (ctx.cpu_offloading or ctx.fine_grained_activation_offloading) and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
-                    if not ctx.cpu_offloading:
-                        w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
-                        weights[i] = w
-                    weights[i].main_grad = main_grads[i]
-                    weights[i].grad_added_to_main_grad = ctx.grad_added_to_main_grad_list[i]
+                    origin_weights[i].main_grad = main_grads[i]
+                    origin_weights[i].grad_added_to_main_grad = ctx.grad_added_to_main_grad_list[i]
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
