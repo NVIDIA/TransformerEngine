@@ -5,6 +5,7 @@
 """GroupedLinear API"""
 from typing import Union, Optional, Callable, Tuple, List
 import warnings
+import contextlib
 
 import functools
 import torch
@@ -745,9 +746,14 @@ class GroupedLinear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
+        if is_first_microbatch is None or is_first_microbatch:
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
