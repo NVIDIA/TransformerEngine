@@ -211,6 +211,7 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
 
+            # Do not offload weights and biases
             for i in range(num_gemms):
                 weights[i].offloading_activation = False
                 weights_fp8[i].offloading_activation = False
@@ -219,9 +220,11 @@ class _GroupedLinear(torch.autograd.Function):
 
             if fine_grained_activation_offloading and cpu_offloading:
                 raise ValueError(
-                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
+                    "Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
                 )
 
+            # Record the attributes grad_added_to_main_grad of weights for backward pass
+            # since these attributes will be lost during offloading
             if fine_grained_activation_offloading and weights[0].requires_grad and fuse_wgrad_accumulation:
                 grad_added_to_main_grad_list = []
                 for weight in weights:
@@ -292,6 +295,7 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
+            # Restore the attributes main_grad and grad_added_to_main_grad of weights
             if (ctx.cpu_offloading or ctx.fine_grained_activation_offloading) and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
                     origin_weights[i].main_grad = main_grads[i]

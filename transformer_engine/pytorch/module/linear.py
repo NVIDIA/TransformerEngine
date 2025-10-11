@@ -413,9 +413,11 @@ class _Linear(torch.autograd.Function):
 
             if fine_grained_activation_offloading and cpu_offloading:
                 raise ValueError(
-                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
+                    "Do not use fine_grained_activation_offloading and cpu_offloading at the same time."
                 )
 
+            # Record the attributes grad_added_to_main_grad of weights for backward pass
+            # since these attributes will be lost during offloading
             if fine_grained_activation_offloading and weight.requires_grad and fuse_wgrad_accumulation:
                 if hasattr(weight, "grad_added_to_main_grad"):
                     ctx.has_grad_added_to_main_grad = True
@@ -529,6 +531,7 @@ class _Linear(torch.autograd.Function):
                 else None
             )
 
+            # Restore the attributes main_grad and grad_added_to_main_grad of weights
             if ctx.cpu_offloading or ctx.fine_grained_activation_offloading:
                 if ctx.has_grad_added_to_main_grad:
                     weight = ctx.weight_object
