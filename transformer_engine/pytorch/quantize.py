@@ -764,7 +764,7 @@ def autocast(
     _graph: bool = False,
 ) -> None:
     """
-    Context manager for FP8 or FP4 usage.
+    Context manager for quantization schemes like FP8 or FP4.
 
     .. code-block:: python
 
