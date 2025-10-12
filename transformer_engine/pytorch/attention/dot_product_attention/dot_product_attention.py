@@ -419,7 +419,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
-            "return_max_score": return_max_score,
         }
 
         self.flash_attention = FlashAttention(
@@ -439,6 +438,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             deterministic=self.deterministic,
             **attn_kwargs,
             softmax_type=self.softmax_type,
+            return_max_score=self.return_max_score,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -447,6 +447,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             **attn_kwargs,
             layer_number=layer_number,
             softmax_type=self.softmax_type,
+            return_max_score=self.return_max_score,
         )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument

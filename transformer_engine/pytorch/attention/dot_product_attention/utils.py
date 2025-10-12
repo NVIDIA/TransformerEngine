@@ -491,12 +491,6 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_score")
-        # if use_flash_attention and not (attention_dropout == 0.0 or not is_training):
-        #    use_flash_attention = False
-        #    logger.debug("Disabling FlashAttention for max_score with dropout")
-        # if use_flash_attention and fp8 and fp8_meta["recipe"].fp8_dpa:
-        #    use_flash_attention = False
-        #    logger.debug("Disabling FlashAttention for max_score with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size

@@ -598,7 +598,6 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
-        return_max_score: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -622,7 +621,6 @@ class FlashAttention(torch.nn.Module):
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
             self.logger.addHandler(attn_log._stream_handler)
-        self.return_max_score = return_max_score
 
     def forward(
         self,
@@ -923,11 +921,7 @@ class FlashAttention(torch.nn.Module):
                         softmax_scale=self.softmax_scale,
                         causal="causal" in attn_mask_type,
                         **fa_optional_forward_kwargs,
-                        return_attn_probs=self.return_max_score,
                     )
-                    # if self.return_max_score and (self.attention_dropout == 0.0 or not self.training):
-                    #    output, _, S_dmask = output
-                    #    max_score = torch.max(S_dmask)
                 else:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
@@ -1052,8 +1046,6 @@ class FlashAttention(torch.nn.Module):
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
-        if self.return_max_score:
-            return output.contiguous(), max_score
         return output.contiguous()
 
 
