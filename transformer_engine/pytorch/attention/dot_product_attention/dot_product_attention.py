@@ -21,7 +21,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.quantize import (
+from transformer_engine.pytorch.quantization import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,

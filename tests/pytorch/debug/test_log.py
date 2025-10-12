@@ -11,7 +11,7 @@ from transformer_engine.common import recipe
 import pytest
 import contextlib
 import os
-from transformer_engine.pytorch.quantize import (
+from transformer_engine.pytorch.quantization import (
     RecipeState,
     is_fp8_available,
     is_mxfp8_available,

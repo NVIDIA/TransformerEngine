@@ -14,7 +14,7 @@ from torch.amp import autocast
 import transformer_engine as te
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
 from transformer_engine.common.recipe import Format, DelayedScaling
-from transformer_engine.pytorch.quantize import get_default_fp8_recipe
+from transformer_engine.pytorch.quantization import get_default_fp8_recipe
 import transformers
 from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConfig, GemmaModel
 

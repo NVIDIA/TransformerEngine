@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """
-DEPRECATED in favor of `transformer_engine.pytorch.quantize.py`.
+DEPRECATED in favor of `transformer_engine.pytorch.quantization.py`.
 """
 
 # pylint: disable=wrong-import-position,unused-import
@@ -22,7 +22,7 @@ warnings.warn(
 # Importing each function instead of 'import *' allows us specify '__all__' in
 # quantize.py and also makes any newer additions to quantize.py invisible via
 # fp8.py so that we don't reinforce importing internal TE functions.
-from .quantize import (
+from .quantization import (
     check_fp8_support,
     check_mxfp8_support,
     check_nvfp4_support,

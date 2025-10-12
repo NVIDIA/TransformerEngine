@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ...quantize import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer

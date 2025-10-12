@@ -9,7 +9,7 @@ import torch
 
 from typing import List
 
-from transformer_engine.pytorch.quantize import quantized_model_init
+from transformer_engine.pytorch.quantization import quantized_model_init
 
 from transformers.modeling_utils import load_state_dict
 from transformers.utils.hub import get_checkpoint_shard_files

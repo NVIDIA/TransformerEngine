@@ -9,7 +9,7 @@ import pandas as pd
 
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
-from transformer_engine.pytorch.quantize import autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import autocast, FP8GlobalStateManager
 from contextlib import nullcontext
 
 """

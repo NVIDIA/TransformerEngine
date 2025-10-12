@@ -17,7 +17,7 @@ from transformer_engine.pytorch import (
     quantized_model_init,
     make_graphed_callables,
 )
-from transformer_engine.pytorch.quantize import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe

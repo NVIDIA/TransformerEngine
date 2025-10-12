@@ -11,7 +11,7 @@ import itertools
 
 import torch
 
-from transformer_engine.pytorch.quantize import FP8GlobalStateManager, Recipe, DelayedScaling
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, Recipe, DelayedScaling
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,

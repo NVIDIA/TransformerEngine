@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
-from transformer_engine.pytorch.quantize import FP8GlobalStateManager, get_fp8_te_dtype
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, autocast, quantized_model_init
 from transformer_engine.pytorch.attention.dot_product_attention import (

@@ -28,7 +28,7 @@ from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
 from .make_extra_output import MakeExtraOutput
-from .quantize import Quantize
+from .quantization import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm

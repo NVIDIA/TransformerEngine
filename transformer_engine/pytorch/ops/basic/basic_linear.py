@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...quantize import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
