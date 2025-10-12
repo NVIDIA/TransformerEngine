@@ -405,10 +405,10 @@ void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
     const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
     const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
-    size_t max_seqlen_kv, bool is_training, bool return_max_score, float attn_scale,
-    float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, NVTETensor workspace, cudaStream_t stream);
+    size_t max_seqlen_kv, bool is_training, bool return_max_score, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *

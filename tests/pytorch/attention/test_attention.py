@@ -281,7 +281,9 @@ model_configs_max_score = {
         8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"
     ),
     "max_score_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
-    "max_score_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20,0)),
+    "max_score_5_1": ModelConfig(
+        8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)
+    ),
     "max_score_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
     "max_score_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
 }
@@ -1183,7 +1185,11 @@ def _run_dot_product_attention(
                         [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
-                return out_orig, max_score, (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset)
+                return (
+                    out_orig,
+                    max_score,
+                    (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset),
+                )
             else:
                 return out_orig, max_score, (None, None, None, d_softmax_offset)
         else:
