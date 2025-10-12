@@ -1150,7 +1150,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors = fused_attn_fwd(
+            out_, aux_ctx_tensors, max_score = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1848,6 +1848,7 @@ class FusedAttention(torch.nn.Module):
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
+                    return_max_score=self.return_max_score,
                 )
         else:
             with self.attention_dropout_ctx():
@@ -1886,7 +1887,7 @@ class FusedAttention(torch.nn.Module):
                     self.return_max_score,
                 )
 
-        if self.return_max_score and not context_parallel:
+        if self.return_max_score:
             # ...hd -> ...(hd)
             return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)
