@@ -281,7 +281,7 @@ model_configs_max_score = {
         8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"
     ),
     "max_score_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
-    "max_score_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
+    "max_score_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20,0)),
     "max_score_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
     "max_score_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
 }
@@ -1141,19 +1141,20 @@ def _run_dot_product_attention(
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
     )
-    if not config.return_max_score:
-        out = (out, None)
+    max_score = None
+    if config.return_max_score:
+        out, max_score = out
     if is_training:
-        out[0].backward(d_out)
+        out.backward(d_out)
 
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
-            return *out, (q.grad, k.grad, v.grad, d_softmax_offset)
+            return out, max_score, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
-            return *out, (None, None, None, d_softmax_offset)
+            return out, max_score, (None, None, None, d_softmax_offset)
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1182,14 +1183,14 @@ def _run_dot_product_attention(
                         [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
-                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset)
+                return out_orig, max_score, (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset)
             else:
-                return out_orig, (None, None, None, d_softmax_offset)
+                return out_orig, max_score, (None, None, None, d_softmax_offset)
         else:
             if is_training:
-                return *out, (q.grad, k.grad, v.grad, d_softmax_offset)
+                return out, max_score, (q.grad, k.grad, v.grad, d_softmax_offset)
             else:
-                return *out, (None, None, None, d_softmax_offset)
+                return out, max_score, (None, None, None, d_softmax_offset)
 
 
 model_configs_te_layer = {
