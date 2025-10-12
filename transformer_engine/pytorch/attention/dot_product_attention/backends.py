@@ -218,6 +218,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 if is_in_onnx_export_mode()
                 else attention_mask_func(x, y)
             )
+
         self.mask_func = mask_func
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
@@ -438,7 +439,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_score = self.mask_func(matmul_result, attention_mask)
             with self.attention_dropout_ctx():
                 max_score = self.attention_dropout(max_score)
-            max_score = torch.amax(max_score, dim=(0,2,3))
+            max_score = torch.amax(max_score, dim=(0, 2, 3))
 
         # add attention sink to the last column: [b, np, sq, sk+1]
         if self.softmax_type != "vanilla":

@@ -326,7 +326,7 @@ def fused_attn_fwd(
         # output_tensors: out [b, sq, h, d] or [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
         stats = output_tensors[1] + torch.log(output_tensors[2])
         # Max [b, h, sq, 1] -> max_score [h]
-        max_score = torch.amax(output_tensors[1], dim=(0,2,3)).to(dtype=output_tensors[0].dtype)
+        max_score = torch.amax(output_tensors[1], dim=(0, 2, 3)).to(dtype=output_tensors[0].dtype)
         aux_ctx_tensors = [stats]
         aux_ctx_tensors.extend(output_tensors[3:])
         return output_tensors[0], aux_ctx_tensors, max_score
