@@ -486,7 +486,10 @@ def get_attention_backend(
         if context_parallel:
             use_flash_attention = False
             use_unfused_attention = False
-            logger.debug("Disabling FlashAttention and UnfusedAttention for max_score with context parallelism")
+            logger.debug(
+                "Disabling FlashAttention and UnfusedAttention for max_score with context"
+                " parallelism"
+            )
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_score")

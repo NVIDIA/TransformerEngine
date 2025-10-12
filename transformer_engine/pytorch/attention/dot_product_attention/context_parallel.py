@@ -1250,7 +1250,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
             if return_max_score:
-                max_score_per_step = torch.empty((cp_size, q.shape[-2]), dtype=q.dtype, device=q.device)
+                max_score_per_step = torch.empty(
+                    (cp_size, q.shape[-2]), dtype=q.dtype, device=q.device
+                )
 
         # split qkv to two halves and prepare for load balancing
         assert qkv_format == "thd" or (
@@ -1616,14 +1618,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if i == 1:
                             max_score = torch.clone(max_score_per_step[0])
                         else:
-                            max_score = torch.maximum(max_score, max_score_per_step[i-1])
+                            max_score = torch.maximum(max_score, max_score_per_step[i - 1])
 
                 if i < cp_size:
                     flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
         if return_max_score:
-            torch.distributed.all_reduce(max_score, op=torch.distributed.ReduceOp.MAX, group=cp_group)
+            torch.distributed.all_reduce(
+                max_score, op=torch.distributed.ReduceOp.MAX, group=cp_group
+            )
 
         second_half_lse_seqlen = None
         if causal and rank < (cp_size - 1):
@@ -2739,7 +2743,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     # [s_range, b, h, d] -> [b, s_range, h, d] or [s_range, b, h, d]
                     k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_, v_]]
                     if use_fused_attention:
-                        out_per_step[i], [softmax_lse_per_step[i], rng_states[i]], max_score_per_step[i] = fused_attn_fwd(
+                        (
+                            out_per_step[i],
+                            [softmax_lse_per_step[i], rng_states[i]],
+                            max_score_per_step[i],
+                        ) = fused_attn_fwd(
                             is_training,
                             max_seqlen_q,
                             max_seqlen_kv_,
@@ -2804,12 +2812,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif qkv_format == "sbhd":
                         out[i - 1].copy_(out_per_step[i - 1])
                 if return_max_score:
-                    max_score = torch.maximum(max_score, max_score_per_step[i-1])
-
+                    max_score = torch.maximum(max_score, max_score_per_step[i - 1])
 
         torch.cuda.current_stream().wait_stream(cp_stream)
         if return_max_score:
-            torch.distributed.all_reduce(max_score, op=torch.distributed.ReduceOp.MAX, group=cp_group)
+            torch.distributed.all_reduce(
+                max_score, op=torch.distributed.ReduceOp.MAX, group=cp_group
+            )
 
         if use_fused_attention:
             if qkv_format == "bshd":
