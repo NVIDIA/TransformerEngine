@@ -554,7 +554,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         data.
 
         """
-        new_tensor = super().make_like(tensor, shape=shape, dtype=dtype, requires_grad=requires_grad)
+        new_tensor = super().make_like(
+            tensor, shape=shape, dtype=dtype, requires_grad=requires_grad
+        )
         if data is not None:
             new_tensor._data = data
         if transpose is not None and not tensor._transpose_invalid:
@@ -614,7 +616,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 types,
                 [data] + list(args[1:]),
                 kwargs,
-                )
+            )
             t_func_out = [None] * len(func_out)
             # Compute corresponding split of the transpose cache if available
             if tensor._transpose is not None and not tensor._transpose_invalid:
@@ -634,9 +636,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     kwargs,
                 )
             outs = [
-                Float8Tensor.make_like(tensor, data=split_tensor, transpose=split_tranpose_tensor,
-                    shape=split_tensor.shape)
-                for split_tensor, split_tranpose_tensor in zip(func_out, t_func_out)]
+                Float8Tensor.make_like(
+                    tensor,
+                    data=split_tensor,
+                    transpose=split_tranpose_tensor,
+                    shape=split_tensor.shape,
+                )
+                for split_tensor, split_tranpose_tensor in zip(func_out, t_func_out)
+            ]
             return outs
 
         if func == aten.new_zeros.default:
@@ -652,9 +659,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
             quantizer = tensor._quantizer.copy()
-            out_tensor = Float8Tensor(data=func_out, shape=data.shape,
-                                      dtype=tensor.dtype, fp8_dtype=tensor._fp8_dtype,
-                                      fp8_scale_inv=scale_inv, quantizer=quantizer)
+            out_tensor = Float8Tensor(
+                data=func_out,
+                shape=data.shape,
+                dtype=tensor.dtype,
+                fp8_dtype=tensor._fp8_dtype,
+                fp8_scale_inv=scale_inv,
+                quantizer=quantizer,
+            )
             return out_tensor
 
         if func == torch.ops.aten.as_strided.default:
@@ -666,7 +678,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 types,
                 [data] + list(args[1:]),
                 kwargs,
-                )
+            )
             func_transposed_out = None
             if tensor._transpose is not None and not tensor._transpose_invalid:
                 transpose = tensor._transpose
@@ -675,7 +687,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 if "storage_offset" in kwargs:
                     storage_offset = kwargs["storage_offset"]
                 else:
-                    storage_offset = args[3] if len(args) > 3 else 0 
+                    storage_offset = args[3] if len(args) > 3 else 0
                 # Only attempt if ranks match; otherwise, drop transpose cache
                 t_size = list(reversed(size)) if len(size) > 0 else size
                 t_stride = list(reversed(stride)) if len(stride) > 0 else stride
@@ -684,12 +696,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     types,
                     [transpose, t_size, t_stride, storage_offset] + list(args[4:]),
                     kwargs,
-                    )
+                )
             return Float8Tensor.make_like(
-                tensor,
-                data=func_out,
-                transpose=func_transposed_out,
-                shape=func_out.shape)
+                tensor, data=func_out, transpose=func_transposed_out, shape=func_out.shape
+            )
 
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
