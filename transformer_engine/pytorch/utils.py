@@ -16,6 +16,9 @@ from .tensor.quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
+__all__ = ["get_device_compute_capability", "get_cudnn_version"]
+
+
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
     for tensor in tensors:

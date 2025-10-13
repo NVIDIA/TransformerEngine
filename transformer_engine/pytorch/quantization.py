@@ -38,6 +38,7 @@ __all__ = [
     "is_mxfp8_available",
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
+    "get_default_recipe",
 ]
 
 
@@ -101,6 +102,11 @@ def get_default_fp8_recipe() -> Recipe:
         # This is a temporary restriction until MXFP8 is supported for all gemm layouts.
         return Float8CurrentScaling()
     return DelayedScaling()
+
+
+def get_default_recipe() -> Recipe:
+    """Returns the default training recipe based on available device."""
+    return get_default_fp8_recipe()
 
 
 def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.dtype:
