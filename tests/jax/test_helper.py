@@ -89,12 +89,19 @@ class TestFP8Functions(unittest.TestCase):
         for tensor_source in TensorSource:
             target_scaling_mode = (
                 ScalingMode.NVFP4_2D_SCALING
-                if tensor_source == TensorSource.KERNEL
+                if (not test.disable_2d_quantization) and tensor_source == TensorSource.KERNEL
                 else ScalingMode.NVFP4_1D_SCALING
             )
             self.assertEqual(
                 get_quantize_config().get_scaling_mode(tensor_source), target_scaling_mode
             )
+        self.assertEqual(
+            get_quantize_config().DISABLE_STOCHASTIC_ROUNDING, test.disable_stochastic_rounding
+        )
+        self.assertEqual(get_quantize_config().DISABLE_RHT, test.disable_rht)
+        self.assertEqual(
+            get_quantize_config().DISABLE_2D_QUANTIZATION, test.disable_2d_quantization
+        )
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_delayed_scaling(self):
@@ -174,6 +181,15 @@ class TestFP8Functions(unittest.TestCase):
         self._check_default_state()
 
         bs = NVFP4BlockScaling()
+        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
+            self.assertTrue(get_quantize_config().is_fp8_enabled())
+            self._compare_nvfp4_scaling(bs)
+
+        bs = NVFP4BlockScaling(
+            disable_stochastic_rounding=True,
+            disable_rht=True,
+            disable_2d_quantization=True,
+        )
         with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_nvfp4_scaling(bs)

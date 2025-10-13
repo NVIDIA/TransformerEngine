@@ -45,7 +45,6 @@ from ..quantize import (
     compute_scale_from_amax,
     NoScaleTensor,
     get_rht_matrix,
-    should_use_rht,
 )
 
 
@@ -792,7 +791,7 @@ def _quantize_dbias_impl(
     rht_matrix = jnp.empty((1, 1), jnp.bfloat16)
     amax = x.amax
 
-    if should_use_rht(quantizer.scaling_mode, q_layout=quantizer.q_layout):
+    if quantizer.should_use_rht():
         use_rht = True
         rht_matrix = get_rht_matrix()
 
@@ -902,6 +901,7 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
+        colwise_uses_rht=use_rht,
     )
     return out, dbias.astype(dq_dtype)
 

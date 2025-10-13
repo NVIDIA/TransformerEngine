@@ -19,7 +19,7 @@ from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
-from .hadamard import apply_rht, should_use_rht
+from .hadamard import apply_rht
 from .tensor import (
     ScaledTensor,
     ScaledTensor1x,
@@ -218,6 +218,10 @@ class Quantizer(ABC):
             The data type for scale tensors
         """
         return self.scaling_mode.get_scale_dtype()
+
+    def should_use_rht(self):
+        """Check if Randomized Hadamard Transform (RHT) should be applied."""
+        return False
 
 
 @register_pytree_node_class
@@ -688,8 +692,11 @@ class NVFP4Quantizer(Quantizer):
             flatten_axis = x.ndim - flatten_axis
         x_shape = x.shape
 
-        if should_use_rht(self.scaling_mode, is_colwise=is_colwise):
-            # We only apply RHT for 1D colwise nvfp4
+        # Split q_layout into rowwise and colwise components for JAX impl so we don't apply RHT incorrectly to the wrong axis
+        use_rht = self.should_use_rht(
+            q_layout=QuantizeLayout.COLWISE if is_colwise else QuantizeLayout.ROWWISE
+        )
+        if use_rht:
             x = apply_rht(x)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
@@ -790,7 +797,21 @@ class NVFP4Quantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=rowwise_flatten_axis,
+            uses_rht=use_rht,
         )
+
+    def should_use_rht(self, q_layout=None):
+        """Check if Randomized Hadamard Transform (RHT) should be applied."""
+        q_layout = q_layout if q_layout is not None else self.q_layout
+
+        disable_rht = (
+            hasattr(get_quantize_config(), "DISABLE_RHT") and get_quantize_config().DISABLE_RHT
+        )
+
+        is_colwise = q_layout in {QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE}
+        should_use_rht = self.scaling_mode == ScalingMode.NVFP4_1D_SCALING and is_colwise
+
+        return should_use_rht and not disable_rht
 
 
 @register_pytree_node_class

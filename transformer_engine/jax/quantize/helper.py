@@ -554,25 +554,36 @@ class BlockScalingQuantizeConfig(BaseQuantizeConfig):
         return QuantizeMeta()
 
 
+@dataclass
 class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
     """Configuration class for NVFP4 scaling recipe.
 
     This class provides specific initialization and finalization for NVFP4 scaling quantization mode.
     """
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
-        """Initialize block scaling FP8 configuration.
+    DISABLE_STOCHASTIC_ROUNDING: bool = False
+    DISABLE_RHT: bool = False
+    DISABLE_2D_QUANTIZATION: bool = False
+
+    def initialize_from_recipe(self, quantization_recipe: recipe.Recipe) -> None:
+        """Initialize block scaling NVFP4 configuration.
 
         Args:
-            fp8_recipe: The FP8 recipe to use for initialization
+            quantization_recipe: The quantization recipe to use for initialization
         """
+        assert isinstance(quantization_recipe, recipe.NVFP4BlockScaling)
+
         self.INITIALIZED = True
-        self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(fp8_recipe.fp4_format)
+        self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(quantization_recipe.fp4_format)
         self.AMAX_HISTORY_LEN = 0
+
+        self.DISABLE_STOCHASTIC_ROUNDING = quantization_recipe.disable_stochastic_rounding
+        self.DISABLE_RHT = quantization_recipe.disable_rht
+        self.DISABLE_2D_QUANTIZATION = quantization_recipe.disable_2d_quantization
 
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
-        if tensor_source == TensorSource.KERNEL:
+        if (not self.DISABLE_2D_QUANTIZATION) and tensor_source == TensorSource.KERNEL:
             return ScalingMode.NVFP4_2D_SCALING
         # for x and grad
         return ScalingMode.NVFP4_1D_SCALING
@@ -596,6 +607,9 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         Returns:
             The quantization metadata for the specified module and tensor. It can be empty if no metadata is needed.
         """
+        if self.DISABLE_STOCHASTIC_ROUNDING:
+            return QuantizeMeta()
+
         if tensor_source != TensorSource.DGRAD:
             # Only DGRAD uses stochastic rounding
             return QuantizeMeta()

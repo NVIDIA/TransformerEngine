@@ -175,6 +175,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
         is_colwise: Whether the tensor uses column-wise quantization
         data_layout: The data_layout specification for the tensor
         flatten_axis: The quantization axis for the tensor
+        uses_rht: Whether the tensor uses the Randomized Hadamard Transform (RHT)
     """
 
     scale_inv: jnp.ndarray
@@ -184,6 +185,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     is_colwise: bool
     data_layout: str
     flatten_axis: int
+    uses_rht: bool
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -243,6 +245,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             self.is_colwise,
             self.data_layout,
             self.flatten_axis,
+            self.uses_rht,
         )
         return (children, aux_data)
 
@@ -314,6 +317,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             is_colwise=self.is_colwise,
             data_layout=self.data_layout,
             flatten_axis=self.flatten_axis,
+            uses_rht=self.uses_rht,
         )
 
 
@@ -364,6 +368,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             is_colwise=is_colwise,
             data_layout=data_layout,
             flatten_axis=flatten_axis,
+            uses_rht=False,
         )
 
     def __post_init__(self):
@@ -515,6 +520,7 @@ class ScaledTensorFactory:
         group_sizes=None,
         original_shape=None,
         group_axis=0,
+        uses_rht=False,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -530,6 +536,7 @@ class ScaledTensorFactory:
             group_sizes: Array of ints containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            uses_rht: Whether the tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
@@ -593,6 +600,7 @@ class ScaledTensorFactory:
             is_colwise=is_colwise,
             data_layout=data_layout,
             flatten_axis=flatten_axis,
+            uses_rht=uses_rht,
         )
 
     @staticmethod
@@ -610,6 +618,8 @@ class ScaledTensorFactory:
         group_sizes=None,
         original_shape=None,
         group_axis=0,
+        rowwise_uses_rht=False,
+        colwise_uses_rht=False,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -626,6 +636,8 @@ class ScaledTensorFactory:
             group_sizes: Array containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            rowwise_uses_rht: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            colwise_uses_rht: Whether the column-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
         Returns:
             A ScaledTensor2x instance
@@ -648,6 +660,7 @@ class ScaledTensorFactory:
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            uses_rht=rowwise_uses_rht,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -661,6 +674,7 @@ class ScaledTensorFactory:
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            uses_rht=colwise_uses_rht,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -680,6 +694,8 @@ class ScaledTensorFactory:
         group_sizes: jnp.ndarray = None,
         original_shape: Tuple[int] = None,
         group_axis: int = 0,
+        rowwise_uses_rht: bool = False,
+        colwise_uses_rht: bool = False,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -696,6 +712,8 @@ class ScaledTensorFactory:
             group_sizes: Array containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            rowwise_uses_rht: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            colwise_uses_rht: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
@@ -715,6 +733,8 @@ class ScaledTensorFactory:
                 group_sizes=group_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
+                rowwise_uses_rht=rowwise_uses_rht,
+                colwise_uses_rht=colwise_uses_rht,
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
@@ -731,6 +751,7 @@ class ScaledTensorFactory:
                 group_sizes=group_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
+                uses_rht=colwise_uses_rht,
             )
 
         return ScaledTensorFactory.create_1x(
@@ -745,6 +766,7 @@ class ScaledTensorFactory:
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            uses_rht=rowwise_uses_rht,
         )
 
 
