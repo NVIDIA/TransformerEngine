@@ -300,7 +300,7 @@ class TestFP8Recipe:
         scaling_factor_compute_algo = None
         if fused_update:
             scaling_factor_compute_algo = (
-                lambda amax, scale, fp8_max, recipe: te.quantize._default_sf_compute(
+                lambda amax, scale, fp8_max, recipe: te.quantization._default_sf_compute(
                     amax, scale, fp8_max, recipe.margin
                 )
             )
