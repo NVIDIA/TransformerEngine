@@ -38,8 +38,9 @@ def save_custom_attrs(module):
     custom_attrs = {}
     for name, param in module.named_parameters():
         if isinstance(param, QuantizedTensor):
-            # Ignore FP8 metadata attributes
-            ignore_keys = ["_" + k for k in param.get_metadata().keys()]
+            # Ignore FP8 metadata attributes. Otherwise we will save duplicate copies
+            # for data/transpose FP8 tensors on top of FP8 tensors that FSDP2 will save.
+            ignore_keys = [key for key in param.__dict__.keys() if key.startswith("_")]
         else:
             ignore_keys = []
         attrs = vars(param)

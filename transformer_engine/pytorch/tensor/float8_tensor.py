@@ -676,7 +676,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     storage_offset = kwargs["storage_offset"]
                 else:
                     storage_offset = args[3] if len(args) > 3 else 0 
-                # Only attempt if ranks match; otherwise, drop transpose cache
                 t_size = list(reversed(size)) if len(size) > 0 else size
                 t_stride = list(reversed(stride)) if len(stride) > 0 else stride
                 func_transposed_out = transpose.__torch_dispatch__(
