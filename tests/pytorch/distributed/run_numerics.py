@@ -75,7 +75,7 @@ def quantization_recipe() -> Recipe:
         return Float8BlockScaling()
     if QUANTIZATION == "nvfp4":
         return nvfp4_vanilla()
-    return te.fp8.get_default_fp8_recipe()
+    return te.quantization.get_default_fp8_recipe()
 
 
 def main(argv=None, namespace=None):
