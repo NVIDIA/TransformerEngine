@@ -281,9 +281,9 @@ def _test_cuda_graphs(
                 model,
                 (generate_data(model_config, dtype, warmup=True),),
                 num_warmup_iters=10,
-                fp8_enabled=fp8,
-                fp8_weight_caching=fp8_weight_caching,
-                fp8_recipe=fp8_recipe,
+                enabled=fp8,
+                cache_quantized_params=fp8_weight_caching,
+                recipe=fp8_recipe,
             )
         elif graph_mode == "individual":
             # Graph individual modules.
@@ -292,9 +292,9 @@ def _test_cuda_graphs(
                     module,
                     (generate_data(model_config, dtype, warmup=True),),
                     num_warmup_iters=10,
-                    fp8_enabled=fp8,
-                    fp8_weight_caching=fp8_weight_caching,
-                    fp8_recipe=fp8_recipe,
+                    enabled=fp8,
+                    cache_quantized_params=fp8_weight_caching,
+                    recipe=fp8_recipe,
                 )
                 for module in modules
             ]
@@ -455,7 +455,7 @@ def _test_cuda_graphs_with_dot_product_attention(
             model,
             generate_data_for_dot_product_attention(model_config, dtype, warmup=True),
             num_warmup_iters=10,
-            fp8_enabled=False,
+            enabled=False,
         )
 
     # Forward and backward passes.

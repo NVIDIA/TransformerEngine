@@ -559,9 +559,9 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
                 model[i],
                 sample_args,
                 num_warmup_iters=10,
-                fp8_enabled=is_fp8,
+                enabled=is_fp8,
                 sample_kwargs=sample_kwargs,
-                fp8_recipe=fp8_recipe,
+                recipe=fp8_recipe,
             )
             for i in range(num_layers)
         ]

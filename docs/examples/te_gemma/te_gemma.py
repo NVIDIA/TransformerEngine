@@ -694,8 +694,8 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             graphed_function = te.pytorch.make_graphed_callables(
                 function,
                 (input_tensor,),
-                fp8_enabled=self.config.fp8,
-                fp8_recipe=fp8_recipe,
+                enabled=self.config.fp8,
+                recipe=fp8_recipe,
                 allow_unused_input=True,
                 num_warmup_iters=5,
                 sample_kwargs=sample_kwargs,
