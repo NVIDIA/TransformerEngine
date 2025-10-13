@@ -8,6 +8,7 @@ import torch
 import pytest
 import os
 
+import transformer_engine
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
