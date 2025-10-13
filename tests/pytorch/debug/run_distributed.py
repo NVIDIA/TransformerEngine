@@ -283,6 +283,8 @@ def _compute_dynamic_range(tensor):
 
 @run_debug_test
 def test_log_distributed(parallel_mode, gather_weight, **kwargs):
+    if not fp8_available:
+        return  # skip - test requires FP8
     _prepare_config_test_log_distributed(kwargs["config_file"])
     _init_debug(kwargs["config_file"].name, kwargs["log_dir"], FEATURE_DIRS)
     set_weight_tensor_tp_group_reduce(gather_weight)
@@ -366,6 +368,8 @@ def test_log_distributed(parallel_mode, gather_weight, **kwargs):
 
 @run_debug_test
 def sanity_test_log_quantized_stats(parallel_mode, gather_weight, **kwargs):
+    if not fp8_available:
+        return  # skip - test requires FP8
     from test_log import LOG_QUANTIZED_CONFIG
 
     kwargs["config_file"].write(LOG_QUANTIZED_CONFIG)
