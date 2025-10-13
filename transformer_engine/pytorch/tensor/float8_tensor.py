@@ -5,7 +5,7 @@
 """Tensor class with FP8 data"""
 from __future__ import annotations
 import os
-from typing import Optional, Tuple, Iterable, Union
+from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 
 import torch
@@ -538,33 +538,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         self._transpose = None
 
     @classmethod
-    def make_like(
-        cls,
-        tensor: QuantizedTensor,
-        *,
-        shape: Optional[Iterable[int]] = None,
-        dtype: Optional[torch.dtype] = None,
-        requires_grad: bool = False,
-        data: Optional[torch.Tensor] = None,
-    ) -> Float8Tensor:
-        """Create new Float8 tensor
-        By default, new tensor has the same attributes and underlying
-        data.
-
-        """
-        if shape is None:
-            shape = data.shape if data is not None else tensor.shape
-        dtype = dtype if dtype is not None else tensor.dtype
-        kwargs = tensor.get_metadata()
-        if data is not None:
-            kwargs["data"] = data
-            # TODO: Move common code to Base class and just update metadata here.
-            fp8_scale_inv = tensor._scale_inv.detach().clone()
-            kwargs["fp8_scale_inv"] = fp8_scale_inv
-
-        return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
-
-    @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         # View op
         if func == aten.view.default:
@@ -630,7 +603,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
+            # here it should be deep copy since it is not a view op
             return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
+
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
@@ -662,8 +637,67 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             )
         else:
             pass
-
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def fsdp_pre_all_gather(self, mesh):
+        """Functions FSDP2 calls before all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
+            to shard the weights.
+
+        Returns:
+            shareded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
+            that need to be all-gathered.(In this case uint8 data tensor)
+            metadata: Tuple[Any]: Metadata needed for reconstructing the
+            Float8Tensor after all-gather.
+        """
+        quantizer = self._quantizer
+        if isinstance(quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
+            # When sharded weight is updated after reduce scattering the gradients in FSDP2,
+            # we need to do amax reduction across the mesh to make sure all weight shards are
+            # updated with same scale inverse. Setting the state below in the quantizer will make 
+            # sure that updated Quantized weight tensor have same scale inverse across all shards.
+            quantizer.amax_reduction_group = mesh.get_group()
+            quantizer.with_amax_reduction = True
+        sharded_tensors = (self._data,)
+        metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer)
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[torch.Tensor] = None,):
+        """Functions FSDP2 calls after all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
+            are all-gathered and received here as a tuple.
+            metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the Float8Tensor.
+            param_dtype (torch.dtype): 
+            out (Optional[torch.Tensor], optional): _description_. Defaults to None.
+
+        Returns:
+            Tuple[Float8Tensor, Tuple[torch.Tensor, ...]]: Allgathered Float8Tensor and tuple of internal tensors
+            used by the Float8Tensor that was actually allgathered
+        """
+        if out is not None:
+            # The Float8tensor object returned in the post_all_gather is used over and over again.
+            # So no need to create a new one.
+            # In torchao implementation of Float8Tensor, this condition is used to set the scale inverse.
+            # since scale inverse is set after the allgather. However we take care of it during quantization
+            # itself by passing the amax reduction group to the quantizer.
+            return
+        (data,) = all_gather_outputs
+        (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer) = metadata
+        return Float8Tensor(data=data,
+                    fp8_scale_inv=fp8_scale_inv,
+                    fp8_dtype=fp8_dtype,
+                    shape=data.shape,
+                    dtype=fake_dtype,
+                    quantizer=quantizer), (data, )
 
     @classmethod
     def _make_in_reduce_ex(
