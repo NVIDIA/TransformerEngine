@@ -674,7 +674,6 @@ if __name__ == "__main__":
             for gather_weight in [True, False]:
                 test_log_distributed(parallel_mode, gather_weight)
 
-
         for parallel_mode in ["row", "column"]:
             test_disable_fp8_layer(parallel_mode)
 

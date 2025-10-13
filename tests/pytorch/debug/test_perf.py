@@ -23,16 +23,17 @@ def test_layer_switches_to_nondebug_mode(configs_dir, feature_dirs, use_microbat
     2. Never call inspect_tensor
     3. Allow layers to switch to non-debug mode for optimal performance,
        so that inspect_tensor_enabled is never called again.
-    
+
     Tests both with and without microbatching to ensure proper behavior in both scenarios.
     """
-    
+
     try:
         debug_api.initialize(
             config_file=configs_dir + "/test_switch_to_nondebug_mode.yaml",
             feature_dirs=feature_dirs,
         )
         import transformer_engine.debug.features._test_dummy_feature as dummy_feature
+
         # Reset counters
         dummy_feature._inspect_tensor_enabled_call_count = 0
         dummy_feature._inspect_tensor_call_count = 0
