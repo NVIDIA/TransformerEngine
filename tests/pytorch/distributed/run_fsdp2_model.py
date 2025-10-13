@@ -46,6 +46,7 @@ def save_custom_attrs(module):
         custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
     return custom_attrs
 
+
 def restore_custom_attrs(module, custom_attrs):
     for name, param in module.named_parameters():
         if name in custom_attrs:
