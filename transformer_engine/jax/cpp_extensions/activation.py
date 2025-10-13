@@ -1314,7 +1314,10 @@ def act_lu(
         )
         return out
 
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+    if (
+        quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+        or quantizer.scaling_mode.is_nvfp4_scaling
+    ):
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = act_lu(
             x=x,
@@ -1488,7 +1491,10 @@ def quantize_dact_dbias(
         if war_output is not None:
             return war_output
 
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+    if (
+        quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+        or quantizer.scaling_mode.is_nvfp4_scaling
+    ):
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = dact_lu(
             dz=dz,
