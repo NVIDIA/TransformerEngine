@@ -656,7 +656,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if isinstance(quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
-            # updated with same scale inverse. Setting the state below in the quantizer will make 
+            # updated with same scale inverse. Setting the state below in the quantizer will make
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             quantizer.amax_reduction_group = mesh.get_group()
             quantizer.with_amax_reduction = True
@@ -664,19 +664,21 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer)
         return sharded_tensors, metadata
 
-    def fsdp_post_all_gather(self,
+    def fsdp_post_all_gather(
+        self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
         metadata: Any,
         param_dtype: torch.dtype,
         *,
-        out: Optional[torch.Tensor] = None,):
+        out: Optional[torch.Tensor] = None,
+    ):
         """Functions FSDP2 calls after all-gather of the
         weights for both forward and backward passes.
         Args:
             all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
             are all-gathered and received here as a tuple.
             metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the Float8Tensor.
-            param_dtype (torch.dtype): 
+            param_dtype (torch.dtype):
             out (Optional[torch.Tensor], optional): _description_. Defaults to None.
 
         Returns:
@@ -692,12 +694,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return
         (data,) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer) = metadata
-        return Float8Tensor(data=data,
-                    fp8_scale_inv=fp8_scale_inv,
-                    fp8_dtype=fp8_dtype,
-                    shape=data.shape,
-                    dtype=fake_dtype,
-                    quantizer=quantizer), (data, )
+        return Float8Tensor(
+            data=data,
+            fp8_scale_inv=fp8_scale_inv,
+            fp8_dtype=fp8_dtype,
+            shape=data.shape,
+            dtype=fake_dtype,
+            quantizer=quantizer,
+        ), (data,)
 
     @classmethod
     def _make_in_reduce_ex(
