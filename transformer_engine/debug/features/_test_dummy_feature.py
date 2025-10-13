@@ -9,6 +9,12 @@ from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 import transformer_engine
 
+# Module-level counters for tracking invocations
+# NOTE: These must be accessed via the full module path
+# (transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count)
+# to ensure the same module instance is used when the feature is loaded by the debug framework
+# and when imported by tests. Using just the variable name would create separate instances
+# in different import contexts.
 _inspect_tensor_enabled_call_count = 0
 _inspect_tensor_call_count = 0
 
@@ -37,6 +43,8 @@ class TestDummyFeature(TEConfigAPIMapper):
         - If inspect_only_once=True in config: returns (False, None) - check once, never call inspect_tensor
         - Otherwise: returns True - feature is always enabled
         """
+        # Access counter via full module path to ensure we're modifying the same module-level
+        # variable regardless of import context (debug framework vs test import)
         transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count += (
             1
         )
@@ -49,22 +57,5 @@ class TestDummyFeature(TEConfigAPIMapper):
     @api_method
     def inspect_tensor(self, config, *_args, **_kwargs):
         """This method does nothing but always tracks invocations for testing."""
+        # Access counter via full module path to ensure shared state across import contexts
         transformer_engine.debug.features._test_dummy_feature._inspect_tensor_call_count += 1
-
-    @classmethod
-    def reset_call_counts(cls):
-        """Reset the call counters for testing."""
-        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count = 0
-        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_call_count = 0
-
-    @classmethod
-    def get_inspect_tensor_enabled_call_count(cls):
-        """Get the number of times inspect_tensor_enabled was called."""
-        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count
-        return _inspect_tensor_enabled_call_count
-
-    @classmethod
-    def get_inspect_tensor_call_count(cls):
-        """Get the number of times inspect_tensor was called."""
-        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_call_count
-        return _inspect_tensor_call_count
