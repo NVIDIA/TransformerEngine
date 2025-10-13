@@ -851,11 +851,11 @@ def make_graphed_callables(
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
-    fp8_enabled: SingleOrTuple[bool] = False,
-    fp8_calibrating: bool = False,
+    fp8_enabled: Optional[SingleOrTuple[bool]] = None,
+    fp8_calibrating: Optional[bool] = None,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
-    fp8_weight_caching: bool = False,
+    fp8_weight_caching: Optional[bool] = None,
     enabled: SingleOrTuple[bool] = False,
     calibrating: bool = False,
     recipe: Optional[Recipe] = None,
@@ -930,47 +930,59 @@ def make_graphed_callables(
 
     """
 
-    # Handle deprecated args.
-    if fp8_enabled is not False and enabled is False:
+    # Handle deprecated args. If old kwargs are set, they are prioritized with warning.
+    if fp8_enabled is not None:
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_enabled` kwarg in favor of `enabled`. "
+            "`fp8_enabled` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
         enabled = fp8_enabled
+    if enabled is None:
+        enabled = False
+
+    if fp8_calibrating is not None:
         warnings.warn(
-            "Argument 'fp8_enabled' is deprecated and will be removed"
-            " in a future release. Use argument 'enabled' instead.",
+            "make_graphed_callables has deprecated `fp8_calibrating` kwarg in favor of "
+            "`calibrating`. `fp8_calibrating` will be removed in a future release.",
             category=DeprecationWarning,
             stacklevel=2,
         )
-    if fp8_calibrating is not False and calibrating is False:
         calibrating = fp8_calibrating
-        warnings.warn(
-            "Argument 'fp8_calibrating' is deprecated and will be removed"
-            " in a future release. Use argument 'calibrating' instead.",
-            category=DeprecationWarning,
-            stacklevel=2,
-        )
-    if fp8_recipe is not False and recipe is False:
+    if calibrating is None:
+        calibrating = False
+
+    if fp8_recipe is not None:
+        if recipe is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg in favor of "
+                "`recipe`. `fp8_recipe` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
         recipe = fp8_recipe
-        warnings.warn(
-            "Argument 'fp8_recipe' is deprecated and will be removed"
-            " in a future release. Use argument 'recipe' instead.",
-            category=DeprecationWarning,
-            stacklevel=2,
-        )
-    if fp8_group is not False and amax_reduction_group is False:
+
+    if fp8_group is not None:
+        if amax_reduction_group is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_group` kwarg in favor of "
+                "`amax_reduction_group`. `fp8_group` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
         amax_reduction_group = fp8_group
+
+    if fp8_weight_caching is not None:
         warnings.warn(
-            "Argument 'fp8_group' is deprecated and will be removed"
-            " in a future release. Use argument 'amax_reduction_group' instead.",
+            "make_graphed_callables has deprecated `fp8_weight_caching` kwarg in favor of "
+            "`cache_quantized_params`. `fp8_weight_caching` will be removed in a future release.",
             category=DeprecationWarning,
             stacklevel=2,
         )
-    if fp8_weight_caching is not False and cache_quantized_params is False:
         cache_quantized_params = fp8_weight_caching
-        warnings.warn(
-            "Argument 'fp8_weight_caching' is deprecated and will be removed"
-            " in a future release. Use argument 'cache_quantized_params' instead.",
-            category=DeprecationWarning,
-            stacklevel=2,
-        )
+    if cache_quantized_params is None:
+        cache_quantized_params = False
 
     set_capture_start()
 
