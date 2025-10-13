@@ -18,12 +18,12 @@ from transformer_engine.pytorch import (
     moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
 )
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine_torch as tex
 import copy
 

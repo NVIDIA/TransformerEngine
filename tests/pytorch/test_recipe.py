@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Iterable, Optional
+from typing import Optional
 
 import pytest
 import torch
@@ -10,27 +10,34 @@ import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch import (
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    Float8Quantizer,
+    NVFP4Quantizer,
+    quantized_model_init,
+    Linear,
+    LayerNormLinear,
+    LayerNormMLP,
+    GroupedLinear,
+)
+
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
-    quantized_model_init,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+    te.is_fp8_block_scaling_available()
 )
+fp4_available, reason_for_no_fp4 = te.is_nvfp4_available()
 
 
 # FP8 per tensor delayed scaling
@@ -499,10 +506,6 @@ class TestFP8Recipe:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
-
-
-fp4_available, reason_for_no_fp4 = FP8GlobalStateManager.is_nvfp4_available()
-
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)

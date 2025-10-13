@@ -16,7 +16,7 @@ import transformer_engine
 import transformer_engine_torch as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch import is_fp8_available
 
 from test_numerics import (
     _emulate_linear,
@@ -45,7 +45,7 @@ FEATURE_DIRS = None
 all_boolean = [True, False]
 TEST_NR = 0
 
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_available, _ = is_fp8_available()
 
 
 def _get_tensors(parallel_mode, weight_seed=SEED, data_seed=SEED, tp_size=None, tp_rank=None):

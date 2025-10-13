@@ -16,6 +16,9 @@ from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
     make_graphed_callables,
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_mxfp8_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -24,9 +27,9 @@ from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, _ = is_fp8_available()
+fp8_block_scaling_available, _ = is_fp8_block_scaling_available()
+mxfp8_available, _ = is_mxfp8_available()
 
 # Reset RNG states.
 reset_rng_states()

@@ -5,7 +5,7 @@
 import pytest
 import torch
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch import NVFP4Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
 

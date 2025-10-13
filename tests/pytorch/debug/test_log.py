@@ -11,12 +11,12 @@ from transformer_engine.common import recipe
 import pytest
 import contextlib
 import os
-from transformer_engine.pytorch.quantization import (
-    RecipeState,
+from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
 )
+from transformer_engine.pytorch.quantization import RecipeState
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 

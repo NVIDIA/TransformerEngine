@@ -10,10 +10,10 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
+    get_device_compute_capability,
 )
 from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,

@@ -11,7 +11,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8Tensor,
     Float8CurrentScalingQuantizer,

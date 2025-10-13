@@ -11,8 +11,7 @@ from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
-from transformer_engine.pytorch import quantized_model_init
+from transformer_engine.pytorch import MultiheadAttention, quantized_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 

@@ -12,12 +12,19 @@ import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import TransformerLayer, autocast, quantized_model_init
-from transformer_engine.pytorch.attention.dot_product_attention import (
+from transformer_engine.pytorch import (
+    TransformerLayer,
+    autocast,
+    quantized_model_init,
     DotProductAttention,
+    MultiheadAttention,
+    get_device_compute_capability,
+    Quantizer,
+    is_fp8_available,
+)
+from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
@@ -32,7 +39,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
@@ -40,7 +46,6 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -56,7 +61,7 @@ from utils import (
 )
 
 # Check if hardware supports FP8
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available()
 
 # Reset RNG seed and states
 seed = 1234

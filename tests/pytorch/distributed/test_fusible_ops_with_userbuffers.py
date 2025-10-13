@@ -16,7 +16,7 @@ import sys
 import pytest
 import torch
 
-from typing import Optional
+from typing import Optional, Iterable
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -26,13 +26,13 @@ from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    QuantizedTensor,
+    Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()

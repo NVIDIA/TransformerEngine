@@ -7,7 +7,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.experimental.quantization_microblock_ref import NVFP4QuantizerRef
 from transformer_engine.pytorch.experimental import utils
 

@@ -14,13 +14,15 @@ import pytest
 import torch
 
 from torch.distributions import Exponential
-from transformer_engine.pytorch import make_graphed_callables
-from transformer_engine.common import recipe
-from transformer_engine.pytorch import autocast, quantized_model_init
-from transformer_engine.pytorch.transformer import (
+from transformer_engine.pytorch import (
+    make_graphed_callables,
+    autocast,
+    quantized_model_init,
     TransformerLayer,
+    DotProductAttention,
+    InferenceParams,
 )
-from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
+from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )

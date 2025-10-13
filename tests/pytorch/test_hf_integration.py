@@ -6,7 +6,7 @@ import pytest
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from transformer_engine.pytorch.transformer import TransformerLayer
+from transformer_engine.pytorch import TransformerLayer
 
 
 class SimpleTEModel(PreTrainedModel):

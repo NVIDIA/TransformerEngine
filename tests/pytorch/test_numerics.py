@@ -12,11 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.quantization import (
-    FP8GlobalStateManager,
-    autocast,
-    quantized_model_init,
-)
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -24,6 +20,8 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
     DotProductAttention,
     LayerNormLinear,
     LayerNormMLP,
@@ -35,26 +33,27 @@ from transformer_engine.pytorch import (
     LayerNorm,
     Fp8Padding,
     Fp8Unpadding,
-)
-from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    get_device_compute_capability,
+    is_fp8_available,
+    is_mxfp8_available,
+    is_fp8_block_scaling_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
+fp8_block_scaling_available, _ = is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 

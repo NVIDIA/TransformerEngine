@@ -8,9 +8,9 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.utils import get_device_compute_capability
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
+    get_device_compute_capability,
 )
 from references.blockwise_quantizer_reference import CuBLASScaleMunger
 from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm

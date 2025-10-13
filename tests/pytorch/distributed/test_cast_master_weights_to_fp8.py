@@ -8,10 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch.quantization import (
-    is_fp8_available,
-    is_fp8_block_scaling_available,
-)
+from transformer_engine.pytorch import is_fp8_available, is_fp8_block_scaling_available
 
 
 if torch.cuda.device_count() < 2:

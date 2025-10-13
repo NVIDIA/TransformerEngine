@@ -8,18 +8,16 @@ import torch
 import pytest
 import os
 
-import transformer_engine.pytorch
-from transformer_engine.pytorch.quantization import (
-    autocast,
-    FP8GlobalStateManager,
-    quantized_model_init,
-)
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
     LayerNormLinear,
     Linear,
     GroupedLinear,
@@ -27,26 +25,24 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     RMSNorm,
     LayerNorm,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+    MXFP8Tensor,
+    checkpoint,
+    QuantizedTensor,
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
-from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from transformer_engine.pytorch.distributed import checkpoint
 from utils import ModelConfig
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available()
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
 
 # Record initial RNG state from script run.
 seed = 1234
