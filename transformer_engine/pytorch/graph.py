@@ -856,11 +856,11 @@ def make_graphed_callables(
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
     fp8_weight_caching: Optional[bool] = None,
-    enabled: SingleOrTuple[bool] = False,
-    calibrating: bool = False,
+    enabled: Optional[SingleOrTuple[bool]] = None,
+    calibrating: Optional[bool] = None,
     recipe: Optional[Recipe] = None,
     amax_reduction_group: Optional[dist_group_type] = None,
-    cache_quantized_params: bool = False,
+    cache_quantized_params: Optional[bool] = None,
     _order: Optional[List[int]] = None,
     _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
@@ -932,6 +932,11 @@ def make_graphed_callables(
 
     # Handle deprecated args. If old kwargs are set, they are prioritized with warning.
     if fp8_enabled is not None:
+        if enabled is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_enabled` kwarg "
+                "in favor of `enabled`, but both kwargs are set."
+            )
         warnings.warn(
             "make_graphed_callables has deprecated `fp8_enabled` kwarg in favor of `enabled`. "
             "`fp8_enabled` will be removed in a future release.",
@@ -943,6 +948,11 @@ def make_graphed_callables(
         enabled = False
 
     if fp8_calibrating is not None:
+        if calibrating is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_calibrating` kwarg "
+                "in favor of `calibrating`, but both kwargs are set."
+            )
         warnings.warn(
             "make_graphed_callables has deprecated `fp8_calibrating` kwarg in favor of "
             "`calibrating`. `fp8_calibrating` will be removed in a future release.",
@@ -961,6 +971,11 @@ def make_graphed_callables(
                 category=DeprecationWarning,
                 stacklevel=2,
             )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg "
+                "in favor of `recipe`, but both kwargs are set."
+            )
         recipe = fp8_recipe
 
     if fp8_group is not None:
@@ -971,9 +986,19 @@ def make_graphed_callables(
                 category=DeprecationWarning,
                 stacklevel=2,
             )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_group` kwarg "
+                "in favor of `amax_reduction_group`, but both kwargs are set."
+            )
         amax_reduction_group = fp8_group
 
     if fp8_weight_caching is not None:
+        if cache_quantized_params is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_weight_caching` kwarg "
+                "in favor of `cache_quantized_params`, but both kwargs are set."
+            )
         warnings.warn(
             "make_graphed_callables has deprecated `fp8_weight_caching` kwarg in favor of "
             "`cache_quantized_params`. `fp8_weight_caching` will be removed in a future release.",
