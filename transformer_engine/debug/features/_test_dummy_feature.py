@@ -12,6 +12,7 @@ import transformer_engine
 _inspect_tensor_enabled_call_count = 0
 _inspect_tensor_call_count = 0
 
+
 @Registry.register_feature(namespace="transformer_engine")
 class TestDummyFeature(TEConfigAPIMapper):
     """
@@ -19,25 +20,27 @@ class TestDummyFeature(TEConfigAPIMapper):
 
     If no features are used, then TE layer automatically switches to the non-debug mode.
     This feature is invoked for each GEMM to prevent this behavior.
-    
+
     Config options:
     - inspect_only_once: if True, return (False, None) from inspect_tensor_enabled to test caching behavior
-    
+
     Note: This feature always tracks invocations for testing purposes.
     """
 
     @api_method
     def inspect_tensor_enabled(self, config, *_args, **_kwargs):
         """API call used to determine whether to run inspect_tensor in the forward pass.
-        
+
         Always tracks calls for testing purposes.
-        
+
         Returns:
         - If inspect_only_once=True in config: returns (False, None) - check once, never call inspect_tensor
         - Otherwise: returns True - feature is always enabled
         """
-        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count += 1
-        
+        transformer_engine.debug.features._test_dummy_feature._inspect_tensor_enabled_call_count += (
+            1
+        )
+
         inspect_only_once = config.get("inspect_only_once", False)
         if inspect_only_once:
             return False, None
