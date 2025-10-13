@@ -360,6 +360,28 @@ def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     return swizzled.reshape(original_shape)
 
 
+def get_lhs_axis_boundary(lhs_cdims, is_transposed):
+    """Get the axis boundary for the LHS operand."""
+    return max(lhs_cdims) + 1 if is_transposed else min(lhs_cdims)
+
+
+def get_rhs_axis_boundary(rhs_cdims, is_transposed):
+    """Get the axis boundary for the RHS operand."""
+    return min(rhs_cdims) if is_transposed else max(rhs_cdims) + 1
+
+
+def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
+    """Assert that the given tensor shape and layout meet the requirements for cuBLAS GEMM."""
+    if scaling_mode != ScalingMode.NO_SCALING:
+        # Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
+        alignment = 32 if scaling_mode.is_nvfp4_scaling else 16
+
+        assert contracting_size % alignment == 0, (
+            f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
+            f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
+        )
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM
@@ -451,6 +473,29 @@ class GemmPrimitive(BasePrimitive):
                 "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
                 f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
             )
+
+        lhs_axis_boundary = get_lhs_axis_boundary(lhs_contracting_dims, lhs_is_transposed)
+        lhs_contracting_size = (
+            reduce(operator.mul, lhs.shape[lhs_axis_boundary:])
+            if lhs_is_transposed
+            else reduce(operator.mul, lhs.shape[:lhs_axis_boundary])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            lhs_contracting_size,
+            "LHS",
+        )
+        rhs_axis_boundary = get_rhs_axis_boundary(rhs_contracting_dims, rhs_is_transposed)
+        rhs_contracting_size = (
+            reduce(operator.mul, rhs.shape[:rhs_axis_boundary])
+            if rhs_is_transposed
+            else reduce(operator.mul, rhs.shape[rhs_axis_boundary:])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            rhs_contracting_size,
+            "RHS",
+        )
 
         # Determine output shape and dtype
         assert (
@@ -563,8 +608,8 @@ class GemmPrimitive(BasePrimitive):
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
-            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-            "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+            "lhs_axis_boundary": get_lhs_axis_boundary(lhs_cdims, lhs_transposed),
+            "rhs_axis_boundary": get_rhs_axis_boundary(rhs_cdims, rhs_transposed),
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
             "fuse_bias": fuse_bias,
