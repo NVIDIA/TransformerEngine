@@ -467,7 +467,7 @@ def is_bf16_available() -> None:
     """
     Check if support for the BF16 dtype is available on this device.
     """
-    return is_bf16_available()
+    return is_bf16_compatible()
 
 
 @functools.lru_cache(maxsize=None)

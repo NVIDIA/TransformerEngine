@@ -71,14 +71,17 @@ from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor import MXFP8TensorStorage
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensorStorage
+from transformer_engine.pytorch.tensor import NVFP4TensorStorage
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor import Float8Tensor
 from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
+from transformer_engine.pytorch.tensor import NVFP4Tensor
 from transformer_engine.pytorch.tensor import prepare_for_saving
 from transformer_engine.pytorch.tensor import restore_from_saved
 
