@@ -538,6 +538,31 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         self._transpose = None
 
     @classmethod
+    def make_like(
+        cls,
+        tensor: QuantizedTensor,
+        *,
+        shape: Optional[Iterable[int]] = None,
+        dtype: Optional[torch.dtype] = None,
+        requires_grad: bool = False,
+        data: Optional[torch.Tensor] = None,
+        transpose: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensor:
+        """Create new quantized tensor
+
+        By default, new tensor has the same attributes and underlying
+        data.
+
+        """
+        new_tensor = super().make_like(tensor, shape=shape, dtype=dtype, requires_grad=requires_grad)
+        if data is not None:
+            new_tensor._data = data
+        if transpose is not None and not tensor._transpose_invalid:
+            new_tensor._transpose = transpose
+            new_tensor._transpose_invalid = False
+        return new_tensor
+
+    @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         # View op
         if func == aten.view.default:
@@ -589,12 +614,33 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 types,
                 [data] + list(args[1:]),
                 kwargs,
-            )
-            return [
-                Float8Tensor.make_like(tensor, data=split_tensor, shape=split_tensor.shape)
-                for split_tensor in func_out
-            ]
+                )
+            t_func_out = [None] * len(func_out)
+            # Compute corresponding split of the transpose cache if available
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                nd = data.dim()
+                # Figure out the original split dim
+                if "dim" in kwargs:
+                    dim_to_split = kwargs["dim"]
+                else:
+                    dim_to_split = args[2] if len(args) > 2 else 0
+                # Transpose dim is reversed
+                t_dim = nd - 1 - dim_to_split
+                t_func_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, args[1], t_dim],
+                    kwargs,
+                )
+            outs = [
+                Float8Tensor.make_like(tensor, data=split_tensor, transpose=split_tranpose_tensor,
+                    shape=split_tensor.shape)
+                for split_tensor, split_tranpose_tensor in zip(func_out, t_func_out)]
+            return outs
+
         if func == aten.new_zeros.default:
+            # create fresh new tensor with zeros.
             tensor = args[0]
             data = tensor._data
             func_out = data.__torch_dispatch__(
@@ -603,19 +649,48 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            # here it should be deep copy since it is not a view op
-            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
+            # deep copy the scale inverse tensor and quantizer as well.
+            scale_inv = tensor._scale_inv.detach().clone()
+            quantizer = tensor._quantizer.copy()
+            out_tensor = Float8Tensor(data=func_out, shape=data.shape,
+                                      dtype=tensor.dtype, fp8_dtype=tensor._fp8_dtype,
+                                      fp8_scale_inv=scale_inv, quantizer=quantizer)
+            return out_tensor
 
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
+            # Apply as_strided to the primary uint8 data
             func_out = data.__torch_dispatch__(
                 func,
                 types,
                 [data] + list(args[1:]),
                 kwargs,
-            )
-            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
+                )
+            func_transposed_out = None
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                size = args[1]
+                stride = args[2]
+                if "storage_offset" in kwargs:
+                    storage_offset = kwargs["storage_offset"]
+                else:
+                    storage_offset = args[3] if len(args) > 3 else 0 
+                # Only attempt if ranks match; otherwise, drop transpose cache
+                t_size = list(reversed(size)) if len(size) > 0 else size
+                t_stride = list(reversed(stride)) if len(stride) > 0 else stride
+                func_transposed_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, t_size, t_stride, storage_offset] + list(args[4:]),
+                    kwargs,
+                    )
+            return Float8Tensor.make_like(
+                tensor,
+                data=func_out,
+                transpose=func_transposed_out,
+                shape=func_out.shape)
+
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
         if func == torch.ops.aten.clone.default:
@@ -694,14 +769,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return
         (data,) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer) = metadata
-        return Float8Tensor(
+        out = Float8Tensor(
             data=data,
             fp8_scale_inv=fp8_scale_inv,
             fp8_dtype=fp8_dtype,
             shape=data.shape,
             dtype=fake_dtype,
             quantizer=quantizer,
-        ), (data,)
+        )
+        out._create_transpose()
+        return out, (data,)
 
     @classmethod
     def _make_in_reduce_ex(
