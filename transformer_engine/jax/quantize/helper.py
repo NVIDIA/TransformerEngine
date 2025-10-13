@@ -565,21 +565,21 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
     DISABLE_RHT: bool = False
     DISABLE_2D_QUANTIZATION: bool = False
 
-    def initialize_from_recipe(self, quantization_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
         """Initialize block scaling NVFP4 configuration.
 
         Args:
-            quantization_recipe: The quantization recipe to use for initialization
+            fp8_recipe: The quantization recipe to use for initialization
         """
-        assert isinstance(quantization_recipe, recipe.NVFP4BlockScaling)
+        assert isinstance(fp8_recipe, recipe.NVFP4BlockScaling)
 
         self.INITIALIZED = True
-        self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(quantization_recipe.fp4_format)
+        self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(fp8_recipe.fp4_format)
         self.AMAX_HISTORY_LEN = 0
 
-        self.DISABLE_STOCHASTIC_ROUNDING = quantization_recipe.disable_stochastic_rounding
-        self.DISABLE_RHT = quantization_recipe.disable_rht
-        self.DISABLE_2D_QUANTIZATION = quantization_recipe.disable_2d_quantization
+        self.DISABLE_STOCHASTIC_ROUNDING = fp8_recipe.disable_stochastic_rounding
+        self.DISABLE_RHT = fp8_recipe.disable_rht
+        self.DISABLE_2D_QUANTIZATION = fp8_recipe.disable_2d_quantization
 
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
