@@ -16,7 +16,7 @@ from .tensor.quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
-__all__ = ["get_device_compute_capability", "get_cudnn_version"]
+__all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -461,6 +461,13 @@ def is_bf16_compatible() -> None:
     check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+def is_bf16_available() -> None:
+    """
+    Check if support for the BF16 dtype is available on this device.
+    """
+    return is_bf16_available()
 
 
 @functools.lru_cache(maxsize=None)

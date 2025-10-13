@@ -31,8 +31,8 @@ from transformer_engine.pytorch import (
     Float8Quantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -45,7 +45,7 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available()
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     _dtypes.append(torch.bfloat16)
 
 # Supported devices

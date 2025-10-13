@@ -17,7 +17,6 @@ from transformer_engine.pytorch import (
     moe_sort_chunks_by_index as te_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
 )
-from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1119,7 +1118,7 @@ def perf_test_cuda_kernel(cuda_kernel_fn):
 
 # TE tensor dtypes
 _te_dtypes: List[tex.DType] = [tex.DType.kFloat32, tex.DType.kFloat16]
-if is_bf16_compatible():
+if te.is_bf16_available():
     _te_dtypes.append(tex.DType.kBFloat16)
 
 

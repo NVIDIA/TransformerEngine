@@ -34,9 +34,7 @@ import transformer_engine_torch as tex
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    te.is_fp8_block_scaling_available()
-)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available()
 fp4_available, reason_for_no_fp4 = te.is_nvfp4_available()
 
 
@@ -506,6 +504,7 @@ class TestFP8Recipe:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
+
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)

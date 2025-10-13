@@ -26,9 +26,9 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    is_bf16_available,
 )
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -1003,7 +1003,7 @@ def run_parallel_tests() -> None:
         if rank == 0:
             print(f"Running _test_linear with {config=}")
         quantization, tensor_parallel_mode, sequence_parallel = config
-        dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
+        dtype = torch.bfloat16 if is_bf16_available() else torch.float32
         _test_linear(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,
@@ -1017,7 +1017,7 @@ def run_parallel_tests() -> None:
         if rank == 0:
             print(f"Running _test_mlp with {config=}")
         quantization, sequence_parallel = config
-        dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
+        dtype = torch.bfloat16 if is_bf16_available() else torch.float32
         _test_mlp(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,

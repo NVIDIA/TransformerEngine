@@ -21,6 +21,7 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     DotProductAttention,
     InferenceParams,
+    is_bf16_available,
 )
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
@@ -29,7 +30,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -44,7 +44,7 @@ from utils import (
 reset_rng_states()
 
 param_types = [torch.float16]
-if is_bf16_compatible():
+if is_bf16_available():
     param_types.append(torch.bfloat16)
 
 model_configs_infer = {

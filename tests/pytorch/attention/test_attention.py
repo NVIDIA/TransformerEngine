@@ -21,6 +21,7 @@ from transformer_engine.pytorch import (
     get_device_compute_capability,
     Quantizer,
     is_fp8_available,
+    is_bf16_available,
 )
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
@@ -41,7 +42,6 @@ from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
@@ -77,7 +77,7 @@ def reset_global_fp8_state():
 
 # Define F16 data types to test
 param_types = [torch.float16]
-if is_bf16_compatible():
+if is_bf16_available():
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 

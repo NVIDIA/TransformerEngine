@@ -19,9 +19,9 @@ from transformer_engine.pytorch import (
     is_fp8_available,
     is_fp8_block_scaling_available,
     is_mxfp8_available,
+    is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
@@ -96,7 +96,7 @@ if fp8_available:
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
 
 

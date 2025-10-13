@@ -13,7 +13,6 @@ from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
     autocast,
@@ -31,6 +30,7 @@ from transformer_engine.pytorch import (
     MXFP8Tensor,
     checkpoint,
     QuantizedTensor,
+    is_bf16_available,
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
@@ -104,7 +104,7 @@ if fp8_available:
 fp8_recipes.append(None)
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
