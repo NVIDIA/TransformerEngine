@@ -37,7 +37,18 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
   // Convert input tensor to C++ object
   auto input_contiguous = tensor.contiguous();
-  const auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  // Set amax if use_existing_amax = true (only valid for CS)
+  bool use_existing_amax = false;
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    use_existing_amax = quantizer.attr("use_existing_amax").cast<bool>();
+    if (use_existing_amax) {
+      const at::Tensor &amax = quantizer.attr("amax").cast<at::Tensor>();
+      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                         getTensorShape(amax));
+    }
+  }
 
   // Initialize output tensor
   TensorWrapper output_cpp;
@@ -57,7 +68,12 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   // Perform quantization
-  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  if (use_existing_amax) {
+    auto *quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+    quantizer_cs->quantize_with_amax(input_cpp, output_cpp, noop_flag_cpp);
+  } else {
+    quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  }
 
   return output_py;
 }
@@ -298,7 +314,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
 
   // Construct FP8 block-wise tensors
   py::handle Float8BlockwiseQTensorClass(
-      reinterpret_cast<PyObject *>(Float8BlockwiseQTensorBasePythonClass));
+      reinterpret_cast<PyObject *>(Float8BlockwiseQTensorStoragePythonClass));
   for (size_t i = 0; i < num_tensors; ++i) {
     // Create tensor objects with proper reference counting
     py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
@@ -445,7 +461,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   }
 
   // Construct mxfp8 tensors
-  py::handle MXFP8TensorClass(reinterpret_cast<PyObject *>(MXFP8TensorBasePythonClass));
+  py::handle MXFP8TensorClass(reinterpret_cast<PyObject *>(MXFP8TensorStoragePythonClass));
   for (size_t i = 0; i < num_tensors; ++i) {
     // Create tensor objects with proper reference counting
     py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
