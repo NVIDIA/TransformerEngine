@@ -10,12 +10,13 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .tensor.quantized_tensor import QuantizedTensorBase
+from .tensor.quantized_tensor import QuantizedTensorStorage
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
+CPUOffloadedLayer = False
 
 
 def mark_activation_offload(*tensors):
@@ -34,7 +35,7 @@ def mark_activation_offload(*tensors):
                 if tensor is not None:
                     tensor.activation_offloading = True
                     # This is a hack to force clear the tensor after it is offloaded.
-                    # It is needed, because .*TensorBase classes are saved in the ctx,
+                    # It is needed, because .*TensorStorage classes are saved in the ctx,
                     # and they contain the reference to their data tensors.
                     tensor.needs_force_clear = True
 
@@ -353,6 +354,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.h2d_stream = torch.cuda.Stream()
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        global CPUOffloadedLayer
 
         torch_stray_tensor = isinstance(
             tensor,
@@ -362,7 +364,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             ),
         )
 
-        is_quantized_tensor = isinstance(tensor, QuantizedTensorBase)
+        is_quantized_tensor = isinstance(tensor, QuantizedTensorStorage)
 
         if not torch_stray_tensor:
 
@@ -408,6 +410,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor.clear()
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
+
+                    # Needed to differentiate non offloaded layer's attention
+                    # QKV layout of attention of non-offloaded layer needs
+                    # to be modified while reloading
+                    CPUOffloadedLayer = True
         else:
             tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
@@ -417,6 +424,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def tensor_pop(self, tensor_tag, **kwargs):
         """Tensor pop."""
+        global CPUOffloadedLayer
+
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
 
@@ -480,6 +489,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
+        global CPUOffloadedLayer
 
         # For the first group, kickstart the offload after we have
         # the first compute completion
@@ -514,7 +524,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 if tensor_tag[0] == self.offloaded_group_count:
                     if hasattr(tensor_buf, "needs_force_clear"):
                         # Need to clear activation tensor - sometimes references persist in the code.
-                        # This is the case for example with the Float8TensorBase class,
+                        # This is the case for example with the Float8TensorStorage class,
                         # which is saved directly inside the ctx while its internal tensors are
                         # saved inside save_for_backward.
                         tensor_buf.data = torch.Tensor()
@@ -527,6 +537,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             # Increment the offload group count to keep track
             self.offloaded_group_count += 1
+
+        if current_group == (self.num_offload_group - 1):
+            CPUOffloadedLayer = False
 
         if not self.double_buffer_created:
             # Creating second copy of double buffer for tensors that are offloaded

@@ -3,13 +3,14 @@
 # See LICENSE for license information.
 
 """Multi-head Attention."""
+import os
 import collections
 from typing import Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
 from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
@@ -31,7 +32,13 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+
+# Force DotProductAttention to use a different recipe than the fp8_recipe set in fp8_autocast().
+# Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"
+# and "Float8CurrentScaling". Use other relevant variables here to define the recipe, e.g. fp8_dpa.
+_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+_dpa_fp8_recipe_dpa = os.getenv("NVTE_DPA_FP8_RECIPE_DPA", "0") == "1"
+_dpa_fp8_recipe_mha = os.getenv("NVTE_DPA_FP8_RECIPE_MHA", "0") == "1"
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -570,10 +577,12 @@ class MultiheadAttention(torch.nn.Module):
             self.cp_size = get_distributed_world_size(cp_group)
             self.cp_rank = get_distributed_rank(cp_group)
         elif isinstance(cp_group, list):
-            assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
             assert (
                 cp_comm_type == "a2a+p2p"
             ), "Only cp_comm_type of a2a+p2p requires hierarchical CP groups!"
+            assert (
+                len(cp_group) == 2
+            ), "cp_comm_type = a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
             cp_size_a2a = get_distributed_world_size(cp_group[0])
             cp_rank_a2a = get_distributed_rank(cp_group[0])
             cp_size_p2p = get_distributed_world_size(cp_group[1])
@@ -730,10 +739,22 @@ class MultiheadAttention(torch.nn.Module):
         # Query, Key, and Value
         # ======================
 
-        fp8_mha = (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
-        )
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        if _dpa_fp8_recipe == "":
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            fp8_dpa = fp8_recipe.fp8_dpa
+            fp8_mha = fp8_recipe.fp8_mha
+            float8_current_scaling = fp8_recipe.float8_current_scaling()
+        else:
+            fp8_dpa = _dpa_fp8_recipe_dpa
+            fp8_mha = _dpa_fp8_recipe_mha
+            float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
+        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
+        qkv_fp8_output = fp8 and fp8_mha and rotary_pos_emb is None and not float8_current_scaling
+        # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
+        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
+        # Proj Gemm: match DPA output except for Float8CurrentScaling
+        proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
         layernorm_output = None
         if self.attention_type == "self":
@@ -742,7 +763,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
+                    fp8_output=qkv_fp8_output,
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -752,7 +773,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
+                    fp8_output=qkv_fp8_output,
                 )
 
             num_queries_per_key_value = (
@@ -806,7 +827,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                fp8_output=fp8_mha and rotary_pos_emb is None,
+                fp8_output=qkv_fp8_output,
             )
 
             if self.qkv_weight_interleaved:
@@ -861,7 +882,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
+                    fp8_output=qkv_fp8_output,
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -871,7 +892,7 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
+                    fp8_output=qkv_fp8_output,
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]
@@ -972,6 +993,7 @@ class MultiheadAttention(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
+            fp8_output=dpa_fp8_output,
         )
 
         # ===================
@@ -980,7 +1002,7 @@ class MultiheadAttention(torch.nn.Module):
         projection_output = self.proj(
             context_layer,
             is_first_microbatch=is_first_microbatch,
-            fp8_grad=isinstance(context_layer, QuantizedTensor),
+            fp8_grad=proj_fp8_grad,
         )
 
         if self.return_bias:

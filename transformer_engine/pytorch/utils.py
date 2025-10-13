@@ -184,7 +184,7 @@ def combine_tensors(
     num_tensors = len(tensors)
     new_shape = list(tensors[0].shape)
     new_shape.insert(dim, num_tensors)
-    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
     if isinstance(tensors[0], Float8Tensor):
         new_stride = list(tensors[0]._data.stride())
@@ -224,14 +224,16 @@ class SplitAlongDim(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
-        from transformer_engine.pytorch.float8_tensor import Float8Tensor
-        from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
 
-        if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
+        if isinstance(mixed_x_layer, Float8TensorStorage) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
             return tuple(
-                Float8TensorBase(
+                Float8TensorStorage(
                     fp8_scale_inv=mixed_x_layer._scale_inv,
                     fp8_dtype=mixed_x_layer._fp8_dtype,
                     data=x.squeeze(split_dim) if squeeze else x,
@@ -276,7 +278,7 @@ class SplitAlongDim(torch.autograd.Function):
             split_sizes = [ctx.split_size_or_sections] * len(grad_outputs)
         dims = len(grad_outputs[0].shape)
         split_dim = (ctx.split_dim + dims) % dims
-        from transformer_engine.pytorch.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
         if isinstance(grad_outputs[0], Float8Tensor):
             noop_ok = True
