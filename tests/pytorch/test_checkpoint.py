@@ -19,8 +19,8 @@ import transformer_engine.pytorch as te
 from utils import make_recipe
 
 # Check supported quantization schemes
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 
 # Test cases for loading checkpoint files

@@ -38,9 +38,9 @@ from utils import dtype_tols, make_recipe, quantization_tols
 
 
 # Check what quantization schemes are supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
-nvfp4_available, reason_for_no_nvfp4 = te.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_mxfp8_available(return_reason=True)
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))

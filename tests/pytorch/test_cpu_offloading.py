@@ -17,8 +17,8 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from utils import ModelConfig, get_available_attention_backends
 
 # Check supported quantization schemes
-fp8_available, _ = te.is_fp8_available()
-mxfp8_available, _ = te.is_mxfp8_available()
+fp8_available = te.is_fp8_available()
+mxfp8_available = te.is_mxfp8_available()
 
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:

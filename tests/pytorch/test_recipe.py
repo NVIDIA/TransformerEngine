@@ -32,10 +32,12 @@ from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling,
 import transformer_engine_torch as tex
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available()
-fp4_available, reason_for_no_fp4 = te.is_nvfp4_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
+fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
 
 
 # FP8 per tensor delayed scaling

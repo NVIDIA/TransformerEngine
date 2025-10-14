@@ -40,8 +40,8 @@ sys.path.append(str(_current_file.parent.parent))
 from utils import dtype_tols, make_recipe, str_to_dtype
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))

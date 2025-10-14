@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import abc
 import itertools
+import functools
 import warnings
 import os
 from contextlib import contextmanager
@@ -42,6 +43,7 @@ __all__ = [
 ]
 
 
+@functools.lru_cache(maxsize=None)
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     if get_device_compute_capability() >= (9, 0):  # hopper and above
@@ -55,6 +57,7 @@ def check_fp8_support() -> Tuple[bool, str]:
     return True, ""
 
 
+@functools.lru_cache(maxsize=None)
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     if get_device_compute_capability() >= (12, 0):
@@ -64,6 +67,7 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
 
+@functools.lru_cache(maxsize=None)
 def check_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -71,6 +75,7 @@ def check_nvfp4_support() -> Tuple[bool, str]:
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
 
 
+@functools.lru_cache(maxsize=None)
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
@@ -143,47 +148,77 @@ def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
     return Format.E5M2.value.max_fwd
 
 
-def is_fp8_available() -> Tuple[bool, str]:
+def is_fp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
-    Return if fp8 support is available for the delayed scaling
-    and per tensor current scaling recipe.
+    Determine if FP8 support is available for the delayed
+    scaling and per tensor current scaling recipe.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for FP8 is available.
+
     """
-    if FP8GlobalStateManager.fp8_available is None:
-        FP8GlobalStateManager.fp8_available, FP8GlobalStateManager.reason_for_no_fp8 = (
-            check_fp8_support()
-        )
-    return FP8GlobalStateManager.fp8_available, FP8GlobalStateManager.reason_for_no_fp8
+    if return_reason:
+        return check_fp8_support()
+    return check_fp8_support()[0]
 
 
-def is_mxfp8_available() -> Tuple[bool, str]:
-    """Return if MXFP8 recipe support is available."""
-    if FP8GlobalStateManager.mxfp8_available is None:
-        FP8GlobalStateManager.mxfp8_available, FP8GlobalStateManager.reason_for_no_mxfp8 = (
-            check_mxfp8_support()
-        )
-    return FP8GlobalStateManager.mxfp8_available, FP8GlobalStateManager.reason_for_no_mxfp8
+def is_mxfp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for the MXFP8 recipe.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for MXFP8 is available.
+
+    """
+    if return_reason:
+        return check_mxfp8_support()
+    return check_mxfp8_support()[0]
 
 
-def is_fp8_block_scaling_available() -> Tuple[bool, str]:
-    """Return if FP8 block scaling support is available."""
-    if FP8GlobalStateManager.fp8_block_scaling_available is None:
-        (
-            FP8GlobalStateManager.fp8_block_scaling_available,
-            FP8GlobalStateManager.reason_for_no_fp8_block_scaling,
-        ) = check_fp8_block_scaling_support()
-    return (
-        FP8GlobalStateManager.fp8_block_scaling_available,
-        FP8GlobalStateManager.reason_for_no_fp8_block_scaling,
-    )
+def is_fp8_block_scaling_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for the FP8 block scaling recipe.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for FP8 block scaling is available.
+
+    """
+    if return_reason:
+        return check_fp8_block_scaling_support()
+    return check_fp8_block_scaling_support()[0]
 
 
-def is_nvfp4_available() -> Tuple[bool, str]:
-    """Return if NVFP4 support is available."""
-    if FP8GlobalStateManager.nvfp4_available is None:
-        FP8GlobalStateManager.nvfp4_available, FP8GlobalStateManager.reason_for_no_nvfp4 = (
-            check_nvfp4_support()
-        )
-    return FP8GlobalStateManager.nvfp4_available, FP8GlobalStateManager.reason_for_no_nvfp4
+def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for the NVFP4 recipe.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for NVFP4 is available.
+
+    """
+    if return_reason:
+        return check_nvfp4_support()
+    return check_nvfp4_support()[0]
 
 
 class FP8GlobalStateManager:
@@ -255,32 +290,22 @@ class FP8GlobalStateManager:
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
         """Return if fp8 support is available"""
-        if cls.fp8_available is None:
-            cls.fp8_available, cls.reason_for_no_fp8 = check_fp8_support()
-        return cls.fp8_available, cls.reason_for_no_fp8
+        return check_fp8_support()
 
     @classmethod
     def is_mxfp8_available(cls) -> Tuple[bool, str]:
         """Return if MXFP8/current scaling support is available."""
-        if cls.mxfp8_available is None:
-            cls.mxfp8_available, cls.reason_for_no_mxfp8 = check_mxfp8_support()
-        return cls.mxfp8_available, cls.reason_for_no_mxfp8
+        return check_mxfp8_support()
 
     @classmethod
     def is_fp8_block_scaling_available(cls) -> Tuple[bool, str]:
         """Return if Float8 block scaling support is available."""
-        if cls.fp8_block_scaling_available is None:
-            cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling = (
-                check_fp8_block_scaling_support()
-            )
-        return cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling
+        return check_fp8_block_scaling_support()
 
     @classmethod
     def is_nvfp4_available(cls) -> Tuple[bool, str]:
         """Return if NVFP4 support is available."""
-        if cls.nvfp4_available is None:
-            cls.nvfp4_available, cls.reason_for_no_nvfp4 = check_nvfp4_support()
-        return cls.nvfp4_available, cls.reason_for_no_nvfp4
+        return check_nvfp4_support()
 
     @staticmethod
     def get_meta_tensor_key(forward: bool = True) -> str:

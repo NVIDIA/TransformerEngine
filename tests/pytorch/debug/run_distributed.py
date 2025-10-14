@@ -45,7 +45,7 @@ FEATURE_DIRS = None
 all_boolean = [True, False]
 TEST_NR = 0
 
-fp8_available, _ = is_fp8_available()
+fp8_available = is_fp8_available()
 
 
 def _get_tensors(parallel_mode, weight_seed=SEED, data_seed=SEED, tp_size=None, tp_rank=None):

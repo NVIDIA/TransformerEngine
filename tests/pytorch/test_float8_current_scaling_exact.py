@@ -21,7 +21,7 @@ if tensor_dump_dir_env is not None:
 
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 class GetRecipes:

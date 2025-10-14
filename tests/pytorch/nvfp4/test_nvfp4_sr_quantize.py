@@ -7,7 +7,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import NVFP4Quantizer
 
-recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 seed = 12345
 torch.manual_seed(seed)

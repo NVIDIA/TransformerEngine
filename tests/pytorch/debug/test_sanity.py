@@ -10,7 +10,7 @@ import transformer_engine.pytorch as te
 
 from test_numerics import create_config_file
 
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 B, S, H, D = 64, 64, 64, 64
 

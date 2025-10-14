@@ -41,9 +41,9 @@ from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234

@@ -61,7 +61,7 @@ from utils import (
 )
 
 # Check if hardware supports FP8
-fp8_available, reason_for_no_fp8 = is_fp8_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 
 # Reset RNG seed and states
 seed = 1234

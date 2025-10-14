@@ -19,6 +19,21 @@ warnings.warn(
 )
 
 
+# There are some users indirectly importing these classes
+# from fp8.py. This ensure backwards compatibility.
+# https://github.com/Lightning-AI/lightning-thunder/pull/2635.
+from transformer_engine.common.recipe import (
+    Recipe,
+    DelayedScaling,
+    Format,
+    MXFP8BlockScaling,
+    Float8CurrentScaling,
+    Float8BlockScaling,
+    NVFP4BlockScaling,
+    CustomRecipe,
+)
+
+
 # Importing each function instead of 'import *' allows us specify '__all__' in
 # quantize.py and also makes any newer additions to quantize.py invisible via
 # fp8.py so that we don't reinforce importing internal TE functions.

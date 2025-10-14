@@ -9,7 +9,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 
 
-recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
 class GetRecipes:

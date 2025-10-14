@@ -15,7 +15,7 @@ from transformer_engine.pytorch import MultiheadAttention, quantized_model_init,
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 class TestFusedOptimizer:

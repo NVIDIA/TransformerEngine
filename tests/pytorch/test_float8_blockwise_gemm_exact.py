@@ -17,7 +17,7 @@ from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
 
 def fp8_blockwise_gemm_supported() -> bool:
-    supported, _ = te.is_fp8_block_scaling_available()
+    supported = te.is_fp8_block_scaling_available()
     emulated = get_device_compute_capability() >= (10, 0)
     return supported and not emulated
 

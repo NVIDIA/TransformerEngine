@@ -21,7 +21,7 @@ import transformer_engine.pytorch.ops as te_ops
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear", "LayerNormMLP"])
 def test_custom_recipe_sanity(module_type):
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -67,7 +67,7 @@ def test_custom_recipe_sanity(module_type):
 
 
 def test_custom_recipe_grouped_linear_sanity():
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -102,7 +102,7 @@ def test_custom_recipe_grouped_linear_sanity():
 
 
 def test_custom_recipe_matches_current_scaling():
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -189,7 +189,7 @@ def test_custom_recipe_matches_current_scaling():
 
 
 def test_custom_recipe_ops_linear_2_1_layout():
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -221,7 +221,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
 
 def test_custom_recipe_factory_invocation_counts_and_cycling():
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -270,7 +270,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
 
 def test_factories_return_distinct_instances_and_buffers():
-    available, reason = te.is_fp8_available()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 

@@ -11,7 +11,7 @@ from transformer_engine.pytorch.experimental.quantization_microblock_ref import 
 from transformer_engine.pytorch.experimental import utils
 
 
-recipe_available, reason_for_no_recipe = te.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:

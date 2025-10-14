@@ -57,8 +57,8 @@ NVTE_TEST_ARTIFACTS_DIR = NVTE_TEST_ARTIFACTS_DIR or os.path.join(
 # The directory where this file is stored.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 fp8_recipes = []
 if mxfp8_available:

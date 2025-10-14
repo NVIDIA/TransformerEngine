@@ -45,7 +45,7 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 DimsType = Union[Iterable[int], int]
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 # delayed scaling

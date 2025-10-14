@@ -29,7 +29,7 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
-recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available()
+recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available(return_reason=True)
 recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 

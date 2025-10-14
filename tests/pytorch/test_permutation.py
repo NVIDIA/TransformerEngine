@@ -1238,9 +1238,11 @@ def test_permutation_mask_map_alongside_probs_empty_input(te_dtype):
 
 
 # Only run FP8 tests on H100.
-fp8_available, reason_for_no_fp8 = te.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),

@@ -29,7 +29,7 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_WGRAD,
 )
 
-fp8_available, reason_for_no_fp8 = is_fp8_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID
