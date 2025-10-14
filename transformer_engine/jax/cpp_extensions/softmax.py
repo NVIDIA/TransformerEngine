@@ -832,7 +832,6 @@ def jax_scaled_upper_triang_masked_softmax(
     return jax_scaled_masked_softmax(logits, mask, scale_factor, softmax_offset)
 
 
-# @partial(custom_derivatives.custom_jvp, nondiff_argnums=(1,))
 def jax_general_softmax(
     x: jnp.ndarray,
     axis: int = -1,
@@ -853,14 +852,6 @@ def jax_general_softmax(
     if where is not None:
         result = jnp.where(where, result, 0)
     return result
-
-
-# @_softmax.defjvp
-# def _softmax_jvp(axis, primals, tangents):
-#  (x, where, initial), (x_dot, _, _) = primals, tangents
-#  y = _softmax(x, axis, where, initial)
-#  return y, y * (x_dot - (y * x_dot).sum(axis, where=where, keepdims=True))
-
 
 def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
     """
