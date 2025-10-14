@@ -19,7 +19,7 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
 )
 from transformer_engine.common.recipe import Format as FP8Format
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.quantize import (
     get_quantize_config,
     is_scaling_mode_supported,
@@ -159,84 +159,78 @@ class TestFP8Functions(unittest.TestCase):
         jax.jit(jax.value_and_grad(test_module.apply), static_argnums=(2,))(variables, x, rngs=rngs)
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
-    def test_fp8_autocast_delayed_scaling(self):
+    def test_autocast_delayed_scaling(self):
         self._check_default_state()
 
-        with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling(), mesh_resource=MeshResource()):
+        with autocast(enabled=False, recipe=DelayedScaling(), mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         ds = DelayedScaling(margin=5.0, fp8_format=FP8Format.E4M3, amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=ds, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_delay_scaling(ds)
 
         self._check_default_state()
 
         ds = DelayedScaling(margin=3.0, fp8_format=FP8Format.HYBRID, amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=ds, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=ds, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_delay_scaling(ds)
 
         self._check_default_state()
 
     @unittest.skipIf(not is_fp8_supported, reason=reason)
-    def test_fp8_autocast_current_scaling(self):
+    def test_autocast_current_scaling(self):
         self._check_default_state()
 
-        with fp8_autocast(
-            enabled=False, fp8_recipe=Float8CurrentScaling(), mesh_resource=MeshResource()
-        ):
+        with autocast(enabled=False, recipe=Float8CurrentScaling(), mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.E4M3)
-        with fp8_autocast(enabled=True, fp8_recipe=cs, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=cs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_current_scaling(cs)
 
         self._check_default_state()
 
         cs = Float8CurrentScaling(fp8_format=FP8Format.HYBRID)
-        with fp8_autocast(enabled=True, fp8_recipe=cs, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=cs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_current_scaling(cs)
 
         self._check_default_state()
 
     @unittest.skipIf(not is_mxfp8_supported, reason=mxfp8_reason)
-    def test_fp8_autocast_mxfp8_block_scaling(self):
+    def test_autocast_mxfp8_block_scaling(self):
         self._check_default_state()
 
-        with fp8_autocast(
-            enabled=False, fp8_recipe=MXFP8BlockScaling(), mesh_resource=MeshResource()
-        ):
+        with autocast(enabled=False, recipe=MXFP8BlockScaling(), mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         bs = MXFP8BlockScaling()
-        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_mxfp8_scaling(bs)
 
         self._check_default_state()
 
     @unittest.skipIf(not is_nvfp4_supported, reason=nvfp4_reason)
-    def test_fp8_autocast_nvfp4_block_scaling(self):
+    def test_autocast_nvfp4_block_scaling(self):
         self._check_default_state()
 
-        with fp8_autocast(
-            enabled=False, fp8_recipe=NVFP4BlockScaling(), mesh_resource=MeshResource()
-        ):
+        with autocast(enabled=False, recipe=NVFP4BlockScaling(), mesh_resource=MeshResource()):
             self._check_default_state()
 
         self._check_default_state()
 
         bs = NVFP4BlockScaling()
-        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_nvfp4_scaling(bs)
             self._compare_nvfp4_scaling_quantizers(bs)
