@@ -33,12 +33,12 @@ namespace nvfp4 {
 using nvfp4_scale_t = fp8e4m3;
 
 namespace quantization_and_transposition_SF {
-#if CUDA_VERSION > 12080
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 // Used in transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
                                                                          const float S_enc) {
+#if CUDA_VERSION > 12080
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   // constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
@@ -49,26 +49,26 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   const float S_dec_b = block_amax / fp4_max * S_enc;
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
-}
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #endif  // CUDA_VERSION > 12080
+}
 }  // namespace quantization_and_transposition_SF
 
 namespace quantization_SF {
-#if CUDA_VERSION > 12080
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 // Used in non-transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
                                                                    const float S_enc) {
+#if CUDA_VERSION > 12080
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
   // return S_dec_b_fp8;
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
-}
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #endif  // CUDA_VERSION > 12080
+}
 }  // namespace quantization_SF
 
 namespace core {
