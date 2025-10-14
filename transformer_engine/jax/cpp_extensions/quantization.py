@@ -555,7 +555,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
         arg_shardings[3] = NamedSharding(
             mesh,
-            PartitionSpec(tuple([x for x in x_spec if x is not None]), None),
+            PartitionSpec(tuple(x for x in x_spec if x is not None), None),
             desc="BaseDBiasQuantizePrimitive.sr_rng_state",
         )
         arg_shardings = tuple(arg_shardings)
