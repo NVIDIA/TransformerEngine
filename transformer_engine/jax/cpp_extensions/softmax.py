@@ -853,6 +853,7 @@ def jax_general_softmax(
         result = jnp.where(where, result, 0)
     return result
 
+
 def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
     """
     scaled_softmax_forward wrapper
