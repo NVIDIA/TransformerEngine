@@ -174,7 +174,7 @@ def _parse_args(argv=None, namespace=None):
         opts.p2p = True
 
     if opts.atomic:
-        if not te.quantization.check_fp8_support():
+        if not te.is_fp8_available():
             assert opts.quantization == "none", "Atomic GEMM is only supported in FP8."
         opts.quantization = "fp8"
 

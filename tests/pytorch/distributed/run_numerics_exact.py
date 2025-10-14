@@ -52,9 +52,7 @@ def get_nvfp4_quantizer_factory():
     """
     Create a quantizer factory for NVFP4 reference implementation.
 
-    This factory returns
-
-    Ref instances with RHT and 2D quantization
+    This factory returns NVFP4QuantizerRef instances with RHT and 2D quantization
     enabled.
 
     Returns:
