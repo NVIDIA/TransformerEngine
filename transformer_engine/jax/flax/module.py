@@ -184,7 +184,9 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
-    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None) -> jnp.ndarray:
+    def __call__(
+        self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None
+    ) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -219,7 +221,9 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             elif self.softmax_fusion is SoftmaxFusion.SCALED_MASKED:
                 outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor, softmax_offset)
             elif self.softmax_fusion is SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED:
-                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor, softmax_offset)
+                outputs = jax_scaled_upper_triang_masked_softmax(
+                    logits, self.scale_factor, softmax_offset
+                )
             else:
                 raise ValueError(
                     f"Unsupported softmax fusion: {self.softmax_fusion}. softmax_fusion must be"

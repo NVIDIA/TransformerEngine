@@ -798,7 +798,9 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
 
 
-def jax_scaled_softmax(logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None):
+def jax_scaled_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
     """
     JAX based implementation of scaled softmax
     """
@@ -807,7 +809,12 @@ def jax_scaled_softmax(logits: jnp.ndarray, scale_factor: float, softmax_offset:
     return jax.nn.softmax(scale_factor * logits)
 
 
-def jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None):
+def jax_scaled_masked_softmax(
+    logits: jnp.ndarray,
+    mask: jnp.ndarray,
+    scale_factor: float,
+    softmax_offset: jnp.ndarray | float | None = None,
+):
     """
     JAX based implementation of scaled and masked softmax
     """
@@ -816,7 +823,9 @@ def jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_fact
     return jax.nn.softmax(logits * scale_factor, where=mask != 1)
 
 
-def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float |  None = None):
+def jax_scaled_upper_triang_masked_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
     """
     JAX based implementation of scaled and upper triangle masked softmax
     """
@@ -824,26 +833,28 @@ def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: fl
     return jax_scaled_masked_softmax(logits, mask, scale_factor, softmax_offset)
 
 
-#@partial(custom_derivatives.custom_jvp, nondiff_argnums=(1,))
+# @partial(custom_derivatives.custom_jvp, nondiff_argnums=(1,))
 def jax_general_softmax(
     x: jnp.ndarray,
     axis: int = -1,
     where: jnp.ndarray | None = None,
     initial: jnp.ndarray = -jnp.inf,
-    offset: jnp.ndarray | float | None = None) -> jnp.ndarray:
-  x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
-  x_safe = x if where is None else jnp.where(where, x, initial)
-  unnormalized = jnp.exp(x_safe - x_max)
-  denominator = jnp.sum(unnormalized, axis, where=where, keepdims=True)
-  if offset is not None:
-    denominator = denominator + offset
-  result = unnormalized / denominator
-  if where is not None:
-    result = jnp.where(where, result, 0)
-  return result
+    offset: jnp.ndarray | float | None = None,
+) -> jnp.ndarray:
+    x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+    x_safe = x if where is None else jnp.where(where, x, initial)
+    unnormalized = jnp.exp(x_safe - x_max)
+    denominator = jnp.sum(unnormalized, axis, where=where, keepdims=True)
+    if offset is not None:
+        denominator = denominator + offset
+    result = unnormalized / denominator
+    if where is not None:
+        result = jnp.where(where, result, 0)
+    return result
 
-#@_softmax.defjvp
-#def _softmax_jvp(axis, primals, tangents):
+
+# @_softmax.defjvp
+# def _softmax_jvp(axis, primals, tangents):
 #  (x, where, initial), (x_dot, _, _) = primals, tangents
 #  y = _softmax(x, axis, where, initial)
 #  return y, y * (x_dot - (y * x_dot).sum(axis, where=where, keepdims=True))

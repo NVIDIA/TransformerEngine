@@ -241,7 +241,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             return new_mask
 
         attn_mask_type = self.attn_mask_type
-        
+
         # If PRE_SCALE_BIAS was used, bias was already added to attn_weights above,
         # so we need to set bias to None to avoid adding it again in Softmax module
         if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
@@ -270,9 +270,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         softmax_fusion, mask = convert_to_softmax_type(attn_mask_type, mask)
 
-        attn_weights = Softmax(softmax_fusion=softmax_fusion, softmax_type=self.softmax_type, scale_factor=fused_scale_factor)(
-            attn_weights, mask, bias, softmax_offset=softmax_offset
-        ).astype(input_dtype)
+        attn_weights = Softmax(
+            softmax_fusion=softmax_fusion,
+            softmax_type=self.softmax_type,
+            scale_factor=fused_scale_factor,
+        )(attn_weights, mask, bias, softmax_offset=softmax_offset).astype(input_dtype)
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)

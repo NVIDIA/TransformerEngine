@@ -394,7 +394,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        
+
         assert softmax_offset_aval.dtype == jnp.float32
         if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
