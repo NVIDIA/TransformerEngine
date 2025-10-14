@@ -270,7 +270,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_aval,
         v_aval,
         bias_aval,
-        _softmax_offset_aval,
+        softmax_offset_aval,
         seed_aval,
         q_seqlen_or_cu_seqlen_aval,
         kv_seqlen_or_cu_seqlen_aval,
@@ -394,6 +394,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
+        
+        assert softmax_offset_aval.dtype == jnp.float32
+        if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
+        else:
+            assert softmax_offset_aval.shape == (0,)
 
         return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
 
@@ -814,8 +820,13 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
         )
 
-        # dsoftmax_offset should always have shape [1, attn_heads, 1, 1] when softmax_type is not VANILLA_SOFTMAX
-        # This matches the cuDNN graph requirements and PyTorch implementation
+        # Validate incoming softmax_offset shape and dtype
+        assert softmax_offset_aval.dtype == jnp.float32
+        if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
+        else:
+            assert softmax_offset_aval.shape == (0,)
+
         if config.softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             dsoftmax_offset_aval = q_aval.update(
                 shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
@@ -2723,7 +2734,7 @@ def fused_attn_fwd(
             )
         else:
             assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX
-            softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
+            softmax_offset = jnp.zeros(0, dtype=jnp.float32)
     else:
         softmax_offset = softmax_offset.astype(jnp.float32)
         # Shard by heads dimension if not VANILLA_SOFTMAX
@@ -2877,7 +2888,7 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
         elif softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
-            softmax_offset = jnp.zeros(0, dtype=qkv[0].dtype)
+            softmax_offset = jnp.zeros(0, dtype=jnp.float32)
         else:
             raise NotImplementedError(f"Unknown {softmax_type=}")
     else:

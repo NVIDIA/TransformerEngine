@@ -158,14 +158,14 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         # Initialize softmax_offset for off-by-one or learnable softmax
         softmax_offset = None
         if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # For off-by-one softmax, use zeros
+            # For off-by-one softmax, use zeros with shape (1, h, 1, 1)
             softmax_offset = jnp.zeros((1, num_attention_heads, 1, 1), dtype=input_dtype)
             # Shard by heads dimension
             softmax_offset = with_sharding_constraint_by_logical_axes(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
         elif self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            # For learnable softmax, create a learnable parameter with proper sharding
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
             softmax_offset = self.param(
                 "softmax_offset",
                 nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
@@ -240,21 +240,12 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
-        # Add attention sink to the last column: [b, h, sq, sk+1]
-        if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
-            # Add extra column with softmax_offset
-            # softmax_offset shape: [1, h, 1, 1], attn_weights shape: [b, h, q, k]
-            extra_col = jnp.broadcast_to(
-                softmax_offset,
-                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1),
-            )
-            attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
-
-            # Pad mask if present to match new shape
-            if mask is not None:
-                mask = jnp.pad(
-                    mask, ((0, 0), (0, 0), (0, 0), (0, 1)), mode="constant", constant_values=0
-                )
+        attn_mask_type = self.attn_mask_type
+        
+        # If PRE_SCALE_BIAS was used, bias was already added to attn_weights above,
+        # so we need to set bias to None to avoid adding it again in Softmax module
+        if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
+            bias = None
 
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusion"""
@@ -277,15 +268,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_fusion, mask = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_fusion, mask = convert_to_softmax_type(attn_mask_type, mask)
 
-        attn_weights = Softmax(softmax_fusion=softmax_fusion, scale_factor=fused_scale_factor)(
-            attn_weights, mask, bias
+        attn_weights = Softmax(softmax_fusion=softmax_fusion, softmax_type=self.softmax_type, scale_factor=fused_scale_factor)(
+            attn_weights, mask, bias, softmax_offset=softmax_offset
         ).astype(input_dtype)
-
-        # Remove the extra column after softmax
-        if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
-            attn_weights = attn_weights[..., :-1]
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
@@ -354,7 +341,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         num_attention_heads = query.shape[-2]
         softmax_offset = None
         if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            # For learnable softmax, create a learnable parameter with proper sharding
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
             softmax_offset = self.param(
                 "softmax_offset",
                 nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
@@ -2043,6 +2030,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             bias_init=self.bias_init,
             name=mha_name,
             window_size=self.window_size,
+            softmax_type=self.softmax_type,
         )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
 
         def hidden_dropout(x, deterministic):
@@ -2121,6 +2109,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_init=self.bias_init,
                 name="encoder_decoder_attention",
                 window_size=self.window_size,
+                softmax_type=self.softmax_type,
             )(x, encoded, encoder_decoder_mask, deterministic=deterministic)
 
             y = with_sharding_constraint_by_logical_axes(

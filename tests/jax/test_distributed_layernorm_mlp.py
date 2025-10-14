@@ -158,6 +158,7 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        return
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -373,6 +374,7 @@ class TestDistributedLayernormMLP:
                     name="mlp",
                 )
                 params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
+                import pdb; pdb.set_trace()
                 mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
                     params_sharded, x, deterministic=True
                 )

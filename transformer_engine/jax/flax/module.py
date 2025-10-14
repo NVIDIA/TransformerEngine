@@ -26,6 +26,7 @@ from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxFusion
 from ..sharding import with_sharding_constraint_by_logical_axes
+from ..attention import AttnSoftmaxType
 from ..cpp_extensions import (
     is_softmax_kernel_available,
     jax_scaled_softmax,
@@ -174,13 +175,16 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         Scalar for the input to softmax.
     softmax_fusion : SoftmaxFusion, default = SoftmaxFusion.SCALED
         Indicate the type of softmax.
+    softmax_type : AttnSoftmaxType, default = AttnSoftmaxType.VANILLA_SOFTMAX
+        Indicate the type of softmax.
     """
 
     scale_factor: float = 1.0
     softmax_fusion: SoftmaxFusion = SoftmaxFusion.SCALED
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
-    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None) -> jnp.ndarray:
+    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -188,9 +192,14 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         input_dtype = inputs.dtype
         logits = inputs
 
+        if softmax_offset is not None:
+            assert self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            softmax_offset = 1.0
+
         # use primitives
         if is_softmax_kernel_available(
-            self.softmax_fusion, batch, heads, q_seqlen, k_seqlen, input_dtype
+            self.softmax_fusion, self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
         ):
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
@@ -206,11 +215,11 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
                 logits = logits + bias.astype(input_dtype)
 
             if self.softmax_fusion is SoftmaxFusion.SCALED:
-                outputs = jax_scaled_softmax(logits, self.scale_factor)
+                outputs = jax_scaled_softmax(logits, self.scale_factor, softmax_offset)
             elif self.softmax_fusion is SoftmaxFusion.SCALED_MASKED:
-                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor, softmax_offset)
             elif self.softmax_fusion is SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED:
-                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
+                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor, softmax_offset)
             else:
                 raise ValueError(
                     f"Unsupported softmax fusion: {self.softmax_fusion}. softmax_fusion must be"

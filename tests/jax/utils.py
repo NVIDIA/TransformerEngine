@@ -220,10 +220,10 @@ class DotProductAttention(nn.Module):
         # Initialize softmax_offset for off-by-one or learnable softmax
         softmax_offset = None
         if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # For off-by-one softmax, use zeros
+            # For off-by-one softmax, use zeros with shape (1, h, 1, 1)
             softmax_offset = jnp.zeros((1, num_attention_heads, 1, 1), dtype=input_dtype)
         elif self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            # For learnable softmax, create a learnable parameter
+            # For learnable softmax, create a learnable parameter with shape (1, h, 1, 1)
             softmax_offset = self.param(
                 "softmax_offset",
                 nn.initializers.zeros,
@@ -264,10 +264,10 @@ class DotProductAttention(nn.Module):
         # Add attention sink to the last column if not vanilla softmax
         if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             # Add extra column with softmax_offset
-            # softmax_offset shape: [1, h, 1, 1], attn_weights shape: [b, h, q, k]
+            # softmax_offset shape: [h], attn_weights shape: [b, h, q, k]
             extra_col = jnp.broadcast_to(
                 softmax_offset,
-                (attn_weights.shape[0], softmax_offset.shape[1], attn_weights.shape[2], 1),
+                (attn_weights.shape[0], softmax_offset.shape[0], attn_weights.shape[2], 1),
             )
             attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
 
