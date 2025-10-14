@@ -1563,12 +1563,14 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         k_spec = get_padded_spec(arg_infos[1])
         v_spec = get_padded_spec(arg_infos[2])
         bias_spec = get_padded_spec(arg_infos[3])
+        softmax_offset_spec = get_padded_spec(arg_infos[4])
         dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
 
         def impl(
             q,
@@ -1696,7 +1698,9 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
             dq, dk_local, dv_local, dbias = lax.switch(cp_rank, functions)
             dk, dv = helper.reduce_scatter_dkv(dk_local, dv_local)
 
-            return dq, dk, dv, dbias
+            # Return dummy dsoftmax_offset for arity matching (all-gather CP doesn't use it)
+            dummy_dsoftmax_offset = jnp.empty_like(softmax_offset)
+            return dq, dk, dv, dbias, dummy_dsoftmax_offset
 
         return mesh, impl, out_shardings, arg_shardings
 
@@ -2074,12 +2078,15 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         k_spec = get_padded_spec(arg_infos[1])
         v_spec = get_padded_spec(arg_infos[2])
         bias_spec = get_padded_spec(arg_infos[3])
+        softmax_offset_spec = get_padded_spec(arg_infos[4])
         dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        # Ring attention doesn't use dsoftmax_offset, but we need to return it for arity matching
+        dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
@@ -2268,7 +2275,9 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                 global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh)
 
             dk, dv = helper.unstack_kv(dk_dv)
-            return dq, dk, dv, global_dbias
+            # Return dummy dsoftmax_offset for arity matching (ring attention doesn't use it)
+            dummy_dsoftmax_offset = jnp.empty_like(_softmax_offset)
+            return dq, dk, dv, global_dbias, dummy_dsoftmax_offset
 
         return mesh, ring_attn_bwd_impl, out_shardings, arg_shardings
 
@@ -2501,8 +2510,8 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
         arg_shardings = tuple(arg.sharding for arg in arg_infos)
-        # dq, dk, dv, dbias sharding = q, k, v, bias sharding
-        out_shardings = tuple(arg.sharding for arg in arg_infos[:4])
+        # dq, dk, dv, dbias, dsoftmax_offset sharding = q, k, v, bias, softmax_offset sharding
+        out_shardings = tuple(arg.sharding for arg in arg_infos[:5])
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
@@ -2621,7 +2630,9 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh)
 
             dk, dv = helper.unstack_kv(dkv)
-            return dq, dk, dv, global_dbias
+            # Return dummy dsoftmax_offset for arity matching (ring attention doesn't use it)
+            dummy_dsoftmax_offset = jnp.empty_like(_softmax_offset)
+            return dq, dk, dv, global_dbias, dummy_dsoftmax_offset
 
         return mesh, bwd_impl, out_shardings, arg_shardings
 
