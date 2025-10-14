@@ -26,7 +26,7 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-namespace quantize_transpose_kernel_ns {
+namespace quantize_transpose_kernel {
 
 using namespace quantization_and_transposition_SF;
 using namespace core;
@@ -622,14 +622,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
-    quantize_transpose_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
-                                 const __grid_constant__ CUtensorMap tensor_map_output,
-                                 const __grid_constant__ CUtensorMap tensor_map_output_t,
-                                 nvfp4_scale_t *const scales_ptr, nvfp4_scale_t *const scales_t_ptr,
-                                 const float *noop, const float *const amax_rowwise_ptr,
-                                 const float *const amax_colwise_ptr, const size_t rows,
-                                 const size_t cols, const size_t scale_stride,
-                                 const size_t scale_stride_t, const size_t *rng_state) {
+    quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                       const __grid_constant__ CUtensorMap tensor_map_output,
+                                       const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                       nvfp4_scale_t *const scales_ptr, nvfp4_scale_t *const scales_t_ptr,
+                                       const float *noop, const float *const amax_rowwise_ptr,
+                                       const float *const amax_colwise_ptr, const size_t rows,
+                                       const size_t cols, const size_t scale_stride,
+                                       const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -1150,18 +1150,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 #endif  // CUDA_VERSION > 12080
-}  // namespace quantize_transpose_kernel_ns
+}  // namespace quantize_transpose_kernel
 
 // Compile-time flag to choose kernel variant
 #ifndef USE_2D_NVFP4_KERNEL
 #define USE_2D_NVFP4_KERNEL 0
 #endif
 
-template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          bool use_2d_quantization>
+template <bool use_2d_quantization>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                         const QuantizationConfig *quant_config, cudaStream_t stream) {
-  using namespace quantize_transpose_kernel_ns;
+  using namespace quantize_transpose_kernel;
   using namespace ptx;
 #if CUDA_VERSION > 12080
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
@@ -1170,6 +1169,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
+
+  constexpr bool COMPUTE_ACTIVATIONS = false;
+  using ParamOP = Empty;
+  constexpr float (*OP)(float, const ParamOP &) = nullptr;
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
@@ -1266,8 +1269,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                                                       USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
 
         if constexpr (use_2d_quantization) {
-          kernel = quantize_transpose_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+          kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
         }
 
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
