@@ -1570,7 +1570,13 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
+        out_shardings = (
+            dq_sharding,
+            dk_sharding,
+            dv_sharding,
+            dbias_sharding,
+            dsoftmax_offset_sharding,
+        )
 
         def impl(
             q,
@@ -2086,7 +2092,13 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         # Ring attention doesn't use dsoftmax_offset, but we need to return it for arity matching
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
+        out_shardings = (
+            dq_sharding,
+            dk_sharding,
+            dv_sharding,
+            dbias_sharding,
+            dsoftmax_offset_sharding,
+        )
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
