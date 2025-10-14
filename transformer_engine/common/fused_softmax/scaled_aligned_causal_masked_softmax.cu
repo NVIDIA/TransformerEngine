@@ -353,6 +353,7 @@ void call_kernel_scaled_aligned_causal_masked_softmax_forward(
   scaled_aligned_causal_masked_softmax_warp_forward<input_t, output_t, acc_t, log2_elements>
       <<<grid_size, block_size, shmem_size, stream>>>(dst, src, scale, microbatches, query_seq_len,
                                                       key_seq_len);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename input_t, typename output_t, typename acc_t, int log2_elements>
@@ -363,6 +364,7 @@ void call_kernel_scaled_aligned_causal_masked_softmax_backward(
   scaled_aligned_causal_masked_softmax_warp_backward<input_t, output_t, acc_t, log2_elements>
       <<<grid_size, block_size, 0, stream>>>(gradInput, grad, output, scale, microbatches,
                                              query_seq_len, key_seq_len);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename input_t, typename output_t, typename acc_t>

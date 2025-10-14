@@ -33,6 +33,7 @@ from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
+from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.attention import InferenceParams
@@ -55,6 +56,21 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch.tensor import Quantizer
+from transformer_engine.pytorch.tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor import QuantizedTensorStorage
+from transformer_engine.pytorch.tensor import Float8TensorStorage
+from transformer_engine.pytorch.tensor import MXFP8TensorStorage
+from transformer_engine.pytorch.tensor import Float8BlockwiseQTensorStorage
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor import Float8Tensor
+from transformer_engine.pytorch.tensor import MXFP8Tensor
+from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
+from transformer_engine.pytorch.tensor import prepare_for_saving
+from transformer_engine.pytorch.tensor import restore_from_saved
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

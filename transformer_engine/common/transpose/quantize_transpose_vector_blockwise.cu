@@ -173,7 +173,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
-    const bool pow_2_scaling) {
+    const bool pow_2_scaling, const float* noop_ptr) {
+  // skip execution if noop
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
   bool return_rowwise = rowwise_option != FP8BlockwiseRowwiseOption::NONE;
   bool return_columnwise_gemm_ready =
       columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
@@ -234,14 +239,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   __syncthreads();
-
-// If not return columnwise, we trigger the next kernel here so that it's load from global memory
-// can overlap with this kernel's return rowwise.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (!return_columnwise_gemm_ready && !return_columnwise_compact) {
-    cudaTriggerProgrammaticLaunchCompletion();
-  }
-#endif
 
   // Step 2: Cast and store to output_c
   if (return_rowwise) {
@@ -333,14 +330,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
     }
   }
-
-// If return columnwise, we trigger the next kernel here so that it's load from global memory
-// can overlap with this kernel's return columnwise.
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if (return_columnwise_gemm_ready || return_columnwise_compact) {
-    cudaTriggerProgrammaticLaunchCompletion();
-  }
-#endif
 
   // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
   if (return_columnwise_gemm_ready) {
@@ -537,8 +526,14 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                                          SimpleTensor& output_t, const float epsilon,
                                          FP8BlockwiseRowwiseOption rowwise_option,
                                          FP8BlockwiseColumnwiseOption columnwise_option,
-                                         const bool pow2_scale, cudaStream_t stream) {
+                                         const bool pow2_scale, const SimpleTensor& noop_tensor,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise);
+
+  if (transformer_engine::cuda::sm_arch() >= 100) {
+    NVTE_CHECK(pow2_scale, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
+               "with MXFP8, which requires using power of two scaling factors.");
+  }
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_elements = row_length;
@@ -590,27 +585,32 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
             "Input and output_t must have the same shape for columnwise non-transpose case.");
       }
     }
-
-    NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
+    if (rowwise_option != FP8BlockwiseRowwiseOption::NONE) {
+      // output may not be defined if rowwise quantization is not needed.
+      NVTE_CHECK(output.dtype == output_t.dtype,
+                 "output and output_t need to have the same dtype.");
+    }
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "Scale_t dimension must be 2.");
     bool columnwise_compact = columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
     size_t scale_t_k = scale_inv_t.shape[1];
     scale_t_stride_x = columnwise_compact ? 1 : scale_t_k;
     scale_t_stride_y = columnwise_compact ? scale_t_k : 1;
   }
+  auto output_dtype =
+      rowwise_option != FP8BlockwiseRowwiseOption::NONE ? output.dtype : output_t.dtype;
 
   const size_t num_blocks_x = DIVUP(row_length, (size_t)kTileDim);
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
-  dim3 grid(num_blocks_x, num_blocks_y, 1);
-  cudaLaunchAttribute attribute[1];
-  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attribute[0].val.programmaticStreamSerializationAllowed = 1;
+
+  const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output.dtype, OutputType,
+          output_dtype, OutputType,
+
+          dim3 grid(num_blocks_x, num_blocks_y, 1);
 
           const bool full_tile = row_length % kTileDim == 0 && num_rows % kTileDim == 0;
 
@@ -618,32 +618,23 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
               full_tile, kAligned,
 
               size_t smem_bytes = kSMemSize * sizeof(InputType);
-
-              cudaLaunchConfig_t cfg = {grid, kThreadsPerBlock, smem_bytes, stream, NULL, 0};
-              if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) >=
-                  90) {
-                cfg.attrs = attribute;
-                cfg.numAttrs = 1;
-              }
               // shared memory must be requested up
               if (smem_bytes >= 48 * 1024) {
                 cudaError_t err = cudaFuncSetAttribute(
                     &block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
                 NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
-              } cudaLaunchKernelEx(&cfg,
-                                   block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType,
-                                                                         OutputType>,
-                                   reinterpret_cast<const InputType*>(input.dptr),
-                                   reinterpret_cast<OutputType*>(output.dptr),
-                                   reinterpret_cast<OutputType*>(output_t.dptr),
-                                   reinterpret_cast<float*>(scale_inv.dptr),
-                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                   scale_t_stride_y, epsilon, rowwise_option, columnwise_option,
-                                   pow2_scale);)  // kAligned
-          )                                       // OutputType
-      )                                           // InputType
+              } block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>
+              <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
+                  reinterpret_cast<const InputType*>(input.dptr),
+                  reinterpret_cast<OutputType*>(output.dptr),
+                  reinterpret_cast<OutputType*>(output_t.dptr),
+                  reinterpret_cast<float*>(scale_inv.dptr),
+                  reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
+                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
+                  columnwise_option, pow2_scale, noop_ptr);)  // kAligned
+          )                                                   // OutputType
+      )                                                       // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

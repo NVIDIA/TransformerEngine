@@ -10,7 +10,6 @@ import pytest
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
@@ -272,6 +271,14 @@ class TestFP8RecipeLinearBase:
             wgrad_list.append(wgrad.detach().clone())
             if bgrad_list is not None and bgrad is not None:
                 bgrad_list.append(bgrad.detach().clone())
+
+        # Stack the results
+        return (
+            torch.stack(y_q_list),
+            torch.stack(dgrad_list),
+            torch.stack(wgrad_list),
+            torch.stack(bgrad_list) if bgrad_list is not None else None,
+        )
 
     @classmethod
     def run_linear(

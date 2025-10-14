@@ -112,7 +112,9 @@ schema = defs.OpSchema(
     doc="TRT FP8 Quantize Linear used for inference.",
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(float)", "Input tensor to quantize"),
-        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for quantization"),
+        defs.OpSchema.FormalParameter(
+            "scale_inv", "tensor(float)", "Inverse scale factor for quantization"
+        ),
     ],
     outputs=[defs.OpSchema.FormalParameter("output", "tensor(uint8)", "Quantized output tensor")],
 )
@@ -126,11 +128,10 @@ TRT_FP8QuantizeLinear = onnxscript.values.Op(
 
 
 @torch.library.custom_op("tex::fp8_dequantize", mutates_args=[])
-def onnx_dequantize_fp8_op(tensor: torch.Tensor, scale: float) -> torch.Tensor:
+def onnx_dequantize_fp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from Float8Tensor used for inference."""
-    scale_tensor = torch.tensor(scale, dtype=torch.float32, device=tensor.device)
     quantizer = Float8Quantizer(
-        scale_tensor, torch.zeros(1).to(tensor.device), tex.DType.kFloat8E4M3
+        1 / scale_inv, torch.zeros(1).to(tensor.device), tex.DType.kFloat8E4M3
     )
     quantizer_tensor = quantizer.create_tensor_from_data(tensor, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize()
@@ -143,10 +144,9 @@ def _(tensor: torch.Tensor, _) -> torch.Tensor:
 
 
 def onnx_dequantize_fp8_symbolic(
-    tensor: onnxscript.onnx_types.TensorType, scale: float
+    tensor: onnxscript.onnx_types.TensorType, scale_inv: onnxscript.onnx_types.TensorType
 ) -> onnxscript.onnx_types.TensorType:
     """Symbolic dequantize from Float8Tensor used for inference."""
-    scale_inv = op.Constant(value_float=1 / scale)
     return TRT_FP8DequantizeLinear(tensor, scale_inv)
 
 
@@ -157,7 +157,9 @@ schema = defs.OpSchema(
     doc="TRT FP8 Dequantize Linear from Float8Tensor used for inference.",
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(uint8)", "Input tensor to dequantize"),
-        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for dequantization"),
+        defs.OpSchema.FormalParameter(
+            "scale_inv", "tensor(float)", "Inverse scale factor for dequantization"
+        ),
     ],
     outputs=[defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")],
 )
@@ -165,6 +167,43 @@ schema = defs.OpSchema(
 TRT_FP8DequantizeLinear = onnxscript.values.Op(
     opset=trt_opset, name="TRT_FP8DequantizeLinear", op_schema=schema
 )
+
+# ONNX FP8 Current Scaling Quantization
+
+
+@torch.library.custom_op("tex::fp8_cs_quantize", mutates_args=[])
+def onnx_cs_quantize_fp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize to FP8 with current scaling; returns (uint8, scale_inv)."""
+    if tensor.dtype != torch.float32:
+        tensor = tensor.to(torch.float32)
+    amax = tensor.abs().max()
+    eps = torch.tensor(1e-12, dtype=torch.float32, device=tensor.device)
+    amax = torch.maximum(amax, eps)
+    fp8_max = torch.tensor(448, dtype=torch.float32, device=tensor.device)
+    scale = fp8_max / amax
+    q = torch.ops.tex.fp8_quantize(tensor, scale)
+    scale_inv = 1 / scale
+    return q, scale_inv
+
+
+@onnx_cs_quantize_fp8_op.register_fake
+def _(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.ones(
+        1, dtype=torch.float32, device=tensor.device
+    )
+
+
+def onnx_quantize_fp8_cs_symbolic(
+    tensor: onnxscript.onnx_types.TensorType,
+):
+    """Symbolic quantize with current scaling; computes scale_inv from tensor."""
+    # scale_inv = 1 / max(abs(tensor))
+    amax = op.ReduceMax(op.Abs(tensor), keepdims=0)
+    eps = op.Constant(value_float=1.0e-12)
+    amax = op.Max(amax, eps)
+    scale_inv = op.Div(amax, op.Constant(value_float=448.0))
+    q = TRT_FP8QuantizeLinear(tensor, scale_inv)
+    return q, scale_inv
 
 
 # ONNX MXFP8 Quantization
@@ -356,6 +395,7 @@ te_translation_table = {
     torch.ops.tex.gemm_inf.default: onnx_gemm_inf_symbolic,
     torch.ops.tex.fp8_quantize.default: onnx_quantize_fp8_symbolic,
     torch.ops.tex.fp8_dequantize.default: onnx_dequantize_fp8_symbolic,
+    torch.ops.tex.fp8_cs_quantize.default: onnx_quantize_fp8_cs_symbolic,
     torch.ops.tex.mxfp8_quantize.default: onnx_quantize_mxfp8_symbolic,
     torch.ops.tex.mxfp8_dequantize.default: onnx_dequantize_mxfp8_symbolic,
     torch.ops.tex.layernorm.default: onnx_layernorm_symbolic,

@@ -19,6 +19,7 @@ from transformer_engine.pytorch.fp8 import (
     fp8_model_init,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
 from transformer_engine.pytorch.distributed import fp8_autocast
@@ -499,3 +500,39 @@ class TestFP8Recipe:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
+
+
+fp4_available, reason_for_no_fp4 = FP8GlobalStateManager.is_nvfp4_available()
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        # full tile cases
+        (128, 128),
+        (256, 1024),
+        (1024, 256),
+        # Padding required cases
+        (256, 272),
+        (304, 304),
+        (320, 256),
+        # # largest tile
+        (8192, 8192),
+    ],
+)
+def test_fp4_dequantize(dtype, M, N):
+    q = NVFP4Quantizer()
+    a = torch.rand((M, N)).cuda().to(dtype=dtype)
+    starting_tensor = q(a)
+    dequantized_tensor = starting_tensor.dequantize()
+    new_tensor = q(dequantized_tensor)
+    torch.testing.assert_close(
+        new_tensor._rowwise_data,
+        starting_tensor._rowwise_data,
+        rtol=0,
+        atol=0,
+    )
+    new_dequantized_tensor = new_tensor.dequantize()
+    torch.testing.assert_close(dequantized_tensor, new_dequantized_tensor)

@@ -413,6 +413,7 @@ void multi_tensor_l2norm_cuda(int chunk_size, Tensor noop_flag,
       reinterpret_cast<float *>(ret.data.dptr),
       per_tensor ? reinterpret_cast<float *>(ret_per_tensor.data.dptr) : nullptr, per_tensor,
       max_chunks_per_tensor);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
@@ -440,6 +441,7 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
       reinterpret_cast<float *>(ret.data.dptr),
       per_tensor ? reinterpret_cast<float *>(ret_per_tensor.data.dptr) : nullptr, per_tensor,
       max_chunks_per_tensor);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace multi_tensor_l2norm

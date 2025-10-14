@@ -257,6 +257,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
           scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens, int num_experts,
@@ -447,6 +448,7 @@ void fused_topk_with_score_function_backward_kernel_launcher(
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,
           use_pre_softmax, scaling_factor, score_function, grad_logits);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_topk_with_score_function_backward(const Tensor &routing_map,

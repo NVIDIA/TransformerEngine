@@ -17,7 +17,6 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 
 from .quantize import (
-    ScaledTensor,
     Quantizer,
 )
 
@@ -112,8 +111,8 @@ def _layernorm_fwd_rule(x, gamma, beta, norm_type: str, zero_centered_gamma, eps
     output, mu, rsigma = tex.normalization_fwd(
         x, gamma, beta, zero_centered_gamma, epsilon, norm_type, quantizer
     )
-    if isinstance(output, ScaledTensor):
-        output = output.dequantize()
+    # This is a no-op for higher-precision tensors
+    output = output.dequantize()
 
     return output, (x, mu, rsigma, gamma, beta, quantizer)
 

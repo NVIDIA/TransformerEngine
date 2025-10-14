@@ -32,6 +32,7 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
+    run_length_fill,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
@@ -41,6 +42,7 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
+    get_device_compute_capability,
 )
 
 from distributed_test_base import assert_equal_collectives
@@ -171,15 +173,34 @@ def make_mask(
             jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
         )
 
-    # causal mask
-    if attn_mask_type.is_causal():
+    if attn_mask_type.is_bottom_right():
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.less_equal,
+        )
+        inv_mask = combine_masks(bottom_right_causal_mask, inv_mask)
+    elif attn_mask_type.is_causal():
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, jnp.bool_)
+    inv_swa_mask = (
+        make_swa_mask(
+            segment_pos_q,
+            segment_pos_kv,
+            window_size,
+            dtype=jnp.bool,
+            segment_ids_q=segment_ids_q,
+            segment_ids_kv=segment_ids_kv,
+        )
+        if attn_mask_type.is_bottom_right()
+        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool_)
+    )
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
@@ -337,6 +358,16 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
+        if self.attn_mask_type.is_bottom_right():
+            if self.max_seqlen_q > self.max_seqlen_kv:
+                pytest.skip(
+                    f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
+                )
+            if self.attn_bias_type is not AttnBiasType.NO_BIAS:
+                pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
+            if self.dropout_prob != 0.0:
+                pytest.skip(f"cuDNN does not support non-zero dropoouts for BRCM")
+
         if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
@@ -348,6 +379,14 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+            )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -397,7 +436,7 @@ class FusedAttnRunner:
         self.mesh = Mesh(self.devices, self.mesh_axes)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
-        self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
+        self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
@@ -517,7 +556,11 @@ class FusedAttnRunner:
                 self.pad_kv = self.pad_q
             else:
                 # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
-                min_segment_len = None if self.window_size is None else self.seqlens_q
+                min_segment_len = None
+                if (
+                    self.window_size is not None or self.attn_mask_type.is_bottom_right()
+                ):  # SWA or BRCM requires kv_len >= q_len
+                    min_segment_len = self.seqlens_q
                 self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
@@ -630,7 +673,7 @@ class FusedAttnRunner:
         self.qkvo_psec = PartitionSpec(
             self.mesh_resource.dp_resource,
             self.mesh_resource.cp_resource,
-            self.mesh_resource.tp_resource,
+            self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
@@ -658,7 +701,7 @@ class FusedAttnRunner:
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
-                None, self.mesh_resource.tp_resource, self.mesh_resource.cp_resource, None
+                None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
@@ -928,6 +971,9 @@ class FusedAttnRunner:
         pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
         pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -949,14 +995,14 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            2048,
+            512,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-64-BF16-CROSS",
+            id="2-512-1024-12-12-64-64-BF16-CROSS",
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"

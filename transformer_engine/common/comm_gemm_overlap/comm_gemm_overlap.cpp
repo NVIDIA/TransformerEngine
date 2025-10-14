@@ -64,6 +64,15 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 #endif
     _comm_created = true;
   }
+
+  initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
+             num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+}
+
+void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_streams,
+                                 int comm_cga_size, int gemm_priority, int comm_priority,
+                                 int num_comm_sm, bool set_sm_margin, bool use_ce,
+                                 bool atomic_gemm) {
   _use_ce = static_cast<int>(use_ce);
   _num_comm_sm = num_comm_sm;
   _cga_size = comm_cga_size;
@@ -101,10 +110,10 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
                              DType::kInt32);
   }
   // CUDA event creation
-  cudaEventCreateWithFlags(&_start_compute, 0);
-  cudaEventCreateWithFlags(&_stop_compute, 0);
-  cudaEventCreateWithFlags(&_start_comm, 0);
-  cudaEventCreateWithFlags(&_stop_comm, 0);
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_comm, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_comm, 0));
 
   /*
     Defining the launcher order between the communication and GEMM kernels
@@ -114,11 +123,11 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   */
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
   int runtime_version = 0;
-  cudaRuntimeGetVersion(&runtime_version);
+  NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&runtime_version));
   cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0);
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
   if (runtime_version >= 12030 && deviceProp.major == 9 && max_connection > 1) {
-    cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming));
   } else {
     _comm_launch_event = 0;
   }
@@ -129,9 +138,13 @@ CommOverlapCore::~CommOverlapCore() {
   cudaEventDestroy(_start_comm);
   cudaEventDestroy(_stop_compute);
   cudaEventDestroy(_start_compute);
-  if (_comm_launch_event) cudaEventDestroy(_comm_launch_event);
+  if (_comm_launch_event) {
+    cudaEventDestroy(_comm_launch_event);
+  }
 
-  if (_atomic_gemm) cudaFree(_counter.dptr());
+  if (_atomic_gemm) {
+    cudaFree(_counter.dptr());
+  }
 
   for (size_t i = 0; i < _stream_compute.size(); i++) {
     cudaStreamSynchronize(_stream_compute[i]);
@@ -274,6 +287,11 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
                       allgather_handle, barrier_handle, num_splits, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, false,
                       atomic_gemm) {
+  initialize(buffer_shape, buffer_dtype, rs_overlap_first_gemm);
+}
+
+void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                 bool rs_overlap_first_gemm) {
   _rs_overlap_first_gemm = rs_overlap_first_gemm;
   _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 0);
   NVTE_CHECK(_rs_kernel_type >= 0 && _rs_kernel_type <= 3,
@@ -284,7 +302,9 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
-  if (_ub_comm->myrank == 0) printf("!!! [UB] Register UBuf %d\n", _ub_reg);
+  if (_ub_comm->myrank == 0) {
+    printf("!!! [UB] Register UBuf %d\n", _ub_reg);
+  }
   _ubuf = TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype);
 
   NVTE_CHECK_CUDA(
@@ -603,17 +623,21 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
   // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
-  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
-                       send_stream);
-  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
-                       recv_stream);
+  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+                       _ub_comm, send_stream);
+  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+                       _ub_comm, recv_stream);
 
+  // We sync with the internal comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
   for (auto stream : {send_stream, recv_stream}) {
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
-    // We sync with the comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _stop_comm, 0));
   }
+
+  // Next we sync with the main stream
+  // We have to recapture an event off the comm stream to enable cuda graph capture otherwise the comm stream will be never be joined in the graph
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }
 
 /***************************************************************************************************
@@ -632,6 +656,11 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm) {
+  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
+}
+
+void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                    CommOverlapType comm_type, bool aggregate) {
   _is_p2p = true;
   _is_reduce_scatter = comm_type == CommOverlapType::RS;
   _aggregate = aggregate;
@@ -639,28 +668,28 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
-  int buffer_chunk_bytes = buffer_bytes / tp_size;
-  _num_ubuf_chunks = tp_size;
+  int buffer_chunk_bytes = buffer_bytes / _tp_size;
+  _num_ubuf_chunks = _tp_size;
   if (_is_reduce_scatter) {
     // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
     // outputs for reduction at the end of the pipelining.
-    buffer_bytes = buffer_bytes / tp_size * (tp_size * 2 - 1);
-    _num_ubuf_chunks = tp_size * 2 - 1;
+    buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
+    _num_ubuf_chunks = _tp_size * 2 - 1;
   }
 
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
-  if (_rank == 0) printf("!!! [UBP2P] Register UBuf %d\n", _ub_reg);
+  if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,
-      std::vector<size_t>{buffer_shape[0] / tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
       buffer_dtype);
 
   // Create tensor chunks for easy management
   char *ubuf_byte_ptr = reinterpret_cast<char *>(buffer_ptr);
   for (int i = 0; i < _num_ubuf_chunks; i++) {
     _ubufs.push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
-                                   std::vector<size_t>{buffer_shape[0] / tp_size, buffer_shape[1]},
+                                   std::vector<size_t>{buffer_shape[0] / _tp_size, buffer_shape[1]},
                                    buffer_dtype));
     ubuf_byte_ptr += buffer_chunk_bytes;
   }
@@ -683,7 +712,7 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
     NVTE_CHECK_CUDA(cudaMemset(_counter.dptr(), 0, sizeof(int32_t)));
   }
 
-  for (int i = 0; i < std::min(num_max_streams, _tp_size); i++) {
+  for (int i = 0; i < _stream_compute.size(); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
@@ -698,7 +727,41 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   cudaEventDestroy(_stop_recv);
   cudaEventDestroy(_stop_send);
   cudaStreamDestroy(_stream_recv);
-  for (size_t i = 0; i < _stream_send.size(); i++) cudaStreamDestroy(_stream_send[i]);
+  for (size_t i = 0; i < _stream_send.size(); i++) {
+    cudaStreamDestroy(_stream_send[i]);
+  }
+}
+
+void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
+                                          bool local_chunk, bool rowwise) {
+  // Check element size
+  const size_t element_size = source.element_size();
+  NVTE_CHECK(_ubuf.element_size() == element_size,
+             "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
+             "(source dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
+
+  // Input data
+  const size_t source_size = source.numel();
+  const void *src_ptr = (rowwise) ? source.dptr() : source.columnwise_dptr();
+
+  // Userbuffers data
+  void *dst_ptr;
+  if (local_chunk) {
+    NVTE_CHECK(_ubufs[_tp_id].numel() == source_size,
+               "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+               "(source_size=", source_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+    dst_ptr = _ubufs[_tp_id].dptr();
+  } else {
+    NVTE_CHECK(_ubuf.numel() == source_size,
+               "Tried to copy an invalid tensor into a Userbuffers buffer ",
+               "(source_size=", source_size, ", ubuf_size=", _ubuf.numel(), ")");
+    dst_ptr = _ubuf.dptr();
+  }
+
+  // Copy data
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, source_size * element_size,
+                                  cudaMemcpyDeviceToDevice, stream));
 }
 
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
@@ -841,6 +904,15 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   const bool do_gelu = pre_gelu_out.numel() > 0;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
+  // Check B copy sizing
+  if (B_copy.numel() > 0) {
+    NVTE_CHECK(B_copy.numel() == _ubuf.numel(), "Expected all-gathered B copy buffer with ",
+               _ubuf.numel(), " elements but got ", B_copy.numel());
+    NVTE_CHECK(B_copy.element_size() == _ubuf.element_size(),
+               "Expected all-gathered B copy buffer with ", _ubuf.element_size() * 8,
+               "-bit data type but got ", B_copy.element_size() * 8, "-bit");
+  }
+
   NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _start_compute, 0));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
@@ -909,12 +981,6 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
         NVTE_CHECK_CUDA(
             cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
-      } else if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
-                                        _stream_send[0]));
       }
     }
   } else {
@@ -962,14 +1028,14 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
         NVTE_CHECK_CUDA(
             cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
-      } else if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
-                                        _stream_send[0]));
       }
     }
+  }
+
+  // Copy all-gathered B from communication buffer into auxiliary output
+  if (B_copy.numel() > 0) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubuf.dptr(), _ubuf.bytes(),
+                                    cudaMemcpyDeviceToDevice, _stream_send[0]));
   }
 
   _ub_comm->sms = ori_sms;

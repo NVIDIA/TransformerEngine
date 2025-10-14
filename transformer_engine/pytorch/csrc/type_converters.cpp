@@ -116,6 +116,46 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
   return ret;
 }
 
+TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer) {
+  const DType dtype = tensor.attr("_fp4_dtype").cast<DType>();
+
+  auto ret = TensorWrapper(NVTE_NVFP4_1D_SCALING);
+
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for NVFP4 Tensor.");
+
+  // Row-scaled data
+  if (rowwise_usage) {
+    const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+    const auto &amax_rowwise = tensor.attr("_amax_rowwise").cast<at::Tensor>();
+    ret.set_rowwise_data(data.data_ptr(), dtype,
+                         convert_shape_back_from_fp4(getTensorShape(data), false));
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E4M3, getTensorShape(scale_inv));
+    ret.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+  }
+
+  // Column-scaled data
+  if (columnwise_usage) {
+    const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+    const auto &amax_columnwise = tensor.attr("_amax_columnwise").cast<at::Tensor>();
+    ret.set_columnwise_data(data.data_ptr(), DType::kFloat4E2M1,
+                            convert_shape_back_from_fp4(getTensorShape(data), false));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E4M3,
+                                 getTensorShape(scale_inv));
+    ret.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
+                            getTensorShape(amax_columnwise));
+  }
+
+  // Quantizer state
+  quantizer->set_quantization_params(&ret);
+
+  return ret;
+}
+
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

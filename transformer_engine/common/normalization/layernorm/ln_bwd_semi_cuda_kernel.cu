@@ -14,16 +14,16 @@ using namespace transformer_engine::normalization;
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
           int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL>
-void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
-                   const bool configure_params) {  // NOLINT(*)
+void launch_ln_bwd_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
+                          const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
   auto kernel = &ln_bwd_tuned_kernel<Kernel_traits>;
 
   if (configure_params) {
     int ctas_per_sm;
-    cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES);
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES));
     launch_params.params.ctas_per_row = CTAS_PER_ROW;
     launch_params.params.ctas_per_col =
         launch_params.multiprocessorCount * ctas_per_sm / launch_params.params.ctas_per_row;
@@ -49,13 +49,14 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
   if (ctas_per_row == 1) {
     kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES, stream>>>(
         launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), Kernel_traits::SMEM_BYTES,
-                                stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_),
+                                                Kernel_traits::SMEM_BYTES, stream));
   }
 
   using Kernel_traits_f =
@@ -66,13 +67,14 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
   auto kernel_f = &ln_bwd_finalize_tuned_kernel<Kernel_traits_f>;
   kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(
       launch_params.params);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG_MAIN,
           int BYTES_PER_LDG_FINAL>
-void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
-                     const bool configure_params) {  // NOLINT(*)
+void launch_ln_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
+                            const bool configure_params) {  // NOLINT(*)
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
   // Instantiate kernel
@@ -87,8 +89,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   int ctas_per_row = launch_params.params.ctas_per_row;
   if (configure_params) {
     int ctas_per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
-                                                  Kernel_traits::THREADS_PER_CTA, 0);
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0));
     const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
     ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
     ctas_per_col = std::min(ceil_div(rows, WARPS_M), max_ctas / ctas_per_row);
@@ -109,10 +111,11 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   dim3 block(Kernel_traits::THREADS_PER_CTA);
   if (ctas_per_row == 1) {
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_), 0, stream));
   }
 
   // Launch finalization kernel
@@ -126,6 +129,7 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   dim3 block_final(Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL);
   dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
   kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
@@ -134,8 +138,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   void                                                                                                          \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(  \
           LaunchParams<NORM_STAGE##KernelParams> &launch_params, const bool configure_params) {                 \
-    launch_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, __VA_ARGS__>(                    \
-        launch_params, configure_params);                                                                       \
+    launch_ln_bwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                           \
+                                   __VA_ARGS__>(launch_params, configure_params);                               \
   }                                                                                                             \
   REGISTER_NORM_BASE(                                                                                           \
       NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                              \

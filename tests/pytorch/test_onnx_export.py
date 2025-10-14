@@ -65,6 +65,7 @@ if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if fp8_available:
     fp8_recipes.append(recipe.DelayedScaling())
+    fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
@@ -81,11 +82,11 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
     ],
     outputs=[PyCustomOpDef.dt_uint8],
 )
-def trt_fp8_quantize(t, scale):
+def trt_fp8_quantize(t, scale_inv):
     """FP8 quantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
@@ -101,11 +102,11 @@ def trt_fp8_quantize(t, scale):
     ],
     outputs=[PyCustomOpDef.dt_float],
 )
-def trt_fp8_dequantize(t, scale):
+def trt_fp8_dequantize(t, scale_inv):
     """FP8 dequantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
@@ -593,7 +594,9 @@ def _test_export_layernorm_linear(
                     fname,
                     inp,
                     model,
-                    atol=1e-3,
+                    # For current scaling we use Float8Quantizer in tests + amax computed by hand,
+                    # which has slightly different numerics than Float8CurrentScalingQuantizer.
+                    atol=1e-3 if fp8_recipe.__class__ is not recipe.Float8CurrentScaling else 2e-2,
                     is_fp8=fp8_recipe is not None,
                     te_outputs=te_outputs,
                 )
@@ -1150,6 +1153,11 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
         ffn_hidden_size=128,
         num_attention_heads=4,
     ).eval()
+
+    if type(fp8_recipe) == recipe.Float8CurrentScaling:
+        # TODO(pgadzinski): Attention does not work with TRT for FP8CurrentScaling
+        model = te.LayerNormMLP(128, 128)
+
     inps = (torch.randn([16, 16, 128], device="cuda", requires_grad=False),)
 
     with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):

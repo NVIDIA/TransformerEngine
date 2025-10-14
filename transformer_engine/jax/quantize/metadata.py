@@ -9,23 +9,29 @@ This module provides classes for managing quantization metadata, including
 scale factors and amax history for different tensor types.
 """
 from dataclasses import dataclass
-import jax.numpy as jnp
 
 
 __all__ = ["QuantizeMeta", "QuantizeMetaSet"]
 
 
-@dataclass
 class QuantizeMeta:
     """Metadata for quantization parameters.
 
-    Attributes:
+    For Delayed Scaling recipe:
         scale: The scaling factor for quantization
         amax_history: History of maximum absolute values
+
+    For NVFP4 recipe with Stochastic Rounding:
+        sr_rng_state: The state of the stochastic rounding RNG
+
     """
 
-    scale: jnp.ndarray
-    amax_history: jnp.ndarray
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+
+    def get_kwargs_dictionary(self):
+        """Get the metadata as a dictionary."""
+        return self._kwargs
 
 
 @dataclass

@@ -258,6 +258,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
               multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
               <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
       );                                                                            // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args_aligned.num_tensors = 0;
     }
     if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
@@ -271,6 +272,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
               multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
               <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
       );                                                                              // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args_unaligned.num_tensors = 0;
     }
 
@@ -311,6 +313,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
             multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
             <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
     );                                                                            // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
   if (kernel_args_unaligned.num_tensors > 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -323,6 +326,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
             multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
             <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
     );                                                                              // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

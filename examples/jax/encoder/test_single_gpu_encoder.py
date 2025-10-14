@@ -16,14 +16,15 @@ from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
-from common import is_bf16_supported, get_fp8_recipe_from_name_string
+from common import is_bf16_supported, get_quantization_recipe_from_name_string
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
+SR_KEY = "sr_rng"
 INPUT_KEY = "input_rng"
 
 
@@ -92,6 +93,8 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect):
     epoch_accuracy = []
 
     for perm in perms:
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_inputs = train_ds["sentence"][perm, ...]
         batch_masks = train_ds["mask"][perm, ...]
         batch_labels = train_ds["label"][perm, ...]
@@ -107,11 +110,11 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect):
 
 
 @jax.jit
-def eval_step(state, inputs, masks, labels, var_collect):
+def eval_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
         one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -122,7 +125,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
     return loss, accuracy
 
 
-def eval_model(state, test_ds, batch_size, var_collect):
+def eval_model(state, test_ds, batch_size, var_collect, rngs):
     """Evaluation loop."""
     test_ds_size = len(test_ds["sentence"])
     num_steps = test_ds_size // batch_size
@@ -131,11 +134,15 @@ def eval_model(state, test_ds, batch_size, var_collect):
     all_accuracy = []
 
     for batch_start in range(0, valid_size, batch_size):
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_end = batch_start + batch_size
         batch_inputs = test_ds["sentence"][batch_start:batch_end]
         batch_masks = test_ds["mask"][batch_start:batch_end]
         batch_labels = test_ds["label"][batch_start:batch_end]
-        loss, accuracy = eval_step(state, batch_inputs, batch_masks, batch_labels, var_collect)
+        loss, accuracy = eval_step(
+            state, batch_inputs, batch_masks, batch_labels, var_collect, rngs
+        )
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -195,7 +202,7 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
-    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0), SR_KEY: jax.random.PRNGKey(0)}
     func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
     assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
@@ -208,14 +215,15 @@ def train_and_evaluate(args):
     rng = jax.random.PRNGKey(args.seed)
     rng, params_rng = jax.random.split(rng)
     rng, dropout_rng = jax.random.split(rng)
-    init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
+    rng, sr_rng = jax.random.split(rng)
+    init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
     input_shape = [args.batch_size, args.max_seq_len]
     mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
     label_shape = [args.batch_size]
 
     if args.use_fp8:
-        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+        fp8_recipe = get_quantization_recipe_from_name_string(args.fp8_recipe)
     else:
         fp8_recipe = None
 
@@ -238,21 +246,25 @@ def train_and_evaluate(args):
 
         if args.dry_run:
             labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-            rngs = {DROPOUT_KEY: dropout_rng}
+            rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
             train_step(state, inputs, masks, labels, var_collect, rngs)
             print("PASSED")
             return None
 
         for epoch in range(1, args.epochs + 1):
+            # Split and reassign to 'rng' to ensure unique rng for each step
             rng, input_rng = jax.random.split(rng)
             rng, dropout_rng = jax.random.split(rng)
-            rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+            rng, sr_rng = jax.random.split(rng)
+            rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
             state, train_loss, train_accuracy, var_collect = train_epoch(
                 state, train_ds, args.batch_size, rngs, var_collect
             )
 
-            test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size, var_collect)
+            test_loss, test_accuracy = eval_model(
+                state, test_ds, args.test_batch_size, var_collect, rngs
+            )
 
             print(
                 f"Epoch: {epoch:>2} "
@@ -329,8 +341,9 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+    is_fp8_supported, fp8_reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
+    is_nvfp4_supported, nvfp4_reason = is_scaling_mode_supported(ScalingMode.NVFP4_1D_SCALING)
 
     def setUp(self):
         """Run 3 epochs for testing"""
@@ -340,7 +353,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.45 and actual[1] > 0.79
+        assert actual[0] < 0.452 and actual[1] > 0.788
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -348,7 +361,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.455 and actual[1] > 0.79
+        assert actual[0] < 0.457 and actual[1] > 0.784
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8(self):
@@ -356,7 +369,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.455 and actual[1] > 0.79
+        assert actual[0] < 0.461 and actual[1] > 0.784
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -364,7 +377,15 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.455 and actual[1] > 0.79
+        assert actual[0] < 0.457 and actual[1] > 0.784
+
+    @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
+    def test_te_nvfp4(self):
+        """Test Transformer Engine with NVFP4"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "NVFP4BlockScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.476 and actual[1] > 0.775
 
 
 if __name__ == "__main__":
