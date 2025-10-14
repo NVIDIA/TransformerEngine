@@ -93,7 +93,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
-      NVTE_CHECK((IS_DBIAS || IS_DACT || IS_ACT),
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
                  "IS_DBIAS, IS_DACT, and IS_ACT not supported by NVTE_NVFP4_1D_SCALING");
 
       // Check tensors
