@@ -1015,12 +1015,8 @@ def _post_process_fp8_blockwise_gather(
     if out._is_gemm_ready_format():
         return out
 
-    needs_columnwise_data_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
-    need_rowwise_scale_transpose = (
-        quantizer is not None and quantizer.rowwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
+    needs_columnwise_data_transpose = quantizer is not None and quantizer.columnwise_usage
+    need_rowwise_scale_transpose = quantizer is not None and quantizer.rowwise_usage
 
     # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
     # columnwise compact format means doing 128x1 quantization of it

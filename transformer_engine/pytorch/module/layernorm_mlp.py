@@ -948,7 +948,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(fc1_weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
@@ -1037,11 +1041,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
-                    # TODO(ksivaman): Re-add fusion once kernel is available.
                     if (
-                        isinstance(
-                            ctx.fc1_grad_output_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
-                        )
+                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
@@ -1192,7 +1193,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(fc2_weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
@@ -1487,7 +1492,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the

@@ -10,7 +10,7 @@ import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
 from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization

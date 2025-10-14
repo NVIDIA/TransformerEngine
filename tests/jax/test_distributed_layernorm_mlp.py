@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import re
 from typing import Callable, Sequence, Union, Optional
 import pytest
 
@@ -17,7 +18,11 @@ from utils import (
 )
 
 from transformer_engine.common import recipe
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+from transformer_engine.jax.quantize import (
+    is_fp8_available,
+    ScalingMode,
+    get_quantize_config_with_recipe,
+)
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.flax import LayerNormMLP
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
@@ -33,22 +38,23 @@ from transformer_engine.jax.sharding import (
     W_JOINED_AXES,
 )
 from transformer_engine.jax.sharding import MeshResource
-from transformer_engine.jax.quantize import QuantizerFactory
+from transformer_engine.jax.quantize import (
+    QuantizerFactory,
+    get_supported_quantization_recipes,
+    is_scaling_mode_supported,
+)
 from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 
 
-is_fp8_supported, reason = is_fp8_available()
-is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+is_fp8_supported, reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
+is_mxfp8_supported, reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
+is_nvfp4_supported, reason = is_scaling_mode_supported(ScalingMode.NVFP4_1D_SCALING)
 
-SUPPORTED_RECIPES = []
-if is_fp8_supported:
-    SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
-    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
-if is_mxfp8_supported:
-    SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+SUPPORTED_RECIPES = get_supported_quantization_recipes()
+SUPPORTED_RECIPES = [pytest.param(r, id=r.__class__.__name__) for r in SUPPORTED_RECIPES]
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 128, 256]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
@@ -59,19 +65,47 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-INTERMEDIATE = 64
+INTERMEDIATE = 256
 
 
 # Only test with FSDP and TPSP as DP is not used
 def generate_fsdp_and_tpsp_configs():
     configs = []
-    if is_devices_enough(2):
-        configs.append(
-            [2, (1, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
-        )
     if is_devices_enough(4):
         configs.append(
-            [4, (2, 2), ("fsdp", "tpsp"), MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")]
+            pytest.param(
+                [
+                    4,
+                    (2, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp2_tpsp2",
+            )
+        )
+
+    if is_devices_enough(2):
+        configs.append(
+            pytest.param(
+                [
+                    2,
+                    (1, 2),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp1_tpsp2",
+            )
+        )
+        configs.append(
+            pytest.param(
+                [
+                    2,
+                    (2, 1),
+                    ("fsdp", "tpsp"),
+                    MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                ],
+                id="fsdp2_tpsp1",
+            ),
         )
     return configs
 
@@ -113,6 +147,7 @@ class TestDistributedLayernormMLP:
         layernorm_type: str = "rmsnorm",
         activation_type: Sequence[Union[str, Callable]] = ("gelu",),
         multi_gpus: bool = False,
+        quantization_recipe: recipe.Recipe = None,
     ) -> jnp.ndarray:
 
         if multi_gpus:
@@ -126,7 +161,9 @@ class TestDistributedLayernormMLP:
             dot_1_input_axes = dot_2_input_axes = None
             kernel_1_axes = kernel_2_axes = None
 
-        quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
+        quantizer_sets = QuantizerFactory.create_set(
+            n_quantizer_sets=2, fp8_recipe=quantization_recipe
+        )
 
         # out = ((x * kernel_1) + bias_1) * kernel_2 + bias_2
         return jnp.mean(
@@ -154,7 +191,7 @@ class TestDistributedLayernormMLP:
         use_bias,
         input_shape,
         dtype,
-        fp8_recipe,
+        quantization_recipe,
         use_shardy,
         with_jax_gemm,
     ):
@@ -174,7 +211,9 @@ class TestDistributedLayernormMLP:
 
             # Single GPU
             with fp8_autocast(
-                enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()
+                enabled=quantization_recipe is not None,
+                fp8_recipe=quantization_recipe,
+                mesh_resource=MeshResource(),
             ):
                 single_jitter = jax.jit(
                     value_and_grad_func,
@@ -186,7 +225,9 @@ class TestDistributedLayernormMLP:
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
             with mesh, fp8_autocast(
-                enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+                enabled=quantization_recipe is not None,
+                fp8_recipe=quantization_recipe,
+                mesh_resource=mesh_resource,
             ):
                 k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tpsp"))
                 k2_sharding = NamedSharding(mesh, PartitionSpec("tpsp", "fsdp"))
@@ -226,11 +267,14 @@ class TestDistributedLayernormMLP:
 
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
 
-        fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
-        bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
+        fwd_test_type = bwd_test_type = dtype
+        if quantization_recipe is not None:
+            quantize_config = get_quantize_config_with_recipe(quantization_recipe)
+            fwd_test_type = quantize_config.FWD_DTYPE
+            bwd_test_type = quantize_config.BWD_DTYPE
 
         if fwd_test_type == jnp.float16 and use_bias:
-            assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type, atol=0.04, rtol=1.5)
+            assert_allclose(multi_fwd, single_fwd, atol=0.04, rtol=1.5)
         else:
             assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
 
@@ -253,13 +297,12 @@ class TestDistributedLayernormMLP:
                         err_msg=f"multi_grads[{i}] is not close",
                     )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", [None] + SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("quantization_recipe", [None] + SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
         self,
@@ -268,27 +311,28 @@ class TestDistributedLayernormMLP:
         use_bias,
         input_shape,
         dtype,
-        fp8_recipe,
+        quantization_recipe,
         with_jax_gemm,
     ):
+        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
+            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
         self._test_layernorm_mlp_grad(
             mesh_config,
             activation_type,
             use_bias,
             input_shape,
             dtype,
-            fp8_recipe,
+            quantization_recipe,
             use_shardy=False,
             with_jax_gemm=with_jax_gemm,
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", [None] + SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("quantization_recipe", [None] + SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad_shardy(
         self,
@@ -297,18 +341,18 @@ class TestDistributedLayernormMLP:
         use_bias,
         input_shape,
         dtype,
-        fp8_recipe,
+        quantization_recipe,
         with_jax_gemm,
     ):
-        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
+            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
         self._test_layernorm_mlp_grad(
             mesh_config,
             activation_type,
             use_bias,
             input_shape,
             dtype,
-            fp8_recipe=fp8_recipe,
+            quantization_recipe=quantization_recipe,
             use_shardy=True,
             with_jax_gemm=with_jax_gemm,
         )
@@ -321,7 +365,7 @@ class TestDistributedLayernormMLP:
         input_shape,
         dtype,
         use_fp8,
-        fp8_recipe,
+        quantization_recipe,
         use_shardy,
         with_jax_gemm,
     ):
@@ -330,14 +374,16 @@ class TestDistributedLayernormMLP:
         layernorm_type = "rmsnorm"
 
         rng = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(rng, 2)
+        subkeys = jax.random.split(rng, 3)
 
         x = jax.random.normal(subkeys[0], (batch, seqlen, hidden_in), dtype)
-        init_rngs = {"params": subkeys[1]}
+        init_rngs = {"params": subkeys[1], "sr_rng": subkeys[2]}
 
         with use_jax_gemm(enabled=with_jax_gemm):
             # Single GPUs
-            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
+            with fp8_autocast(
+                enabled=use_fp8, fp8_recipe=quantization_recipe, mesh_resource=MeshResource()
+            ):
                 ln_mlp_single = LayerNormMLP(
                     layernorm_type=layernorm_type,
                     intermediate_dim=INTERMEDIATE,
@@ -346,7 +392,7 @@ class TestDistributedLayernormMLP:
                 )
                 params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
                 mlp_out_single, ln_out_single = ln_mlp_single.apply(
-                    params_single, x, deterministic=True
+                    params_single, x, deterministic=True, rngs={"sr_rng": subkeys[2]}
                 )
 
             # Multi GPUs
@@ -354,7 +400,7 @@ class TestDistributedLayernormMLP:
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
             with mesh, fp8_autocast(
-                enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+                enabled=use_fp8, fp8_recipe=quantization_recipe, mesh_resource=mesh_resource
             ):
                 ln_mlp_sharded = LayerNormMLP(
                     layernorm_type=layernorm_type,
@@ -374,19 +420,20 @@ class TestDistributedLayernormMLP:
                 )
                 params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
                 mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
-                    params_sharded, x, deterministic=True
+                    params_sharded, x, deterministic=True, rngs={"sr_rng": subkeys[2]}
                 )
 
         # Make sure params values are the same
         assert_tree_like_allclose(params_sharded["params"], params_single["params"])
         assert_allclose(ln_out_sharded, ln_out_single, dtype=dtype)
 
+        # TODO(Phuong): check if these tols updates are still needed
         atol = None
         rtol = None
         l40_tolerance_update = (
             get_min_device_compute_capability() == 89
-            and fp8_recipe == recipe.DelayedScaling()
             and use_fp8
+            and quantization_recipe.delayed()
             and dtype == jnp.float16
             and activation_type == ("gelu",)
         )
@@ -404,9 +451,10 @@ class TestDistributedLayernormMLP:
         # within tolerance to the float32 ground truth.
         jax_triton_gemm_precision_tolerance_update = (
             with_jax_gemm
-            and isinstance(fp8_recipe, recipe.Float8CurrentScaling)
-            and dtype == jnp.bfloat16
-            and activation_type == ("gelu", "linear")
+            and quantization_recipe is not None
+            and (quantization_recipe.delayed() or quantization_recipe.float8_current_scaling())
+            and dtype in (jnp.bfloat16, jnp.float16)
+            and activation_type == ("gelu", "linear"),
         )
         if jax_triton_gemm_precision_tolerance_update:
             atol = 0.08
@@ -430,22 +478,30 @@ class TestDistributedLayernormMLP:
             input_shape,
             dtype,
             use_fp8=False,
-            fp8_recipe=None,
+            quantization_recipe=None,
             use_shardy=False,
             with_jax_gemm=with_jax_gemm,
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("quantization_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        quantization_recipe,
+        with_jax_gemm,
     ):
+        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
+            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
         self._test_layernorm_mlp(
             mesh_config,
             activation_type,
@@ -453,7 +509,7 @@ class TestDistributedLayernormMLP:
             input_shape,
             dtype,
             use_fp8=True,
-            fp8_recipe=fp8_recipe,
+            quantization_recipe=quantization_recipe,
             use_shardy=False,
             with_jax_gemm=with_jax_gemm,
         )
@@ -474,24 +530,30 @@ class TestDistributedLayernormMLP:
             input_shape,
             dtype,
             use_fp8=False,
-            fp8_recipe=None,
+            quantization_recipe=None,
             use_shardy=True,
             with_jax_gemm=with_jax_gemm,
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("quantization_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        quantization_recipe,
+        with_jax_gemm,
     ):
-        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
+            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
         self._test_layernorm_mlp(
             mesh_config,
             activation_type,
@@ -499,7 +561,7 @@ class TestDistributedLayernormMLP:
             input_shape,
             dtype,
             use_fp8=True,
-            fp8_recipe=fp8_recipe,
+            quantization_recipe=quantization_recipe,
             use_shardy=True,
             with_jax_gemm=with_jax_gemm,
         )

@@ -25,7 +25,8 @@ from common import (
     is_bf16_supported,
     is_fp8_supported,
     is_mxfp8_supported,
-    get_fp8_recipe_from_name_string,
+    is_nvfp4_supported,
+    get_quantization_recipe_from_name_string,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
@@ -39,6 +40,7 @@ NAMED_BROADCAST_AXIS = "my_broadcast_axis"
 NAMED_TP_AXIS = "my_tp_axis"
 PARAMS_KEY = "params"
 PARAMS_AXES_KEY = PARAMS_KEY + "_axes"
+SR_KEY = "sr_rng"
 DROPOUT_KEY = "dropout"
 INPUT_KEY = "input_rng"
 
@@ -175,6 +177,8 @@ def train_epoch(
     epoch_accuracy = []
 
     for perm in perms:
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_input = sentence[perm, ...]
         batch_mask = mask[perm, ...]
         batch_label = label[perm, ...]
@@ -200,11 +204,11 @@ def train_epoch(
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_step(state, inputs, masks, labels, var_collect):
+def eval_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
         one_hot = jax.nn.one_hot(labels, 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -216,7 +220,16 @@ def eval_step(state, inputs, masks, labels, var_collect):
 
 
 def eval_model(
-    state, test_ds, batch_size, var_collect, eval_fn, mesh, inputs_pspec, masks_pspec, labels_pspec
+    state,
+    test_ds,
+    batch_size,
+    var_collect,
+    eval_fn,
+    mesh,
+    inputs_pspec,
+    masks_pspec,
+    labels_pspec,
+    rngs,
 ):
     """Evaluation loop."""
     global_input_shape, input_named_sharding, sentence = shard_array_wrapper(
@@ -233,7 +246,8 @@ def eval_model(
     all_accuracy = []
 
     for batch_input, batch_mask, batch_label in zip(sentence, mask, label):
-
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         shard_input = jax.make_array_from_single_device_arrays(
             global_input_shape, input_named_sharding, [batch_input]
         )
@@ -244,7 +258,7 @@ def eval_model(
             global_label_shape, label_named_sharding, [batch_label]
         )
 
-        loss, accuracy = eval_fn(state, shard_input, shard_mask, shard_label, var_collect)
+        loss, accuracy = eval_fn(state, shard_input, shard_mask, shard_label, var_collect, rngs)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -303,7 +317,7 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
-    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0), SR_KEY: jax.random.PRNGKey(0)}
     func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
     assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
@@ -372,7 +386,7 @@ def train_and_evaluate(args):
         ), "Test batch size needs to be multiple of 32 for MXFP8"
 
     if args.use_fp8:
-        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+        fp8_recipe = get_quantization_recipe_from_name_string(args.fp8_recipe)
     else:
         fp8_recipe = None
 
@@ -390,7 +404,8 @@ def train_and_evaluate(args):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
         rng, dropout_rng = jax.random.split(rng)
-        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
+        rng, sr_rng = jax.random.split(rng)
+        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
         input_shape = [args.batch_size, args.max_seq_len]
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
@@ -444,7 +459,14 @@ def train_and_evaluate(args):
                 train_step, in_shardings=in_shardings, out_shardings=out_shardings
             )
 
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (None, None)
             jit_eval_step = jax.jit(
                 eval_step, in_shardings=in_shardings, out_shardings=out_shardings
@@ -456,14 +478,16 @@ def train_and_evaluate(args):
 
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                rngs = {DROPOUT_KEY: dropout_rng}
+                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng_state}
                 jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
             else:
                 for epoch in range(1, args.epochs + 1):
+                    # Split and reassign to 'rng' to ensure unique rng for each step
                     rng, input_rng = jax.random.split(rng)
                     rng, dropout_rng = jax.random.split(rng)
-                    rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+                    rng, sr_rng = jax.random.split(rng)
+                    rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
                     state, train_loss, train_accuracy, var_collect = train_epoch(
                         state,
@@ -488,6 +512,7 @@ def train_and_evaluate(args):
                         inputs_pspec,
                         masks_pspec,
                         labels_sharding.spec,
+                        rngs,
                     )
                     if args.process_id == 0:
                         print(
@@ -508,16 +533,16 @@ def encoder_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=128,
+        default=256,
         metavar="N",
-        help="input batch size for training (default: 128)",
+        help="input batch size for training (default: 256)",
     )
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=128,
+        default=256,
         metavar="N",
-        help="input batch size for testing (default: 128)",
+        help="input batch size for testing (default: 256)",
     )
     parser.add_argument(
         "--max-seq-len",
@@ -629,7 +654,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_current_scaling_fp8(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         result = self.exec(True, "Float8CurrentScaling")
-        assert result[0] < 0.43 and result[1] > 0.80
+        assert result[0] < 0.432 and result[1] > 0.80
 
     @unittest.skipIf(
         not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
@@ -638,6 +663,14 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling")
         assert result[0] < 0.43 and result[1] > 0.80
+
+    @unittest.skipIf(
+        not is_nvfp4_supported(), "Device compute capability 10.0+ is required for NVFP4"
+    )
+    def test_te_nvfp4(self):
+        """Test Transformer Engine with NVFP4"""
+        result = self.exec(True, "NVFP4BlockScaling")
+        assert result[0] < 0.451 and result[1] > 0.79
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
@@ -659,18 +692,23 @@ class TestEncoder(unittest.TestCase):
     def test_te_current_scaling_fp8_shardy(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         result = self.exec(True, "Float8CurrentScaling", enable_shardy=True)
-        assert result[0] < 0.43 and result[1] > 0.80
+        assert result[0] < 0.432 and result[1] > 0.80
 
     @unittest.skipIf(
         not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
-    )
-    @unittest.skipIf(
-        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
     )
     def test_te_mxfp8_shardy(self):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling", enable_shardy=True)
         assert result[0] < 0.43 and result[1] > 0.80
+
+    @unittest.skipIf(
+        not is_nvfp4_supported(), "Device compute capability 10.0+ is required for NVFP4"
+    )
+    def test_te_nvfp4_shardy(self):
+        """Test Transformer Engine with NVFP4"""
+        result = self.exec(True, "NVFP4BlockScaling", enable_shardy=True)
+        assert result[0] < 0.451 and result[1] > 0.79
 
 
 if __name__ == "__main__":

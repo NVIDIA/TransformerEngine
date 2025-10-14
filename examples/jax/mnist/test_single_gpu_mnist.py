@@ -18,11 +18,11 @@ from flax.training import train_state
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
 DIR = str(Path(__file__).resolve().parents[1])
 sys.path.append(str(DIR))
-from encoder.common import is_bf16_supported, get_fp8_recipe_from_name_string
+from encoder.common import is_bf16_supported, get_quantization_recipe_from_name_string
 
 IMAGE_H = 28
 IMAGE_W = 28
@@ -189,7 +189,7 @@ def train_and_evaluate(args):
     label_shape = [args.batch_size]
 
     if args.use_fp8:
-        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+        fp8_recipe = get_quantization_recipe_from_name_string(args.fp8_recipe)
     else:
         fp8_recipe = None
 
@@ -308,8 +308,8 @@ def mnist_parser(args):
 class TestMNIST(unittest.TestCase):
     """MNIST unittests"""
 
-    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+    is_fp8_supported, fp8_reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
 
     @classmethod
     def setUpClass(cls):

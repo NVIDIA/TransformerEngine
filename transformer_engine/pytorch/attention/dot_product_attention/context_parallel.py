@@ -20,7 +20,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.constants import (

@@ -34,7 +34,7 @@ load_framework_extension("jax")
 from . import flax
 from . import quantize
 
-from .quantize import fp8_autocast, update_collections, get_delayed_scaling
+from .quantize import fp8_autocast, update_collections
 from .quantize import NVTE_FP8_COLLECTION_NAME
 
 from .sharding import MeshResource
@@ -47,7 +47,6 @@ __all__ = [
     "NVTE_FP8_COLLECTION_NAME",
     "fp8_autocast",
     "update_collections",
-    "get_delayed_scaling",
     "MeshResource",
     "flax",
     "quantize",

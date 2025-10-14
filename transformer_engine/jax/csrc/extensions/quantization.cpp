@@ -5,8 +5,11 @@
  ************************************************************************/
 #include <cuda_runtime.h>
 
+#include <iostream>
+
 #include "../extensions.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/hadamard_transform.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
 #include "xla/ffi/api/c_api.h"
@@ -15,7 +18,7 @@ namespace transformer_engine {
 namespace jax {
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                               DType in_dtype, DType out_dtype,
+                                               DType in_dtype, DType out_dtype, DType scale_dtype,
                                                JAXX_Scaling_Mode scaling_mode,
                                                QuantizeLayout q_layout) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
@@ -30,16 +33,22 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
   // this function. We pass a dummy pointer as a workaround.
   int temp = 0;
 
+  bool const is_nvfp4 = scaling_mode == JAXX_Scaling_Mode::NVFP4_1D_SCALING ||
+                        scaling_mode == JAXX_Scaling_Mode::NVFP4_2D_SCALING;
+
   auto input_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), input_shape, in_dtype);
   auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+  auto scale_shape = std::vector<size_t>{1};
   // Only the pointers will be checked for scale_inv, thus the shapes do not matter
   if (q_layout == QuantizeLayout::ROWWISE_COLWISE || q_layout == QuantizeLayout::ROWWISE) {
     output_tensor.set_rowwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_shape);
-    if (is_fp8_dtype(out_dtype)) {
-      output_tensor.set_rowwise_scale_inv(reinterpret_cast<void *>(&temp), DType::kFloat32,
-                                          std::vector<size_t>{1});
+    if (scaling_mode != JAXX_Scaling_Mode::NO_SCALING) {
+      if (is_nvfp4)
+        scale_shape = get_block_scale_shape(scaling_mode, batch_size, hidden_size, false);
+      output_tensor.set_rowwise_scale_inv(reinterpret_cast<void *>(&temp), scale_dtype,
+                                          scale_shape);
     }
   }
 
@@ -49,13 +58,16 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
     output_tensor.set_columnwise_data(reinterpret_cast<void *>(&temp), out_dtype, tmp_shape);
 
     // Only the pointers will be checked for scale_inv, thus the shapes do not matter
-    if (is_fp8_dtype(out_dtype)) {
-      output_tensor.set_columnwise_scale_inv(reinterpret_cast<void *>(&temp), DType::kFloat32,
-                                             std::vector<size_t>{1});
+    if (scaling_mode != JAXX_Scaling_Mode::NO_SCALING) {
+      if (is_nvfp4)
+        scale_shape =
+            get_block_scale_shape(scaling_mode, hidden_size, batch_size, false);  //Transpose
+      output_tensor.set_columnwise_scale_inv(reinterpret_cast<void *>(&temp), scale_dtype,
+                                             scale_shape);
     }
   }
 
-  if (is_fp8_dtype(out_dtype) && scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || is_nvfp4) {
     output_tensor.set_amax(reinterpret_cast<void *>(&temp), DType::kFloat32,
                            std::vector<size_t>{1});
     output_tensor.set_scale(reinterpret_cast<void *>(&temp), DType::kFloat32,
@@ -72,17 +84,20 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
 }
 
 Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
-                            Buffer_Type amax_buf, Result_Type output_buf,
-                            Result_Type output_trans_buf, Result_Type scale_inv_buf,
-                            Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
-                            Result_Type dbias_buf, Result_Type workspace_buf,
-                            JAXX_Scaling_Mode scaling_mode, int64_t quantize_layout_enum,
-                            bool is_dbias, int64_t flatten_axis) {
+                            Buffer_Type amax_buf, Buffer_Type sr_rng_state,
+                            Buffer_Type post_rht_amax_buf, Buffer_Type rht_matrix_buf,
+                            Result_Type output_buf, Result_Type output_trans_buf,
+                            Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                            Result_Type updated_amax_buf, Result_Type dbias_buf,
+                            Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
+                            int64_t quantize_layout_enum, bool is_dbias, int64_t flatten_axis,
+                            bool stochastic_rounding, bool use_rht) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
 
-  NVTE_CHECK(is_fp8_dtype(out_dtype), "Output datatype must be FP8 for quantization.");
+  NVTE_CHECK(is_fp8_dtype(out_dtype) || is_fp4_dtype(out_dtype),
+             "Output datatype must be FP8 or FP4 for quantization.");
 
   auto *input = input_buf.untyped_data();
 
@@ -112,39 +127,106 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   bool const is_tensor_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
                                  scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING;
+  bool const is_mxfp8 = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
+  bool const is_nvfp4 = scaling_mode == JAXX_Scaling_Mode::NVFP4_1D_SCALING ||
+                        scaling_mode == JAXX_Scaling_Mode::NVFP4_2D_SCALING;
+
+  NVTE_CHECK(!stochastic_rounding || is_nvfp4, "Stochastic rounding is only supported for NVFP4.");
+  NVTE_CHECK(!use_rht || is_nvfp4, "RHT is only supported for NVFP4 scaling");
 
   if (quantize_layout == QuantizeLayout::ROWWISE ||
       quantize_layout == QuantizeLayout::ROWWISE_COLWISE) {
     output_tensor.set_rowwise_data(output, out_dtype, output_shape);
 
-    if (is_fp8_dtype(out_dtype)) {
-      if (is_tensor_scaling) {
-        float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
-        float *amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
-        NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
-        NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
-        output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-        output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
-        output_tensor.set_rowwise_scale_inv(
-            scale_inv_buf->untyped_data(),
-            convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-            std::vector<size_t>{1});
-      } else {
-        output_tensor.set_rowwise_scale_inv(
-            scale_inv_buf->untyped_data(),
-            convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-            std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, flatten_axis),
-                                product(scale_inv_buf->dimensions(), flatten_axis,
-                                        scale_inv_buf->dimensions().size())});
-      }
+    if (is_tensor_scaling) {
+      float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+      float *amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
+      NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
+      NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
+      output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+      output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
+      output_tensor.set_rowwise_scale_inv(
+          scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()), std::vector<size_t>{1});
+    } else {
+      output_tensor.set_rowwise_scale_inv(
+          scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
+          std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, flatten_axis),
+                              product(scale_inv_buf->dimensions(), flatten_axis,
+                                      scale_inv_buf->dimensions().size())});
     }
+  }
+
+  if (is_nvfp4) {
+    float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+    NVTE_CHECK(amax != nullptr, "amax must be provided for NVFP4");
+    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
+  }
+
+  QuantizationConfigWrapper quant_config{};
+  if (scaling_mode == JAXX_Scaling_Mode::NVFP4_2D_SCALING) {
+    quant_config.set_nvfp4_2d_quantization(true);
+  }
+
+  // Stochastic rounding
+  quant_config.set_stochastic_rounding(stochastic_rounding);
+  TensorWrapper sr_rng_state_tensor(sr_rng_state.untyped_data(), std::vector<size_t>{2},
+                                    DType::kInt64);
+  if (stochastic_rounding) {
+    NVTE_CHECK(sr_rng_state.size_bytes() == 2 * sizeof(uint64_t),
+               "rng_state must be of type int64[2]");
+    NVTE_CHECK(sr_rng_state.untyped_data() != nullptr, "rng_state must be provided for SR");
+    quant_config.set_rng_state(sr_rng_state_tensor.data());
   }
 
   if (quantize_layout == QuantizeLayout::COLWISE ||
       quantize_layout == QuantizeLayout::ROWWISE_COLWISE) {
-    auto &tmp_shape = (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
-                          ? output_trans_shape
-                          : output_shape;
+    if (is_nvfp4 && use_rht) {
+      if (quantize_layout == QuantizeLayout::ROWWISE_COLWISE) {
+        // Do regular rowwise quantization without RHT
+        nvte_quantize_v2(input_tensor.data(), output_tensor.data(), quant_config, stream);
+      }
+
+      TensorWrapper out_transpose(get_nvte_scaling_mode(scaling_mode));
+
+      // nvte_hadamard_transform_cast_fusion_columnwise expects the colwise data to be populated in the rowwise buffers on TensorWrapper
+      out_transpose.set_rowwise_data(output_trans, out_dtype, output_trans_shape);
+      auto const colwise_flatten_axis = output_trans_buf->dimensions().size() - flatten_axis;
+      out_transpose.set_rowwise_scale_inv(
+          colwise_scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
+          std::vector<size_t>{product(colwise_scale_inv_buf->dimensions(), 0, colwise_flatten_axis),
+                              product(colwise_scale_inv_buf->dimensions(), colwise_flatten_axis,
+                                      colwise_scale_inv_buf->dimensions().size())});
+
+      float *post_rht_amax = reinterpret_cast<float *>(post_rht_amax_buf.untyped_data());
+      NVTE_CHECK(post_rht_amax != nullptr, "Post-RHT colwise amax must be provided for NVFP4");
+      out_transpose.set_amax(post_rht_amax, DType::kFloat32, std::vector<size_t>{1});
+
+      bool const eligible_for_rht_cast_fusion =
+          input_tensor.dtype() == DType::kBFloat16 && m % 64 == 0 && n % 128 == 0;
+      NVTE_CHECK(eligible_for_rht_cast_fusion, "RHT cast fusion conditions not met");
+
+      NVTE_CHECK(
+          convert_ffi_datatype_to_te_dtype(rht_matrix_buf.element_type()) == DType::kBFloat16,
+          "RHT matrix must be bf16");
+      NVTE_CHECK(rht_matrix_buf.dimensions().size() == 2 && rht_matrix_buf.dimensions()[0] == 16 &&
+                     rht_matrix_buf.dimensions()[1] == 16,
+                 "RHT matrix must be 16x16");
+      TensorWrapper rht_matrix_tensor(rht_matrix_buf.untyped_data(), std::vector<size_t>{16, 16},
+                                      DType::kBFloat16);
+
+      nvte_hadamard_transform_cast_fusion_columnwise(input_tensor.data(), out_transpose.data(),
+                                                     rht_matrix_tensor.data(), quant_config,
+                                                     stream);
+
+      return ffi_with_cuda_error_check();
+    }
+
+    bool const is_colwise_transposed =
+        scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || is_nvfp4;
+    auto &tmp_shape = is_colwise_transposed ? output_trans_shape : output_shape;
     output_tensor.set_columnwise_data(output_trans, out_dtype, tmp_shape);
     // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
     auto &tmp_buf = is_tensor_scaling ? scale_inv_buf : colwise_scale_inv_buf;
@@ -154,26 +236,30 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
           tmp_buf->untyped_data(), convert_ffi_datatype_to_te_dtype(tmp_buf->element_type()),
           std::vector<size_t>{1});
     } else {
+      auto colwise_flatten_axis = flatten_axis;
+      if (is_colwise_transposed) {
+        // convert flatten_axis from N layout to T layout
+        colwise_flatten_axis = tmp_buf->dimensions().size() - flatten_axis;
+      }
       output_tensor.set_columnwise_scale_inv(
           tmp_buf->untyped_data(), convert_ffi_datatype_to_te_dtype(tmp_buf->element_type()),
           std::vector<size_t>{
-              product(tmp_buf->dimensions(), 0, flatten_axis),
-              product(tmp_buf->dimensions(), flatten_axis, tmp_buf->dimensions().size())});
+              product(tmp_buf->dimensions(), 0, colwise_flatten_axis),
+              product(tmp_buf->dimensions(), colwise_flatten_axis, tmp_buf->dimensions().size())});
     }
-  }
-
-  if (scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING) {
-    output_tensor.set_amax(nullptr, DType::kFloat32, std::vector<size_t>{1});
   }
 
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, workspace_dtype);
 
   if (is_dbias) {
+    NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::NVFP4_2D_SCALING,
+               "DBias quantization is not supported for NVFP4_2D_SCALING as fused dbias API cannot "
+               "take quant_config as input.");
     nvte_quantize_dbias(input_tensor.data(), output_tensor.data(), dbias_tensor.data(),
                         workspace_tensor.data(), stream);
   } else {
-    nvte_quantize(input_tensor.data(), output_tensor.data(), stream);
+    nvte_quantize_v2(input_tensor.data(), output_tensor.data(), quant_config, stream);
   }
   return ffi_with_cuda_error_check();
 }
@@ -184,6 +270,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Arg<Buffer_Type>()      // input
                                   .Arg<Buffer_Type>()      // scale
                                   .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // sr_rng_state
+                                  .Arg<Buffer_Type>()      // colwise amax
+                                  .Arg<Buffer_Type>()      // rht matrix
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // colwise output
                                   .Ret<Buffer_Type>()      // scale_inv
@@ -194,7 +283,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("q_layout")
                                   .Attr<bool>("is_dbias")
-                                  .Attr<int64_t>("flatten_axis"),
+                                  .Attr<int64_t>("flatten_axis")
+                                  .Attr<bool>("stochastic_rounding")
+                                  .Attr<bool>("use_rht"),
                               FFI_CudaGraph_Traits);
 
 Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
@@ -344,7 +435,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
           sinv_size = 1;
         } else {
           const bool is_colwise = false;
-          auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, is_colwise);
+          auto sinv_shape_i = get_block_scale_shape(scaling_mode, m_i, n, is_colwise);
           out_i.set_rowwise_scale_inv(static_cast<void *>(sinv_ptr), sinv_dtype, sinv_shape_i);
           sinv_size = product(sinv_shape_i);
         }
@@ -363,7 +454,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
         colwise_sinv_size = 1;
       } else {
         const bool is_colwise = true;
-        auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, is_colwise);
+        auto sinv_shape_i = get_block_scale_shape(scaling_mode, m_i, n, is_colwise);
         out_i.set_columnwise_scale_inv(static_cast<void *>(colwise_sinv_ptr), sinv_dtype,
                                        sinv_shape_i);
         colwise_sinv_size = product(sinv_shape_i);

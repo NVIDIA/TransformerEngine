@@ -66,6 +66,9 @@ class RotaryPositionEmbedding(torch.nn.Module):
         """
         Create rotary position embedding frequencies.
 
+        This function is particularly sensitive to the use of mixed precision, so we disable the
+        autocast context if it is enabled.
+
         Parameters
         ----------
         max_seq_len: int
@@ -73,26 +76,27 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             Fixed offset for frequencies.
         """
-        seq = (
-            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-            + offset
-        )
+        with torch.autocast(enabled=False, device_type="cuda"):
+            seq = (
+                torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+                + offset
+            )
 
-        if (
-            self.pretrained_max_position_embeddings is not None
-            and self.seq_len_interpolation_factor is not None
-        ):
             if (
-                max_seq_len
-                > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor
+                self.pretrained_max_position_embeddings is not None
+                and self.seq_len_interpolation_factor is not None
             ):
-                # dynamic linear scaling (length > position we have learned)
-                seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
-            else:
-                # fixed linear scaling
-                seq *= 1 / self.seq_len_interpolation_factor
+                if (
+                    max_seq_len
+                    > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor
+                ):
+                    # dynamic linear scaling (length > position we have learned)
+                    seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
+                else:
+                    # fixed linear scaling
+                    seq *= 1 / self.seq_len_interpolation_factor
 
-        freqs = torch.einsum("i , j -> i j", seq, self.inv_freq)
+            freqs = torch.einsum("i , j -> i j", seq, self.inv_freq)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
         if not self.interleaved:

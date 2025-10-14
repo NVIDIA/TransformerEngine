@@ -30,7 +30,7 @@ from transformer_engine.pytorch.fp8 import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
@@ -546,6 +546,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         # global recipe set in fp8_autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.custom():
+            return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
         # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
@@ -597,9 +599,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe in (
-            "",
-            "Float8CurrentScaling",
+        elif (
+            fp8_recipe.float8_current_scaling()
+            and _dpa_fp8_recipe in ("", "Float8CurrentScaling")
+            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
         ):
             # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe

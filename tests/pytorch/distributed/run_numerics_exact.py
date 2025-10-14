@@ -21,9 +21,12 @@ from transformer_engine.common.recipe import (
     Format,
     Recipe,
     QParams,
+    CustomRecipe,
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.experimental import quantization_nvfp4
+from transformer_engine.pytorch.experimental import utils
 from run_layer_with_overlap import _compare_tensors
 
 
@@ -48,6 +51,52 @@ def nvfp4_rht_and_2d_quantization():
     return nvfp4_recipe
 
 
+def get_nvfp4_quantizer_factory():
+    """
+    Create a quantizer factory for NVFP4 reference implementation.
+
+    This factory returns NVFP4QuantizerRef instances with RHT and 2D quantization
+    enabled.
+
+    Returns:
+        A factory function that takes a role string and returns a quantizer instance
+    """
+
+    def factory(role):
+        if role == "linear_input":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=True,  # RHT enabled for input
+            )
+        elif role == "linear_weight":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(16, 16),  # 2D quantization for weight
+                pow_2_scales=False,
+                with_rht=False,
+            )
+        elif role == "linear_output":
+            # Output quantization not used
+            return None
+        elif role == "linear_grad_output":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=True,  # RHT enabled for grad_output
+            )
+        elif role == "linear_grad_input":
+            # Grad input quantization not used
+            return None
+        else:
+            # For any other roles, return None
+            return None
+
+    return factory
+
+
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "nvfp4":
@@ -55,16 +104,12 @@ def quantization_recipe() -> Recipe:
     raise ValueError(f"Unsupported quantization: {QUANTIZATION}")
 
 
-def setup_environment_for_reference():
+def quantization_reference_recipe() -> Recipe:
+    """Create reference recipe using CustomRecipe with NVFP4 quantizer factory."""
     if QUANTIZATION == "nvfp4":
-        os.environ["QAT_PARAMS"] = "9003"
-    else:
-        raise ValueError(f"Unsupported quantization for reference: {QUANTIZATION}")
-
-
-def cleanup_environment():
-    if "QAT_PARAMS" in os.environ:
-        del os.environ["QAT_PARAMS"]
+        nvfp4_ref_factory = get_nvfp4_quantizer_factory()
+        return CustomRecipe(qfactory=nvfp4_ref_factory)
+    raise ValueError(f"Unsupported quantization for reference: {QUANTIZATION}")
 
 
 def main(argv=None, namespace=None):
@@ -478,8 +523,8 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
         )
 
     # run the reference
-    setup_environment_for_reference()
-    with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+    reference_recipe = quantization_reference_recipe()
+    with te.fp8_autocast(enabled=True, fp8_recipe=reference_recipe):
         y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = TestDistributedLinearBase.run_linear(
             x,
             w,
@@ -494,8 +539,6 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
             run_num_steps=run_num_steps,
             enable_weight_cache=enable_weight_cache,
         )
-    # Clean up env
-    cleanup_environment()
 
     # compare results, zero tolerance
     if WORLD_RANK == 0:
@@ -673,8 +716,8 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
         )
 
     # run the reference
-    setup_environment_for_reference()
-    with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+    reference_recipe = quantization_reference_recipe()
+    with te.fp8_autocast(enabled=True, fp8_recipe=reference_recipe):
         y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = (
             TestDistributedLayerNormLinearBase.run_layernorm_linear(
                 x,
@@ -690,8 +733,6 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
                 enable_weight_cache=False,
             )
         )
-    # Clean up env
-    cleanup_environment()
 
     # compare results, zero tolerance
     if WORLD_RANK == 0:

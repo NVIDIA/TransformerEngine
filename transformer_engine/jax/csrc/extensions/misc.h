@@ -45,6 +45,8 @@ enum class JAXX_Scaling_Mode : int64_t {
   DELAYED_TENSOR_SCALING = 1,
   MXFP8_1D_SCALING = 2,
   CURRENT_TENSOR_SCALING = 3,
+  NVFP4_1D_SCALING = 4,
+  NVFP4_2D_SCALING = 5,
 };
 
 inline bool is_tensor_scaling(const JAXX_Scaling_Mode &mode) {
@@ -54,6 +56,11 @@ inline bool is_tensor_scaling(const JAXX_Scaling_Mode &mode) {
 
 inline bool is_block_scaling(const JAXX_Scaling_Mode &mode) {
   return (mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING);
+}
+
+inline bool is_nvfp4_scaling(const JAXX_Scaling_Mode &mode) {
+  return (mode == JAXX_Scaling_Mode::NVFP4_1D_SCALING ||
+          mode == JAXX_Scaling_Mode::NVFP4_2D_SCALING);
 }
 
 static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
@@ -70,22 +77,32 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
     case JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING:
       return NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING;
       break;
+    case JAXX_Scaling_Mode::NVFP4_1D_SCALING:
+      return NVTEScalingMode::NVTE_NVFP4_1D_SCALING;
+      break;
+    case JAXX_Scaling_Mode::NVFP4_2D_SCALING:
+      // TE common uses the same enum value for 1D and 2D fp4 scaling and instead differentiates them via quant_config.nvfp4_2d_quantization
+      return NVTEScalingMode::NVTE_NVFP4_1D_SCALING;
+      break;
     default:
       NVTE_ERROR("Invalid Scaling Mode ", static_cast<int>(mode));
       break;
   }
 }
 
-constexpr struct BlockSize {
+struct BLOCK_SIZE {
   size_t x;
   size_t y;
-} MXFP8_BLOCK_SIZE{1, 32};
-constexpr struct Alignment {
-  size_t x;
-  size_t y;
-} MXFP8_ALIGNMENT{128, 4};
+  constexpr BLOCK_SIZE(int _x, int _y) : x(_x), y(_y) {}
+};
 
-std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
+constexpr BLOCK_SIZE MXFP8_BLOCK_SIZE{1, 32};
+constexpr BLOCK_SIZE NVFP4_BLOCK_SIZE{1, 16};
+
+constexpr BLOCK_SIZE BLOCK_SCALE_ALIGNMENT{128, 4};
+
+std::vector<size_t> get_block_scale_shape(JAXX_Scaling_Mode scaling_mode, size_t M, size_t N,
+                                          bool is_colwise);
 
 template <typename T, typename... Rest>
 void hash_combine(int64_t &seed, const T &v, Rest... rest) {
