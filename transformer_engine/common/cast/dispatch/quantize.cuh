@@ -94,7 +94,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
     }
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK((IS_DBIAS || IS_DACT || IS_ACT),
-                  "IS_DBIAS, IS_DACT, and IS_ACT not supported by NVTE_NVFP4_1D_SCALING");
+                 "IS_DBIAS, IS_DACT, and IS_ACT not supported by NVTE_NVFP4_1D_SCALING");
 
       // Check tensors
       CheckNoopTensor(*noop_tensor, "cast_noop");
@@ -114,7 +114,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         } else {
-          nvfp4::quantize_transpose</*use_2d_quantization*/false>(
+          nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
       } else {
