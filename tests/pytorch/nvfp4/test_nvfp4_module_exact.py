@@ -230,13 +230,13 @@ def check_nvfp4_module_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         # Native forward/backward
-        with autocast(enabled=True, recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             # enable weight cache by giving is_first_microbatch
             y_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
-        with autocast(enabled=True, recipe=nvfp4_ref_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_ref_recipe):
             y_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
 
@@ -454,12 +454,12 @@ def check_nvfp4_layernorm_linear_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         # Native forward/backward
-        with autocast(enabled=True, recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_native, ln_out_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
-        with autocast(enabled=True, recipe=nvfp4_ref_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_ref_recipe):
             y_ref, ln_out_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
 
