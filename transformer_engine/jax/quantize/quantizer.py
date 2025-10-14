@@ -607,6 +607,30 @@ class NVFP4Quantizer(Quantizer):
         ), "NVFP4 quantization must use a q_dtype of float4_e2m1fn"
         assert self.scaling_mode.is_nvfp4_scaling, "NVFP4Quantizer must use NVFP4 scaling modes"
 
+    def tree_flatten(self):
+        """Flatten the quantizer for JAX tree operations.
+
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = (self.stochastic_rounding_rng_state,)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        """Reconstruct a quantizer from its flattened representation.
+
+        Args:
+            aux_data: Auxiliary data containing quantizer parameters
+            children: Unused children data
+
+        Returns:
+            A reconstructed Quantizer instance
+        """
+        stochastic_rounding_rng_state = children[0]
+        return cls(*aux_data, stochastic_rounding_rng_state=stochastic_rounding_rng_state)
+
     def _apply_stochastic_rounding(self, x):
         assert (
             self.stochastic_rounding_rng_state is not None

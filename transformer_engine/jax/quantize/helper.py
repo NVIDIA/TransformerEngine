@@ -27,7 +27,7 @@ from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import (
     global_shard_guard,
     MeshResource,
-    num_of_devices,
+    get_num_devices_in_mesh,
     get_all_mesh_axes,
     with_sharding_constraint,
 )
@@ -614,7 +614,6 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
             # Only DGRAD uses stochastic rounding
             return QuantizeMeta()
 
-        # TODO(jberchtold): This assumes SR is always enabled for NVFP4. Use flag from recipe to toggle it.
         sr_jax_rng = module.make_rng("sr_rng")
         # Get a unique key for this quantizer
         sr_jax_rng = jax.jit(jax.random.fold_in)(
@@ -622,8 +621,11 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         )
 
         # Generate 4 random uint32 values from the JAX PRNG key
+        shape = (4,)
+        if get_num_devices_in_mesh() > 1:
+            shape = (get_num_devices_in_mesh(), 4)
         sr_jax_rng_state = jax.random.randint(
-            sr_jax_rng, (num_of_devices(), 4), 0, jnp.iinfo(jnp.int32).max, dtype=jnp.int32
+            sr_jax_rng, shape, 0, jnp.iinfo(jnp.int32).max, dtype=jnp.int32
         ).view(jnp.uint32)
         sr_jax_rng_state = with_sharding_constraint(
             sr_jax_rng_state, jax.sharding.PartitionSpec(get_all_mesh_axes(), None)

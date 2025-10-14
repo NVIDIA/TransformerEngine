@@ -31,7 +31,7 @@ from .misc import (
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
-    num_of_devices,
+    get_num_devices_in_mesh,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -107,9 +107,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 "sr_rng_state must be a uint32 array when stochastic_rounding is True but"
                 f" received {sr_rng_state_aval}"
             )
-            if is_outer:
+            if is_outer and get_num_devices_in_mesh() > 1:
                 assert (
-                    sr_rng_state_aval.shape[0] == num_of_devices()
+                    sr_rng_state_aval.shape[0] == get_num_devices_in_mesh()
                     and sr_rng_state_aval.shape[1] == 4
                 ), (
                     "sr_rng_state must be of shape (num_devices, 4) when stochastic_rounding is"
@@ -860,7 +860,11 @@ def _quantize_dbias_impl(
         x.data,
         scale,
         amax,
-        sr_rng_state if sr_rng_state is not None else jnp.empty((num_of_devices(), 1), jnp.uint32),
+        (
+            sr_rng_state
+            if sr_rng_state is not None
+            else jnp.empty((get_num_devices_in_mesh(), 1), jnp.uint32)
+        ),
         post_rht_amax if post_rht_amax is not None else jnp.zeros((1,), jnp.float32),
         rht_matrix,
         out_dtype=quantizer.q_dtype,
