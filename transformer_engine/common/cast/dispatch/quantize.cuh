@@ -93,6 +93,9 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK((IS_DBIAS || IS_DACT || IS_ACT),
+                  "IS_DBIAS, IS_DACT, and IS_ACT not supported by NVTE_NVFP4_1D_SCALING");
+
       // Check tensors
       CheckNoopTensor(*noop_tensor, "cast_noop");
       CheckInputTensor(*input_tensor, "input");
@@ -108,18 +111,15 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
-          nvfp4::quantize_transpose<IS_ACT, ParamOP, OP, true>(
+          nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         } else {
-          nvfp4::quantize_transpose<IS_ACT, ParamOP, OP, false>(
+          nvfp4::quantize_transpose</*use_2d_quantization*/false>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
-        NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-                   "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_NVFP4_1D_SCALING for "
-                   "2D quantization");
         quantize_transpose_vector_blockwise_fp4(
             /*input=*/input_tensor->data, /*global_amax=*/global_amax,
             /*scale_inv=*/output_tensor->scale_inv,

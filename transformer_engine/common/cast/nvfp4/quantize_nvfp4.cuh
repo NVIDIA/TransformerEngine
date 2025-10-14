@@ -542,11 +542,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 // This kernel supports only two scaling cases:
 // 1. r16c0  - Rowwise NVFP4
 // 2. r16c32 - Rowwise NVFP4 AND Colwise MXFP8
-template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
+inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
   using namespace quantize_kernel;
   using namespace ptx;
   checkCuDriverContext(stream);
+
+  constexpr bool COMPUTE_ACTIVATIONS = false;
+  using ParamOP = Empty;
+  constexpr float (*OP)(float, const ParamOP &) = nullptr;
 
   NVTE_CHECK(output->has_data(), "NVFP4 Output tensor must be allocated.");
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
