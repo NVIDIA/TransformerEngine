@@ -572,13 +572,13 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
     DISABLE_RHT: bool = False
     DISABLE_2D_QUANTIZATION: bool = False
 
-    def initialize_from_recipe(self, fp8_recipe: recipe.Recipe) -> None:
+    def initialize_from_recipe(self, fp8_recipe: Recipe) -> None:
         """Initialize block scaling NVFP4 configuration.
 
         Args:
             fp8_recipe: The quantization recipe to use for initialization
         """
-        assert isinstance(fp8_recipe, recipe.NVFP4BlockScaling)
+        assert isinstance(fp8_recipe, NVFP4BlockScaling)
 
         self.INITIALIZED = True
         self.FWD_DTYPE, self.BWD_DTYPE = _format2dtypes(fp8_recipe.fp4_format)
