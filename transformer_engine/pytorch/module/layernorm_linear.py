@@ -55,7 +55,7 @@ from ..distributed import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, WeightGradStore, get_module_quantizers
+from ._common import apply_normalization, noop_cat, WeightGradStore
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -1541,7 +1541,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
+            quantizers = (
+                self._get_quantizers(fp8_output, fp8_grad)
+                if not debug
+                else self._get_debug_quantizers(fp8_output, fp8_grad)
+            )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False

@@ -25,7 +25,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, WeightGradStore, get_module_quantizers
+from ._common import noop_cat, WeightGradStore
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
@@ -1428,7 +1428,11 @@ class Linear(TransformerEngineBaseModule):
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
+            quantizers = (
+                self._get_quantizers(fp8_output, fp8_grad)
+                if not debug
+                else self._get_debug_quantizers(fp8_output, fp8_grad)
+            )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False

@@ -546,6 +546,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.custom():
+            return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
         # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
