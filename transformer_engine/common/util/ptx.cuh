@@ -82,6 +82,12 @@ constexpr bool is_supported_arch() {
   }
 }
 
+#ifdef __CUDA_ARCH__
+#define __NVTE_CURRENT_ARCH__ constexpr int current_arch = __CUDA_ARCH__;
+#else
+#define __NVTE_CURRENT_ARCH__ constexpr int current_arch = 0;
+#endif
+
 #ifdef __CUDA_ARCH_SPECIFIC__
 #define __NVTE_ARCH_SPECIFIC__ constexpr int ArchSpecific = __CUDA_ARCH_SPECIFIC__;
 #else
@@ -97,7 +103,7 @@ constexpr bool is_supported_arch() {
 #define ARCH_SPECIFIC(...)                                                       \
   [&]                                                                            \
   {                                                                              \
-    constexpr int current_arch = __CUDA_ARCH__;                                  \
+    __NVTE_CURRENT_ARCH__                                                        \
     __NVTE_ARCH_SPECIFIC__                                                       \
     __NVTE_ARCH_FAMILY_SPECIFIC__                                                \
     return transformer_engine::is_supported_arch<current_arch, ArchSpecific,     \
