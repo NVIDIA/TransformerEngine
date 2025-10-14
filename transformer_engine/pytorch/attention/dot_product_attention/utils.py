@@ -40,7 +40,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
 
@@ -222,7 +222,7 @@ class AttentionParams:
     is_training: bool, default = `True`
         Whether in training mode (`True`) or inference mode (`False`)
     fp8: bool, default = `False`
-        Whether `DotProductAttention` is in an `fp8_autocast` region.
+        Whether `DotProductAttention` is in an `autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`

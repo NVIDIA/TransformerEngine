@@ -6,11 +6,10 @@ import argparse
 import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
-import pathlib
 
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import autocast, FP8GlobalStateManager
 from contextlib import nullcontext
 
 """
@@ -51,9 +50,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
-    fp8_context = (
-        fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
-    )
+    fp8_context = autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
     # print(f"fp8_context: {fp8_context} and is it nullcontext? {isinstance(fp8_context, nullcontext)}")
 
     if mode == "fwd_only":

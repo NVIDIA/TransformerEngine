@@ -9,13 +9,12 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 if torch.cuda.device_count() < 2:
     pytest.skip("Comm+GEMM overlap requires at least 2 GPUs.")
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024

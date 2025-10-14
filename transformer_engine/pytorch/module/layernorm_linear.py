@@ -27,7 +27,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
     assert_dim_for_all_gather,
