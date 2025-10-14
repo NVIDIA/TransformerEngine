@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.sharding import PartitionSpec, NamedSharding
-from jax._src import custom_derivatives
 from .attention import AttnSoftmaxType
 
 from .base import BasePrimitive, register_primitive
@@ -841,6 +840,9 @@ def jax_general_softmax(
     initial: jnp.ndarray = -jnp.inf,
     offset: jnp.ndarray | float | None = None,
 ) -> jnp.ndarray:
+    """
+    JAX based implementation of general softmax with optional masking and offset.
+    """
     x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
     x_safe = x if where is None else jnp.where(where, x, initial)
     unnormalized = jnp.exp(x_safe - x_max)
