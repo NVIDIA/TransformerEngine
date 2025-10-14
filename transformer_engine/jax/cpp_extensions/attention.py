@@ -14,7 +14,6 @@ import jax.numpy as jnp
 from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -27,6 +26,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
+from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
