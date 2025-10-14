@@ -12,13 +12,15 @@ import pathlib
 import pytest
 import torch
 
+from typing import Optional
+
 import transformer_engine.pytorch as te
 
 from utils import make_recipe
 
 # Check supported quantization schemes
-fp8_available, reason_for_no_fp8 = te.fp8.FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = te.fp8.FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 
 # Test cases for loading checkpoint files
@@ -65,16 +67,16 @@ class TestLoadCheckpoint:
         if name == "ops_linear":
             return te.ops.Linear(1, 1)
         if name == "linear.fp8":
-            with te.fp8_model_init(recipe=make_recipe("fp8")):
+            with te.quantized_model_init(recipe=make_recipe("fp8")):
                 return te.Linear(16, 16)
         if name == "ops_linear.fp8":
-            with te.fp8_model_init(recipe=make_recipe("fp8")):
+            with te.quantized_model_init(recipe=make_recipe("fp8")):
                 return te.ops.Linear(16, 16)
         if name == "linear.mxfp8":
-            with te.fp8_model_init(recipe=make_recipe("mxfp8")):
+            with te.quantized_model_init(recipe=make_recipe("mxfp8")):
                 return te.Linear(32, 32)
         if name == "ops_linear.mxfp8":
-            with te.fp8_model_init(recipe=make_recipe("mxfp8")):
+            with te.quantized_model_init(recipe=make_recipe("mxfp8")):
                 return te.ops.Linear(32, 32)
         raise ValueError(f"Unrecognized module name ({name})")
 

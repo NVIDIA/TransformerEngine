@@ -26,8 +26,7 @@ from transformer_engine.common.recipe import (
     Recipe,
     QParams,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
 from run_layer_with_overlap import _compare_tensors
@@ -75,7 +74,7 @@ def quantization_recipe() -> Recipe:
         return Float8BlockScaling()
     if QUANTIZATION == "nvfp4":
         return nvfp4_vanilla()
-    return te.fp8.get_default_fp8_recipe()
+    return te.quantization.get_default_fp8_recipe()
 
 
 def main(argv=None, namespace=None):
@@ -316,15 +315,15 @@ def _apply_models(
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
     input_single_node.requires_grad_()
     input_distributed.requires_grad_()
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
+        recipe=quantization_recipe(),
     ):
         output_single_node = model_single_node(input_single_node, **kwargs)
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
-        fp8_group=NCCL_WORLD,
+        recipe=quantization_recipe(),
+        amax_reduction_group=NCCL_WORLD,
     ):
         output_distributed = model_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed

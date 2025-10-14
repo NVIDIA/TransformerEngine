@@ -9,21 +9,18 @@ import datetime
 import os
 import sys
 from functools import wraps
-import math
 
 import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
-    Format,
     Recipe,
     QParams,
     CustomRecipe,
 )
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.experimental import quantization_nvfp4
 from transformer_engine.pytorch.experimental import utils
@@ -506,7 +503,7 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     )
 
     # run the recipe under test
-    with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+    with te.autocast(enabled=True, recipe=recipe):
         y_q, dgrad, wgrad, bgrad = TestDistributedLinearBase.run_linear(
             x,
             w,
@@ -524,7 +521,7 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
 
     # run the reference
     reference_recipe = quantization_reference_recipe()
-    with te.fp8_autocast(enabled=True, fp8_recipe=reference_recipe):
+    with te.autocast(enabled=True, recipe=reference_recipe):
         y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = TestDistributedLinearBase.run_linear(
             x,
             w,
@@ -700,7 +697,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     )
 
     # run the recipe under test
-    with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+    with te.autocast(enabled=True, recipe=recipe):
         y_q, ln_out, dgrad, wgrad, bgrad = TestDistributedLayerNormLinearBase.run_layernorm_linear(
             x,
             w,
@@ -717,7 +714,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
 
     # run the reference
     reference_recipe = quantization_reference_recipe()
-    with te.fp8_autocast(enabled=True, fp8_recipe=reference_recipe):
+    with te.autocast(enabled=True, recipe=reference_recipe):
         y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = (
             TestDistributedLayerNormLinearBase.run_layernorm_linear(
                 x,

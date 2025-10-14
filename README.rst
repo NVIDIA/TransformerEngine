@@ -86,7 +86,7 @@ PyTorch
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       out = model(inp)
 
   loss = out.sum()
@@ -121,7 +121,7 @@ Flax
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       model = te_flax.DenseGeneral(features=HIDDEN)
 
       def loss_fn(params, other_vars, inp):

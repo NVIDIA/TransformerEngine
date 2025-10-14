@@ -13,20 +13,23 @@ from transformer_engine.pytorch import (
     Linear,
     MultiheadAttention,
     TransformerLayer,
-    fp8_autocast,
-    fp8_model_init,
+    autocast,
+    quantized_model_init,
     make_graphed_callables,
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_mxfp8_available,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available = is_fp8_available()
+fp8_block_scaling_available = is_fp8_block_scaling_available()
+mxfp8_available = is_mxfp8_available()
 
 # Reset RNG states.
 reset_rng_states()
@@ -93,7 +96,7 @@ if fp8_available:
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
 
 
@@ -201,7 +204,7 @@ def _test_cuda_graphs(
         fp8_weight_caching = False
 
     # Create modules.
-    with fp8_model_init(enabled=fp8_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
         if module == "transformer":
             modules = [
                 TransformerLayer(
@@ -281,9 +284,9 @@ def _test_cuda_graphs(
                 model,
                 (generate_data(model_config, dtype, warmup=True),),
                 num_warmup_iters=10,
-                fp8_enabled=fp8,
-                fp8_weight_caching=fp8_weight_caching,
-                fp8_recipe=fp8_recipe,
+                enabled=fp8,
+                cache_quantized_params=fp8_weight_caching,
+                recipe=fp8_recipe,
             )
         elif graph_mode == "individual":
             # Graph individual modules.
@@ -292,9 +295,9 @@ def _test_cuda_graphs(
                     module,
                     (generate_data(model_config, dtype, warmup=True),),
                     num_warmup_iters=10,
-                    fp8_enabled=fp8,
-                    fp8_weight_caching=fp8_weight_caching,
-                    fp8_recipe=fp8_recipe,
+                    enabled=fp8,
+                    cache_quantized_params=fp8_weight_caching,
+                    recipe=fp8_recipe,
                 )
                 for module in modules
             ]
@@ -311,7 +314,7 @@ def _test_cuda_graphs(
         for grad_accumulation_step in range(2):
             input_ = generate_data(model_config, dtype)
             grad_output = generate_data(model_config, dtype, requires_grad=False)
-            with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
+            with autocast(enabled=fp8, recipe=fp8_recipe):
                 kwargs = {}
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0
@@ -455,7 +458,7 @@ def _test_cuda_graphs_with_dot_product_attention(
             model,
             generate_data_for_dot_product_attention(model_config, dtype, warmup=True),
             num_warmup_iters=10,
-            fp8_enabled=False,
+            enabled=False,
         )
 
     # Forward and backward passes.

@@ -227,8 +227,8 @@ def train_and_evaluate(args):
     else:
         fp8_recipe = None
 
-    with te.fp8_autocast(
-        enabled=args.use_fp8, fp8_recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
+    with te.autocast(
+        enabled=args.use_fp8, recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
     ):
         encoder = Net(num_embed)
         # We use nn.Embed, thus inputs need to be in int

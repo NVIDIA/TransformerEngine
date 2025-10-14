@@ -28,7 +28,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,

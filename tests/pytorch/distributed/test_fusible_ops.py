@@ -20,16 +20,15 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
+    QuantizedTensor,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -39,9 +38,9 @@ from utils import dtype_tols, make_recipe, quantization_tols
 
 
 # Check what quantization schemes are supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_mxfp8_available(return_reason=True)
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
@@ -427,7 +426,7 @@ def _test_basic_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         op = te_ops.BasicLinear(
             in_features,
             out_features,
@@ -440,7 +439,7 @@ def _test_basic_linear(
     with torch.no_grad():
         op.weight.copy_(w_test)
         del w_test
-    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+    with te.autocast(enabled=quantized_compute, recipe=recipe):
         y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -593,7 +592,7 @@ def _test_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.Linear(
                 in_features,
@@ -612,7 +611,7 @@ def _test_linear(
             model[0].bias.copy_(b_test)
         del w_test
         del b_test
-    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+    with te.autocast(enabled=quantized_compute, recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 
@@ -759,7 +758,7 @@ def _test_mlp(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.GELU(),
             te_ops.Linear(
@@ -795,7 +794,7 @@ def _test_mlp(
 
     # Warmup steps
     for _ in range(3):
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
     x_test.grad = None
@@ -806,7 +805,7 @@ def _test_mlp(
         model[3].bias.grad = None
 
     # Forward and backward step
-    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+    with te.autocast(enabled=quantized_compute, recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 
@@ -944,7 +943,7 @@ def _test_fp8_scale_update(
         amax_history_len=amax_history_len,
         amax_compute_algo=amax_compute_algo,
     )
-    with te.fp8_autocast(fp8_recipe=recipe):
+    with te.autocast(recipe=recipe):
         y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -1004,7 +1003,7 @@ def run_parallel_tests() -> None:
         if rank == 0:
             print(f"Running _test_linear with {config=}")
         quantization, tensor_parallel_mode, sequence_parallel = config
-        dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
+        dtype = torch.bfloat16 if is_bf16_available() else torch.float32
         _test_linear(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,
@@ -1018,7 +1017,7 @@ def run_parallel_tests() -> None:
         if rank == 0:
             print(f"Running _test_mlp with {config=}")
         quantization, sequence_parallel = config
-        dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
+        dtype = torch.bfloat16 if is_bf16_available() else torch.float32
         _test_mlp(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,

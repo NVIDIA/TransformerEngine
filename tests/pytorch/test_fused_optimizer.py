@@ -11,14 +11,11 @@ from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
-from transformer_engine.pytorch import fp8_model_init
-from transformer_engine.pytorch.utils import is_bf16_compatible
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 class TestFusedOptimizer:
@@ -188,7 +185,7 @@ class TestFusedAdam(TestFusedOptimizer):
         build_model_context = nullcontext
         build_model_context_args = {}
         if use_fp8_params:
-            build_model_context = fp8_model_init
+            build_model_context = quantized_model_init
             build_model_context_args["enabled"] = True
 
         with build_model_context(**build_model_context_args):
@@ -286,7 +283,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_sq_dtype=torch.float32,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_fp32_master(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -298,7 +295,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_sq_dtype=torch.float32,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_fp32_master_store_param_remainders(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -311,7 +308,7 @@ class TestFusedAdam(TestFusedOptimizer):
             store_param_remainders=True,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_fp16_master(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -325,7 +322,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_bf16_grad(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -339,7 +336,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_fp16_exp_avg(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -353,7 +350,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_bf16_exp_avg(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -367,7 +364,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_exp_avg(self):
         self.gen_precision_aware_test(
@@ -382,7 +379,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=1e-2,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_fp16_exp_avg_sq(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -396,7 +393,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_bf16_exp_avg_sq(self):
         self.gen_precision_aware_test(
             use_fp8_params=False,
@@ -410,7 +407,7 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_exp_avg_sq(self):
         self.gen_precision_aware_test(
@@ -424,7 +421,7 @@ class TestFusedAdam(TestFusedOptimizer):
             skip_assert=True,
         )
 
-    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_bf16_model_weight_cast(self):
         dtype = torch.bfloat16
         model = MultiheadAttention(
@@ -468,7 +465,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
-        with fp8_model_init(enabled=True, recipe=DelayedScaling()):
+        with quantized_model_init(enabled=True, recipe=DelayedScaling()):
             model = MultiheadAttention(
                 hidden_size=1024,
                 num_attention_heads=16,

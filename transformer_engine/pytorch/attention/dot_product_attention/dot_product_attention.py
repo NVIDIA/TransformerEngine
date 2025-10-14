@@ -21,7 +21,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.fp8 import (
+from transformer_engine.pytorch.quantization import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,
@@ -91,26 +91,26 @@ _alibi_cache = {
 This feature is **experimental** and subject to change.
 
 Some models may use different FP8 recipes for their linear layers and attention layers. To support this,
-users can either use multiple, nested fp8_autocast() contexts to assign a distinct recipe for each layer,
-or use a single fp8_autocast() for the non-attention layers and configure the recipe for the attention
+users can either use multiple, nested autocast() contexts to assign a distinct recipe for each layer,
+or use a single autocast() for the non-attention layers and configure the recipe for the attention
 layers as follows.
 
 +-------------------+-----------+-----------------------------------------------------------------------------------+
 | Linear            | Attention | Configuration                                                                     |
 +===================+===========+===================================================================================+
-| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to fp8_autocast();                                     |
+| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to autocast();                                     |
 |                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8DS     | Pass FP8DS to fp8_autocast();                                                     |
+| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                     |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8DS     | Pass FP8CS to fp8_autocast();                                                     |
+| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                     |
 |                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8DS     | Pass NVFP4 to fp8_autocast();                                                     |
+| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                     |
 |                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
@@ -118,19 +118,19 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8CS     | Pass FP8DS to fp8_autocast();                                                     |
+| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                     |
 |                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
 |                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8CS     | Pass FP8CS to fp8_autocast();                                                     |
+| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                     |
 |                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
 |                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8CS     | Pass NVFP4 to fp8_autocast();                                                     |
+| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                     |
 |                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
 |                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
@@ -544,7 +544,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
-        # global recipe set in fp8_autocast()
+        # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
             return
@@ -560,7 +560,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe_dpa = fp8_recipe
         fp8_recipes = fp8_recipe
         if _dpa_fp8_recipe == "F16":
-            # ignore the recipe from fp8_autocast, set fp8_dpa = False, fp8_mha = False
+            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
         elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":

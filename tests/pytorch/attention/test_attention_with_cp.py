@@ -10,7 +10,7 @@ import logging
 
 import pytest
 import torch
-from transformer_engine.pytorch.utils import (
+from transformer_engine.pytorch import (
     get_device_compute_capability,
     get_cudnn_version,
 )

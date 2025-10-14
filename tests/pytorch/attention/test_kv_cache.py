@@ -14,20 +14,22 @@ import pytest
 import torch
 
 from torch.distributions import Exponential
-from transformer_engine.pytorch import make_graphed_callables
-from transformer_engine.common import recipe
-from transformer_engine.pytorch import fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.transformer import (
+from transformer_engine.pytorch import (
+    make_graphed_callables,
+    autocast,
+    quantized_model_init,
     TransformerLayer,
+    DotProductAttention,
+    InferenceParams,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
+from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -42,7 +44,7 @@ from utils import (
 reset_rng_states()
 
 param_types = [torch.float16]
-if is_bf16_compatible():
+if is_bf16_available():
     param_types.append(torch.bfloat16)
 
 model_configs_infer = {
@@ -238,7 +240,7 @@ def get_model(
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 TransformerLayer(
                     hidden_size=hidden_size,
@@ -261,7 +263,7 @@ def get_model(
                 for layer_number in range(1, num_layers + 1)
             ]
     if module == "DotProductAttention":
-        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
+        with quantized_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 DotProductAttention(
                     kv_channels=config.head_dim_qk,
@@ -559,9 +561,9 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
                 model[i],
                 sample_args,
                 num_warmup_iters=10,
-                fp8_enabled=is_fp8,
+                enabled=is_fp8,
                 sample_kwargs=sample_kwargs,
-                fp8_recipe=fp8_recipe,
+                recipe=fp8_recipe,
             )
             for i in range(num_layers)
         ]
@@ -654,7 +656,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
         incremental_output = incremental_inputs
-        with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
+        with autocast(enabled=is_fp8, recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
                     *incremental_output,
