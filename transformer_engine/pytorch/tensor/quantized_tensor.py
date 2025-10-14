@@ -495,6 +495,10 @@ class QuantizedTensor(torch.Tensor):
                 and schema_arg.alias_info.is_write
             ):
                 arg.quantize_(new_arg)
+            elif isinstance(arg, list) and isinstance(new_arg, list):
+                # Recursively handle update for lists of tensors
+                for a, na in zip(arg, new_arg):
+                    maybe_update_inplace(a, na, schema_arg)
 
         # In-place op: dequantize, perform op, and quantize
         if func._schema.is_mutable:
@@ -563,8 +567,6 @@ class QuantizedTensor(torch.Tensor):
             shape = data.shape if data is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
-        if data is not None:
-            kwargs["data"] = data
         return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:

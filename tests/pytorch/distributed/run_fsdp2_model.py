@@ -18,6 +18,7 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
 
 
@@ -36,8 +37,14 @@ class SimpleNet(nn.Module):
 def save_custom_attrs(module):
     custom_attrs = {}
     for name, param in module.named_parameters():
+        if isinstance(param, QuantizedTensor):
+            # Ignore FP8 metadata attributes. Otherwise we will save duplicate copies
+            # for data/transpose FP8 tensors on top of FP8 tensors that FSDP2 will save.
+            ignore_keys = [key for key in param.__dict__.keys() if key.startswith("_")]
+        else:
+            ignore_keys = []
         attrs = vars(param)
-        custom_attrs[name] = {k: v for k, v in attrs.items()}
+        custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
     return custom_attrs
 
 
@@ -104,24 +111,20 @@ def _train(args):
     # FP8 Configuration
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
-
+    build_model_context_args = {}
     if not args.fp8_init:
         # Build model context (FP8 init)
         build_model_context = nullcontext
-        build_model_context_args = {}
-
+    else:
         from transformer_engine.pytorch import fp8_model_init
 
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
-
-        # Build the model with the specified context
-        with build_model_context(**build_model_context_args):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    else:
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
+        build_model_context_args["recipe"] = fp8_recipe
     # Move the model to the correct device
-
+    # Build the model with the specified context
+    with build_model_context(**build_model_context_args):
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
     model.to(device)
 
     if LOCAL_RANK == 0:
@@ -146,7 +149,6 @@ def _train(args):
         )
     else:
         assert False
-
     # Apply FSDP/HSDP
     custom_attrs = save_custom_attrs(model)
     for sub_module in model.modules():
@@ -163,13 +165,14 @@ def _train(args):
         # Zero the parameter gradients
         optimizer.zero_grad()
         input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        output = model(input_data)
+        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+            output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
         if LOCAL_RANK == 0:
-            print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
+            print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed with loss {loss.item()}")
 
     dist.destroy_process_group()
     if LOCAL_RANK == 0:
