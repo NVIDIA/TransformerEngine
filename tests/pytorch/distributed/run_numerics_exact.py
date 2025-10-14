@@ -25,8 +25,8 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.experimental import quantization_nvfp4
-from transformer_engine.pytorch.experimental import utils
+from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import utils
 from run_layer_with_overlap import _compare_tensors
 
 

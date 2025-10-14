@@ -8,8 +8,8 @@ import transformer_engine as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.experimental import quantization_nvfp4
-from transformer_engine.pytorch.experimental import utils
+from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import utils
 
 
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()

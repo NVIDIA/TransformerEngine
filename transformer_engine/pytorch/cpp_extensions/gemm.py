@@ -14,7 +14,7 @@ from ..utils import get_sm_count, _empty_tensor
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_experimental
-from ..experimental.gemm import experimental_gemm
+from ..custom_recipes.gemm import experimental_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [

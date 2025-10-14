@@ -2,13 +2,13 @@
 #
 # See LICENSE for license information.
 
-"""GEMM API for experimental middleware between Transformer Engine and Kitchen."""
+"""GEMM API that enables custom GEMM logic for custom quantization recipes."""
 
 from typing import Iterable, Optional
 
 import torch
 
-from transformer_engine.pytorch.experimental.quantization import (
+from transformer_engine.pytorch.custom_recipes.quantization import (
     MMParams,
     GEMMType,
 )

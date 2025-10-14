@@ -455,16 +455,11 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 
 
 def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
-    """Check if an environment or object is using experimental Kitchen middleware.
+    """Check if an object is experimental.
 
     Returns False if x is a torch.Tensor.
     """
-    # Detect if the environment is experimental
-    if x is None:
-        return int(os.getenv("QAT_PARAMS", "0")) > 0
-
-    # Detect if the object is experimental
-    if isinstance(x, torch.Tensor):
+    if x is None or isinstance(x, torch.Tensor):
         return False
     if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
         raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")

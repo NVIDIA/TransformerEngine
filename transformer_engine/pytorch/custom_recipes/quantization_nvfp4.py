@@ -9,8 +9,8 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.experimental import quantization
-from transformer_engine.pytorch.experimental import utils
+from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
