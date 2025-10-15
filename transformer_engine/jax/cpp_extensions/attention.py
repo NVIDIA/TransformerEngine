@@ -1234,31 +1234,31 @@ def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contig
     return combined.reshape(ori_tensor_shape)
 
 
-def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool):
+def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool, stripe_height:int = 1):
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
-    if origin_shape[seq_dim] % cp_size != 0:
+    if origin_shape[seq_dim] % (cp_size*stripe_height) != 0:
         raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
-            f" {origin_shape[seq_dim]=} and {cp_size=}"
+            "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_height but got"
+            f" {origin_shape[seq_dim]=}, {cp_size=}, {stripe_height=}, {cp_size*stripe_height=}"
         )
 
     if not is_inverse:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[origin_shape[seq_dim] // cp_size, cp_size],
+            *[origin_shape[seq_dim] // (cp_size*stripe_height), cp_size, stripe_height],
             *origin_shape[seq_dim + 1 :],
         ]
     else:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[cp_size, origin_shape[seq_dim] // cp_size],
+           *[stripe_height, cp_size, origin_shape[seq_dim] // (cp_size*stripe_height)],
             *origin_shape[seq_dim + 1 :],
         ]
 
-    chunked_tensor = tensor.reshape(new_shape)
-    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
-    return reordered_chunked_tensor.reshape(origin_shape)
+    striped_tensor = tensor.reshape(new_shape)
+    reordered_striped_tensor = jnp.swapaxes(striped_tensor, seq_dim, seq_dim + 1)
+    return reordered_striped_tensor.reshape(origin_shape)
 
 
 @dataclass(frozen=True)
