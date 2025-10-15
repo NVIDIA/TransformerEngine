@@ -157,7 +157,6 @@ list(APPEND transformer_engine_cuda_sources
      transpose/multi_cast_transpose.cu
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
-     transpose/quantize_transpose_vector_blockwise_fp4.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
@@ -195,12 +194,15 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu.cu
      activation/swiglu.cu
      transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu)
 
-list(APPEND transformer_engine_SOURCES ${transformer_engine_cpp_sources}
+# Compiling the files with the worst compilation time first to hopefully overlap
+# better with the faster-compiling cpp files
+list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_sources}
                                        ${transformer_engine_cuda_sources}
-                                       ${transformer_engine_cuda_arch_specific_sources})
+                                       ${transformer_engine_cpp_sources})
 
 # Set compile options for CUDA sources with generic architectures
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
