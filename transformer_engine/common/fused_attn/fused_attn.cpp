@@ -727,7 +727,7 @@ namespace {
       bool can_use_max512 = checks_for_max512(ctx);
       std::string max512_error = ctx.error_msg;
       
-      bool can_use_arbitrary = checks_for_arbitrary(ctx);
+      bool can_use_arbitrary = checks_for_arbitrary_seqlen(ctx);
       std::string arbitrary_error = ctx.error_msg;
       
       // Select backend based on seqlen and availability
