@@ -27,7 +27,7 @@ void fused_attn_max_512_fwd(size_t batch, size_t num_head, size_t q_max_seqlen,
                             NVTETensorPack *Aux_CTX_Tensors, const Tensor *q_cu_seqlens,
                             const Tensor *kv_cu_seqlens, const Tensor *rng_state, Tensor *workspace,
                             cudaStream_t stream, cudnnHandle_t handle);
-                            
+
 void fused_attn_max_512_bwd(size_t batch, size_t num_head, size_t q_max_seqlen,
                             size_t kv_max_seqlen, size_t head_dim, float attn_scale,
                             float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
