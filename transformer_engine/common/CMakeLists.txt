@@ -195,7 +195,7 @@ list(APPEND transformer_engine_cuda_sources
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_SOURCES ${transformer_engine_cpp_sources}
                                        ${transformer_engine_cuda_sources}
