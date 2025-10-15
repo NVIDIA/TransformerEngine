@@ -97,7 +97,7 @@ cutlass::Array<cutlass::float_e2m1_t, 8>
 StochasticNumericConverterBase(cutlass::Array<float, 8> const &input, cutlass::Array<uint32_t, 2> const &rbits) {
   using result_type = cutlass::Array<cutlass::float_e2m1_t, 8>;
   result_type output;
-  constexpr bool has_rs = ARCH_SPECIFIC(Arch<100>, Arch<103>);
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
     auto output_ptr = reinterpret_cast<uint16_t *>(&output);
     asm volatile( \

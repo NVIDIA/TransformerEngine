@@ -128,6 +128,9 @@ constexpr bool is_supported_arch() {
                                                  __VA_ARGS__>();                             \
   }();
 
+#define ARCH_BLACKWELL_FAMILY ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>)
+#define ARCH_HAS_STOCHASTIC_ROUNDING ARCH_SPECIFIC(Arch<100>, Arch<103>)
+
 namespace ptx {
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
@@ -245,7 +248,7 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
 }
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-  constexpr bool is_blackwell = ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>);
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
     uint16_t out;
     asm volatile(
