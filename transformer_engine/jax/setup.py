@@ -23,6 +23,7 @@ behaviors for:
 
 import sys
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -52,6 +53,20 @@ from pybind11.setup_helpers import build_ext as BuildExtension
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)
+
+
+def get_cuda_major_version() -> int:
+    """Get CUDA major version using Jax backend."""
+
+    assert (
+        jax.lib.xla_bridge.get_backend().platform == "gpu"
+    ), "GPU backend is required to build TE jax extensions."
+
+    platform_version = jax.lib.xla_bridge.get_backend().platform_version
+    cuda_version = int(re.search(r"cuda (\d+)", platform_version).group(1))
+    cuda_major_version = cuda_version // 1000
+    assert cuda_major_version in (12, 13), f"Unsupported cuda version {cuda_version}."
+    return cuda_major_version
 
 
 if __name__ == "__main__":
@@ -93,15 +108,23 @@ if __name__ == "__main__":
         )
     ]
 
+    # Setup version and requirements.
+    # Having the framework extension depend on the core lib allows
+    # us to detect CUDA version dynamically during compilation and
+    # choose the correct wheel for te core lib.
+    __version__ = te_version()
+    te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
+    install_requires = install_requirements() + [te_core]
+
     # Configure package
     setuptools.setup(
         name="transformer_engine_jax",
-        version=te_version(),
+        version=__version__,
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         python_requires=f">={min_python_version_str()}",
-        install_requires=install_requirements(),
+        install_requires=install_requires,
         tests_require=test_requirements(),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

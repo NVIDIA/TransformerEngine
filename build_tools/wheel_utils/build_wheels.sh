@@ -11,6 +11,7 @@ BUILD_PYTORCH=${4:-true}
 BUILD_JAX=${5:-true}
 
 export NVTE_RELEASE_BUILD=1
+export PIP_CONSTRAINT=""
 export TARGET_BRANCH=${TARGET_BRANCH:-}
 mkdir -p /wheelhouse/logs
 
@@ -21,7 +22,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel nvidia-mathdx==25.1.1
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
