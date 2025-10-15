@@ -57,6 +57,7 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]

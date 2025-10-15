@@ -12,7 +12,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorBase
+from ..quantized_tensor import QuantizedTensorStorage
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
@@ -27,7 +27,7 @@ class _FromFloat8Func(torch.autograd.Function):
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: Float8TensorBase,
+        tensor: Float8TensorStorage,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -52,7 +52,7 @@ class _FromFloat8Func(torch.autograd.Function):
         return grad, None
 
 
-class Float8TensorBase(QuantizedTensorBase):
+class Float8TensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of Float8Tensor.
 
     Float8Tensor inherits from the PyTorch tensor class and this mixin
@@ -81,7 +81,7 @@ class Float8TensorBase(QuantizedTensorBase):
         quantizer: Optional[Quantizer] = None,
         **kwargs,
     ):
-        if cls is Float8TensorBase:
+        if cls is Float8TensorStorage:
             instance = object.__new__(cls)
         else:
             instance = super().__new__(cls, *args, **kwargs)
@@ -116,7 +116,7 @@ class Float8TensorBase(QuantizedTensorBase):
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [self._data, self._transpose, self._scale_inv]
         self._data = None
@@ -163,7 +163,7 @@ class Float8TensorBase(QuantizedTensorBase):
             if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
                 out_transpose = None
 
-        return Float8TensorBase(
+        return Float8TensorStorage(
             data=out_data,
             fp8_scale_inv=self._scale_inv,
             fp8_dtype=self._fp8_dtype,
@@ -173,7 +173,7 @@ class Float8TensorBase(QuantizedTensorBase):
 
     def __repr__(self):
         return (
-            "Float8TensorBase("
+            "Float8TensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
             f"data={self.dequantize()}"

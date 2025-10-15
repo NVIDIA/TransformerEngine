@@ -59,6 +59,7 @@ def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[
     return drop_path_shape
 
 
+# TODO(Phuong): move this function to sharding.py
 def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     """
     Extend the given Flax logical axis rules with the predefined TransformerLayer's
@@ -71,7 +72,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         for 1D-sharding tensor parallelism.
 
     .. warning::
-        Please make sure ShardingResource is set via fp8_autocast before calling this function.
+        Please make sure ShardingResource is set via autocast before calling this function.
 
     .. note::
         This function is only needed when using TransformerLayer. For  other modules, such as
@@ -1289,6 +1290,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="qkv",
                     dtype=self.dtype,
                 )(inputs_q)
@@ -1316,6 +1318,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="query",
                 )(inputs_q)
 
@@ -1334,6 +1337,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     enable_low_rank_adaptation=lora_scope.qkv_proj,
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
+                    transpose_batch_sequence=self.transpose_batch_sequence,
                     name="kv",
                     dtype=self.dtype,
                 )(inputs_kv)
@@ -1374,6 +1378,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
                 dot_input_axes=inputs_logical_axes_no_sp,
+                transpose_batch_sequence=self.transpose_batch_sequence,
                 name="query",
             )(inputs_q)
 
@@ -1715,6 +1720,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     mlp_activations: Sequence[str], default = ('relu', )
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
+    mlp_activation_params: dict = None
+         This is only used when ('clamped_silu', 'clamped_linear') is in :attr:`mlp_activations`. At the moment
+        ClampedSwiglu is the only activation that requires parameters.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
         If set to False, the layer will not learn additive biases.
@@ -1847,6 +1855,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     mha_kernel_init: Initializer = None
     mlp_kernel_init: Initializer = None
     mlp_activations: Sequence[str] = ("relu",)
+    mlp_activation_params: dict = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     apply_residual_connection_post_layernorm: bool = False
@@ -2144,6 +2153,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
+            activation_params=self.mlp_activation_params,
             intermediate_dropout_rng_name=self.dropout_rng_name,
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_hidden_dropout_dims=self.intermediate_dropout_dims,
@@ -2163,6 +2173,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             layernorm_input_axes=(*generate_batch_seqlen_logical_axes(), HIDDEN_AXES),
             dot_1_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES),
             dot_2_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_TP_AXES),
+            transpose_batch_sequence=self.transpose_batch_sequence,
             name="mlp",
         )(mlp_input, deterministic=deterministic)
 

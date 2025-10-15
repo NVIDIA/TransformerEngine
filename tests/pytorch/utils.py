@@ -7,14 +7,14 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
+from typing import Optional, Tuple, Dict, Any, List
 
-import pytest
 import torch
 
 import transformer_engine
-import transformer_engine.common.recipe
-import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch import InferenceParams
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -73,6 +73,8 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 
     # Transformer Engine dtypes
     if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat4E2M1:
+            return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
             tex.DType.kByte: torch.uint8,
             tex.DType.kInt32: torch.int32,
@@ -95,8 +97,23 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     if dtype == torch.float8_e4m3fn:
         return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
     if dtype == torch.float8_e5m2:
-        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.125
     raise ValueError(f"Unsupported dtype ({dtype})")
+
+
+def quantization_tols(name: str) -> dict[str, float]:
+    """Estimated numerical error for a quantization scheme"""
+    if name in (
+        "fp8",
+        "fp8_delayed_scaling",
+        "fp8_current_scaling",
+        "mxfp8",
+        "mxfp8_block_scaling",
+    ):
+        return dtype_tols(tex.DType.kFloat8E4M3)
+    if name == "nvfp4":
+        return dtype_tols(tex.DType.kFloat4E2M1)
+    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def make_recipe(name: Optional[str]) -> Optional[Recipe]:
@@ -118,6 +135,12 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling()
+    if name == "nvfp4":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+        )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
