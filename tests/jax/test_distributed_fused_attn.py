@@ -591,9 +591,13 @@ class TestDistributedContextParallelSelfAttn:
         "qkv_layout, attn_mask_type",
         [
             pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
-            pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
+            pytest.param(
+                QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"
+            ),
             pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="BSHD_KVPACKED-NO_MASK"),
-            pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"),
+            pytest.param(
+                QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"
+            ),
         ],
     )
     def test_context_parallel_alltoall_attn(
