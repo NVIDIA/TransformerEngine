@@ -42,7 +42,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O,
     META_QKV,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype, FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
@@ -1090,7 +1090,7 @@ class FusedAttnFunc(torch.autograd.Function):
         nvtx_label = "transformer_engine.FusedAttnFunc.forward"
         nvtx_range_push(f"{nvtx_label}")
 
-        # recipe passed in through fp8_autocast or set by NVTE_DPA_FP8_RECIPE;
+        # recipe passed in through autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
@@ -1276,7 +1276,6 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 tensor_list = [q, k, v, out]
 
-            qkv_layout = "sbhd_sbhd_sbhd"
             mark_activation_offload(*tensor_list)
             mark_activation_offload(*aux_ctx_tensors)
 
@@ -1311,7 +1310,31 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
-        ctx.qkv_layout = qkv_layout
+
+        from transformer_engine.pytorch.cpu_offload import (
+            CPUOffloadedLayer,
+        )
+
+        # If interleaved tensor is offloaded, reloaded tensor will be
+        # non-interleaved, so we need to modify the QKV layout
+        # for backward
+        if CPUOffloadedLayer and CPUOffloadEnabled:
+            reload_layout = ""
+            split_list = qkv_layout.split("_")
+            for split in split_list:
+                temp_layout = ""
+                rep_count = 1
+                for s in split:
+                    if s.isalpha():
+                        temp_layout = temp_layout + s
+                    else:
+                        rep_count = int(s)
+                for _ in range(rep_count):
+                    reload_layout = reload_layout + temp_layout + "_"
+            ctx.qkv_layout = reload_layout[:-1]
+        else:
+            ctx.qkv_layout = qkv_layout
+
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.softmax_type = softmax_type

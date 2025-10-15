@@ -8,16 +8,15 @@ import logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
-from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
-from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
+from transformer_engine.pytorch import (
+    autocast,
+    DotProductAttention,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
@@ -307,7 +306,7 @@ def run_dpa_with_cp(
     ############ run without CP ############
     logging.info(f"[Rank {rank}] Run without context parallelism")
     if dtype == "fp8":
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
     max_score = None
@@ -400,7 +399,7 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         core_attn.fp8_initialized = False
         core_attn.fp8_meta_tensors_initialized = False
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
