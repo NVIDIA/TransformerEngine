@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 # Remove leftovers.
-rm -rf x86_wheelhouse
+rm -rf x86_wheelhouse_cu12 x86_wheelhouse_cu13
 
 # CUDA 12.
 docker build --no-cache \
@@ -15,7 +15,7 @@ docker build --no-cache \
   --build-arg BUILD_JAX=true \
   -t "x86_wheel" -f build_tools/wheel_utils/Dockerfile.x86 .
 docker run --runtime=nvidia --gpus=all --ipc=host "x86_wheel"
-docker cp $(docker ps -aq | head -1):/wheelhouse x86_wheelhouse
+docker cp $(docker ps -aq | head -1):/wheelhouse x86_wheelhouse_cu12
 
 # CUDA 13.
 docker build --no-cache \
@@ -27,4 +27,4 @@ docker build --no-cache \
   --build-arg BUILD_JAX=false \
   -t "x86_wheel" -f build_tools/wheel_utils/Dockerfile.x86 .
 docker run --runtime=nvidia --gpus=all --ipc=host "x86_wheel"
-docker cp $(docker ps -aq | head -1):/wheelhouse/* x86_wheelhouse/
+docker cp $(docker ps -aq | head -1):/wheelhouse x86_wheelhouse_cu13

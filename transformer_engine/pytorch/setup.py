@@ -150,9 +150,7 @@ if __name__ == "__main__":
     # us to detect CUDA version dynamically during compilation and
     # choose the correct wheel for te core lib.
     __version__ = te_version()
-    cuda_major_version = (
-        torch.version.cuda.split(".")[0] if torch.version.cuda is not None else None
-    )
+    cuda_major_version = parse(torch.version.cuda).major
     assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
     te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
     install_requires = install_requirements() + [te_core]

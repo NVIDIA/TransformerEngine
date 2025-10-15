@@ -140,6 +140,7 @@ if __name__ == "__main__":
         ext_modules = []
         package_data = {}
         include_package_data = False
+        install_requires = []
         extras_require = {
             "core": [f"transformer_engine_cu12=={__version__}"],
             "core_cu12": [f"transformer_engine_cu12=={__version__}"],
