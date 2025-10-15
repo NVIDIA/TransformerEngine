@@ -230,6 +230,7 @@ def element_mul_kernel(
     X_ptr,
     X_stride,
     grad_output_ptr,
+    grad_output_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -252,6 +253,7 @@ def element_mul_kernel(
     X_ptr += program_id * X_stride
 
     # Load the gradient output value
+    grad_output_ptr += program_id * grad_output_stride
     grad_output = tl.load(grad_output_ptr)
 
     # Perform the element-wise multiplication
@@ -360,6 +362,7 @@ def cross_entropy_backward(
             _input,
             _input.stride(-2),
             grad_output,
+            1 if grad_output.numel() > 1 else 0,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,

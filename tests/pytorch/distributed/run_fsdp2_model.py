@@ -107,9 +107,8 @@ def _train(args):
 
     # Create build context manager
     if args.fp8_init:
-        from transformer_engine.pytorch import fp8_model_init
-
-        build_model_context = fp8_model_init
+        from transformer_engine.pytorch import quantized_model_init
+        build_model_context = quantized_model_init
         build_model_context_args["enabled"] = True
     else:
         build_model_context = nullcontext
@@ -161,7 +160,7 @@ def _train(args):
         # Zero the parameter gradients
         optimizer.zero_grad()
         input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)

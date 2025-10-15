@@ -11,13 +11,11 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8Tensor,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
@@ -47,7 +45,7 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 DimsType = Union[Iterable[int], int]
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 # delayed scaling

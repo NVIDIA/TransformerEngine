@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -27,6 +28,7 @@ __all__ = [
     "SReGLU",
     "SiLU",
     "SwiGLU",
+    "ClampedSwiGLU",
 ]
 
 
@@ -110,6 +112,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -389,3 +393,38 @@ class SwiGLU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dswiglu(*args, **kwargs)
+
+
+class ClampedSwiGLU(_ActivationOperation):
+    r"""GPT-OSS
+    Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
+
+    This activation has two differences compared to the original SwiGLU
+       1. Both gate and pre-activations are clipped based on parameter limit.
+       2. Activation uses sigmoid(alpha * x) instead of sigmoid(x) used in Swish activation.
+
+    .. warning::    The input tensor is chunked along the last dimension to get gates/pre-activations which is differnt
+    from GPT OSS implementation where the gates/pre-activations are assumed to be interleaved in the input tensor.
+
+    Parameters
+    ----------
+    limit: float
+        The clamp limit.
+    alpha: float
+        The scaling factor for the sigmoid function used in the activation.
+    cache_quantized_input: bool, default = False
+        Quantize input tensor when caching for use in the backward pass.
+    """
+
+    def __init__(
+        self, *, limit: float = 7.0, alpha: float = 1.702, cache_quantized_input: bool = False
+    ):
+        super().__init__(cache_quantized_input=cache_quantized_input)
+        self.limit = limit
+        self.alpha = alpha
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.clamped_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.clamped_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)

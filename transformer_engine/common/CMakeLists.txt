@@ -45,8 +45,35 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+set(CUTLASS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
+set(CUTLASS_TOOLS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+# NVIDIA MathDX include directory (from Python package install location)
+if(NOT DEFINED MATHDX_INCLUDE_DIR)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} -m pip show nvidia-mathdx
+    OUTPUT_VARIABLE _PIP_SHOW_MATHDX
+    ERROR_VARIABLE _PIP_SHOW_MATHDX_ERR
+    RESULT_VARIABLE _PIP_SHOW_MATHDX_RES
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _PIP_SHOW_MATHDX_RES EQUAL 0)
+    message(FATAL_ERROR "Failed to query 'nvidia-mathdx' with pip (using ${Python_EXECUTABLE}): ${_PIP_SHOW_MATHDX_ERR}")
+  endif()
+  string(REGEX MATCH "Location: ([^\n\r]+)" _MATHDX_LOC_MATCH "${_PIP_SHOW_MATHDX}")
+  if(NOT _MATHDX_LOC_MATCH)
+    message(FATAL_ERROR "Could not parse installation location for 'nvidia-mathdx'. Output was:\n${_PIP_SHOW_MATHDX}")
+  endif()
+  set(MATHDX_LOCATION "${CMAKE_MATCH_1}")
+  set(MATHDX_INCLUDE_DIR "${MATHDX_LOCATION}/nvidia/mathdx/include")
+endif()
+if(NOT EXISTS "${MATHDX_INCLUDE_DIR}")
+  message(FATAL_ERROR "MATHDX include directory not found at ${MATHDX_INCLUDE_DIR}. Set MATHDX_INCLUDE_DIR or ensure 'nvidia-mathdx' is installed for ${Python_EXECUTABLE}.")
+endif()
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -68,7 +95,9 @@ list(APPEND transformer_engine_SOURCES
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu
      activation/gelu.cu
+     dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
@@ -79,7 +108,9 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
+     gemm/config.cpp
      gemm/cublaslt_gemm.cu
+     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -96,6 +127,7 @@ list(APPEND transformer_engine_SOURCES
      util/multi_stream.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
+     swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -106,6 +138,9 @@ list(APPEND transformer_engine_SOURCES
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
+     recipe/nvfp4.cu
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu
@@ -120,18 +155,28 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-
+# CUTLASS kernels require SM90a and cause hang in debug build
+set_property(
+  SOURCE gemm/cutlass_grouped_gemm.cu
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE ${MATHDX_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE
+                          ${CUTLASS_INCLUDE_DIR}
+                          ${CUTLASS_TOOLS_INCLUDE_DIR})
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
