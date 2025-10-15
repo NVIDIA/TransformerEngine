@@ -197,9 +197,9 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
   constexpr bool is_blackwell = ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>);
+  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
   if constexpr (is_blackwell) {
     // NOTE: rbits unused for rn.
-    uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
     asm volatile(
         "{\n"
         ".reg.b64 v01; \n\t"
@@ -290,9 +290,9 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
   constexpr bool is_blackwell = ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>);
+  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
   if constexpr (is_blackwell) {
     // NOTE: rbits unused for rn.
-    uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
     asm volatile(
         "{\n"
         ".reg.b64 v01; \n\t"
