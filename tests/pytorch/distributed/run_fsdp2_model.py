@@ -108,6 +108,7 @@ def _train(args):
     # Create build context manager
     if args.fp8_init:
         from transformer_engine.pytorch import quantized_model_init
+
         build_model_context = quantized_model_init
         build_model_context_args["enabled"] = True
     else:
