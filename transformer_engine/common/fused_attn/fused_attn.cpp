@@ -133,544 +133,531 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 }
 
 namespace {
-  struct BackendSelectionContext {
-    bool is_training;
-    NVTEDType q_dtype;
-    NVTE_QKV_Layout qkv_layout;
-    NVTE_Bias_Type bias_type;
-    NVTE_Mask_Type attn_mask_type;
-    NVTE_Softmax_Type softmax_type;
-    float dropout;
-    size_t num_attn_heads;
-    size_t num_gqa_groups;
-    size_t max_seqlen_q;
-    size_t max_seqlen_kv;
-    size_t head_dim_qk;
-    size_t head_dim_v;
-    int64_t window_size_left;
-    int64_t window_size_right;
-    
-    int sm_arch;
-    int cudnn_version;
-    NVTE_QKV_Format qkv_format;
-    NVTE_QKV_Format q_format;
-    NVTE_QKV_Format kv_format;
-    NVTE_QKV_Layout_Group layout_group;
-    bool requires_64bit_ragged_offset;
-    bool supported_ragged_offset_size;
-    
-    std::string error_msg;
-    
-    void set_error(const std::string& msg) {
-      error_msg = msg;
-    }
-  };
+struct BackendSelectionContext {
+  bool is_training;
+  NVTEDType q_dtype;
+  NVTE_QKV_Layout qkv_layout;
+  NVTE_Bias_Type bias_type;
+  NVTE_Mask_Type attn_mask_type;
+  NVTE_Softmax_Type softmax_type;
+  float dropout;
+  size_t num_attn_heads;
+  size_t num_gqa_groups;
+  size_t max_seqlen_q;
+  size_t max_seqlen_kv;
+  size_t head_dim_qk;
+  size_t head_dim_v;
+  int64_t window_size_left;
+  int64_t window_size_right;
   
-  bool checks_for_fp8(BackendSelectionContext& ctx) {
-    // Check dtype
-    if (ctx.q_dtype != NVTEDType::kNVTEFloat8E4M3 && 
-        ctx.q_dtype != NVTEDType::kNVTEFloat8E5M2) {
-      ctx.set_error("FP8 backend requires FP8E4M3 or FP8E5M2 dtype");
-      return false;
-    }
-    
-    // Check architecture
-    if (ctx.sm_arch < 90) {
-      ctx.set_error("FP8 backend requires SM90 (Hopper) or newer, got SM" + 
-                    std::to_string(ctx.sm_arch));
-      return false;
-    }
-    
-    // Check bias
-    if (ctx.bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
-      ctx.set_error("FP8 backend requires NVTE_NO_BIAS");
-      return false;
-    }
-    
-    bool version_has_support = false;
-    // cuDNN 8.9: t3hd, max_s=512, d=64, padding
-    if (ctx.cudnn_version >= 8900 && ctx.sm_arch < 100 &&
-        ctx.qkv_layout == NVTE_QKV_Layout::NVTE_T3HD && 
-        ctx.max_seqlen_q == ctx.max_seqlen_kv &&
-        ctx.max_seqlen_q <= 512 && 
-        ctx.head_dim_qk == 64 && ctx.head_dim_v == 64 &&
-        ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
-      version_has_support = true;
-    }
-    // cuDNN 9.2: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
-    if (ctx.cudnn_version >= 90201 && ctx.sm_arch < 100 && 
-        ctx.max_seqlen_q % 128 == 0 && ctx.max_seqlen_kv % 128 == 0 && 
-        ctx.head_dim_qk == 128 && ctx.head_dim_v == 128 &&
-        (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) {
-      version_has_support = true;
-    }
-    // cuDNN 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
-    if (ctx.cudnn_version >= 90700) {
-      bool head_dim_ok = false;
-      if (ctx.sm_arch < 100 && !ctx.is_training && 
-          ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256) {
-        head_dim_ok = true;
-      } else if (ctx.sm_arch < 100 && ctx.is_training && 
-                 ctx.head_dim_qk == 128 && ctx.head_dim_v == 128) {
-        head_dim_ok = true;
-      } else if (ctx.sm_arch >= 100 && 
-                 ctx.head_dim_qk <= 128 && ctx.head_dim_v <= 128) {
-        head_dim_ok = true;
-      }
-      if (head_dim_ok && 
-          ctx.head_dim_qk % 16 == 0 && ctx.head_dim_v % 16 == 0 &&
-          (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-           ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-           ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-           ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) {
-        version_has_support = true;
-      }
-    }
-    if (!version_has_support) {
-      ctx.set_error("FP8 backend: cuDNN version" + std::to_string(ctx.cudnn_version) + " does not support provided head_dim, seqlen, or mask");
-      return false;
-    }
-    
-    // Check common constraints
-    if (ctx.qkv_format != NVTE_QKV_Format::NVTE_BSHD && 
-        ctx.qkv_format != NVTE_QKV_Format::NVTE_SBHD) {
-      ctx.set_error("FP8 backend requires BSHD or SBHD format");
-      return false;
-    }
-    if (ctx.requires_64bit_ragged_offset) {
-      ctx.set_error("FP8 backend does not support 64-bit ragged offsets");
-      return false;
-    }
-    if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
-      ctx.set_error("FP8 backend requires vanilla softmax");
-      return false;
-    }
-    if (ctx.cudnn_version == 91000) {
-      ctx.set_error("FP8 backend has known bugs in cuDNN 9.10.0");
-      return false;
-    }
-    
-    return true;
+  int sm_arch;
+  int cudnn_version;
+  NVTE_QKV_Format qkv_format;
+  NVTE_QKV_Format q_format;
+  NVTE_QKV_Format kv_format;
+  NVTE_QKV_Layout_Group layout_group;
+  bool requires_64bit_ragged_offset;
+  bool supported_ragged_offset_size;
+  
+  std::string error_msg;
+  
+  void set_error(const std::string& msg) {
+    error_msg = msg;
   }
-  
-  bool checks_for_max512(BackendSelectionContext& ctx) {
-    // Check dtype
-    if (ctx.q_dtype != NVTEDType::kNVTEFloat16 && 
-        ctx.q_dtype != NVTEDType::kNVTEBFloat16) {
-      ctx.set_error("Max512 backend requires FP16 or BF16 dtype");
-      return false;
-    }
-    
-    // Check architecture
-    if (ctx.sm_arch != 80 && ctx.sm_arch != 90) {
-      ctx.set_error("Max512 backend requires sm80 or sm90, got sm" + 
-                    std::to_string(ctx.sm_arch));
-      return false;
-    }
-    
-    // Check sequence length
-    if (ctx.max_seqlen_q > 512 || ctx.max_seqlen_kv > 512) {
-      ctx.set_error("Max512 backend requires seqlen <= 512, got q=" + 
-                    std::to_string(ctx.max_seqlen_q) + ", kv=" + 
-                    std::to_string(ctx.max_seqlen_kv));
-      return false;
-    }
-    if (ctx.max_seqlen_q % 64 != 0 || ctx.max_seqlen_kv % 64 != 0) {
-      ctx.set_error("Max512 backend requires seqlen % 64 == 0");
-      return false;
-    }
+};
 
-    // Check head dimension
-    if (ctx.head_dim_qk != 64 || ctx.head_dim_v != 64) {
-      ctx.set_error("Max512 backend requires head_dim=64");
-      return false;
-    }
-    
-    // Check GQA
-    if (ctx.num_attn_heads != ctx.num_gqa_groups) {
-      ctx.set_error("Max512 backend does not support GQA");
-      return false;
-    }
-    
-    // Check bias type
-    if (ctx.bias_type != NVTE_Bias_Type::NVTE_NO_BIAS &&
-        ctx.bias_type != NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
-      ctx.set_error("Max512 backend requires NO_BIAS or POST_SCALE_BIAS");
-      return false;
-    }
-    
-    // Check mask type
-    bool mask_ok = false;
-    if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-        ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-        ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK) {
-      mask_ok = true;
-    } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-               ctx.max_seqlen_q == ctx.max_seqlen_kv) {
-      mask_ok = true;
-    }
-    if (!mask_ok) {
-      ctx.set_error("Max512 backend: unsupported mask type");
-      return false;
-    }
-    
-    // Check layout
-    if (ctx.qkv_layout != NVTE_QKV_Layout::NVTE_SB3HD &&
-        ctx.qkv_layout != NVTE_QKV_Layout::NVTE_SBHD_SB2HD &&
-        ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BS3HD &&
-        ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BSHD_BS2HD &&
-        ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
-      ctx.set_error("Max512 backend: unsupported QKV layout");
-      return false;
-    }
-    
-    // Check window size
-    if (ctx.window_size_left != -1 || 
-        (ctx.window_size_right != -1 && ctx.window_size_right != 0)) {
-      ctx.set_error("Max512 backend requires does not support sliding window");
-      return false;
-    }
-    
-    // Check ragged offset
-    if (!ctx.supported_ragged_offset_size) {
-      ctx.set_error("Max512 backend does not support 64-bit ragged offsets");
-      return false;
-    }
-    
-    // Check softmax type
-    if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
-      ctx.set_error("Max512 backend requires vanilla softmax type");
-      return false;
-    }
-    
-    return true;
+bool checks_for_fp8(BackendSelectionContext& ctx) {
+  // Check dtype
+  if (ctx.q_dtype != NVTEDType::kNVTEFloat8E4M3 && 
+      ctx.q_dtype != NVTEDType::kNVTEFloat8E5M2) {
+    ctx.set_error("FP8 backend requires FP8E4M3 or FP8E5M2 dtype");
+    return false;
   }
   
-  bool checks_for_arbitrary_seqlen(BackendSelectionContext& ctx) {
-    // Check dtype
-    if (ctx.q_dtype != NVTEDType::kNVTEFloat16 && 
-        ctx.q_dtype != NVTEDType::kNVTEBFloat16) {
-      ctx.set_error("ArbitrarySeqlen backend requires FP16 or BF16 dtype");
-      return false;
-    }
-    
-    // Check architecture
-    bool arch_ok = false;
-    if (ctx.cudnn_version < 8903 && (ctx.sm_arch == 80 || ctx.sm_arch == 90)) {
-      arch_ok = true;
-    } else if (ctx.cudnn_version >= 8903 && ctx.sm_arch >= 80 && ctx.sm_arch < 100) {
-      arch_ok = true;
-    } else if (ctx.cudnn_version >= 90700 && ctx.sm_arch >= 80) {
-      arch_ok = true;
-    }
-    if (!arch_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported sm" + std::to_string(ctx.sm_arch) + 
-                    " with cuDNN " + std::to_string(ctx.cudnn_version));
-      return false;
-    }
-    
-    // Check sequence length
-    if (ctx.cudnn_version < 90000) {
-      if (ctx.max_seqlen_q % 64 != 0 || ctx.max_seqlen_kv % 64 != 0) {
-        ctx.set_error("ArbitrarySeqlen backend (cuDNN < 9.0) requires seqlen % 64 == 0");
-        return false;
-      }
-    }
-    
-    // Check GQA
-    if (ctx.cudnn_version < 8907) {
-      if (ctx.num_attn_heads != ctx.num_gqa_groups) {
-        ctx.set_error("ArbitrarySeqlen backend (cuDNN < 8.9.7) does not support GQA");
-        return false;
-      }
-    }
-    
-    // Check head dimension
-    if (ctx.head_dim_qk % 8 != 0 || ctx.head_dim_v % 8 != 0) {
-      ctx.set_error("ArbitrarySeqlen backend requires head_dim % 8 == 0");
-      return false;
-    }
+  // Check architecture
+  if (ctx.sm_arch < 90) {
+    ctx.set_error("FP8 backend requires SM90 (Hopper) or newer, got SM" + 
+                  std::to_string(ctx.sm_arch));
+    return false;
+  }
+  
+  // Check bias
+  if (ctx.bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
+    ctx.set_error("FP8 backend requires NVTE_NO_BIAS");
+    return false;
+  }
+  
+  bool version_has_support = false;
+  // cuDNN 8.9: t3hd, max_s=512, d=64, padding
+  if (ctx.cudnn_version >= 8900 && ctx.sm_arch < 100 &&
+      ctx.qkv_layout == NVTE_QKV_Layout::NVTE_T3HD && 
+      ctx.max_seqlen_q == ctx.max_seqlen_kv &&
+      ctx.max_seqlen_q <= 512 && 
+      ctx.head_dim_qk == 64 && ctx.head_dim_v == 64 &&
+      ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
+    version_has_support = true;
+  }
+  // cuDNN 9.2: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
+  if (ctx.cudnn_version >= 90201 && ctx.sm_arch < 100 && 
+      ctx.max_seqlen_q % 128 == 0 && ctx.max_seqlen_kv % 128 == 0 && 
+      ctx.head_dim_qk == 128 && ctx.head_dim_v == 128 &&
+      (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+        ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) {
+    version_has_support = true;
+  }
+  // cuDNN 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
+  if (ctx.cudnn_version >= 90700) {
     bool head_dim_ok = false;
-    // <= 128
-    if (ctx.head_dim_qk <= 128 && ctx.head_dim_v <= 128) {
+    if (ctx.sm_arch < 100 && !ctx.is_training && 
+        ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256) {
+      head_dim_ok = true;
+    } else if (ctx.sm_arch < 100 && ctx.is_training && 
+                ctx.head_dim_qk == 128 && ctx.head_dim_v == 128) {
+      head_dim_ok = true;
+    } else if (ctx.sm_arch >= 100 && 
+                ctx.head_dim_qk <= 128 && ctx.head_dim_v <= 128) {
       head_dim_ok = true;
     }
-    // 9.1: <= 256 + Hopper + fprop
-    else if (ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256 &&
-             !ctx.is_training && ctx.sm_arch == 90 && ctx.cudnn_version >= 90100) {
-      head_dim_ok = true;
+    if (head_dim_ok && 
+        ctx.head_dim_qk % 16 == 0 && ctx.head_dim_v % 16 == 0 &&
+        (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+          ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+          ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+          ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) {
+      version_has_support = true;
     }
-    // 9.5: <= 256 + Hopper + bprop
-    else if (ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256 &&
-             ctx.is_training && ctx.sm_arch == 90 && ctx.cudnn_version >= 90500) {
-      head_dim_ok = true;
-    }
-    // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
-    else if (!ctx.is_training && ctx.sm_arch >= 100 && ctx.cudnn_version >= 90900 && 
-             ctx.max_seqlen_q > 1 &&
-             ctx.layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) {
-      head_dim_ok = true;
-    }
-    // 9.10.2: any head_dim + any arch + fprop + paged
-    // 9.10.2: any head_dim + any arch + fprop + non_paged + sq > 1
-    // 9.10.2: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
-    else if (!ctx.is_training && ctx.cudnn_version >= 91002 &&
-             (ctx.layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD || 
-              ctx.max_seqlen_q > 1 ||
-              (ctx.max_seqlen_q == 1 && 
-               ctx.attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK &&
-               ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) {
-      head_dim_ok = true;
-    }
-    // 9.11: d_qk=192, d_v=128 + Blackwell + bprop + non-paged
-    else if (ctx.head_dim_qk == 192 && ctx.head_dim_v == 128 && 
-             ctx.is_training && ctx.sm_arch >= 100 && ctx.cudnn_version >= 91100) {
-      head_dim_ok = true;
-    }    
-    // 9.11+ bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
-    if (ctx.cudnn_version >= 91100 && ctx.is_training && ctx.sm_arch == 90 &&
-        ctx.head_dim_qk >= 128 && ctx.head_dim_v >= 128 && 
-        !(ctx.head_dim_qk == 192 && ctx.head_dim_v == 128) &&
-        ctx.head_dim_qk != ctx.head_dim_v) {
-      ctx.set_error("ArbitrarySeqlen backend: known cuDNN 9.11+ bug for sm90 bprop with MLA");
+  }
+  if (!version_has_support) {
+    ctx.set_error("FP8 backend: cuDNN version" + std::to_string(ctx.cudnn_version) + " does not support provided head_dim, seqlen, or mask");
+    return false;
+  }
+  
+  // Check common constraints
+  if (ctx.qkv_format != NVTE_QKV_Format::NVTE_BSHD && 
+      ctx.qkv_format != NVTE_QKV_Format::NVTE_SBHD) {
+    ctx.set_error("FP8 backend requires BSHD or SBHD format");
+    return false;
+  }
+  if (ctx.requires_64bit_ragged_offset) {
+    ctx.set_error("FP8 backend does not support 64-bit ragged offsets");
+    return false;
+  }
+  if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
+    ctx.set_error("FP8 backend requires vanilla softmax");
+    return false;
+  }
+  if (ctx.cudnn_version == 91000) {
+    ctx.set_error("FP8 backend has known bugs in cuDNN 9.10.0");
+    return false;
+  }
+  
+  return true;
+}
+
+bool checks_for_max512(BackendSelectionContext& ctx) {
+  // Check dtype
+  if (ctx.q_dtype != NVTEDType::kNVTEFloat16 && 
+      ctx.q_dtype != NVTEDType::kNVTEBFloat16) {
+    ctx.set_error("Max512 backend requires FP16 or BF16 dtype");
+    return false;
+  }
+  
+  // Check architecture
+  if (ctx.sm_arch != 80 && ctx.sm_arch != 90) {
+    ctx.set_error("Max512 backend requires sm80 or sm90, got sm" + 
+                  std::to_string(ctx.sm_arch));
+    return false;
+  }
+  
+  // Check sequence length
+  if (ctx.max_seqlen_q > 512 || ctx.max_seqlen_kv > 512) {
+    ctx.set_error("Max512 backend requires seqlen <= 512, got q=" + 
+                  std::to_string(ctx.max_seqlen_q) + ", kv=" + 
+                  std::to_string(ctx.max_seqlen_kv));
+    return false;
+  }
+  if (ctx.max_seqlen_q % 64 != 0 || ctx.max_seqlen_kv % 64 != 0) {
+    ctx.set_error("Max512 backend requires seqlen % 64 == 0");
+    return false;
+  }
+
+  // Check head dimension
+  if (ctx.head_dim_qk != 64 || ctx.head_dim_v != 64) {
+    ctx.set_error("Max512 backend requires head_dim=64");
+    return false;
+  }
+  
+  // Check GQA
+  if (ctx.num_attn_heads != ctx.num_gqa_groups) {
+    ctx.set_error("Max512 backend does not support GQA");
+    return false;
+  }
+  
+  // Check bias type
+  if (ctx.bias_type != NVTE_Bias_Type::NVTE_NO_BIAS &&
+      ctx.bias_type != NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
+    ctx.set_error("Max512 backend requires NO_BIAS or POST_SCALE_BIAS");
+    return false;
+  }
+  
+  // Check mask type
+  bool mask_ok = false;
+  if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+      ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+      ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK) {
+    mask_ok = true;
+  } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
+              ctx.max_seqlen_q == ctx.max_seqlen_kv) {
+    mask_ok = true;
+  }
+  if (!mask_ok) {
+    ctx.set_error("Max512 backend: unsupported mask type");
+    return false;
+  }
+  
+  // Check layout
+  if (ctx.qkv_layout != NVTE_QKV_Layout::NVTE_SB3HD &&
+      ctx.qkv_layout != NVTE_QKV_Layout::NVTE_SBHD_SB2HD &&
+      ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BS3HD &&
+      ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BSHD_BS2HD &&
+      ctx.qkv_layout != NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD) {
+    ctx.set_error("Max512 backend: unsupported QKV layout");
+    return false;
+  }
+  
+  // Check window size
+  if (ctx.window_size_left != -1 || 
+      (ctx.window_size_right != -1 && ctx.window_size_right != 0)) {
+    ctx.set_error("Max512 backend requires does not support sliding window");
+    return false;
+  }
+  
+  // Check ragged offset
+  if (!ctx.supported_ragged_offset_size) {
+    ctx.set_error("Max512 backend does not support 64-bit ragged offsets");
+    return false;
+  }
+  
+  // Check softmax type
+  if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
+    ctx.set_error("Max512 backend requires vanilla softmax type");
+    return false;
+  }
+  
+  return true;
+}
+
+bool checks_for_arbitrary_seqlen(BackendSelectionContext& ctx) {
+  // Check dtype
+  if (ctx.q_dtype != NVTEDType::kNVTEFloat16 && 
+      ctx.q_dtype != NVTEDType::kNVTEBFloat16) {
+    ctx.set_error("ArbitrarySeqlen backend requires FP16 or BF16 dtype");
+    return false;
+  }
+  
+  // Check architecture
+  bool arch_ok = false;
+  if (ctx.cudnn_version < 8903 && (ctx.sm_arch == 80 || ctx.sm_arch == 90)) {
+    arch_ok = true;
+  } else if (ctx.cudnn_version >= 8903 && ctx.sm_arch >= 80 && ctx.sm_arch < 100) {
+    arch_ok = true;
+  } else if (ctx.cudnn_version >= 90700 && ctx.sm_arch >= 80) {
+    arch_ok = true;
+  }
+  if (!arch_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported sm" + std::to_string(ctx.sm_arch) + 
+                  " with cuDNN " + std::to_string(ctx.cudnn_version));
+    return false;
+  }
+  
+  // Check sequence length
+  if (ctx.cudnn_version < 90000) {
+    if (ctx.max_seqlen_q % 64 != 0 || ctx.max_seqlen_kv % 64 != 0) {
+      ctx.set_error("ArbitrarySeqlen backend (cuDNN < 9.0) requires seqlen % 64 == 0");
       return false;
     }
-    if (!head_dim_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported head_dim (qk=" + 
-                    std::to_string(ctx.head_dim_qk) + ", v=" + std::to_string(ctx.head_dim_v) + ")");
+  }
+  
+  // Check GQA
+  if (ctx.cudnn_version < 8907) {
+    if (ctx.num_attn_heads != ctx.num_gqa_groups) {
+      ctx.set_error("ArbitrarySeqlen backend (cuDNN < 8.9.7) does not support GQA");
       return false;
     }
-    
-    // Check bias type
-    bool bias_ok = false;
-    if (ctx.cudnn_version < 8906 && 
-        ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
+  }
+  
+  // Check head dimension
+  if (ctx.head_dim_qk % 8 != 0 || ctx.head_dim_v % 8 != 0) {
+    ctx.set_error("ArbitrarySeqlen backend requires head_dim % 8 == 0");
+    return false;
+  }
+  bool head_dim_ok = false;
+  // <= 128
+  if (ctx.head_dim_qk <= 128 && ctx.head_dim_v <= 128) {
+    head_dim_ok = true;
+  // 9.1: <= 256 + Hopper + fprop
+  } else if (ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256 &&
+            !ctx.is_training && ctx.sm_arch == 90 && ctx.cudnn_version >= 90100) {
+    head_dim_ok = true;
+  // 9.5: <= 256 + Hopper + bprop
+  } else if (ctx.head_dim_qk <= 256 && ctx.head_dim_v <= 256 &&
+            ctx.is_training && ctx.sm_arch == 90 && ctx.cudnn_version >= 90500) {
+    head_dim_ok = true;
+  // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
+  } else if (!ctx.is_training && ctx.sm_arch >= 100 && ctx.cudnn_version >= 90900 && 
+            ctx.max_seqlen_q > 1 &&
+            ctx.layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) {
+    head_dim_ok = true;
+  // 9.10.2: any head_dim + any arch + fprop + paged
+  // 9.10.2: any head_dim + any arch + fprop + non_paged + sq > 1
+  // 9.10.2: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
+  } else if (!ctx.is_training && ctx.cudnn_version >= 91002 &&
+            (ctx.layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD || 
+            ctx.max_seqlen_q > 1 ||
+            (ctx.max_seqlen_q == 1 && 
+              ctx.attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK &&
+              ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) {
+    head_dim_ok = true;
+  // 9.11: d_qk=192, d_v=128 + Blackwell + bprop + non-paged
+  } else if (ctx.head_dim_qk == 192 && ctx.head_dim_v == 128 && 
+            ctx.is_training && ctx.sm_arch >= 100 && ctx.cudnn_version >= 91100) {
+    head_dim_ok = true;
+  }    
+  // 9.11+ bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
+  if (ctx.cudnn_version >= 91100 && ctx.is_training && ctx.sm_arch == 90 &&
+      ctx.head_dim_qk >= 128 && ctx.head_dim_v >= 128 && 
+      !(ctx.head_dim_qk == 192 && ctx.head_dim_v == 128) &&
+      ctx.head_dim_qk != ctx.head_dim_v) {
+    ctx.set_error("ArbitrarySeqlen backend: known cuDNN 9.11+ bug for sm90 bprop with MLA");
+    return false;
+  }
+  if (!head_dim_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported head_dim (qk=" + 
+                  std::to_string(ctx.head_dim_qk) + ", v=" + std::to_string(ctx.head_dim_v) + ")");
+    return false;
+  }
+  
+  // Check bias type
+  bool bias_ok = false;
+  if (ctx.cudnn_version < 8906 && 
+      ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
+    bias_ok = true;
+  } else if (ctx.cudnn_version >= 8906) {
+    if (ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
+      bias_ok = true;
+    } else if (ctx.bias_type == NVTE_Bias_Type::NVTE_ALIBI &&
+                ctx.attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK &&
+                ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
+                ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
+                ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+                ctx.sm_arch >= 90) {
+      bias_ok = true;
+    } else if (ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && 
+                ctx.sm_arch >= 90) {
       bias_ok = true;
     }
-    else if (ctx.cudnn_version >= 8906) {
-      if (ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
-        bias_ok = true;
-      } else if (ctx.bias_type == NVTE_Bias_Type::NVTE_ALIBI &&
-                 ctx.attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK &&
-                 ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
-                 ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-                 ctx.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-                 ctx.sm_arch >= 90) {
-        bias_ok = true;
-      } else if (ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && 
-                 ctx.sm_arch >= 90) {
-        bias_ok = true;
-      }
-    }
-    if (ctx.cudnn_version >= 90000 &&
-        ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && 
-        ctx.sm_arch >= 80) {
-      bias_ok = true;
-    }    
-    if (!bias_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported bias type");
-      return false;
-    }
-    
-    // Check mask type
-    bool mask_ok = false;
-    // Pre-8.9.6: causal
-    if (ctx.cudnn_version < 8906 && 
+  }
+  if (ctx.cudnn_version >= 90000 &&
+      ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && 
+      ctx.sm_arch >= 80) {
+    bias_ok = true;
+  }    
+  if (!bias_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported bias type");
+    return false;
+  }
+  
+  // Check mask type
+  bool mask_ok = false;
+  // Pre-8.9.6: causal
+  if (ctx.cudnn_version < 8906 && 
+      ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    mask_ok = true;
+  // 8.9.6: {bshd, sbhd} + {no_mask, causal, padding, padding_causal}
+  } else if (ctx.cudnn_version >= 8906 &&
+            (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
+            ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
+            (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) {
+    mask_ok = true;
+  // 9.1: adds thd + {padding, padding_causal}
+  } else if (ctx.cudnn_version >= 90100 && 
+            ctx.qkv_format == NVTE_QKV_Format::NVTE_THD &&
+            (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) {
+    mask_ok = true;
+  // 9.3: adds {bshd, sbhd} + causal_bottom_right + self/cross-attn (sq <= skv)
+  } else if (ctx.cudnn_version >= 90300 &&
+            (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
+            ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
+            ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
+            ctx.max_seqlen_q <= ctx.max_seqlen_kv &&
+            ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
+    mask_ok = true;
+  // 9.5: adds {paged_kv_bshd, paged_kv_sbhd} + {padding, padding_causal, padding_causal_bottom_right}
+  } else if (ctx.cudnn_version >= 90500 &&
+            ctx.layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
+            (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+            (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+              ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
+              ctx.max_seqlen_q <= ctx.max_seqlen_kv)) &&
+            ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
+    mask_ok = true;
+  // 9.6: adds {bshd, sbhd, thd} + padding_causal_bottom_right + self/cross-attn (sq <= skv)
+  } else if (ctx.cudnn_version >= 90600 &&
+            ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+            ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
+            ctx.max_seqlen_q <= ctx.max_seqlen_kv &&
+            ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
+    mask_ok = true;
+  // 9.7: removes s_q/s_kv % 64 = 0 for {causal_bottom_right, padding_causal_bottom_right}
+  // for any q_format/kv_format, and paged/non-paged
+  } else if (ctx.cudnn_version >= 90700) {
+    if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
         ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
       mask_ok = true;
-    }
-    // 8.9.6: {bshd, sbhd} + {no_mask, causal, padding, padding_causal}
-    else if (ctx.cudnn_version >= 8906 &&
-             (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
-              ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
-             (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-              ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-              ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-              ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) {
+    } else if ((ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+                ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+                ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+                ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
+      mask_ok = true;
+    } else if ((ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+                ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+                ctx.max_seqlen_q <= ctx.max_seqlen_kv) {
       mask_ok = true;
     }
-    // 9.1: adds thd + {padding, padding_causal}
-    else if (ctx.cudnn_version >= 90100 && 
-             ctx.qkv_format == NVTE_QKV_Format::NVTE_THD &&
-             (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-              ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) {
-      mask_ok = true;
-    }
-    // 9.3: adds {bshd, sbhd} + causal_bottom_right + self/cross-attn (sq <= skv)
-    else if (ctx.cudnn_version >= 90300 &&
-             (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
-              ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
-             ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
-             ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
-             ctx.max_seqlen_q <= ctx.max_seqlen_kv &&
-             ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
-      mask_ok = true;
-    }
-    // 9.5: adds {paged_kv_bshd, paged_kv_sbhd} + {padding, padding_causal, padding_causal_bottom_right}
-    else if (ctx.cudnn_version >= 90500 &&
-             ctx.layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
-             (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-              ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-              (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-               ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
-               ctx.max_seqlen_q <= ctx.max_seqlen_kv)) &&
-             ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
-      mask_ok = true;
-    }
-    // 9.6: adds {bshd, sbhd, thd} + padding_causal_bottom_right + self/cross-attn (sq <= skv)
-    else if (ctx.cudnn_version >= 90600 &&
-             ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-             ctx.max_seqlen_q % 64 == 0 && ctx.max_seqlen_kv % 64 == 0 && 
-             ctx.max_seqlen_q <= ctx.max_seqlen_kv &&
-             ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
-      mask_ok = true;
-    }
-    // 9.7: removes s_q/s_kv % 64 = 0 for {causal_bottom_right, padding_causal_bottom_right}
-    // for any q_format/kv_format, and paged/non-paged
-    else if (ctx.cudnn_version >= 90700) {
-      if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-          ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
-        mask_ok = true;
-      } else if ((ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-                  ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                  ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-                 ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && ctx.dropout == 0.0) {
-        mask_ok = true;
-      } else if ((ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-                  ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-                 ctx.max_seqlen_q <= ctx.max_seqlen_kv) {
-        mask_ok = true;
-      }
-    }
-    if (!mask_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported mask type for cuDNN" + std::to_string(ctx.cudnn_version));
-      return false;
-    }
-    
-    // Check bias + mask combination
-    if (ctx.cudnn_version >= 8906 &&
-        (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-         ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
-        ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
-      ctx.set_error("ArbitrarySeqlen backend: POST_SCALE_BIAS not supported with PADDING masks");
-      return false;
-    }
-    
-    // Check QKV format
-    bool format_ok = false;
-    if (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
-        ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
-      format_ok = true;
-    } else if (ctx.qkv_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90 &&
-               ((ctx.cudnn_version >= 90100 && ctx.num_attn_heads == ctx.num_gqa_groups) ||
-                ctx.cudnn_version >= 90600)) {
-      format_ok = true;
-    } else if (ctx.cudnn_version >= 90700 &&
-               ((ctx.q_format == NVTE_QKV_Format::NVTE_SBHD || 
-                 ctx.q_format == NVTE_QKV_Format::NVTE_BSHD ||
-                 (ctx.q_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90)) ||
-                (ctx.kv_format == NVTE_QKV_Format::NVTE_SBHD || 
-                 ctx.kv_format == NVTE_QKV_Format::NVTE_BSHD ||
-                 (ctx.kv_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90)))) {
-      format_ok = true;
-    }
-    if (!format_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported QKV format");
-      return false;
-    }
-    
-    // Check sliding window
-    bool window_ok = false;
-    // Pre-9.2: full attention, causal
-    if (ctx.cudnn_version < 90200 && 
-        ctx.window_size_left == -1 &&
-        (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
-      window_ok = true;
-    }
-    // 9.2: SWA (left, 0) + top-left diagonal + {bshd, sbhd}
-    else if (ctx.cudnn_version >= 90200) {
-      if (ctx.window_size_left == -1 && 
-          (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
-        window_ok = true;
-      } else if ((ctx.window_size_left >= 0 || ctx.window_size_left == -1) && 
-                 ctx.window_size_right == 0 &&
-                 (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-                  (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
-                   ctx.max_seqlen_q == ctx.max_seqlen_kv)) &&
-                 ctx.max_seqlen_q <= ctx.max_seqlen_kv && 
-                 ctx.dropout == 0.0 &&
-                 ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-                 (ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-                  ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
-        window_ok = true;
-      }
-    }
-    // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
-    if (ctx.cudnn_version >= 90600) {
-      if (ctx.window_size_left == -1 && 
-          (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
-        window_ok = true;
-      } else if ((ctx.window_size_left >= 0 || ctx.window_size_left == -1) && 
-                 ctx.window_size_right == 0) {
-        bool mask_and_arch_ok = false;
-        
-        if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
-            (ctx.sm_arch < 100 || 
-             (ctx.sm_arch >= 100 && 
-              ((ctx.max_seqlen_q == ctx.max_seqlen_kv && ctx.cudnn_version <= 90700) ||
-               ctx.cudnn_version > 90700)))) {
-          mask_and_arch_ok = true;
-        } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
-          mask_and_arch_ok = true;
-        } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-                   (ctx.sm_arch < 100 || 
-                    (ctx.sm_arch >= 100 && 
-                     ((ctx.max_seqlen_q == ctx.max_seqlen_kv && ctx.cudnn_version <= 90700) ||
-                      ctx.cudnn_version > 90700)))) {
-          mask_and_arch_ok = true;
-        }
-        if (mask_and_arch_ok && 
-            ctx.max_seqlen_q <= ctx.max_seqlen_kv && 
-            ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-            ctx.dropout == 0.0) {
-          window_ok = true;
-        }
-      }
-    }
-    if (!window_ok) {
-      ctx.set_error("ArbitrarySeqlen backend: unsupported sliding window configuration");
-      return false;
-    }
-    
-    // Check ragged offset
-    if (!ctx.supported_ragged_offset_size) {
-      ctx.set_error("ArbitrarySeqlen backend does not support 64-bit ragged offset");
-      return false;
-    }
-    
-    // Check known bugs
-    if (ctx.cudnn_version == 91000 || ctx.cudnn_version == 91001) {
-      ctx.set_error("ArbitrarySeqlen backend: known bugs with SDPA F16 in cuDNN 9.10.0/9.10.1");
-      return false;
-    }
-    
-    // Check softmax type
-    if (ctx.cudnn_version >= 91301) {
-      // 9.13.1+: vanilla, off-by-one, learnable
-    } else {
-      // pre-9.13.1: vanilla
-      if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
-        ctx.set_error("ArbitrarySeqlen backend (cuDNN < 9.13.1) requires vanilla softmax type");
-        return false;
-      }
-    }
-    
-    return true;
-  }  
+  }
+  if (!mask_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported mask type for cuDNN" + std::to_string(ctx.cudnn_version));
+    return false;
   }
   
-  NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
+  // Check bias + mask combination
+  if (ctx.cudnn_version >= 8906 &&
+      (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+        ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
+      ctx.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
+    ctx.set_error("ArbitrarySeqlen backend: POST_SCALE_BIAS not supported with PADDING masks");
+    return false;
+  }
+  
+  // Check QKV format
+  bool format_ok = false;
+  if (ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD || 
+      ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
+    format_ok = true;
+  } else if (ctx.qkv_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90 &&
+              ((ctx.cudnn_version >= 90100 && ctx.num_attn_heads == ctx.num_gqa_groups) ||
+              ctx.cudnn_version >= 90600)) {
+    format_ok = true;
+  } else if (ctx.cudnn_version >= 90700 &&
+              ((ctx.q_format == NVTE_QKV_Format::NVTE_SBHD || 
+                ctx.q_format == NVTE_QKV_Format::NVTE_BSHD ||
+                (ctx.q_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90)) ||
+              (ctx.kv_format == NVTE_QKV_Format::NVTE_SBHD || 
+                ctx.kv_format == NVTE_QKV_Format::NVTE_BSHD ||
+                (ctx.kv_format == NVTE_QKV_Format::NVTE_THD && ctx.sm_arch >= 90)))) {
+    format_ok = true;
+  }
+  if (!format_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported QKV format");
+    return false;
+  }
+  
+  // Check sliding window
+  bool window_ok = false;
+  // Pre-9.2: full attention, causal
+  if (ctx.cudnn_version < 90200 && 
+      ctx.window_size_left == -1 &&
+      (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
+    window_ok = true;
+  // 9.2: SWA (left, 0) + top-left diagonal + {bshd, sbhd}
+  } else if (ctx.cudnn_version >= 90200) {
+    if (ctx.window_size_left == -1 && 
+        (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
+      window_ok = true;
+    } else if ((ctx.window_size_left >= 0 || ctx.window_size_left == -1) && 
+                ctx.window_size_right == 0 &&
+                (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
+                  ctx.max_seqlen_q == ctx.max_seqlen_kv)) &&
+                ctx.max_seqlen_q <= ctx.max_seqlen_kv && 
+                ctx.dropout == 0.0 &&
+                ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+                (ctx.qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
+                ctx.qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+      window_ok = true;
+    }
+  }
+  // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
+  if (ctx.cudnn_version >= 90600) {
+    if (ctx.window_size_left == -1 && 
+        (ctx.window_size_right == -1 || ctx.window_size_right == 0)) {
+      window_ok = true;
+    } else if ((ctx.window_size_left >= 0 || ctx.window_size_left == -1) && 
+                ctx.window_size_right == 0) {
+      bool mask_and_arch_ok = false;
+      
+      if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
+          (ctx.sm_arch < 100 || 
+            (ctx.sm_arch >= 100 && 
+            ((ctx.max_seqlen_q == ctx.max_seqlen_kv && ctx.cudnn_version <= 90700) ||
+              ctx.cudnn_version > 90700)))) {
+        mask_and_arch_ok = true;
+      } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
+        mask_and_arch_ok = true;
+      } else if (ctx.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+                  (ctx.sm_arch < 100 || 
+                  (ctx.sm_arch >= 100 && 
+                    ((ctx.max_seqlen_q == ctx.max_seqlen_kv && ctx.cudnn_version <= 90700) ||
+                    ctx.cudnn_version > 90700)))) {
+        mask_and_arch_ok = true;
+      }
+      if (mask_and_arch_ok && 
+          ctx.max_seqlen_q <= ctx.max_seqlen_kv && 
+          ctx.bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+          ctx.dropout == 0.0) {
+        window_ok = true;
+      }
+    }
+  }
+  if (!window_ok) {
+    ctx.set_error("ArbitrarySeqlen backend: unsupported sliding window configuration");
+    return false;
+  }
+  
+  // Check ragged offset
+  if (!ctx.supported_ragged_offset_size) {
+    ctx.set_error("ArbitrarySeqlen backend does not support 64-bit ragged offset");
+    return false;
+  }
+  
+  // Check known bugs
+  if (ctx.cudnn_version == 91000 || ctx.cudnn_version == 91001) {
+    ctx.set_error("ArbitrarySeqlen backend: known bugs with SDPA F16 in cuDNN 9.10.0/9.10.1");
+    return false;
+  }
+  
+  // Check softmax type
+  if (ctx.cudnn_version >= 91301) {
+    // 9.13.1+: vanilla, off-by-one, learnable
+  } else {
+    // pre-9.13.1: vanilla
+    if (ctx.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
+      ctx.set_error("ArbitrarySeqlen backend (cuDNN < 9.13.1) requires vanilla softmax type");
+      return false;
+    }
+  }
+  
+  return true;
+}  
+} // namespace
+  
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
       NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
       float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
@@ -782,7 +769,7 @@ namespace {
     // No backend available
     std::cout << "Warning: No fused attention backend available for the given configuration." << std::endl;
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-  }
+}
 
 // NVTE fused attention FWD with separate Q, K and V
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
