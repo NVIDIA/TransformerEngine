@@ -483,21 +483,17 @@ def get_attention_backend(
 
     # Filter: Return max_score
     if return_max_score:
-        if context_parallel:
-            use_flash_attention = False
-            use_unfused_attention = False
-            logger.debug(
-                "Disabling FlashAttention and UnfusedAttention for max_score with context"
-                " parallelism"
-            )
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_score")
+        if use_fused_attention and qkv_format == "thd":
+            logger.debug("Disabling FusedAttention for max_score and qkv_format = thd")
+            use_fused_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
             use_unfused_attention = False
-            logger.debug("Disabling all backends for max_score with context parallelism in FP8")
+            logger.debug("Disabling all backends for max_score with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size

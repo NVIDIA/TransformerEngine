@@ -694,7 +694,7 @@ def cp_p2p_fwd_fused_attn(
         fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step
         fp8_meta_kwargs["o_quantizer"] = O_quantizer_per_step
 
-    out_per_step, aux_ctx_tensors, max_score = fused_attn_fwd(
+    out_per_step, aux_ctx_tensors, *max_score = fused_attn_fwd(
         is_training,
         max_seqlen_q_,
         max_seqlen_kv_,
@@ -723,8 +723,9 @@ def cp_p2p_fwd_fused_attn(
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
 
-    return out_per_step, softmax_lse_per_step, rng_states, attn_bias, max_score
-
+    if return_max_score:
+        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_score
+    return out_per_step, softmax_lse_per_step, rng_states, attn_bias, None
 
 def cp_p2p_fwd_flash_attn(
     use_flash_attn_3,
@@ -1088,6 +1089,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        return_max_score,
         fp8,
         fp8_meta,
         cp_group,
@@ -1098,7 +1100,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         use_flash_attn_3,
         fp8_output,
         layer_number,
-        return_max_score,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1250,9 +1251,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
             if return_max_score:
-                max_score_per_step = torch.empty(
-                    (cp_size, q.shape[-2]), dtype=q.dtype, device=q.device
-                )
+                max_score_per_step = [torch.empty(
+                    q.shape[-2], dtype=q.dtype, device=q.device
+                ) for _ in range(cp_size)]
 
         # split qkv to two halves and prepare for load balancing
         assert qkv_format == "thd" or (
@@ -1838,7 +1839,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
-        return out_ret, max_score
+        if return_max_score:
+            return out_ret, max_score
+        return out_ret
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -2605,11 +2608,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        return_max_score,
         window_size,
         cp_group,
         cp_stream,
         use_flash_attn_3,
-        return_max_score,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -2855,7 +2858,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
-        return out, max_score
+        if return_max_score:
+            return out, max_score
+        return out
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -3110,6 +3115,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        return_max_score,
         window_size,
         fp8,
         fp8_meta,
@@ -3120,7 +3126,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         softmax_type,
         softmax_offset,
         fp8_output,
-        return_max_score,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
@@ -3250,7 +3255,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
                     for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
                 ]
-            out_, aux_ctx_tensors, max_score = fused_attn_fwd(
+            out_, aux_ctx_tensors, *max_score = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -3326,7 +3331,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         )
         if return_max_score:
             max_score = flash_attn_a2a_communicate_softmax_offset(
-                max_score, 0, cp_size, cp_group, cp_stream, False
+                *max_score, 0, cp_size, cp_group, cp_stream, False
             )
 
         if use_fused_attention:
@@ -3414,7 +3419,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
-        return out_ret, max_score
+        if return_max_score:
+            return out_ret, max_score
+        return out_ret
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -3651,8 +3658,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             None,
-            d_softmax_offset,
             None,
+            d_softmax_offset,
             None,
         )
 
@@ -3838,6 +3845,7 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
+        return_max_score,
     ]
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
@@ -3852,13 +3860,12 @@ def attn_forward_func_with_cp(
             use_flash_attn_3,
             fp8_output,
             layer_number,
-            return_max_score,
         ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)
         args.pop(8)
-        args += [window_size, cp_group, cp_stream, use_flash_attn_3, return_max_score]
+        args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
         args += [
@@ -3872,7 +3879,6 @@ def attn_forward_func_with_cp(
             softmax_type,
             softmax_offset,
             fp8_output,
-            return_max_score,
         ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:

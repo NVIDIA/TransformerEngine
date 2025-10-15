@@ -249,7 +249,7 @@ def fused_attn_fwd(
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
-    max_score: float if return_max_score = True, otherwise None
+    max_score: if return_max_score = True, shape [h] and same data type as O; otherwise None
     """
 
     if attn_scale is None:
@@ -332,7 +332,7 @@ def fused_attn_fwd(
         return output_tensors[0], aux_ctx_tensors, max_score
 
     # out, aux_ctx_tensors
-    return output_tensors[0], output_tensors[1:], None
+    return output_tensors[0], output_tensors[1:]
 
 
 def fused_attn_bwd(

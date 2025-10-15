@@ -134,7 +134,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
-        generate_stats,
         return_max_score,
     };
 
@@ -620,8 +619,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
-        true,
-        true,
+        false,
     };
 
     namespace fe = cudnn_frontend;

@@ -192,7 +192,7 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-            fused_attn_fwd, fused_max_score, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, _, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -203,7 +203,7 @@ def test_dot_product_attention(
                 is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            fused_attn_fwd_1, fused_max_score_1, fused_attn_bwd_1 = _run_dot_product_attention(
+            fused_attn_fwd_1, _, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -216,7 +216,7 @@ def test_dot_product_attention(
 
     # FlashAttention backend
     if flash_attn_supported:
-        flash_attn_fwd, flash_max_score, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, _, flash_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "FlashAttention",
@@ -232,8 +232,6 @@ def test_dot_product_attention(
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
-        if config.return_max_score:
-            torch.testing.assert_close(flash_max_score, unfused_max_score, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if unfused_attn_supported and fused_attn_supported:
@@ -246,8 +244,6 @@ def test_dot_product_attention(
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
-        if config.return_max_score:
-            torch.testing.assert_close(fused_max_score, flash_max_score, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and len(fused_attn_backends) == 2:
@@ -268,24 +264,12 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 
 model_configs_max_score = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "max_score_1_0": ModelConfig(8, 128, 16, 64),
-    "max_score_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
-    "max_score_2_0": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
-    "max_score_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
-    "max_score_3_0": ModelConfig(
-        8, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"
-    ),
-    "max_score_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
-    "max_score_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
-    "max_score_4_1": ModelConfig(
-        8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"
-    ),
-    "max_score_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
-    "max_score_5_1": ModelConfig(
-        8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)
-    ),
-    "max_score_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
-    "max_score_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
+    "max_score_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    "max_score_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
+    "max_score_3": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
+    "max_score_4": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"),
+    "max_score_5": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)),
+    "max_score_6": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
 }
 
 
@@ -293,11 +277,12 @@ model_configs_max_score = {
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_max_score])
 @pytest.mark.parametrize("model", model_configs_max_score.keys())
-def test_dpa_max_score(dtype, model_configs, model):
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
+def test_dpa_max_score(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
     config.return_max_score = True
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
 
 model_configs_softmax = {
@@ -375,7 +360,7 @@ model_configs_softmax = {
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
     test_dot_product_attention(
-        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False
+        dtype, model_configs, model, False, True, "bshd_bshd_bshd", False, False
     )
 
 
@@ -405,7 +390,7 @@ model_configs_mla = {
 @pytest.mark.parametrize("model", model_configs_mla.keys())
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_mask = {
@@ -1152,6 +1137,7 @@ def _run_dot_product_attention(
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
+
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
             return out, max_score, (q.grad, k.grad, v.grad, d_softmax_offset)

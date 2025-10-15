@@ -220,7 +220,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
 
         self.mask_func = mask_func
-
         self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -437,8 +436,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             max_score = matmul_result
             if attn_mask_type != "no_mask":
                 max_score = self.mask_func(matmul_result, attention_mask)
-            with self.attention_dropout_ctx():
-                max_score = self.attention_dropout(max_score)
             max_score = torch.amax(max_score, dim=(0, 2, 3))
 
         # add attention sink to the last column: [b, np, sq, sk+1]
@@ -817,7 +814,6 @@ class FlashAttention(torch.nn.Module):
                         batch_size * context_len,
                     )
 
-        max_score = None
         use_flash_attn_3 = False
         if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
             use_flash_attn_3 = True
@@ -1150,7 +1146,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors, max_score = fused_attn_fwd(
+            out_, aux_ctx_tensors, *_ = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1226,7 +1222,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors, max_score = fused_attn_fwd(
+            out_, aux_ctx_tensors, *max_score = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1326,7 +1322,9 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        return out_ret, max_score
+        if return_max_score:
+            return out_ret, *max_score
+        return out_ret
 
     @staticmethod
     def backward(ctx, d_out, *args):
@@ -1891,4 +1889,4 @@ class FusedAttention(torch.nn.Module):
             # ...hd -> ...(hd)
             return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)
-        return output[0].view(*output[0].shape[:-2], -1)
+        return output.view(*output.shape[:-2], -1)
