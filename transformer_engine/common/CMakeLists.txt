@@ -155,19 +155,15 @@ list(APPEND transformer_engine_cuda_sources
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-     transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu
-     activation/gelu.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     activation/relu.cu
-     activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
@@ -177,7 +173,6 @@ list(APPEND transformer_engine_cuda_sources
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     util/cast.cu
      util/padding.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
@@ -192,10 +187,16 @@ list(APPEND transformer_engine_cuda_sources
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
      recipe/nvfp4.cu
-     hadamard_transform/hadamard_transform.cu
-     hadamard_transform/hadamard_transform_cast_fusion.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers.cu)
+
+list(APPEND transformer_engine_cuda_arch_specific_sources
+     util/cast.cu
+     activation/gelu.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu)
 
 list(APPEND transformer_engine_SOURCES ${transformer_engine_cpp_sources}
                                        ${transformer_engine_cuda_sources}
