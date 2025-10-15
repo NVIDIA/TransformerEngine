@@ -511,7 +511,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
     context_parallel_axis (str): The name of the context parallel axis.
-    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
+    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING, 3: ALL_TO_ALL.
     context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
 
     Optimization parameters

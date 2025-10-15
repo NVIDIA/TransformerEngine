@@ -1713,7 +1713,9 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
         
         helper = _FusedAttnCPWithA2AHelper(mesh, config)
-        helper.check_supported()
+        q_aval = arg_infos[0].aval if hasattr(arg_infos[0], 'aval') else arg_infos[0]
+        num_heads = q_aval.shape[2]
+        helper.check_supported(num_heads)
         
         dq_sharding = result_infos[0].sharding
         dk_sharding = result_infos[1].sharding
