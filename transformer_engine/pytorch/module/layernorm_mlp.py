@@ -70,7 +70,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ..tensor.quantized_tensor import (
+from ..quantization import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,

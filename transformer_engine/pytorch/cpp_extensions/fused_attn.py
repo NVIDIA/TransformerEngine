@@ -15,7 +15,7 @@ from transformer_engine_torch import (
     NVTE_Softmax_Type,
     NVTE_Fused_Attn_Backend,
 )
-from ..tensor.quantized_tensor import Quantizer
+from ..quantization import Quantizer
 
 
 __all__ = [

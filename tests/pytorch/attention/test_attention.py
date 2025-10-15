@@ -39,7 +39,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantization import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,

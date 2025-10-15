@@ -56,7 +56,7 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import apply_normalization, noop_cat, WeightGradStore
-from ..tensor.quantized_tensor import (
+from ..quantization import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
