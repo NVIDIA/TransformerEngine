@@ -11,6 +11,7 @@
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/ubnext.h>
 
 #include "cuda_runtime.h"
 
@@ -117,6 +118,8 @@
              std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
              transformer_engine::CommOverlapCore>(m, "CommOverlapBase", pybind11::module_local())  \
       .def(py::init([]() { return new transformer_engine::CommOverlapBase(); }),                   \
+           py::call_guard<py::gil_scoped_release>())                                               \
+      .def("init_ubnext", &transformer_engine::CommOverlapBase::init_ubnext,                       \
            py::call_guard<py::gil_scoped_release>());                                              \
   py::class_<transformer_engine::CommOverlapP2PBase,                                               \
              std::shared_ptr<transformer_engine::CommOverlapP2PBase>,                              \
@@ -135,6 +138,45 @@
       },                                                                                           \
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
-        py::call_guard<py::gil_scoped_release>());
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def(                                                                                           \
+      "allreduce_2shot_mc",                                                                        \
+      [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* mcptr_in, void* mcptr_out,       \
+         size_t bytes, void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma,    \
+         float eps, const int hidden_size) {                                                       \
+        transformer_engine::allreduce_2shot_mc(                                                    \
+            ranks, myrank, uc0ptr, mc0ptr, mcptr_in, mcptr_out, bytes, residual_in, residual_out,  \
+            fuse_layernorm, gamma, eps, hidden_size, at::cuda::getCurrentCUDAStream());            \
+      },                                                                                           \
+      py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"),                   \
+      py::arg("mcptr_in"), py::arg("mcptr_out"), py::arg("bytes"), py::arg("residual_in"),         \
+      py::arg("residual_out"), py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"),        \
+      py::arg("hidden_size"));                                                                     \
+  m.def(                                                                                           \
+      "allreduce_2shot_uc",                                                                        \
+      [](int ranks, int myrank, void* uc0ptr, void* ucptr_in, void* ucptr_out, size_t bytes,       \
+         void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma, float eps,       \
+         const int hidden_size) {                                                                  \
+        transformer_engine::allreduce_2shot_uc(                                                    \
+            ranks, myrank, uc0ptr, ucptr_in, ucptr_out, bytes, residual_in, residual_out,          \
+            fuse_layernorm, gamma, eps, hidden_size, at::cuda::getCurrentCUDAStream());            \
+      },                                                                                           \
+      py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("ucptr_in"),                 \
+      py::arg("ucptr_out"), py::arg("bytes"), py::arg("residual_in"), py::arg("residual_out"),     \
+      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"));        \
+  m.def(                                                                                           \
+      "allreduce_2shot_mc_lamport",                                                                \
+      [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* ucptr_out, void* mcptr_in,       \
+         void* mcptr_out, void* clear_ptr, size_t bytes, bool poisoned, void* residual_in,         \
+         void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size) { \
+        transformer_engine::allreduce_2shot_mc_lamport(                                            \
+            ranks, myrank, uc0ptr, mc0ptr, ucptr_out, mcptr_in, mcptr_out, clear_ptr, bytes,       \
+            poisoned, residual_in, residual_out, fuse_layernorm, gamma, eps, hidden_size,          \
+            at::cuda::getCurrentCUDAStream());                                                     \
+      },                                                                                           \
+      py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"),                   \
+      py::arg("ucptr_out"), py::arg("mcptr_in"), py::arg("mcptr_out"), py::arg("clear_ptr"),       \
+      py::arg("bytes"), py::arg("poisoned"), py::arg("residual_in"), py::arg("residual_out"),      \
+      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"));
 
 #endif

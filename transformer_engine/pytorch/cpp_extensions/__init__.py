@@ -7,3 +7,4 @@ from transformer_engine_torch import *
 
 from .fused_attn import *
 from .gemm import *
+from .symm_allocator import *

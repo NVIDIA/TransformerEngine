@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import os
 
 import torch
 
@@ -53,6 +54,9 @@ from ..distributed import (
 )
 from ..cpp_extensions import (
     general_gemm,
+    ubsymm_request_allocator,
+    ubsymm_get_sym_tensor,
+    ubsymm_allreduce,
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -118,6 +122,9 @@ class _Linear(torch.autograd.Function):
         symmetric_ar_type: str,
         save_original_input: bool = False,
         debug: Optional[bool] = False,
+        residual: Optional[torch.Tensor] = None,
+        eps: Optional[float] = None,
+        ln_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -301,6 +308,24 @@ class _Linear(torch.autograd.Function):
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
+        symm_out = None
+        if (
+            symmetric_ar_type is not None
+            and symmetric_ar_type.startswith("ubnext")
+            and parallel_mode == "row"
+            and tp_size > 1
+        ):
+            out_shape_list = list(tuple(inp.shape))
+            out_shape_list[-1] = out_features
+            symm_out = ubsymm_get_sym_tensor(
+                torch.Size(out_shape_list),
+                activation_dtype,
+                tp_group,
+            )
+            assert symm_out is not None or symmetric_ar_type == "ubnext", (
+                "No symmetric pool out of space fallback for fused ops, increase"
+                " NVTE_UB_SYMM_POOL_SIZE"
+            )
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
@@ -317,6 +342,7 @@ class _Linear(torch.autograd.Function):
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=reduce_scatter_out,
+            out=symm_out,
         )
         nvtx_range_pop(f"{nvtx_label}.gemm")
         # ------------------------------------------------------
@@ -344,7 +370,19 @@ class _Linear(torch.autograd.Function):
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
-                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                    if symm_out is not None:
+                        out = ubsymm_allreduce(
+                            symm_out, residual_global=residual, gamma=ln_weight, eps=eps
+                        )
+                    else:
+                        fallback_symmetric = (
+                            "multimem_all_reduce"
+                            if symmetric_ar_type.startswith("ubnext")
+                            else symmetric_ar_type
+                        )
+                        out, _ = symmetric_all_reduce(
+                            out, tp_group, all_reduce_type=fallback_symmetric
+                        )
                 else:
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
@@ -1120,6 +1158,8 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        eps: Optional[float] = None,
+        ln_weight: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
 
@@ -1208,7 +1248,21 @@ class Linear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-
+            if (
+                self.symmetric_ar_type.startswith("ubnext")
+                and parallel_mode == "row"
+                and tp_size > 1
+            ):
+                ubsymm_request_allocator(
+                    self.tp_group,
+                    (
+                        int(os.environ.get("NVTE_UB_MAXBATCH", 64)),
+                        self.out_features,
+                    ),
+                    params_dtype,
+                )
+        self.eps = eps
+        self.layer_norm_weight = ln_weight  # in general expected to be filled with reference to layernorm_weight from next LayerNormLinear later
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -1374,6 +1428,7 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1490,6 +1545,9 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
+                residual,
+                self.eps,
+                self.layer_norm_weight,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

@@ -8,6 +8,7 @@ import warnings
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
+import os
 
 import torch
 from torch.nn import init
@@ -73,6 +74,9 @@ from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
     general_gemm,
+    ubsymm_request_allocator,
+    ubsymm_get_sym_tensor,
+    ubsymm_allreduce,
 )
 
 __all__ = ["LayerNormLinear"]
@@ -128,6 +132,7 @@ class _LayerNormLinear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
+        skip_layernorm: bool = False,
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -204,20 +209,25 @@ class _LayerNormLinear(torch.autograd.Function):
         )
 
         # Apply normalization
-        nvtx_range_push(f"{nvtx_label}.norm")
-        ln_out, mu, rsigma = apply_normalization(
-            inputmat,
-            None,  # ln_out
-            ln_weight,
-            ln_bias,
-            eps,
-            input_quantizer if with_quantized_norm else None,
-            inputmat.dtype,
-            normalization,
-            fwd_ln_sm_margin,
-            zero_centered_gamma,
-        )
-        nvtx_range_pop(f"{nvtx_label}.norm")
+        if skip_layernorm:
+            ln_out = inputmat
+            mu = None
+            rsigma = None
+        else:
+            nvtx_range_push(f"{nvtx_label}.norm")
+            ln_out, mu, rsigma = apply_normalization(
+                inputmat,
+                None,  # ln_out
+                ln_weight,
+                ln_bias,
+                eps,
+                input_quantizer if with_quantized_norm else None,
+                inputmat.dtype,
+                normalization,
+                fwd_ln_sm_margin,
+                zero_centered_gamma,
+            )
+            nvtx_range_pop(f"{nvtx_label}.norm")
 
         # Store unquantized layer norm output if we need to return it
         ln_out_return = None
@@ -335,7 +345,20 @@ class _LayerNormLinear(torch.autograd.Function):
             out_shape[0] //= tp_world_size
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
-
+        symm_out = None
+        if (
+            symmetric_ar_type is not None
+            and symmetric_ar_type.startswith("ubnext")
+            and parallel_mode == "row"
+            and tp_size > 1
+        ):
+            out_shape_list = list(tuple(inp.shape))
+            out_shape_list[-1] = out_features
+            symm_out = ubsymm_get_sym_tensor(
+                torch.Size(out_shape_list),
+                activation_dtype,
+                tp_group,
+            )
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
@@ -352,6 +375,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=reduce_scatter_out,
+            out=symm_out,
         )
         nvtx_range_pop(f"{nvtx_label}.gemm")
         # ------------------------------------------------------
@@ -380,7 +404,17 @@ class _LayerNormLinear(torch.autograd.Function):
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
-                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                    if symm_out is not None:
+                        out = ubsymm_allreduce(symm_out)
+                    else:
+                        fallback_symmetric = (
+                            "multimem_all_reduce"
+                            if symmetric_ar_type.startswith("ubnext")
+                            else symmetric_ar_type
+                        )
+                        out, _ = symmetric_all_reduce(
+                            out, tp_group, all_reduce_type=fallback_symmetric
+                        )
                 else:
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
@@ -1050,6 +1084,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
+            None,  # skip_layernorm
         )
 
 
@@ -1181,6 +1216,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
+        skip_layernorm: bool = False,
         name: str = None,
     ) -> None:
         super().__init__()
@@ -1274,7 +1310,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-
+            if (
+                self.symmetric_ar_type.startswith("ubnext")
+                and parallel_mode == "row"
+                and tp_size > 1
+            ):
+                ubsymm_request_allocator(
+                    self.tp_group,
+                    (
+                        int(os.environ.get("NVTE_UB_MAXBATCH", 64)),
+                        self.out_features,
+                    ),
+                    params_dtype,
+                )
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(
             torch.empty(self.in_features, device=device, dtype=params_dtype)
@@ -1293,7 +1341,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
         else:
             self.layer_norm_bias = None
-
+        self.skip_layernorm = skip_layernorm
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -1609,6 +1657,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.skip_layernorm,
                 debug,
             )
             out = fwd_fn(*args)
