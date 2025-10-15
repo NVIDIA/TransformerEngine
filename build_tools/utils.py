@@ -257,11 +257,11 @@ def cuda_archs() -> str:
     if archs is None:
         version = cuda_version()
         if version >= (13, 0):
-            archs = "75;80;89;90;100;100a;103a;120f"
+            archs = "75;80;89;90;100a;103a;120f"
         elif version >= (12, 9):
-            archs = "70;80;89;90;100;100a;103a;120f"
+            archs = "70;80;89;90;100a;103a;120f"
         elif version >= (12, 8):
-            archs = "70;80;89;90;100;100a;120f"
+            archs = "70;80;89;90;100a;120a"
         else:
             archs = "70;80;89;90"
     return archs

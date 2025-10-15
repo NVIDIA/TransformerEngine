@@ -224,6 +224,7 @@ __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, cons
       : "memory");
   return static_cast<bool>(waitComplete);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  return true;
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
@@ -425,15 +426,6 @@ using fp4e2m1x4 = __nv_fp4x4_e2m1;
 static_assert(sizeof(fp4e2m1x2) == 1);
 static_assert(sizeof(fp4e2m1x4) == 2);
 #endif  // CUDA_VERSION >= 12080
-
-// cvt.rn.satfinite.e2m1x2.f32 d, a, b;  // Convert two FP32 values to two packed e2m1
-
-// cvt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 introduced in PTX ISA version 8.6.
-
-// vt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 is supported on following architectures:
-// sm_100a
-// sm_101a
-// sm_120a
 
 // When converting to .e2m1x2 data formats, the destination operand d has .b8 type.
 // When converting two .f32 inputs to .e2m1x2, each input is converted to the specified format,
