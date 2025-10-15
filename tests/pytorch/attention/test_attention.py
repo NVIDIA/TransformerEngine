@@ -267,8 +267,12 @@ model_configs_max_score = {
     "max_score_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
     "max_score_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
     "max_score_3": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
-    "max_score_4": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"),
-    "max_score_5": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)),
+    "max_score_4": ModelConfig(
+        8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"
+    ),
+    "max_score_5": ModelConfig(
+        8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)
+    ),
     "max_score_6": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
 }
 

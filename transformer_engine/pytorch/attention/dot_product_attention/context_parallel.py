@@ -727,6 +727,7 @@ def cp_p2p_fwd_fused_attn(
         return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_score
     return out_per_step, softmax_lse_per_step, rng_states, attn_bias, None
 
+
 def cp_p2p_fwd_flash_attn(
     use_flash_attn_3,
     qkv_format,
@@ -1251,9 +1252,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
             if return_max_score:
-                max_score_per_step = [torch.empty(
-                    q.shape[-2], dtype=q.dtype, device=q.device
-                ) for _ in range(cp_size)]
+                max_score_per_step = [
+                    torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(cp_size)
+                ]
 
         # split qkv to two halves and prepare for load balancing
         assert qkv_format == "thd" or (
