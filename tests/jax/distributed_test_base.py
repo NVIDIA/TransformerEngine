@@ -154,7 +154,9 @@ def compare_ops(
         grad_args = tuple(range(len(inputs)))
 
     target_grad_func = jax.value_and_grad(target_func, argnums=grad_args)
-    target_jitter = jax.jit(target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
+    target_jitter = jax.jit(
+        target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings
+    )
     target_fwd, target_grads = target_jitter(*inputs, **kwargs)
     target_hlo = target_jitter.lower(*inputs, **kwargs).compile().as_text()
 
