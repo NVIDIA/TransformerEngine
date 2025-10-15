@@ -150,6 +150,13 @@ class TestFP8Functions(unittest.TestCase):
             else:
                 self.assertIsNotNone(quantizer.stochastic_rounding_rng_state)
 
+            expected_rht = (
+                quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
+                and quantizer.q_layout in {QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE}
+                and not test.disable_rht
+            )
+            self.assertEqual(quantizer.use_rht, expected_rht)
+
         x = jnp.ones((), dtype=jnp.float32)
         test_module = TestModule(assertion_func=assertion_func)
         param_key, sr_key = jax.random.split(jax.random.PRNGKey(0))
@@ -240,7 +247,7 @@ class TestFP8Functions(unittest.TestCase):
             disable_rht=True,
             disable_2d_quantization=True,
         )
-        with fp8_autocast(enabled=True, fp8_recipe=bs, mesh_resource=MeshResource()):
+        with autocast(enabled=True, recipe=bs, mesh_resource=MeshResource()):
             self.assertTrue(get_quantize_config().is_fp8_enabled())
             self._compare_nvfp4_scaling(bs)
             self._compare_nvfp4_scaling_quantizers(bs)

@@ -800,7 +800,7 @@ def _quantize_dbias_impl(
     rht_matrix = jnp.empty((1, 1), jnp.bfloat16)
     amax = x.amax
 
-    if quantizer.should_use_rht():
+    if quantizer.use_rht:
         use_rht = True
         rht_matrix = get_rht_matrix()
 

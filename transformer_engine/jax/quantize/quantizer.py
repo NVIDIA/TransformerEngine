@@ -219,10 +219,6 @@ class Quantizer(ABC):
         """
         return self.scaling_mode.get_scale_dtype()
 
-    def should_use_rht(self):
-        """Check if Randomized Hadamard Transform (RHT) should be applied."""
-        return False
-
 
 @register_pytree_node_class
 @dataclass
@@ -594,11 +590,13 @@ class NVFP4Quantizer(Quantizer):
         q_layout: Quantization axis
         data_layout: Data layout string (default: "NT")
         stochastic_rounding_rng_state: RNG state for stochastic rounding, must be of shape (4,) and dtype uint32. If None, stochastic rounding is disabled.
+        use_rht: Whether to apply Randomized Hadamard Transform (RHT) before quantization.
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVFP4_1D_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
     data_layout: str = "NT"
+    use_rht: bool = False
     stochastic_rounding_rng_state: Optional[jnp.ndarray] = None
 
     def __post_init__(self):
@@ -614,7 +612,7 @@ class NVFP4Quantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.stochastic_rounding_rng_state,)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.use_rht)
         return (children, aux_data)
 
     @classmethod
@@ -716,11 +714,8 @@ class NVFP4Quantizer(Quantizer):
             flatten_axis = x.ndim - flatten_axis
         x_shape = x.shape
 
-        # Split q_layout into rowwise and colwise components for JAX impl so we don't apply RHT incorrectly to the wrong axis
-        use_rht = self.should_use_rht(
-            q_layout=QuantizeLayout.COLWISE if is_colwise else QuantizeLayout.ROWWISE
-        )
-        if use_rht:
+        # We currently only have a single flag 'use_rht' on the quantizer. To avoid an unused rowwise flag, we assume RHT is only used for colwise quantization for now.
+        if self.use_rht and not is_colwise:
             x = apply_rht(x)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
@@ -821,21 +816,8 @@ class NVFP4Quantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=rowwise_flatten_axis,
-            has_rht_applied=use_rht,
+            has_rht_applied=self.use_rht,
         )
-
-    def should_use_rht(self, q_layout=None):
-        """Check if Randomized Hadamard Transform (RHT) should be applied."""
-        q_layout = q_layout if q_layout is not None else self.q_layout
-
-        disable_rht = (
-            hasattr(get_quantize_config(), "DISABLE_RHT") and get_quantize_config().DISABLE_RHT
-        )
-
-        is_colwise = q_layout in {QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE}
-        should_use_rht = self.scaling_mode == ScalingMode.NVFP4_1D_SCALING and is_colwise
-
-        return should_use_rht and not disable_rht
 
 
 @register_pytree_node_class

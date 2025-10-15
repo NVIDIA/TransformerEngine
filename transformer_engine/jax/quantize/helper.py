@@ -596,25 +596,25 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         # for x and grad
         return ScalingMode.NVFP4_1D_SCALING
 
-    def get_quantize_flax_meta(
-        self,
-        module,
-        collection_name: str,
-        postfix: str,
-        tensor_source: TensorSource,
-        quantizer_name: str,
-    ) -> QuantizeMeta:
-        """Get the quantization metadata for a given Flax module.
+    def _make_rht_quantize_meta(self, q_layout, tensor_source: TensorSource) -> QuantizeMeta:
+        """Create the quantization metadata for RHT if applicable."""
+        # Imported here to prevent circular import
+        from transformer_engine.jax.quantize import QuantizeLayout
 
-        Args:
-            module: The Flax module to get metadata for
-            collection_name: The name of the collection to store metadata in
-            postfix: Postfix to append to metadata names
-            tensor_source: The source type of the tensor (e.g., X, KERNEL, DGRAD)
-            quantizer_name: The name of the quantizer within the module
-        Returns:
-            The quantization metadata for the specified module and tensor. It can be empty if no metadata is needed.
-        """
+        use_rht = self.get_scaling_mode(
+            tensor_source
+        ) == ScalingMode.NVFP4_1D_SCALING and q_layout in {
+            QuantizeLayout.ROWWISE_COLWISE,
+            QuantizeLayout.COLWISE,
+        }
+        if self.DISABLE_RHT:
+            use_rht = False
+        return QuantizeMeta(use_rht=use_rht)
+
+    def _make_stochastic_rounding_rng_state(
+        self, module, tensor_source: TensorSource, quantizer_name: str
+    ) -> jnp.ndarray:
+        """Create the stochastic rounding rng state if applicable."""
         if self.DISABLE_STOCHASTIC_ROUNDING:
             return QuantizeMeta()
 
@@ -641,8 +641,34 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         sr_jax_rng_state = with_sharding_constraint(
             sr_jax_rng_state, jax.sharding.PartitionSpec(get_all_mesh_axes(), None)
         )
-
         return QuantizeMeta(stochastic_rounding_rng_state=sr_jax_rng_state)
+
+    def get_quantize_flax_meta(
+        self,
+        module,
+        collection_name: str,
+        postfix: str,
+        tensor_source: TensorSource,
+        quantizer_name: str,
+    ) -> QuantizeMeta:
+        """Get the quantization metadata for a given Flax module.
+
+        Args:
+            module: The Flax module to get metadata for
+            collection_name: The name of the collection to store metadata in
+            postfix: Postfix to append to metadata names
+            tensor_source: The source type of the tensor (e.g., X, KERNEL, DGRAD)
+            quantizer_name: The name of the quantizer within the module
+        Returns:
+            The quantization metadata for the specified module and tensor. It can be empty if no metadata is needed.
+        """
+        # Imported here to prevent circular import
+        from transformer_engine.jax.quantize import QuantizeLayout
+
+        return QuantizeMeta.merge(
+            self._make_rht_quantize_meta(QuantizeLayout.ROWWISE_COLWISE, tensor_source),
+            self._make_stochastic_rounding_rng_state(module, tensor_source, quantizer_name),
+        )
 
 
 _QUANTIZE_CONFIG = NoOpQuantizeConfig()
