@@ -291,6 +291,7 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
                                                                     const uint32_t rbits) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
+  if constexpr (is_blackwell) {
     // NOTE: rbits unused for rn.
     asm volatile(
         "{\n"
@@ -1382,16 +1383,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }  // namespace nvfp4_transpose
 #endif  // CUDA_VERSION > 12080
 
-// Compile-time flag to choose kernel variant
-#ifndef USE_2D_NVFP4_KERNEL
-#define USE_2D_NVFP4_KERNEL 0
-#endif
-
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           bool use_2d_quantization>
 void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                               const QuantizationConfig *quant_config, cudaStream_t stream) {
-#if CUDA_VERSION > 12080
+#if CUDA_VERSION >= 12080
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
