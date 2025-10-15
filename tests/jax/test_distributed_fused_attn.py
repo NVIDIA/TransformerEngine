@@ -600,6 +600,10 @@ class TestDistributedContextParallelSelfAttn:
             ),
         ],
     )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
+    )
     def test_context_parallel_alltoall_attn(
         self,
         device_count,
@@ -611,6 +615,7 @@ class TestDistributedContextParallelSelfAttn:
         attn_mask_type,
         dtype,
         qkv_layout,
+        load_balanced,
     ):
         self.impl_test_context_parallel_attn(
             device_count,
@@ -622,7 +627,7 @@ class TestDistributedContextParallelSelfAttn:
             attn_mask_type,
             dtype,
             qkv_layout,
-            load_balanced=True,
+            load_balanced=load_balanced,
             cp_strategy=CPStrategy.ALL_TO_ALL,
             use_shardy=False,
         )
