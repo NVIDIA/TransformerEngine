@@ -12,14 +12,13 @@ import torch
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from utils import ModelConfig, get_available_attention_backends
 
 # Check supported quantization schemes
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available = te.is_fp8_available()
+mxfp8_available = te.is_mxfp8_available()
 
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
@@ -79,9 +78,9 @@ def _warmup_model(
     """Perform forward and backward pass"""
     tensor = _make_input()
     for module in modules:
-        with te.fp8_autocast(
+        with te.autocast(
             enabled=quantization_recipe is not None,
-            fp8_recipe=quantization_recipe,
+            recipe=quantization_recipe,
         ):
             tensor = module(tensor)
     tensor.sum().backward()
@@ -159,8 +158,8 @@ def _measure_cached_memory(
     tensor = inp
     memory_before_forward = torch.cuda.memory_allocated() / (1024**2)
     for module in modules:
-        with te.fp8_autocast(
-            enabled=quantization_recipe is not None, fp8_recipe=quantization_recipe
+        with te.autocast(
+            enabled=quantization_recipe is not None, recipe=quantization_recipe
         ), offload_context:
             tensor = module(tensor)
         tensor = sync_function(tensor)
