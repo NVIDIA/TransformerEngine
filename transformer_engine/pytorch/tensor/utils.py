@@ -454,8 +454,8 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         )
 
 
-def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
-    """Check if an object is experimental.
+def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
+    """Check if an object is custom.
 
     Returns False if x is a torch.Tensor.
     """
@@ -463,4 +463,4 @@ def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None
         return False
     if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
         raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")
-    return hasattr(x, "experimental") and x.experimental
+    return hasattr(x, "custom") and x.custom

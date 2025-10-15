@@ -489,7 +489,7 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
         sequence_parallel (bool): Enable sequence parallelism if True.
         kwargs (dict): Additional arguments for the linear layer.
 
-        QUANTIZATION options: nvfp4 <=> experimental nvfp4 as a reference
+        QUANTIZATION options: nvfp4 <=> custom nvfp4 as a reference
     """
     params_dtype = torch.bfloat16
     use_bias = kwargs.get("bias", True)

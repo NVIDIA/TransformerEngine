@@ -229,8 +229,8 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     _quantizer: Optional[Quantizer] = None
 
     @property
-    def experimental(self) -> bool:
-        """Flag to indicate this quantizer is using experimental Kitchen middleware."""
+    def custom(self) -> bool:
+        """Flag to indicate this quantized tensor is custom."""
         return True
 
     def prepare_for_saving(
@@ -362,8 +362,8 @@ class NVFP4QuantizerRef(Quantizer):
         self.with_random_sign_mask = with_random_sign_mask
 
     @property
-    def experimental(self) -> bool:
-        """Flag to indicate this quantizer is using experimental Kitchen middleware"""
+    def custom(self) -> bool:
+        """Flag to indicate this quantizer is custom."""
         return True
 
     @staticmethod
