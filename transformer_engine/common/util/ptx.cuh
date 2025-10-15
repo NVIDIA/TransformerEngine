@@ -20,7 +20,7 @@
 
 namespace transformer_engine {
 
-template<int N>
+template <int N>
 struct Arch {
   constexpr static int id = N * 10;
   constexpr static bool is_arch = true;
@@ -42,7 +42,7 @@ struct ArchHelper {
   }
 };
 
-template<int N>
+template <int N>
 struct Family {
   constexpr static int id = N * 10;
   constexpr static bool is_arch = false;
@@ -66,7 +66,7 @@ struct FamilyHelper {
 
 template <int Arch, int ArchSpecific, int FamilySpecific, class T, class... U>
 constexpr bool is_supported_arch() {
-  constexpr bool compatible = [&]{
+  constexpr bool compatible = [&] {
     if constexpr (T::is_arch) {
       return ArchHelper<Arch, ArchSpecific, FamilySpecific, T::id>::compatible();
     } else {
@@ -119,18 +119,16 @@ constexpr bool is_supported_arch() {
 #define __NVTE_ARCH_FAMILY_SPECIFIC__ constexpr int FamilySpecific = 0;
 #endif
 
-#define ARCH_SPECIFIC(...)                                                       \
-  [&]                                                                            \
-  {                                                                              \
-    __NVTE_CURRENT_ARCH__                                                        \
-    __NVTE_ARCH_SPECIFIC__                                                       \
-    __NVTE_ARCH_FAMILY_SPECIFIC__                                                \
-    return transformer_engine::is_supported_arch<current_arch, ArchSpecific,     \
-                                                 FamilySpecific, __VA_ARGS__>(); \
+#define ARCH_SPECIFIC(...)                                                                   \
+  [&] {                                                                                      \
+    __NVTE_CURRENT_ARCH__                                                                    \
+    __NVTE_ARCH_SPECIFIC__                                                                   \
+    __NVTE_ARCH_FAMILY_SPECIFIC__                                                            \
+    return transformer_engine::is_supported_arch<current_arch, ArchSpecific, FamilySpecific, \
+                                                 __VA_ARGS__>();                             \
   }();
 
 namespace ptx {
-
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
@@ -233,7 +231,6 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint3
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
@@ -280,7 +277,6 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
     return exponent;
   }
 }
-
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global

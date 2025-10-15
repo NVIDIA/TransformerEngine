@@ -97,22 +97,23 @@ cutlass::Array<cutlass::float_e2m1_t, 8>
 StochasticNumericConverterBase(cutlass::Array<float, 8> const &input, cutlass::Array<uint32_t, 2> const &rbits) {
   using result_type = cutlass::Array<cutlass::float_e2m1_t, 8>;
   result_type output;
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  auto output_ptr = reinterpret_cast<uint16_t *>(&output);
-  asm volatile( \
-      "{\n" \
-      "cvt.rs.satfinite.e2m1x4.f32   %0, {%5, %4, %3, %2}, %10;\n" \
-      "cvt.rs.satfinite.e2m1x4.f32   %1, {%9, %8, %7, %6}, %11;\n" \
-      "}" \
-      : "=h"(output_ptr[0]),
+  constexpr bool has_rs = ARCH_SPECIFIC(Arch<100>, Arch<103>);
+  if constexpr (has_rs) {
+    auto output_ptr = reinterpret_cast<uint16_t *>(&output);
+    asm volatile( \
+        "{\n" \
+        "cvt.rs.satfinite.e2m1x4.f32   %0, {%5, %4, %3, %2}, %10;\n" \
+        "cvt.rs.satfinite.e2m1x4.f32   %1, {%9, %8, %7, %6}, %11;\n" \
+        "}" \
+        : "=h"(output_ptr[0]),
         "=h"(output_ptr[1])
-      : "f"(input[0]), "f"(input[1]), "f"(input[2]), "f"(input[3]),
+        : "f"(input[0]), "f"(input[1]), "f"(input[2]), "f"(input[3]),
         "f"(input[4]), "f"(input[5]), "f"(input[6]), "f"(input[7]),
         "r"(rbits[0]), "r"(rbits[1]));
-#else
-  NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                    "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  } else {
+    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
   return output;
 }
 
