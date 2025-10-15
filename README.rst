@@ -15,7 +15,7 @@ Latest News
 
 * [09/2025] `Pretraining Large Language Models with NVFP4 <https://www.arxiv.org/pdf/2509.25149>`_
 
-  A reference implementation of NVFP4 pretraining recipe is publicly available in PR `#2177 <https://github.com/NVIDIA/TransformerEngine/pull/2177>`_
+  A reference implementation of NVFP4 pretraining recipe is `publicly available <https://github.com/NVIDIA/TransformerEngine/pull/2177>`_ in Transformer Engine
 * [09/2025] `Native FP8 Mixed Precision Training for Ling 2.0, Open Sourced! <https://huggingface.co/blog/im0qianqian/ling-mini-2-fp8-mixed-precision-training-solution>`_
 * [09/2025] `Faster Training Throughput in FP8 Precision with NVIDIA NeMo <https://developer.nvidia.com/blog/faster-training-throughput-in-fp8-precision-with-nvidia-nemo/>`_
 * [08/2025] `How we built DeepL's next-generation LLMs with FP8 for training and inference <https://www.deepl.com/en/blog/tech/next-generation-llm-fp8-training>`_
