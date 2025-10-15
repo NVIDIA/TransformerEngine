@@ -168,13 +168,13 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     assert not isinstance(lhs_q, ScaledTensor2x)
     assert not isinstance(rhs_q, ScaledTensor2x)
 
-    def uses_rht(q: AbstractBaseTensor) -> bool:
-        return isinstance(q, ScaledTensor1x) and q.uses_rht
+    def has_rht_applied(q: AbstractBaseTensor) -> bool:
+        return isinstance(q, ScaledTensor1x) and q.has_rht_applied
 
-    assert uses_rht(lhs_q) == uses_rht(rhs_q), (
-        "With NVFP4_1D_SCALING, if one operand is colwise quantized, the other must be colwise"
-        " quantized as well. This is to ensure the RHT is applied to both and will cancel out in"
-        " the GEMM."
+    assert has_rht_applied(lhs_q) == has_rht_applied(rhs_q), (
+        "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be quantized"
+        " with RHT as well. This is to ensure the RHT is applied to both and will cancel out in the"
+        " GEMM."
     )
 
     return lhs_q, rhs_q

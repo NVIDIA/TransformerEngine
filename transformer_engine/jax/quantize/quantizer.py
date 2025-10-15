@@ -821,7 +821,7 @@ class NVFP4Quantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=rowwise_flatten_axis,
-            uses_rht=use_rht,
+            has_rht_applied=use_rht,
         )
 
     def should_use_rht(self, q_layout=None):

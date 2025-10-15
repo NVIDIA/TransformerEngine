@@ -914,7 +914,7 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
-        colwise_uses_rht=use_rht,
+        colwise_has_rht_applied=use_rht,
     )
     return out, dbias.astype(dq_dtype)
 
