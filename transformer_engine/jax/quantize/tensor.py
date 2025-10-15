@@ -719,6 +719,8 @@ class ScaledTensorFactory:
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
         """
+        assert not rowwise_has_rht_applied, "RHT is not supported for rowwise quantization yet"
+
         if q_layout == QuantizeLayout.ROWWISE_COLWISE:
             return ScaledTensorFactory.create_2x(
                 data,
