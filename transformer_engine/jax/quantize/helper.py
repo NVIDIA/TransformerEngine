@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 from typing import Optional, Tuple, Dict, Union, Sequence, Type, List
 from functools import reduce, lru_cache
 import operator
@@ -623,9 +624,12 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
 
         sr_jax_rng = module.make_rng("sr_rng")
         # Get a unique key for this quantizer
-        sr_jax_rng = jax.jit(jax.random.fold_in)(
-            sr_jax_rng, hash(quantizer_name) % jnp.iinfo(jnp.int32).max
+        # Use hashlib to get a deterministic hash value for quantizer_name
+        quantizer_hash = (
+            int(hashlib.sha256(quantizer_name.encode("utf-8")).hexdigest(), 16)
+            % jnp.iinfo(jnp.int32).max
         )
+        sr_jax_rng = jax.jit(jax.random.fold_in)(sr_jax_rng, quantizer_hash)
 
         # Generate 4 random uint32 values from the JAX PRNG key
         shape = (4,)
