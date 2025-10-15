@@ -166,7 +166,6 @@ list(APPEND transformer_engine_cuda_sources
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     gemm/cutlass_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
@@ -189,6 +188,7 @@ list(APPEND transformer_engine_cuda_sources
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
+     gemm/cutlass_grouped_gemm.cu
      util/cast.cu
      activation/gelu.cu
      activation/relu.cu
@@ -341,28 +341,35 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
-set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                            fused_softmax/scaled_upper_triang_masked_softmax.cu
-                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                            multi_tensor/adam.cu
-                            multi_tensor/compute_scale.cu
-                            multi_tensor/l2norm.cu
-                            multi_tensor/scale.cu
-                            multi_tensor/sgd.cu
-                            fused_attn/flash_attn.cu
-                            fused_attn/context_parallel.cu
-                            fused_attn/kv_cache.cu
-                            PROPERTIES
-                            COMPILE_OPTIONS "--use_fast_math")
+set(nvte_sources_with_fast_math)
+list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
+                                        fused_softmax/scaled_upper_triang_masked_softmax.cu
+                                        fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                                        multi_tensor/adam.cu
+                                        multi_tensor/compute_scale.cu
+                                        multi_tensor/l2norm.cu
+                                        multi_tensor/scale.cu
+                                        multi_tensor/sgd.cu
+                                        fused_attn/flash_attn.cu
+                                        fused_attn/context_parallel.cu
+                                        fused_attn/kv_cache.cu)
+
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  set_source_files_properties(activation/gelu.cu
-                              activation/relu.cu
-                              activation/swiglu.cu
-                              util/cast.cu
-                              PROPERTIES
-                              COMPILE_OPTIONS "--use_fast_math")
+  list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/relu.cu
+                                          activation/swiglu.cu
+                                          util/cast.cu)
 endif()
+
+foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
+  set_property(
+    SOURCE ${cuda_source}
+    APPEND
+    PROPERTY
+    COMPILE_OPTIONS "--use_fast_math")
+endforeach()
+
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
