@@ -175,11 +175,13 @@ class CPStrategy(Enum):
     DEFAULT: Default strategy will choose automatically if context parallel axis is sharded.
     ALL_GATHER: All-gather/reduce scatter implementation.
     RING: Ring attention implementation (https://arxiv.org/abs/2310.01889).
+    ALL_TO_ALL: All-to-all implementation.
     """
 
     DEFAULT = 0
     ALL_GATHER = 1
     RING = 2
+    ALL_TO_ALL = 3
 
 
 class ReorderStrategy(Enum):

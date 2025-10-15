@@ -662,6 +662,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             "ALL_GATHER": CPStrategy.ALL_GATHER,
             "ALLGATHER": CPStrategy.ALL_GATHER,  # Alternative spelling
             "RING": CPStrategy.RING,
+            "ALL_TO_ALL": CPStrategy.ALL_TO_ALL,
+            "ALLTOALL": CPStrategy.ALL_TO_ALL,  # Alternative spelling
+            "A2A": CPStrategy.ALL_TO_ALL,  # Short form
         }
 
         strategy_key = self.context_parallel_strategy.upper()

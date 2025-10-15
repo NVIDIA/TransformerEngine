@@ -1629,6 +1629,249 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
 register_primitive(FusedAttnCPWithAllGatherBwdPrimitive)
 
 
+class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
+    """
+        Fused Attention Forward with Context Parallelism Primitive.
+        Like Ulysses, applying A2A to QKVO.
+        Refer the paper `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        
+        helper = _FusedAttnCPWithA2AHelper(mesh, config)
+        q_aval = arg_infos[0].aval if hasattr(arg_infos[0], 'aval') else arg_infos[0]
+        num_heads = q_aval.shape[2]
+        helper.check_supported(num_heads)
+        
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[4] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            q_, k_, v_ = helper.all_to_all(q, True), helper.all_to_all(k, True), helper.all_to_all(v, True)
+            output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                q_,
+                k_,
+                v_,
+                bias,
+                seed,
+                q_seqlen,
+                kv_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,
+                config=helper.get_step_config(),
+            )
+            output = helper.all_to_all(output, False)
+            # softmax_aux has shape [b, h/cp, s, 1] with heads at dim 1, seq at dim 2
+            softmax_aux = helper.all_to_all(softmax_aux, False, seq_dim=2, heads_dim=1)
+            return output, softmax_aux, rng_state
+
+        return mesh, impl, out_shardings, arg_shardings
+
+register_primitive(FusedAttnCPWithAllToAllFwdPrimitive)
+
+class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
+    """
+        Fused Attention Backward with Context Parallelism Primitive.
+        Like Ulysses, applying A2A to QKVO and its derivatives.
+        Refer the paper `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_.
+    """
+    
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unnecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        
+        helper = _FusedAttnCPWithA2AHelper(mesh, config)
+        helper.check_supported()
+        
+        dq_sharding = result_infos[0].sharding
+        dk_sharding = result_infos[1].sharding
+        dv_sharding = result_infos[2].sharding
+        dbias_sharding = result_infos[3].sharding
+        arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos])
+        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+        
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            # Apply all-to-all to inputs before backward pass
+            q_, k_, v_ = helper.all_to_all(q, True), helper.all_to_all(k, True), helper.all_to_all(v, True)
+            doutput_ = helper.all_to_all(doutput, True)
+            # softmax_aux has shape [b, h, s/cp, 1] with heads at dim 1, seq at dim 2
+            softmax_aux_ = helper.all_to_all(softmax_aux, True, seq_dim=2, heads_dim=1)
+            
+            # Perform backward pass
+            dq, dk, dv, dbias = FusedAttnBwdPrimitive.impl(
+                q_,
+                k_,
+                v_,
+                bias,
+                softmax_aux_,
+                rng_state,
+                output,
+                doutput_,
+                q_seqlen,
+                kv_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,
+                config=helper.get_step_config(),
+            )
+            
+            # Apply all-to-all to gradients to restore original sharding
+            dq_ = helper.all_to_all(dq, False)
+            dk_ = helper.all_to_all(dk, False)
+            dv_ = helper.all_to_all(dv, False)
+            
+            return dq_, dk_, dv_, dbias
+        
+        return mesh, impl, out_shardings, arg_shardings
+
+register_primitive(FusedAttnCPWithAllToAllBwdPrimitive)
+
+
+@dataclass(frozen=True)
+class _FusedAttnCPWithA2AHelper:
+    """Helper class to assist with all-to-all communication for context parallel attention.
+    
+    This class provides methods for performing all-to-all communication across devices
+    and handles both THD and BSHD layout formats appropriately.
+    """
+    
+    mesh: jax.sharding.Mesh
+    config: _FusedAttnConfig
+    
+    def check_supported(self, num_heads):
+        """Checks if the context parallel implementation is supported by the given arguments."""
+        header = "Context parallel fused A2A attention"
+        if self.config.qkv_layout.is_thd():
+            raise ValueError(f"{header} does not support THD format")
+        elif self.config.qkv_layout.get_qkv_format() is QKVFormat.SBHD:
+            raise ValueError(f"{header} does not support SBHD format")
+        
+        cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+        if num_heads % cp_size != 0:
+            raise ValueError(
+                f"{header} requires num_heads ({num_heads}) to be divisible by "
+                f"context parallel size ({cp_size})"
+            )
+    
+    def all_to_all(self, x, before_attn=True, seq_dim=1, heads_dim=2):
+        """
+        Performs all-to-all communication for context parallelism.
+        
+        Args:
+            x: Input tensor
+            before_attn: If True, converts seq->heads dist. If False, converts heads->seq dist.
+            seq_dim: Position of sequence dimension (default 1 for BSHD: [b, s, h, d])
+            heads_dim: Position of heads dimension (default 2 for BSHD: [b, s, h, d])
+        
+        Returns:
+            Tensor after all-to-all with redistributed dimensions
+            
+        Shape transforms for BSHD (seq_dim=1, heads_dim=2):
+            before_attn=True:  [b, s/cp, h, d] -> [b, s, h/cp, d]
+            before_attn=False: [b, s, h/cp, d] -> [b, s/cp, h, d]
+            
+        Shape transforms for softmax_aux (seq_dim=2, heads_dim=1):
+            before_attn=False: [b, h/cp, s, ...] -> [b, h, s/cp, ...]
+        """
+        cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+        shape = x.shape
+        
+        if before_attn:
+            # Input: sharded on seq, want to shard on heads
+            # Split heads: [..., s/cp, ..., h, ...] -> [..., s/cp, ..., cp, h/cp, ...]
+            x = x.reshape(*shape[:heads_dim], cp_size, shape[heads_dim] // cp_size, *shape[heads_dim+1:])
+            # A2A splits cp dimension and concatenates into seq
+            split_axis = heads_dim
+            concat_axis = seq_dim
+        else:
+            # Input: sharded on heads, want to shard on seq
+            # Unflatten seq: [..., s, ..., h/cp, ...] -> [..., cp, s/cp, ..., h/cp, ...]
+            s_global = shape[seq_dim]
+            s_local = s_global // cp_size
+            new_shape = list(shape)
+            new_shape[seq_dim:seq_dim+1] = [cp_size, s_local]
+            x = x.reshape(new_shape)
+            # A2A splits cp dimension (at seq_dim) and concatenates into heads
+            split_axis = seq_dim
+            concat_axis = heads_dim
+        
+        # All-to-all communication
+        x = lax_paral_op(
+            x, lax.all_to_all, self.config.cp_axis, mesh=self.mesh,
+            split_axis=split_axis, concat_axis=concat_axis, tiled=True,
+        )
+        
+        return x
+    
+    def get_step_config(self) -> _FusedAttnConfig:
+        """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        return _FusedAttnConfig(
+            attn_bias_type=self.config.attn_bias_type,
+            attn_mask_type=self.config.attn_mask_type,
+            qkv_layout=self.config.qkv_layout,
+            scaling_factor=self.config.scaling_factor,
+            dropout_probability=self.config.dropout_probability,
+            is_training=self.config.is_training,
+            max_segments_per_seq=self.config.max_segments_per_seq,
+            window_size=self.config.window_size,
+            context_parallel_load_balanced=self.config.context_parallel_load_balanced,
+            cp_axis="",  # No CP axis for the inner attention call
+            cp_striped_window_size=None,
+        )
+
+
 @dataclass(frozen=True)
 class _FusedAttnCPWithP2PHelper:
     """Helper class to assist with running the P2P ring strategy for CP attention."""
@@ -2641,6 +2884,8 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnStripedFwdPrimitive.outer_primitive
             else:
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
+        case CPStrategy.ALL_TO_ALL:
+            primitive = FusedAttnCPWithAllToAllFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     output, softmax_aux, rng_state = primitive.bind(
@@ -2767,6 +3012,8 @@ def fused_attn_bwd(
                 primitive = FusedRingAttnStripedBwdPrimitive.outer_primitive
             else:
                 primitive = FusedRingAttnBwdPrimitive.outer_primitive
+        case CPStrategy.ALL_TO_ALL:
+            primitive = FusedAttnCPWithAllToAllBwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     *qkv_grads, bias_grad = primitive.bind(
