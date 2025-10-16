@@ -1848,7 +1848,7 @@ class _FusedAttnCPWithA2AHelper:
         header = "Context parallel fused A2A attention"
         if self.config.qkv_layout.is_thd():
             raise ValueError(f"{header} does not support THD format")
-        elif self.config.qkv_layout.get_qkv_format() is QKVFormat.SBHD:
+        if self.config.qkv_layout.get_qkv_format() is QKVFormat.SBHD:
             raise ValueError(f"{header} does not support SBHD format")
 
     def get_qkv_heads_dims(self, seq_dim=1):
@@ -1860,16 +1860,16 @@ class _FusedAttnCPWithA2AHelper:
             # [batch..., seq, 3, heads, dim]
             heads_dim = seq_dim + 2
             return heads_dim, heads_dim, heads_dim
-        elif self.config.qkv_layout.is_kvpacked():
+        if self.config.qkv_layout.is_kvpacked():
             # Q=[batch..., seq, heads, dim]
             # KV=[batch..., seq, 2, heads, dim]
             q_heads_dim = seq_dim + 1
             kv_heads_dim = seq_dim + 2
             return q_heads_dim, kv_heads_dim, kv_heads_dim
-        else:  # separate
-            # Q/K/V=[batch..., seq, heads, dim]
-            heads_dim = seq_dim + 1
-            return heads_dim, heads_dim, heads_dim
+        # separate
+        # Q/K/V=[batch..., seq, heads, dim]
+        heads_dim = seq_dim + 1
+        return heads_dim, heads_dim, heads_dim
 
     def all_to_all(self, x, before_attn=True, seq_dim=1, heads_dim=2):
         """
