@@ -1651,8 +1651,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 }
 
 void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              const std::optional<TensorWrapper>& noop_flag,
-                              const bool pdl_sync, const bool pdl_trigger) {
+                              const std::optional<TensorWrapper>& noop_flag, const bool pdl_sync,
+                              const bool pdl_trigger) {
   // TODO: add pdl_sync/pdl_trigger for nvfp4
   this->quantize_impl(input, out, noop_flag, true);
 }

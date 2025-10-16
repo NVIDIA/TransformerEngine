@@ -167,7 +167,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   int parity = 0;
 
-// Block until the previous kernel has completed and flushed results to global memory.
+  // Block until the previous kernel has completed and flushed results to global memory.
   if (pdl_sync) {
     cudaGridDependencySynchronize();
   }
