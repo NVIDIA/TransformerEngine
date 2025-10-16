@@ -21,9 +21,9 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 
-#if CUDA_VERSION > 12080
+#if CUDA_VERSION >= 12080
 #include <cuda_fp4.h>
-#endif  // CUDA_VERSION > 12080
+#endif  // CUDA_VERSION >= 12080
 
 namespace transformer_engine {
 namespace dispatch {

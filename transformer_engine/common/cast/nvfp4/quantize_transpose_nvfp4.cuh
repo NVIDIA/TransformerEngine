@@ -32,7 +32,7 @@ using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
-#if CUDA_VERSION > 12080
+#if CUDA_VERSION >= 12080
 
 constexpr size_t SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 
@@ -1150,7 +1150,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-#endif  // CUDA_VERSION > 12080
+#endif  // CUDA_VERSION >= 12080
 }  // namespace quantize_transpose_kernel
 
 // Compile-time flag to choose kernel variant
@@ -1161,9 +1161,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
 template <bool use_2d_quantization>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                         const QuantizationConfig *quant_config, cudaStream_t stream) {
+#if CUDA_VERSION >= 12080
   using namespace quantize_transpose_kernel;
   using namespace ptx;
-#if CUDA_VERSION > 12080
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
@@ -1282,7 +1282,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
       }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // CUDA_VERSION > 12080
+#endif  // CUDA_VERSION >= 12080
 }
 
 }  // namespace nvfp4
