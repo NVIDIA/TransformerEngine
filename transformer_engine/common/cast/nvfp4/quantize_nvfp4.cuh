@@ -543,7 +543,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 // 1. r16c0  - Rowwise NVFP4
 // 2. r16c32 - Rowwise NVFP4 AND Colwise MXFP8
 inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
-  #if CUDA_VERSION >= 12080
+#if CUDA_VERSION >= 12080
   using namespace quantize_kernel;
   using namespace ptx;
   checkCuDriverContext(stream);
