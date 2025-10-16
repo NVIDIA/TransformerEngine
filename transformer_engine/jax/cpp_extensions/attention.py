@@ -1678,20 +1678,24 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             assert q_heads % cp_size == 0, "q_heads must be divisible by cp_size"
             assert kv_heads % cp_size == 0, "kv_heads must be divisible by cp_size"
-            
+
             # Load balanced causal attention is not yet supported for all-to-all strategy
             if config.context_parallel_load_balanced:
                 raise NotImplementedError(
                     "context_parallel_load_balanced is not supported with all-to-all strategy"
                 )
 
-            assert config.qkv_layout in [QKVLayout.BS3HD, QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+            assert config.qkv_layout in [
+                QKVLayout.BS3HD,
+                QKVLayout.BSHD_BS2HD,
+                QKVLayout.BSHD_BSHD_BSHD,
+            ]
 
             # Apply all-to-all to transform from seq-sharded to heads-sharded
             q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
             k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
             v_ = helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
-            
+
             output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                 q_,
                 k_,
@@ -1708,7 +1712,7 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
                 _kv_segment_pos,
                 config=helper.get_step_config(),
             )
-            
+
             # Apply all-to-all to transform from heads-sharded to seq-sharded (scatter in seq dimension)
             # output is always [b, s, h/cp, d] -> heads_dim=2
             output = helper.all_to_all(output, False, seq_dim=1, heads_dim=2)
@@ -1748,10 +1752,10 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        
+
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
-        
+
         def impl(
             q,
             k,
@@ -1778,13 +1782,13 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             assert q_heads % cp_size == 0, "q_heads must be divisible by cp_size"
             assert k_heads % cp_size == 0, "k_heads must be divisible by cp_size"
-            
+
             # Load balanced causal attention is not yet supported for all-to-all strategy
             if config.context_parallel_load_balanced:
                 raise NotImplementedError(
                     "context_parallel_load_balanced is not supported with all-to-all strategy"
                 )
-            
+
             q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
             k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
             v_ = helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
@@ -1815,7 +1819,7 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
                 _kv_segment_pos,
                 config=helper.get_step_config(),
             )
-            
+
             # Apply all-to-all to gradients to restore original sharding (scatter in seq dimension)
             dq_heads_dim, dk_heads_dim, dv_heads_dim = helper.get_qkv_heads_dims(seq_dim=1)
             dq_ = helper.all_to_all(dq, False, seq_dim=1, heads_dim=dq_heads_dim)
@@ -1883,7 +1887,7 @@ class _FusedAttnCPWithA2AHelper:
             Tensor after all-to-all with redistributed dimensions
         """
         if x.shape[0] == 0:
-            return x # If tensor is empty, then no communication is performed.
+            return x  # If tensor is empty, then no communication is performed.
 
         cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
         if before_attn:
@@ -1902,20 +1906,25 @@ class _FusedAttnCPWithA2AHelper:
         # Reshape: insert cp_size at split_axis
         assert shape[split_axis] % cp_size == 0
         x = x.reshape(
-            *shape[:split_axis], cp_size, shape[split_axis] // cp_size, *shape[split_axis + 1:]
+            *shape[:split_axis], cp_size, shape[split_axis] // cp_size, *shape[split_axis + 1 :]
         )
         if concat_axis > split_axis:
-            concat_axis += 1 # Added one dimenstion before concat_axis, need to adjust it.
+            concat_axis += 1  # Added one dimenstion before concat_axis, need to adjust it.
 
         # Perform all-to-all
         x = lax_paral_op(
-            x, lax.all_to_all, self.config.cp_axis, mesh=self.mesh,
-            split_axis=split_axis, concat_axis=concat_axis, tiled=True
+            x,
+            lax.all_to_all,
+            self.config.cp_axis,
+            mesh=self.mesh,
+            split_axis=split_axis,
+            concat_axis=concat_axis,
+            tiled=True,
         )
 
         # Merge the two dimensions created by all-to-all at split_axis
         new_shape = list(x.shape)
-        new_shape[split_axis:split_axis + 2] = [x.shape[split_axis] * x.shape[split_axis + 1]]
+        new_shape[split_axis : split_axis + 2] = [x.shape[split_axis] * x.shape[split_axis + 1]]
         return x.reshape(new_shape)
 
     def get_step_config(self) -> _FusedAttnConfig:
