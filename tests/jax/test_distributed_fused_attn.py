@@ -617,6 +617,10 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
+        if data_shape[2] % (mesh_shape[1] * mesh_shape[2] * kv_groups) != 0:
+            pytest.skip("Skipping test as num_heads is not divisible by cp_size * tp_size * kv_groups")
+        if load_balanced:
+            pytest.skip("Load balanced causal attention is not yet supported with all-to-all strategy")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,

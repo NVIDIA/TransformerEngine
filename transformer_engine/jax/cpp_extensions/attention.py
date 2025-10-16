@@ -1644,9 +1644,7 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
         helper = _FusedAttnCPWithA2AHelper(mesh, config)
-        q_aval = arg_infos[0].aval if hasattr(arg_infos[0], "aval") else arg_infos[0]
-        num_heads = q_aval.shape[2]
-        helper.check_supported(num_heads)
+        helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
@@ -1673,11 +1671,26 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
             _q_segment_pos,
             _kv_segment_pos,
         ):
-            q_, k_, v_ = (
-                helper.all_to_all(q, True),
-                helper.all_to_all(k, True),
-                helper.all_to_all(v, True),
-            )
+            # Get heads dimensions based on QKV layout
+            q_heads_dim, k_heads_dim, v_heads_dim = helper.get_qkv_heads_dims(seq_dim=1)
+            q_heads = q.shape[q_heads_dim]
+            kv_heads = k.shape[k_heads_dim]
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            assert q_heads % cp_size == 0, "q_heads must be divisible by cp_size"
+            assert kv_heads % cp_size == 0, "kv_heads must be divisible by cp_size"
+            
+            # Load balanced causal attention is not yet supported for all-to-all strategy
+            if config.context_parallel_load_balanced:
+                raise NotImplementedError(
+                    "context_parallel_load_balanced is not supported with all-to-all strategy"
+                )
+
+            # Apply all-to-all to transform from seq-sharded to heads-sharded (gather in seq dimension)
+            q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
+            k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
+            # For KVPACKED layout, v is empty placeholder
+            v_ = v if v.shape[0] == 0 else helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
+            
             output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                 q_,
                 k_,
@@ -1694,7 +1707,10 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
                 _kv_segment_pos,
                 config=helper.get_step_config(),
             )
-            output = helper.all_to_all(output, False)
+            
+            # Apply all-to-all to transform from heads-sharded to seq-sharded (scatter in seq dimension)
+            # output is always [b, s, h/cp, d] -> heads_dim=2
+            output = helper.all_to_all(output, False, seq_dim=1, heads_dim=2)
             # softmax_aux has shape [b, h/cp, s, 1] with heads at dim 1, seq at dim 2
             softmax_aux = helper.all_to_all(softmax_aux, False, seq_dim=2, heads_dim=1)
             return output, softmax_aux, rng_state
@@ -1720,17 +1736,29 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
         helper = _FusedAttnCPWithA2AHelper(mesh, config)
-        q_aval = arg_infos[0].aval if hasattr(arg_infos[0], "aval") else arg_infos[0]
-        num_heads = q_aval.shape[2]
-        helper.check_supported(num_heads)
+        helper.check_supported()
 
         dq_sharding = result_infos[0].sharding
         dk_sharding = result_infos[1].sharding
         dv_sharding = result_infos[2].sharding
         dbias_sharding = result_infos[3].sharding
-        arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos])
+        
+        # For AllToAll context parallel, output and doutput need to be seq-sharded
+        # to match the forward output sharding (before they get transformed to heads-sharded)
+        arg_shardings = list([arg_i.sharding for arg_i in arg_infos])
+        # arg_infos: [q, k, v, bias, softmax_aux, rng_state, output, doutput, q_seqlen, ...]
+        # output is at index 6, doutput is at index 7
+        # They should have the same sharding as the forward output (seq-sharded on cp axis)
+        output_seq_sharding = NamedSharding(mesh, PartitionSpec(None, config.cp_axis, None, None))
+        softmax_aux_seq_sharding = NamedSharding(mesh, PartitionSpec(None, None, config.cp_axis, None))
+        arg_shardings[4] = softmax_aux_seq_sharding  # softmax_aux [b, h, s/cp, 1]
+        arg_shardings[6] = output_seq_sharding  # output [b, s/cp, h, d]
+        arg_shardings[7] = output_seq_sharding  # doutput [b, s/cp, h, d]
+        arg_shardings = tuple(arg_shardings)
+        
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
-
+        
+        
         def impl(
             q,
             k,
@@ -1750,12 +1778,29 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
             _kv_segment_pos,
         ):
             # Apply all-to-all to inputs before backward pass
-            q_, k_, v_ = (
-                helper.all_to_all(q, True),
-                helper.all_to_all(k, True),
-                helper.all_to_all(v, True),
-            )
-            doutput_ = helper.all_to_all(doutput, True)
+            # Get heads dimensions based on QKV layout (same as forward)
+            q_heads_dim, k_heads_dim, v_heads_dim = helper.get_qkv_heads_dims(seq_dim=1)
+            q_heads = q.shape[q_heads_dim]
+            k_heads = k.shape[k_heads_dim]
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            assert q_heads % cp_size == 0, "q_heads must be divisible by cp_size"
+            assert k_heads % cp_size == 0, "k_heads must be divisible by cp_size"
+            
+            # Load balanced causal attention is not yet supported for all-to-all strategy
+            if config.context_parallel_load_balanced:
+                raise NotImplementedError(
+                    "context_parallel_load_balanced is not supported with all-to-all strategy"
+                )
+            
+            # Apply all-to-all to transform from seq-sharded to heads-sharded (gather in seq dimension)
+            q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
+            k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
+            # For KVPACKED layout, v is empty placeholder
+            v_ = v if v.shape[0] == 0 else helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
+            # doutput is always separate [b, s, h, d], so heads_dim=2
+            doutput_ = helper.all_to_all(doutput, True, seq_dim=1, heads_dim=2)
+            # output has the same shape as doutput, needs the same transformation
+            output_ = helper.all_to_all(output, True, seq_dim=1, heads_dim=2)
             # softmax_aux has shape [b, h, s/cp, 1] with heads at dim 1, seq at dim 2
             softmax_aux_ = helper.all_to_all(softmax_aux, True, seq_dim=2, heads_dim=1)
 
@@ -1767,7 +1812,7 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
                 bias,
                 softmax_aux_,
                 rng_state,
-                output,
+                output_,
                 doutput_,
                 q_seqlen,
                 kv_seqlen,
@@ -1779,11 +1824,15 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
                 _kv_segment_pos,
                 config=helper.get_step_config(),
             )
-
-            # Apply all-to-all to gradients to restore original sharding
-            dq_ = helper.all_to_all(dq, False)
-            dk_ = helper.all_to_all(dk, False)
-            dv_ = helper.all_to_all(dv, False)
+            
+            # Apply all-to-all to gradients to restore original sharding (scatter in seq dimension)
+            # Gradients have the same shape as inputs, so use same heads_dim
+            dq_heads_dim, dk_heads_dim, dv_heads_dim = helper.get_qkv_heads_dims(seq_dim=1)
+            
+            dq_ = helper.all_to_all(dq, False, seq_dim=1, heads_dim=dq_heads_dim)
+            dk_ = helper.all_to_all(dk, False, seq_dim=1, heads_dim=dk_heads_dim)
+            # For KVPACKED layout, dv is empty placeholder
+            dv_ = dv if dv.shape[0] == 0 else helper.all_to_all(dv, False, seq_dim=1, heads_dim=dv_heads_dim)
 
             return dq_, dk_, dv_, dbias
 
@@ -1795,16 +1844,22 @@ register_primitive(FusedAttnCPWithAllToAllBwdPrimitive)
 
 @dataclass(frozen=True)
 class _FusedAttnCPWithA2AHelper:
-    """Helper class to assist with all-to-all communication for context parallel attention.
+    """
+    Helper class for Ulysses-style context parallelism using all-to-all communication.
 
-    This class provides methods for performing all-to-all communication across devices
-    and handles both THD and BSHD layout formats appropriately.
+    This helper manages the all-to-all communication pattern that redistributes tensors
+    between sequence-sharded and heads-sharded layouts. This enables context parallelism
+    by allowing each rank to process different parts of the sequence and heads dimensions.
+
+    Attributes:
+        mesh: JAX mesh for distributed computation
+        config: Fused attention configuration including QKV layout information
     """
 
     mesh: jax.sharding.Mesh
     config: _FusedAttnConfig
 
-    def check_supported(self, num_heads):
+    def check_supported(self):
         """Checks if the context parallel implementation is supported by the given arguments."""
         header = "Context parallel fused A2A attention"
         if self.config.qkv_layout.is_thd():
@@ -1812,69 +1867,98 @@ class _FusedAttnCPWithA2AHelper:
         elif self.config.qkv_layout.get_qkv_format() is QKVFormat.SBHD:
             raise ValueError(f"{header} does not support SBHD format")
 
-        cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-        if num_heads % cp_size != 0:
-            raise ValueError(
-                f"{header} requires num_heads ({num_heads}) to be divisible by "
-                f"context parallel size ({cp_size})"
-            )
+    def get_qkv_heads_dims(self, seq_dim=1):
+        """
+        Determines the heads dimension indices for Q, K, V tensors based on QKV layout.
+        
+        The heads dimension position depends on the QKV packing format:
+        - QKVPacked: All tensors packed together with dimension [qkv=3, heads, dim]
+        - KVPacked: Q is separate, K and V are packed with dimension [kv=2, heads, dim]
+        - Separate: All tensors are separate with dimension [heads, dim]
+        
+        Args:
+            seq_dim: The sequence dimension position (default 1 for BSHD format)
+        
+        Returns:
+            Tuple of (q_heads_dim, k_heads_dim, v_heads_dim) indicating the position
+            of the heads dimension for each tensor.
+        
+        Examples for BSHD layout (seq_dim=1):
+            QKVPacked: Q=[b, s, 3, h, d] -> returns (3, 3, 3)
+            KVPacked:  Q=[b, s, h, d], K=[b, s, 2, h, d], V=[b, s, 2, h, d] -> returns (2, 3, 3)
+            Separate:  Q=[b, s, h, d], K=[b, s, h, d], V=[b, s, h, d] -> returns (2, 2, 2)
+        """
+        if self.config.qkv_layout.is_qkvpacked():
+            # QKV all packed together: [batch..., seq, 3, heads, dim]
+            # Heads dimension is at seq_dim + 2 for all tensors
+            heads_dim = seq_dim + 2
+            return heads_dim, heads_dim, heads_dim
+        elif self.config.qkv_layout.is_kvpacked():
+            # Q separate, K and V packed: Q=[batch..., seq, heads, dim]
+            #                              K/V=[batch..., seq, 2, heads, dim]
+            q_heads_dim = seq_dim + 1  # Q has no packing dimension
+            kv_heads_dim = seq_dim + 2  # K/V have packing dimension [2, heads, dim]
+            return q_heads_dim, kv_heads_dim, kv_heads_dim
+        else:  # separate
+            # All separate: Q/K/V=[batch..., seq, heads, dim]
+            # Heads dimension is at seq_dim + 1 for all tensors
+            heads_dim = seq_dim + 1
+            return heads_dim, heads_dim, heads_dim
 
     def all_to_all(self, x, before_attn=True, seq_dim=1, heads_dim=2):
         """
-        Performs all-to-all communication for context parallelism.
+        Performs all-to-all communication for context parallelism (Ulysses-style).
+
+        Redistributes data between sequence and heads dimensions across CP ranks.
 
         Args:
             x: Input tensor
-            before_attn: If True, converts seq->heads dist. If False, converts heads->seq dist.
-            seq_dim: Position of sequence dimension (default 1 for BSHD: [b, s, h, d])
-            heads_dim: Position of heads dimension (default 2 for BSHD: [b, s, h, d])
+            before_attn: True = seq-sharded -> heads-sharded, False = heads-sharded -> seq-sharded
+            seq_dim: Sequence dimension position (typically 1 for BSHD)
+            heads_dim: Heads dimension position (depends on QKV layout)
 
         Returns:
             Tensor after all-to-all with redistributed dimensions
-
-        Shape transforms for BSHD (seq_dim=1, heads_dim=2):
-            before_attn=True:  [b, s/cp, h, d] -> [b, s, h/cp, d]
-            before_attn=False: [b, s, h/cp, d] -> [b, s/cp, h, d]
-
-        Shape transforms for softmax_aux (seq_dim=2, heads_dim=1):
-            before_attn=False: [b, h/cp, s, ...] -> [b, h, s/cp, ...]
         """
+        if x.shape[0] == 0:
+            return x
+
         cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+        if before_attn:
+            num_heads = x.shape[heads_dim]
+            assert num_heads % cp_size == 0, "num_heads must be divisible by cp_size"
+
         shape = x.shape
 
+        # Determine which dimension to split and where to concat
         if before_attn:
-            # Input: sharded on seq, want to shard on heads
-            # Split heads: [..., s/cp, ..., h, ...] -> [..., s/cp, ..., cp, h/cp, ...]
-            x = x.reshape(
-                *shape[:heads_dim], cp_size, shape[heads_dim] // cp_size, *shape[heads_dim + 1 :]
-            )
-            # A2A splits cp dimension and concatenates into seq
-            split_axis = heads_dim
-            concat_axis = seq_dim
+            split_axis, concat_axis = heads_dim, seq_dim
+            # After reshape, need to adjust concat_axis if it comes after split_axis
+            needs_adjustment = concat_axis > split_axis
         else:
-            # Input: sharded on heads, want to shard on seq
-            # Unflatten seq: [..., s, ..., h/cp, ...] -> [..., cp, s/cp, ..., h/cp, ...]
-            s_global = shape[seq_dim]
-            s_local = s_global // cp_size
-            new_shape = list(shape)
-            new_shape[seq_dim : seq_dim + 1] = [cp_size, s_local]
-            x = x.reshape(new_shape)
-            # A2A splits cp dimension (at seq_dim) and concatenates into heads
             split_axis = seq_dim
-            concat_axis = heads_dim
+            concat_axis = heads_dim + 1 if heads_dim > seq_dim else heads_dim
+            needs_adjustment = False  # Already adjusted above
 
-        # All-to-all communication
-        x = lax_paral_op(
-            x,
-            lax.all_to_all,
-            self.config.cp_axis,
-            mesh=self.mesh,
-            split_axis=split_axis,
-            concat_axis=concat_axis,
-            tiled=True,
+        # Reshape: insert cp_size at split_axis
+        assert shape[split_axis] % cp_size == 0
+        x = x.reshape(
+            *shape[:split_axis], cp_size, shape[split_axis] // cp_size, *shape[split_axis + 1:]
         )
 
-        return x
+        # Adjust concat_axis if needed (only for before_attn case)
+        adjusted_concat_axis = concat_axis + 1 if needs_adjustment else concat_axis
+
+        # Perform all-to-all
+        x = lax_paral_op(
+            x, lax.all_to_all, self.config.cp_axis, mesh=self.mesh,
+            split_axis=split_axis, concat_axis=adjusted_concat_axis, tiled=True
+        )
+
+        # Merge the two dimensions created by all-to-all at split_axis
+        new_shape = list(x.shape)
+        new_shape[split_axis:split_axis + 2] = [x.shape[split_axis] * x.shape[split_axis + 1]]
+        return x.reshape(new_shape)
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""

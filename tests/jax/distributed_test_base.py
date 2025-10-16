@@ -8,7 +8,8 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit, _UNSPECIFIED
+from jax.experimental.pjit import pjit
+from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
@@ -38,7 +39,7 @@ def generate_configs():
     return configs
 
 
-def generate_context_parallel_configs_for_attn():
+def generate_context_parallel_configs_for_attn(heads_divisible_by_cp_times_tp=False):
     """Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only"""
     configsL1 = []
     configsL2 = []
@@ -52,6 +53,9 @@ def generate_context_parallel_configs_for_attn():
         if is_devices_enough(ndev):
             # Do not run cp1 case in L1 as that is already covered in TestDistributedSelfAttn and TestDistributedCrossAttn (as these do not have any cp combinations)
             if cp != 1:
+                if heads_divisible_by_cp_times_tp:
+                    if num_heads % (cp * tp) != 0:
+                        continue
                 configsL1.append(
                     pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
                 )
