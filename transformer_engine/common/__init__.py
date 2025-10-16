@@ -16,7 +16,7 @@ import platform
 import subprocess
 import sys
 import sysconfig
-from typing import Optional
+from typing import Optional, Tuple
 
 
 _logger = logging.getLogger(__name__)
@@ -112,6 +112,19 @@ def _get_shared_object_file(library: str) -> Path:
     )
 
 
+def get_te_core_package_info() -> Tuple[bool, str, str]:
+    """
+    Check if Tranformer Engine core package is installed via PyPI.
+    Returns the module name and version if found.
+    """
+
+    te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
+    for package in te_core_packages:
+        if _is_pip_package_installed(package):
+            return True, package, version(package)
+    return False, "", ""
+
+
 @functools.lru_cache(maxsize=None)
 def load_framework_extension(framework: str) -> None:
     """
@@ -130,6 +143,9 @@ def load_framework_extension(framework: str) -> None:
     if framework == "torch":
         extra_dep_name = "pytorch"
 
+    # Find the TE core package from PyPI.
+    te_core_pypi_installed, te_core_package_name, te_core_version = get_te_core_package_info()
+
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching version.
@@ -137,30 +153,23 @@ def load_framework_extension(framework: str) -> None:
         assert _is_pip_package_installed(
             "transformer_engine"
         ), "Could not find `transformer-engine`."
-        assert _is_pip_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version("transformer-engine-cu12")
-        ), (
+
+        assert te_core_pypi_installed, "Could not find TE core package `transformer-engine-cu*`."
+        assert version(module_name) == version("transformer-engine") == te_core_version, (
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            f" v{version('transformer-engine')}, and {te_core_package_name}"
+            f" v{te_core_version}. Install transformer-engine using "
             f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
         )
 
     # If the core package is installed via PyPI, log if
     # the framework extension is not found from PyPI.
-    # Note: Should we error? This is a rare use case.
-    if _is_pip_package_installed("transformer-engine-cu12"):
+    if te_core_pypi_installed:
         if not _is_pip_package_installed(module_name):
             _logger.info(
-                "Could not find package %s. Install transformer-engine using "
+                f"Could not find package {module_name}. Install transformer-engine using "
                 f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'",
-                module_name,
             )
 
     # After all checks are completed, load the shared object file.
