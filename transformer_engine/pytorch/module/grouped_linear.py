@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     divide,
     cast_if_needed,
@@ -419,7 +419,11 @@ class _GroupedLinear(torch.autograd.Function):
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
+                    accumulate=(
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(weights[0], "overwrite_main_grad", False)
+                        else False
+                    ),
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
@@ -536,7 +540,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the

@@ -40,7 +40,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
 
@@ -222,7 +222,7 @@ class AttentionParams:
     is_training: bool, default = `True`
         Whether in training mode (`True`) or inference mode (`False`)
     fp8: bool, default = `False`
-        Whether `DotProductAttention` is in an `fp8_autocast` region.
+        Whether `DotProductAttention` is in an `autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`
@@ -469,13 +469,13 @@ def get_attention_backend(
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
-        if (
-            use_fused_attention
-            and fp8_recipe.float8_current_scaling()
-            and device_compute_capability < (10, 0)
-        ):
-            logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
-            use_fused_attention = False
+        if use_fused_attention and fp8_recipe.float8_current_scaling():
+            if device_compute_capability < (10, 0):
+                logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
+                use_fused_attention = False
+            elif cudnn_version < (9, 14, 0):
+                logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0")
+                use_fused_attention = False
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size

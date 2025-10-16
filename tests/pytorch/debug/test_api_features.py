@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 import torch
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch import Float8Tensor, Float8Quantizer
 
 import nvdlfw_inspect.api as debug_api
 
