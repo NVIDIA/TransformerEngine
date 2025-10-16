@@ -130,10 +130,16 @@ class LogTensorStats(BaseLogTensorStats):
             " log_tensor_stats. Use log_fp8_tensor_stats for FP8 tensors."
         )
 
+        start_step = config.get("start_step", None)
+        end_step = config.get("end_step", None)
+        start_end_list = config.get("start_end_list", None)
+        if start_end_list is not None:
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
+
         options = (
-            config.get("start_step", None),
-            config.get("end_step", None),
-            config.get("start_end_list", None),
+            start_step,
+            end_step,
+            start_end_list,
         )
 
         skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
