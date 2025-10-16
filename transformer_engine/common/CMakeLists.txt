@@ -5,6 +5,27 @@
 cmake_minimum_required(VERSION 3.21)
 
 # Language options
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
+endif()
+
+# Hide non-necessary symbols in shared object.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+
+# Transformer Engine library
+project(transformer_engine LANGUAGES CUDA CXX)
+
+# CUDA Toolkit
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.1)
+  message(FATAL_ERROR "CUDA 12.1+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# Process GPU architectures
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
     set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
@@ -56,26 +77,6 @@ if(NOT arch_120_index EQUAL -1)
   else()
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
   endif()
-endif()
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
-endif()
-
-# Hide non-necessary symbols in shared object.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-
-# Transformer Engine library
-project(transformer_engine LANGUAGES CUDA CXX)
-
-# CUDA Toolkit
-find_package(CUDAToolkit REQUIRED)
-if (CUDAToolkit_VERSION VERSION_LESS 12.1)
-  message(FATAL_ERROR "CUDA 12.1+ is required, but found CUDA ${CUDAToolkit_VERSION}")
 endif()
 
 # cuDNN frontend API
