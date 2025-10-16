@@ -8,8 +8,7 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit
-from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
+from jax.experimental.pjit import pjit, _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
