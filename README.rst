@@ -205,7 +205,7 @@ pip Installation
 **Prerequisites for pip installation:**
 
 * A compatible C++ compiler
-* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) installed
+* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) if installing from source.
 
 To install the latest stable version with pip:
 
