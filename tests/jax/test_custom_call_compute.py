@@ -622,15 +622,6 @@ class TestNorm:
         )
 
 
-def skip_for_unfused_rht_shape(input_shape, quantizer, flatten_axis):
-    """Temporary skip for unsupported FP4 RHT cases until we implement support for the unfused RHT kernel"""
-    # HACK: FIXME TODO(jberchtold)
-    row = reduce(operator.mul, input_shape[flatten_axis:], 1)
-    col = reduce(operator.mul, input_shape[:flatten_axis], 1)
-    if quantizer.should_use_rht() and (row % 64 != 0 or col % 128 != 0):
-        pytest.skip("Unfused RHT is not supported currently, skipping")
-
-
 QUANTIZE_OUTPUT_FP8_DTYPES = {
     "L0": [jnp.float8_e4m3fn],
     "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
@@ -783,17 +774,6 @@ class TestQuantize:
     def _should_use_precise_comparison(
         self, in_dtype, scaling_mode, quantizer, input_shape, flatten_axis
     ):
-        # TODO(jberchtold): Remove this hack once we have a better solution to ensure bitwise identical results between TE and JAX RHT+quant implementations. Currently for certain shapes the quantized fp4 data differs by a small amount on <0.5% of the values.
-        RHT_SLIGHT_MISMATCH_SHAPES = [
-            ((32, 256, 128), -1),
-            ((64, 32, 32, 256), -1),
-            ((8192, 2, 4096), -2),
-        ]
-
-        if quantizer.should_use_rht() and (input_shape, flatten_axis) in RHT_SLIGHT_MISMATCH_SHAPES:
-            # TE fused RHT+quant and JAX RHT+quant have slight implementation differences which can lead to small numerical differences on certain shapes
-            return False
-
         if scaling_mode.is_nvfp4_scaling and in_dtype != jnp.bfloat16:
             # With NVFP4 scaling, TE kernels internally use bfloat16 so using a different input dtype can lead to small numerical differences compared to the JAX implementation
             return False
@@ -812,19 +792,9 @@ class TestQuantize:
             n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        skip_for_unfused_rht_shape(input_shape, te_quantizer, flatten_axis)
-
         jax_output = _jax_quantize(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        try:
-            te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
-        except AssertionError as e:
-            if te_quantizer.should_use_rht() and in_dtype != jnp.bfloat16:
-                error_message = e.args[0]
-                if "RHT requires input to be bfloat16" in error_message:
-                    # Successfully caught the expected error, early return from the test
-                    return
-            raise e
+        te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
 
         assert_bitwise_scaled_tensors(
             te_output,
@@ -846,22 +816,12 @@ class TestQuantize:
             n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        skip_for_unfused_rht_shape(input_shape, te_quantizer, flatten_axis)
-
         jax_impl_func_jit = jax.jit(_jax_quantize, static_argnums=(2, 3))
         te_impl_func_jit = jax.jit(tex.quantize, static_argnums=(2,))
 
         jax_output = jax_impl_func_jit(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        try:
-            te_output = te_impl_func_jit(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
-        except AssertionError as e:
-            if te_quantizer.should_use_rht() and in_dtype != jnp.bfloat16:
-                error_message = e.args[0]
-                if "RHT requires input to be bfloat16" in error_message:
-                    # Successfully caught the expected error, early return from the test
-                    return
-            raise e
+        te_output = te_impl_func_jit(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
 
         assert_bitwise_scaled_tensors(
             te_output,
@@ -987,11 +947,6 @@ class TestStochasticRounding:
 
     def test_sr_nvfp4(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
         """Tests that the mean absolute error of stochastic rounding is smaller than round nearest quantization over multiple samples for both TE and JAX implementations. Asserts that the MAE of both implementations is close to each other."""
-        skip_for_unfused_rht_shape(
-            input_shape,
-            QuantizerFactory.create(scaling_mode=scaling_mode, q_layout=q_layout, q_dtype=q_dtype),
-            flatten_axis,
-        )
 
         key = jax.random.PRNGKey(0)
         inputs = jax.random.uniform(key, input_shape, in_dtype)

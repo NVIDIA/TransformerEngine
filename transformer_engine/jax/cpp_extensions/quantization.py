@@ -762,9 +762,10 @@ def _quantize_dbias_impl(
     # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
     # fall back on the native-JAX quantize implementation
     PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
-    is_unsupported = (
-        quantizer.q_layout == QuantizeLayout.COLWISE
-        and quantizer.scaling_mode != ScalingMode.NVFP4_1D_SCALING
+    is_unsupported = quantizer.q_layout == QuantizeLayout.COLWISE and not (
+        quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
+        and hasattr(quantizer, "use_rht")
+        and quantizer.use_rht
     )
     if is_unsupported or not PrimitiveClass.enabled():
         if is_dbias:
@@ -800,7 +801,7 @@ def _quantize_dbias_impl(
     rht_matrix = jnp.empty((1, 1), jnp.bfloat16)
     amax = x.amax
 
-    if quantizer.use_rht:
+    if hasattr(quantizer, "use_rht") and quantizer.use_rht:
         use_rht = True
         rht_matrix = get_rht_matrix()
 
