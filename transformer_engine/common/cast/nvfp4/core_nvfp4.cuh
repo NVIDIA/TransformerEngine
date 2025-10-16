@@ -53,7 +53,7 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 #else
-  NVTE_DEVICE_ERROR("sm_100 or higher is required.");
+  NVTE_ERROR("sm_100 or higher is required.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace quantization_and_transposition_SF
@@ -74,7 +74,7 @@ __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float b
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 #else
-  NVTE_DEVICE_ERROR("sm_100 or higher is required.");
+  NVTE_ERROR("sm_100 or higher is required.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace quantization_SF
