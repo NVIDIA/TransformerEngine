@@ -420,9 +420,6 @@ class TestDistributedLayernormMLP:
                     name="mlp",
                 )
                 params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
-                import pdb
-
-                pdb.set_trace()
                 mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
                     params_sharded, x, deterministic=True, rngs={"sr_rng": subkeys[2]}
                 )
