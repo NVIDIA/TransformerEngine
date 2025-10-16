@@ -111,6 +111,7 @@ class _Linear(torch.autograd.Function):
         ub_bulk_dgrad: bool,
         ub_bulk_wgrad: bool,
         ub_name: str,
+        fine_grained_activation_offloading: bool,
         fp8_output: bool,  # pylint: disable=unused-argument
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
@@ -408,10 +409,31 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+            ctx.fine_grained_activation_offloading = fine_grained_activation_offloading
 
-                if ctx.grad_added_to_main_grad:
+            if fine_grained_activation_offloading and cpu_offloading:
+                raise ValueError(
+                    f"Do not use fine_grained_activation_offloading and cpu_offloading at the same"
+                    f" time."
+                )
+
+            if (
+                fine_grained_activation_offloading
+                and weight.requires_grad
+                and fuse_wgrad_accumulation
+            ):
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    ctx.has_grad_added_to_main_grad = True
+                    ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
+                    weight.grad_added_to_main_grad = True
+                    ctx.weight_object = weight
+                else:
+                    ctx.has_grad_added_to_main_grad = False
+
+            if cpu_offloading:
+                ctx.has_grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.has_grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
                     # get back torch.Tensor. Torch rips off the Parameter wrapper.
                     # You need to preserve the weight object to have all the attributes user
@@ -419,6 +441,11 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
+            # Do not offload weights and biases
+            weight.offloading_activation = False
+            weightmat.offloading_activation = False
+            if bias is not None:
+                bias.offloading_activation = False
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -507,9 +534,11 @@ class _Linear(torch.autograd.Function):
                 else None
             )
 
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
+            if ctx.cpu_offloading or ctx.fine_grained_activation_offloading:
+                if ctx.has_grad_added_to_main_grad:
                     weight = ctx.weight_object
+                    if ctx.fine_grained_activation_offloading:
+                        weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
                     weight.main_grad = main_grad
 
@@ -996,6 +1025,7 @@ class _Linear(torch.autograd.Function):
             None,  # ub_bulk_dgrad
             None,  # ub_bulk_wgrad
             None,  # ub_name
+            None,  # fine_grained_activation_offloading
             None,  # fp8_output
             None,  # fsdp_group
             None,  # module
@@ -1120,6 +1150,7 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        fine_grained_activation_offloading: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1135,7 +1166,7 @@ class Linear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
         self.name = name
-
+        self.fine_grained_activation_offloading = fine_grained_activation_offloading
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if device == "meta":
@@ -1483,6 +1514,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_bulk_dgrad,
                 self.ub_bulk_wgrad,
                 self.ub_name,
+                self.fine_grained_activation_offloading,
                 fp8_output,
                 self.fsdp_group,
                 self,
