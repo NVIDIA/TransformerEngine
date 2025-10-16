@@ -109,14 +109,12 @@ def _train(args):
     if args.fp8_init:
         from transformer_engine.pytorch import quantized_model_init
 
-        build_model_context = quantized_model_init
-        build_model_context_args["enabled"] = True
+        build_model_context = quantized_model_init()
     else:
-        build_model_context = nullcontext
-        build_model_context_args = {}
+        build_model_context = nullcontext()
 
     # Build the model with the specified context
-    with build_model_context(**build_model_context_args):
+    with build_model_context:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
 
     # Move the model to the correct device
