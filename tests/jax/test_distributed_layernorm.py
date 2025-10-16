@@ -152,7 +152,10 @@ class TestDistributedLayernorm:
                         metric_fwd_dtype=q_dtype,
                         metric_bwd_dtype=q_dtype,
                         in_shardings=(x_named_sharding, g_named_sharding, b_named_sharding),
-                        out_shardings=(None, (x_named_sharding, g_named_sharding, b_named_sharding)),
+                        out_shardings=(
+                            None,
+                            (x_named_sharding, g_named_sharding, b_named_sharding),
+                        ),
                     )
                 except AssertionError as err:
                     # Layernorm should still produce the correct numerical result with
