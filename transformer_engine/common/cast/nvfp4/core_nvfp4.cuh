@@ -50,7 +50,7 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   const float S_dec_b = block_amax / fp4_max * S_enc;
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 #else
-NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 #else
   NVTE_DEVICE_ERROR("sm_100 or higher is required.");
@@ -59,10 +59,10 @@ NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ",
 }  // namespace quantization_and_transposition_SF
 
 namespace quantization_SF {
-  // Used in non-transpose variant
-  // Compute per-block E4M3 encoding/decoding scaling factor
-  __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
-    const float S_enc) {
+// Used in non-transpose variant
+// Compute per-block E4M3 encoding/decoding scaling factor
+__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
+                                                                   const float S_enc) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #if CUDA_VERSION >= 12080
   constexpr float rcp_6f = 1.0f / 6.0f;
@@ -71,7 +71,7 @@ namespace quantization_SF {
   // return S_dec_b_fp8;
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
 #else
-NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 #else
   NVTE_DEVICE_ERROR("sm_100 or higher is required.");
