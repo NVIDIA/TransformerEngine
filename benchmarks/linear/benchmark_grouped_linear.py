@@ -63,7 +63,9 @@ nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available(
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
-    quantization_context = autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
+    quantization_context = (
+        autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
+    )
 
     if mode == "fwd_only":
         with torch.no_grad(), quantization_context:

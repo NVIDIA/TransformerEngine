@@ -78,7 +78,7 @@ class Fp8Padding(torch.nn.Module):
                 number of GEMMs to be performed simultaneously.
     align_size : int, optional
                  the alignment size for the input tensor. If not provided, the alignment size will
-                 be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
+                 be determined by the FP8/FP4 recipe (32 for MXFP8/NVFP4 and 16 for others) in the first
                  forward pass.
     """
 

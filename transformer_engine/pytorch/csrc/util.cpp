@@ -50,8 +50,6 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   void* scale_inv_dptr = scale_inv.data_ptr;
   void* swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
 
-  // Reconstruct input only to avoid swizzling both directions if not needed.
-  // The specific dtype used is irrelevant, just needs to be correct bits.
   transformer_engine::TensorWrapper input_cu(input.scaling_mode());
   transformer_engine::TensorWrapper output_cu(input.scaling_mode());
 
