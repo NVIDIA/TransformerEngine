@@ -9,8 +9,9 @@ from typing import Optional
 
 import torch
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
-from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_autocast_dtype, maybe_dequantize
 from ..op import BasicOperation, OperationContext
 
@@ -55,7 +56,7 @@ class Dropout(BasicOperation):
             out = input_
         elif impl == "fused":
             x = input_
-            if not isinstance(x, Float8TensorBase):
+            if not isinstance(x, Float8TensorStorage):
                 x = maybe_dequantize(x, dtype=dtype)
             out, mask = tex.dropout_fwd(x, self.dropout_probability)
         elif impl == "unfused":
@@ -70,6 +71,8 @@ class Dropout(BasicOperation):
 
         # Save context for backward
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(mask)
             ctx.save_for_backward(mask)
             ctx.impl = impl
             ctx.dropout_probability = self.dropout_probability

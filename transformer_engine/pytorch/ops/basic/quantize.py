@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ...fp8 import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer
@@ -18,8 +18,8 @@ from ...tensor import Quantizer
 class Quantize(BasicOperation):
     """Quantize tensor data
 
-    Uses FP8 recipe from `fp8_autocast` context. When called outside
-    of an `fp8_autocast` context, this is an identity operation.
+    Uses recipe from `autocast` context. When called outside
+    of an `autocast` context, this is an identity operation.
 
     Parameters
     ----------

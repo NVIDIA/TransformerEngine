@@ -218,6 +218,11 @@ def _nvidia_cudart_include_dir() -> str:
     except ModuleNotFoundError:
         return ""
 
+    # Installing some nvidia-* packages, like nvshmem, create nvidia name, so "import nvidia"
+    # above doesn't through. However, they don't set "__file__" attribute.
+    if nvidia.__file__ is None:
+        return ""
+
     include_dir = Path(nvidia.__file__).parent / "cuda_runtime"
     return str(include_dir) if include_dir.exists() else ""
 

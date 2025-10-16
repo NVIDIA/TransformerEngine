@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     divide,
     cast_if_needed,
@@ -44,7 +44,7 @@ from ..cpu_offload import is_cpu_offload_enabled
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.quantized_tensor import (
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -200,13 +200,13 @@ class _GroupedLinear(torch.autograd.Function):
                     inputmats[0] = inp
                 else:
                     for inputmat in inputmats:
-                        if isinstance(inputmat, QuantizedTensorBase):
+                        if isinstance(inputmat, QuantizedTensorStorage):
                             inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             else:
                 inputmats = [None] * num_gemms
             if inp.requires_grad:
                 for weight in weights_fp8:
-                    if isinstance(weight, QuantizedTensorBase):
+                    if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
 
             tensors_to_save, tensor_objects = prepare_for_saving(
@@ -338,7 +338,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
                 for weight, quantizer in zip(weights, ctx.weight_quantizers):
-                    if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                    if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
@@ -402,7 +402,11 @@ class _GroupedLinear(torch.autograd.Function):
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
+                    accumulate=(
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(weights[0], "overwrite_main_grad", False)
+                        else False
+                    ),
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
@@ -450,9 +454,6 @@ class _GroupedLinear(torch.autograd.Function):
                     for weight, wgrad in zip(origin_weights, wgrad_list)
                 ]
             else:
-                wgrad_list = [None] * ctx.num_gemms
-
-            if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                 wgrad_list = [None] * ctx.num_gemms
 
             if not ctx.use_bias or (
@@ -522,7 +523,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
@@ -737,7 +740,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                                produced)
         """
         assert not isinstance(
-            inp, QuantizedTensorBase
+            inp, QuantizedTensorStorage
         ), "GroupedLinear doesn't support input tensor in FP8."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
@@ -829,8 +832,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
-                    if weight_params[i].grad is None:
-                        weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
+                    weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
             if self.use_bias:
                 for i in range(self.num_gemms):
                     if bias_params[i].grad is None:
@@ -872,22 +874,23 @@ class GroupedLinear(TransformerEngineBaseModule):
                     self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
                 ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
-        if not self.fp8 and any(isinstance(w, QuantizedTensorBase) for w in weight_tensors):
+        if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
             warnings.warn(
                 "You are using quantized weights without quantized compute. "
                 "Please make sure this is intentional."
             )
             weight_tensors = [
-                w.dequantize() if isinstance(w, QuantizedTensorBase) else w for w in weight_tensors
+                w.dequantize() if isinstance(w, QuantizedTensorStorage) else w
+                for w in weight_tensors
             ]
         return weight_tensors
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None] * self.num_gemms
         weight_quantizers = [
             self.quantizers["scaling_fwd"][

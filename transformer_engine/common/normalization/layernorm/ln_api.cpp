@@ -28,7 +28,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
-      !is_mxfp_scaling(z->scaling_mode)) {
+      !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 
@@ -63,10 +63,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
-    cudnn_backend = false;  // cuDNN does not currently support amax output for non quantized output
+    NVTE_CHECK(!cudnn_backend,
+               "cuDNN does not currently support amax output for non quantized output");
   }
 
   bool gamma_in_weight_dtype = false;
