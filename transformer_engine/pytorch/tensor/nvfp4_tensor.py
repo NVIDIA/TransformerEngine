@@ -41,7 +41,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     mask = 0
     for i, v in enumerate(vector):
         mask |= (v == -1) << i
-    return mask
+    return mask.item()
 
 
 def get_wgrad_sign_vector() -> torch.Tensor:
