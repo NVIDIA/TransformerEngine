@@ -1252,7 +1252,7 @@ def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool,
     else:
         new_shape = [
             *origin_shape[:seq_dim],
-           *[stripe_height, cp_size, origin_shape[seq_dim] // (cp_size*stripe_height)],
+           *[cp_size, origin_shape[seq_dim] // (cp_size*stripe_height), stripe_height],
             *origin_shape[seq_dim + 1 :],
         ]
 

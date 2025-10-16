@@ -639,24 +639,19 @@ REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
 
+REORDER_STRATEGY = [
+    pytest.param(ReorderStrategy.DualChunkSwap, None, id="DualChunkSwap"),
+    pytest.param(ReorderStrategy.Striped, 1, id="Striped-1"),
+    pytest.param(ReorderStrategy.Striped, 4, id="Striped-4"),
+]
 
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
     @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
     @pytest.mark.parametrize(
-        "reorder_strategy",
-        [
-            pytest.param(ReorderStrategy.DualChunkSwap, id="DualChunkSwap"),
-            pytest.param(ReorderStrategy.Striped, id="Striped"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "stripe_height",
-        [
-            pytest.param(1, id="stripe-1"),
-            pytest.param(4, id="stripe-4"),
-        ],
+        "reorder_strategy, stripe_height",
+        REORDER_STRATEGY,
     )
     def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_height):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
@@ -664,6 +659,12 @@ class TestReorderCausalLoadBalancing:
         if qkv_format == QKVFormat.SBHD:
             tensor = tensor.swapaxes(0, 1)
             seq_dim = 0
+
+        if reorder_strategy == ReorderStrategy.Striped:
+            seq_lens = shape[seq_dim]
+            if seq_lens < (cp_size*stripe_height):
+                pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_height=}")
+
 
         ref = tensor.copy()
 
