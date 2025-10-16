@@ -19,7 +19,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake==3.21.0 pybind11[global] ninja
+          pip install cmake==3.21.0 pybind11[global] ninja nvidia-mathdx==25.1.1
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -43,7 +43,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript nvidia-mathdx==25.1.1
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -63,7 +63,7 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install pybind11[global]
+        run: pip install pybind11[global] nvidia-mathdx==25.1.1
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -83,7 +83,7 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install torch pybind11[global] einops onnxscript
+        run: pip install torch pybind11[global] einops onnxscript nvidia-mathdx==25.1.1
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
