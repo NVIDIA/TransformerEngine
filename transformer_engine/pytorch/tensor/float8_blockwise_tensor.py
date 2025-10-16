@@ -413,11 +413,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         UntypedStorage of the column-wise FP8 data.
 
         """
-        data = (
-            self._rowwise_data
-            if self._rowwise_data is not None
-            else self._columnwise_data
-        )
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
         if data is not None:
             return data.untyped_storage()
         return torch.UntypedStorage(0, device=self.device)
