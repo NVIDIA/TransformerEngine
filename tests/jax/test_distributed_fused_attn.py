@@ -651,7 +651,14 @@ class TestReorderCausalLoadBalancing:
             pytest.param(ReorderStrategy.Striped, id="Striped"),
         ],
     )
-    def test(self, cp_size, shape, qkv_format, reorder_strategy):
+    @pytest.mark.parametrize(
+        "stripe_height",
+        [
+            pytest.param(1, id="stripe-1"),
+            pytest.param(4, id="stripe-4"),
+        ],
+    )
+    def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_height):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
         seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
@@ -660,10 +667,10 @@ class TestReorderCausalLoadBalancing:
 
         ref = tensor.copy()
 
-        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3])
-        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3])
+        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
+        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
 
-        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim)
-        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim, stripe_height)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_height)
 
         assert jnp.array_equal(inversed, ref)

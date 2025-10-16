@@ -386,23 +386,23 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
+def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False, stripe_height)
     raise ValueError(f"Unsupported {strategy=}")
 
 
 def inverse_reorder_causal_load_balancing(
-    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1 
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True, stripe_height)
     raise ValueError(f"Unsupported {strategy=}")
 
 
