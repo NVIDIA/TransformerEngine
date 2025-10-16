@@ -404,6 +404,15 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         return _ReshapeFunc.apply(self, shape)
 
     def untyped_storage(self) -> torch.UntypedStorage:
+        """Return the underlying UntypedStorage of the FP8 data.
+
+        Note that FP8 block-scaled tensor may involve multiple
+        buffers: row-wise FP8 data, row-wise scales, column-wise FP8
+        data, column-wise scales. The UntypedStorage of the row-wise
+        FP8 data is returned if it exists, and otherwise the
+        UntypedStorage of the column-wise FP8 data.
+
+        """
         data = (
             self._rowwise_data
             if self._rowwise_data is not None
