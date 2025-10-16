@@ -1050,7 +1050,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
@@ -1685,11 +1685,12 @@ class FusedAttnCPWithAllToAllFwdPrimitive(FusedAttnFwdPrimitive):
                     "context_parallel_load_balanced is not supported with all-to-all strategy"
                 )
 
-            # Apply all-to-all to transform from seq-sharded to heads-sharded (gather in seq dimension)
+            assert config.qkv_layout in [QKVLayout.BS3HD, QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+
+            # Apply all-to-all to transform from seq-sharded to heads-sharded
             q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
             k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
-            # For KVPACKED layout, v is empty placeholder
-            v_ = v if v.shape[0] == 0 else helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
+            v_ = helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
             
             output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                 q_,
@@ -1738,26 +1739,18 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
         helper = _FusedAttnCPWithA2AHelper(mesh, config)
         helper.check_supported()
 
-        dq_sharding = result_infos[0].sharding
-        dk_sharding = result_infos[1].sharding
-        dv_sharding = result_infos[2].sharding
-        dbias_sharding = result_infos[3].sharding
+        del result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         
-        # For AllToAll context parallel, output and doutput need to be seq-sharded
-        # to match the forward output sharding (before they get transformed to heads-sharded)
-        arg_shardings = list([arg_i.sharding for arg_i in arg_infos])
-        # arg_infos: [q, k, v, bias, softmax_aux, rng_state, output, doutput, q_seqlen, ...]
-        # output is at index 6, doutput is at index 7
-        # They should have the same sharding as the forward output (seq-sharded on cp axis)
-        output_seq_sharding = NamedSharding(mesh, PartitionSpec(None, config.cp_axis, None, None))
-        softmax_aux_seq_sharding = NamedSharding(mesh, PartitionSpec(None, None, config.cp_axis, None))
-        arg_shardings[4] = softmax_aux_seq_sharding  # softmax_aux [b, h, s/cp, 1]
-        arg_shardings[6] = output_seq_sharding  # output [b, s/cp, h, d]
-        arg_shardings[7] = output_seq_sharding  # doutput [b, s/cp, h, d]
-        arg_shardings = tuple(arg_shardings)
-        
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
-        
         
         def impl(
             q,
@@ -1792,14 +1785,12 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
                     "context_parallel_load_balanced is not supported with all-to-all strategy"
                 )
             
-            # Apply all-to-all to transform from seq-sharded to heads-sharded (gather in seq dimension)
             q_ = helper.all_to_all(q, True, seq_dim=1, heads_dim=q_heads_dim)
             k_ = helper.all_to_all(k, True, seq_dim=1, heads_dim=k_heads_dim)
-            # For KVPACKED layout, v is empty placeholder
-            v_ = v if v.shape[0] == 0 else helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
-            # doutput is always separate [b, s, h, d], so heads_dim=2
+            v_ = helper.all_to_all(v, True, seq_dim=1, heads_dim=v_heads_dim)
+
+            # doutput is always [b, s, h, d], so heads_dim=2
             doutput_ = helper.all_to_all(doutput, True, seq_dim=1, heads_dim=2)
-            # output has the same shape as doutput, needs the same transformation
             output_ = helper.all_to_all(output, True, seq_dim=1, heads_dim=2)
             # softmax_aux has shape [b, h, s/cp, 1] with heads at dim 1, seq at dim 2
             softmax_aux_ = helper.all_to_all(softmax_aux, True, seq_dim=2, heads_dim=1)
@@ -1826,13 +1817,10 @@ class FusedAttnCPWithAllToAllBwdPrimitive(FusedAttnBwdPrimitive):
             )
             
             # Apply all-to-all to gradients to restore original sharding (scatter in seq dimension)
-            # Gradients have the same shape as inputs, so use same heads_dim
             dq_heads_dim, dk_heads_dim, dv_heads_dim = helper.get_qkv_heads_dims(seq_dim=1)
-            
             dq_ = helper.all_to_all(dq, False, seq_dim=1, heads_dim=dq_heads_dim)
             dk_ = helper.all_to_all(dk, False, seq_dim=1, heads_dim=dk_heads_dim)
-            # For KVPACKED layout, dv is empty placeholder
-            dv_ = dv if dv.shape[0] == 0 else helper.all_to_all(dv, False, seq_dim=1, heads_dim=dv_heads_dim)
+            dv_ = helper.all_to_all(dv, False, seq_dim=1, heads_dim=dv_heads_dim)
 
             return dq_, dk_, dv_, dbias
 
@@ -1846,14 +1834,6 @@ register_primitive(FusedAttnCPWithAllToAllBwdPrimitive)
 class _FusedAttnCPWithA2AHelper:
     """
     Helper class for Ulysses-style context parallelism using all-to-all communication.
-
-    This helper manages the all-to-all communication pattern that redistributes tensors
-    between sequence-sharded and heads-sharded layouts. This enables context parallelism
-    by allowing each rank to process different parts of the sequence and heads dimensions.
-
-    Attributes:
-        mesh: JAX mesh for distributed computation
-        config: Fused attention configuration including QKV layout information
     """
 
     mesh: jax.sharding.Mesh
@@ -1870,38 +1850,20 @@ class _FusedAttnCPWithA2AHelper:
     def get_qkv_heads_dims(self, seq_dim=1):
         """
         Determines the heads dimension indices for Q, K, V tensors based on QKV layout.
-        
-        The heads dimension position depends on the QKV packing format:
-        - QKVPacked: All tensors packed together with dimension [qkv=3, heads, dim]
-        - KVPacked: Q is separate, K and V are packed with dimension [kv=2, heads, dim]
-        - Separate: All tensors are separate with dimension [heads, dim]
-        
-        Args:
-            seq_dim: The sequence dimension position (default 1 for BSHD format)
-        
-        Returns:
-            Tuple of (q_heads_dim, k_heads_dim, v_heads_dim) indicating the position
-            of the heads dimension for each tensor.
-        
-        Examples for BSHD layout (seq_dim=1):
-            QKVPacked: Q=[b, s, 3, h, d] -> returns (3, 3, 3)
-            KVPacked:  Q=[b, s, h, d], K=[b, s, 2, h, d], V=[b, s, 2, h, d] -> returns (2, 3, 3)
-            Separate:  Q=[b, s, h, d], K=[b, s, h, d], V=[b, s, h, d] -> returns (2, 2, 2)
         """
+
         if self.config.qkv_layout.is_qkvpacked():
-            # QKV all packed together: [batch..., seq, 3, heads, dim]
-            # Heads dimension is at seq_dim + 2 for all tensors
+            # [batch..., seq, 3, heads, dim]
             heads_dim = seq_dim + 2
             return heads_dim, heads_dim, heads_dim
         elif self.config.qkv_layout.is_kvpacked():
-            # Q separate, K and V packed: Q=[batch..., seq, heads, dim]
-            #                              K/V=[batch..., seq, 2, heads, dim]
-            q_heads_dim = seq_dim + 1  # Q has no packing dimension
-            kv_heads_dim = seq_dim + 2  # K/V have packing dimension [2, heads, dim]
+            # Q=[batch..., seq, heads, dim]
+            # KV=[batch..., seq, 2, heads, dim]
+            q_heads_dim = seq_dim + 1
+            kv_heads_dim = seq_dim + 2
             return q_heads_dim, kv_heads_dim, kv_heads_dim
         else:  # separate
-            # All separate: Q/K/V=[batch..., seq, heads, dim]
-            # Heads dimension is at seq_dim + 1 for all tensors
+            # Q/K/V=[batch..., seq, heads, dim]
             heads_dim = seq_dim + 1
             return heads_dim, heads_dim, heads_dim
 
@@ -1921,7 +1883,7 @@ class _FusedAttnCPWithA2AHelper:
             Tensor after all-to-all with redistributed dimensions
         """
         if x.shape[0] == 0:
-            return x
+            return x # If tensor is empty, then no communication is performed.
 
         cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
         if before_attn:
@@ -1933,26 +1895,22 @@ class _FusedAttnCPWithA2AHelper:
         # Determine which dimension to split and where to concat
         if before_attn:
             split_axis, concat_axis = heads_dim, seq_dim
-            # After reshape, need to adjust concat_axis if it comes after split_axis
-            needs_adjustment = concat_axis > split_axis
         else:
             split_axis = seq_dim
-            concat_axis = heads_dim + 1 if heads_dim > seq_dim else heads_dim
-            needs_adjustment = False  # Already adjusted above
+            concat_axis = heads_dim
 
         # Reshape: insert cp_size at split_axis
         assert shape[split_axis] % cp_size == 0
         x = x.reshape(
             *shape[:split_axis], cp_size, shape[split_axis] // cp_size, *shape[split_axis + 1:]
         )
-
-        # Adjust concat_axis if needed (only for before_attn case)
-        adjusted_concat_axis = concat_axis + 1 if needs_adjustment else concat_axis
+        if concat_axis > split_axis:
+            concat_axis += 1 # Added one dimenstion before concat_axis, need to adjust it.
 
         # Perform all-to-all
         x = lax_paral_op(
             x, lax.all_to_all, self.config.cp_axis, mesh=self.mesh,
-            split_axis=split_axis, concat_axis=adjusted_concat_axis, tiled=True
+            split_axis=split_axis, concat_axis=concat_axis, tiled=True
         )
 
         # Merge the two dimensions created by all-to-all at split_axis
