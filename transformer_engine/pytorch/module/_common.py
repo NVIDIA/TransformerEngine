@@ -11,10 +11,8 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from .. import cpp_extensions as tex
-from .. import experimental
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
-from ..tensor.utils import is_experimental
 from ..utils import get_default_init_method
 
 
@@ -170,32 +168,6 @@ def noop_cat(
     if is_in_onnx_export_mode():
         return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
-
-
-def get_module_quantizers(
-    module: torch.nn.Module,
-    fp8_output: bool,
-    fp8_grad: bool,
-    debug: bool,
-):
-    """Return the 6-tuple of quantizers for a module in a centralized way.
-
-    Routing policy:
-    - If experimental quantization is enabled via environment and module.fp8 is True,
-      return experimental quantizers.
-    - Otherwise, return the module's own quantizers (debug or regular).
-    """
-    if getattr(module, "fp8", False) and is_experimental():
-        # TODO(etsykunov): Quantizer instantiation should be better
-        # done in the module's constructor
-        qlinear_params = experimental.config.set_qlinear_params()
-
-        if qlinear_params is not None:
-            return experimental.config.get_experimental_quantizers(module.fp8, qlinear_params)
-
-    if not debug:
-        return module._get_quantizers(fp8_output, fp8_grad)
-    return module._get_debug_quantizers(fp8_output, fp8_grad)
 
 
 @dataclasses.dataclass

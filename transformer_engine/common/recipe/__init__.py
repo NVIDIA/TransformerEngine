@@ -161,7 +161,7 @@ class DelayedScaling(Recipe):
                                  where `Tensor` is a framework tensor type.
     reduce_amax: bool, default = `True`
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
-                tensors is reduced across the `fp8_group` (specified in the `fp8_autocast`
+                tensors is reduced across the `amax_reduction_group` (specified in the `autocast`
                 call). This keeps the amaxes and scaling factors synced across the given
                 distributed group. If set to `False`, this reduction is skipped and every
                 GPU maintains local amaxes and scaling factors. To ensure results are
@@ -169,7 +169,7 @@ class DelayedScaling(Recipe):
                 ranks must checkpoint in order to store the local tensors.
     fp8_dpa: bool, default = `False`
              Whether to enable FP8 dot product attention (DPA). When the model is placed in an
-             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             `autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
              inputs from higher precision to FP8, performs attention in FP8, and casts tensors
              back to higher precision as outputs. FP8 DPA currently is only supported in the
              `FusedAttention` backend.
@@ -363,6 +363,7 @@ class Float8BlockScaling(Recipe):
         assert (
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
 
     def __repr__(self) -> str:
         return (
@@ -401,16 +402,32 @@ class NVFP4BlockScaling(Recipe):
     computed from the high precision input to avoid double quantization
     errors.
 
+    The default NVFP4 training recipe implements 3 techniques for quantizing
+    to a narrow format (4-bit):
+
+    - For weight tensors a variant of the NVFP4 quantization is used,
+      where a single scaling factor is shared by a 2D block of 16x16 elements.
+    - When quantizing gradients, stochastic rounding is applied to avoid the bias
+      introduced by quantization. With this, values are rounded probabilistically
+      to one of their two nearest representable numbers, with probabilities
+      inversely proportional to their distances.
+    - When quantizing inputs and gradients, random Hadamard transforms are applied
+      (16x16 Hadamard matrix) to smooth outliers in the tensor distributions
+      and make them easier to represent accurately in NVFP4.
+
+    These techniques are described more comprehensively in the NVFP4 paper titled
+    'Pretraining Large Language Models with NVFP4' (https://arxiv.org/abs/2509.25149v1).
+
     Parameters
     ----------
     fp4_format : {Format.E2M1}, default = Format.E2M1
              FP4 data type.
-    fp8_format : {Format.E4M3}, default = Format.E4M3
-             FP8 data type. Only E4M3 is supported.
-    fp8_dpa: bool, default = `False`
-             FP8 dot product attention. Not yet supported.
-    fp8_mha: bool, default = `False`
-             FP8 multi-head attention. Not yet supported.
+    disable_rht : bool, default = `False`
+             If set to `True`, random Hadamard transforms are not applied to any tensor.
+    disable_stochastic_rounding : bool, default = `False`
+             If set to `True`, stochastic rounding is disabled during quantization for all tensors.
+    disable_2d_quantization : bool, default = `False`
+             If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     """
 
     # Configuration envvars

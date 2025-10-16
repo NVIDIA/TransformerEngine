@@ -7,11 +7,10 @@ import torch
 
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from test_numerics import create_config_file
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 B, S, H, D = 64, 64, 64, 64
 
@@ -68,7 +67,7 @@ def _get_model(model_key):
 def _run_forward_backward(model, fp8):
     for _ in range(3):
         inp = torch.randn((S, B, H)).cuda()
-        with te.fp8_autocast(enabled=fp8):
+        with te.autocast(enabled=fp8):
             out = model(inp)
         out.sum().backward()
         debug_api.step()

@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-from .cpp_extensions.quantization import AmaxScope
+from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
     ScalingMode,
@@ -63,7 +63,7 @@ def dense(
     kernel: jnp.ndarray,
     bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     output_axes: Tuple[str, ...] = None,
@@ -81,7 +81,7 @@ def dense(
         kernel: Weight matrix for the dense layer transformation
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
-        batch_sequence_transpose: Transpose the batch and sequence dimensions of the input tensor.
+        transpose_batch_sequence: Transpose the batch and sequence dimensions of the input tensor.
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         output_axes: Logical axes for sharding the output
@@ -91,8 +91,8 @@ def dense(
     Returns:
         Transformed output tensor
     """
-    if batch_sequence_transpose:
-        warnings.warn("batch_sequence_transpose is not well tested, use with caution!")
+    if transpose_batch_sequence:
+        warnings.warn("transpose_batch_sequence is not well tested, use with caution!")
 
     if not get_quantize_config().is_fp8_enabled():
         input_dtype = x.dtype
@@ -103,7 +103,7 @@ def dense(
         kernel,
         bias,
         contracting_dims,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         input_axes,
         kernel_axes,
         output_axes,
@@ -119,7 +119,7 @@ def _dense(
     kernel,
     bias,
     contracting_dims,
-    batch_sequence_transpose,
+    transpose_batch_sequence,
     input_axes,
     kernel_axes,
     output_axes,
@@ -136,7 +136,7 @@ def _dense(
         kernel: Weight matrix
         bias: Optional bias tensor
         contracting_dims: Contracting dimensions specification
-        batch_sequence_transpose: Transpose the batch and sequence dimensions of the input tensor.
+        transpose_batch_sequence: Transpose the batch and sequence dimensions of the input tensor.
         input_axes: Logical axes for sharding the activation input
         output_axes: Logical axes for sharding the output_axes
         kernel_axes: Logical axes for sharding the weight matrix
@@ -151,7 +151,7 @@ def _dense(
         kernel,
         bias,
         contracting_dims,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         input_axes,
         kernel_axes,
         output_axes,
@@ -166,7 +166,7 @@ def _dense_fwd_rule(
     kernel,
     bias,
     contracting_dims,
-    batch_sequence_transpose,
+    transpose_batch_sequence,
     input_axes,
     kernel_axes,
     output_axes,
@@ -197,7 +197,7 @@ def _dense_fwd_rule(
         flatten_axis=flatten_axis_x,
         quantizer=quantizer_set.x,
         amax_scope=AmaxScope.TPSP,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -215,7 +215,7 @@ def _dense_fwd_rule(
         casted_x.get_tensor(usage=TensorUsage.LHS),
         casted_kernel.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
-        transpose_batch_sequence=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
         collective_op=collective_op_set.forward,
@@ -240,7 +240,7 @@ def _dense_fwd_rule(
 
 def _dense_bwd_rule(
     contracting_dims,
-    batch_sequence_transpose,
+    transpose_batch_sequence,
     input_axes,
     kernel_axes,
     output_axes,
@@ -274,7 +274,7 @@ def _dense_bwd_rule(
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     # GEMM NT
@@ -291,7 +291,7 @@ def _dense_bwd_rule(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
-        transpose_batch_sequence=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op_set.backward,
     )
 
@@ -305,7 +305,7 @@ def _dense_bwd_rule(
         casted_x_lhs,
         casted_grad.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=(x_contracting_dim, g_contracting_dim),
-        transpose_batch_sequence=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)

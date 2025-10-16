@@ -36,7 +36,7 @@ from .utils import (
     needs_quantized_gemm,
 )
 from .constants import dist_group_type
-from .fp8 import FP8GlobalStateManager, fp8_autocast
+from .quantization import FP8GlobalStateManager, autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
@@ -419,8 +419,8 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
-        ), fp8_autocast(
-            enabled=ctx.fp8, fp8_recipe=ctx.fp8_recipe
+        ), autocast(
+            enabled=ctx.fp8, recipe=ctx.fp8_recipe
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
@@ -754,8 +754,8 @@ def checkpoint(
     def recompute_fn(*args, **kwargs):
         with torch.autograd.enable_grad(), (
             te_recompute_ctx
-        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, fp8_autocast(
-            enabled=fp8, fp8_recipe=fp8_recipe
+        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, autocast(
+            enabled=fp8, recipe=fp8_recipe
         ):
             function(*args, **kwargs)
 
@@ -1015,12 +1015,8 @@ def _post_process_fp8_blockwise_gather(
     if out._is_gemm_ready_format():
         return out
 
-    needs_columnwise_data_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
-    need_rowwise_scale_transpose = (
-        quantizer is not None and quantizer.rowwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
+    needs_columnwise_data_transpose = quantizer is not None and quantizer.columnwise_usage
+    need_rowwise_scale_transpose = quantizer is not None and quantizer.rowwise_usage
 
     # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
     # columnwise compact format means doing 128x1 quantization of it
@@ -1973,7 +1969,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
         if hasattr(fsdp_root, "primary_weights_in_fp8"):
             assert not fsdp_root.primary_weights_in_fp8, (
                 "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                "Please initialize your model without the te.fp8_model_init(...) context."
+                "Please initialize your model without the te.quantized_model_init(...) context."
             )
         root_state = _get_module_fsdp_state(fsdp_root)
         assert root_state is not None, "Root module does not have a valid _FSDPState."
@@ -1986,7 +1982,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
             if hasattr(fsdp_module.module, "primary_weights_in_fp8"):
                 assert not fsdp_module.module.primary_weights_in_fp8, (
                     "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                    "Please initialize your model without the te.fp8_model_init(...) context."
+                    "Please initialize your model without the te.quantized_model_init(...) context."
                 )
             setattr(fsdp_module.module, "fsdp_group", state.process_group)
 

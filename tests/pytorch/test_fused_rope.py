@@ -373,3 +373,19 @@ def test_fused_qkv_rope(
 
         if not isinstance(start_positions, torch.Tensor):
             torch.testing.assert_close(grad_fused, grad_unfused)
+
+
+def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_without_autocast():
+    rope_layer = RotaryPositionEmbedding(128)
+
+    rope_embeddings_no_autocast = rope_layer(max_seq_len=1024)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        rope_embeddings_autocast = rope_layer(max_seq_len=1024)
+
+    torch.testing.assert_close(
+        rope_embeddings_no_autocast.to(dtype=torch.bfloat16),
+        rope_embeddings_autocast.to(dtype=torch.bfloat16),
+        atol=1e-8,
+        rtol=1e-8,
+    )

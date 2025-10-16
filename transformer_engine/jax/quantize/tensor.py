@@ -201,13 +201,32 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
         else:
             unpadded_scale_shape = self.scaling_mode.get_scale_shape(
                 self.data.shape,
+                data_layout=self.data_layout,
                 is_colwise=self.is_colwise,
                 is_padded=False,
-                flatten_axis=self.flatten_axis,
+                # expect the flatten_axis wrt the N layout
+                flatten_axis=(
+                    self.flatten_axis
+                    if self.data_layout == "N"
+                    else self.data.ndim - self.flatten_axis
+                ),
             )
-            assert self.scale_inv.shape == unpadded_scale_shape, (
-                "Unpadded inverse scale factor has wrong shape, expected"
-                f" {unpadded_scale_shape} but got {self.scale_inv.shape}."
+            unpadded_scale_shape_broadcast = self.scaling_mode.get_scale_shape(
+                self.data.shape,
+                data_layout=self.data_layout,
+                is_colwise=self.is_colwise,
+                is_padded=False,
+                # expect the flatten_axis wrt the N layout
+                flatten_axis=(
+                    self.flatten_axis
+                    if self.data_layout == "N"
+                    else self.data.ndim - self.flatten_axis
+                ),
+                broadcast_2d_scale_shape_to_1d=True,
+            )
+            assert self.scale_inv.shape in (unpadded_scale_shape, unpadded_scale_shape_broadcast), (
+                f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or"
+                f" {unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
             )
 
     def tree_flatten(self):
@@ -583,6 +602,7 @@ class ScaledTensorFactory:
         colwise_data,
         colwise_scale_inv,
         amax=None,
+        colwise_amax=None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
@@ -612,6 +632,8 @@ class ScaledTensorFactory:
         """
         if amax is None:
             amax = jnp.empty((1,), dtype=jnp.float32)
+        if colwise_amax is None:
+            colwise_amax = amax
 
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
@@ -630,10 +652,10 @@ class ScaledTensorFactory:
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
             colwise_scale_inv,
-            amax,
+            colwise_amax,
             scaling_mode,
             dq_dtype,
-            is_colwise=True,
+            is_colwise=True,  # TODO(Phuong): set this correctly
             data_layout=data_layout[1],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
@@ -649,6 +671,7 @@ class ScaledTensorFactory:
         colwise_data: jnp.ndarray,
         colwise_scale_inv: jnp.ndarray,
         amax=None,
+        colwise_amax=None,
         scaling_mode: ScalingMode = ScalingMode.NO_SCALING,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         data_layout: str = "NN",
@@ -684,6 +707,7 @@ class ScaledTensorFactory:
                 colwise_data,
                 colwise_scale_inv,
                 amax,
+                colwise_amax,
                 scaling_mode,
                 dq_dtype,
                 data_layout=data_layout,
@@ -698,7 +722,7 @@ class ScaledTensorFactory:
             return ScaledTensorFactory.create_1x(
                 colwise_data,
                 colwise_scale_inv,
-                amax,
+                colwise_amax if colwise_amax is not None else amax,
                 scaling_mode,
                 dq_dtype,
                 is_colwise=is_colwise,

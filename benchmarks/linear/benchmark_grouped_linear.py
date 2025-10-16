@@ -6,7 +6,6 @@ import argparse
 import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
-import pathlib
 
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import (
@@ -14,7 +13,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     NVFP4BlockScaling,
 )
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import autocast, FP8GlobalStateManager
 from contextlib import nullcontext
 
 """
@@ -64,13 +63,10 @@ nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available(
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
-    fp8_context = (
-        fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
-    )
-    # print(f"fp8_context: {fp8_context} and is it nullcontext? {isinstance(fp8_context, nullcontext)}")
+    quantization_context = autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
 
     if mode == "fwd_only":
-        with torch.no_grad(), fp8_context:
+        with torch.no_grad(), quantization_context:
             for i in range(run_num_steps):
                 y_q = layer.forward(
                     x,
@@ -83,7 +79,7 @@ def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=
         layer.zero_grad()
         x.grad = None
 
-        with fp8_context:
+        with quantization_context:
             for i in range(run_num_steps):
                 label = f"step_{i}"
                 torch.cuda.nvtx.range_push(label)
