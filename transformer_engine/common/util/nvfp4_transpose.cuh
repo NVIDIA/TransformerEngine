@@ -152,7 +152,6 @@ __device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int
   return rbits;
 }
 
-
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
@@ -275,8 +274,8 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_roun
         "}"
         : "=h"(out_4x)
         : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
@@ -317,8 +316,8 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
         "}"
         : "=r"(out_4x)
         : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)));
   } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
