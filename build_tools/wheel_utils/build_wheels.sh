@@ -56,14 +56,12 @@ fi
 
 if $BUILD_PYTORCH ; then
 	cd /TransformerEngine/transformer_engine/pytorch
-        /opt/python/cp310-cp310/bin/pip install torch
 	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
 	cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
 	cd /TransformerEngine/transformer_engine/jax
-        /opt/python/cp310-cp310/bin/pip install "jax[cuda12_local]" jaxlib
 	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
 	cp dist/* /wheelhouse/
 fi
