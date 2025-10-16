@@ -358,7 +358,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         self.group_sizes = group_sizes
         self.original_shape = original_shape
         self.group_axis = group_axis
-        # TODO: Handle RHT for grouped quantization once grouped quantization supports NVFP4
+        # TODO(Phuong):Handle RHT for grouped quantization once grouped quantization supports NVFP4
         super().__init__(
             data=data,
             scale_inv=scale_inv,
