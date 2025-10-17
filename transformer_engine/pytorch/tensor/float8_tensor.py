@@ -757,7 +757,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             quantizer.amax_reduction_group = mesh.get_group()
             quantizer.with_amax_reduction = True
         sharded_tensors = (self._data,)
-        metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer)
+        is_transpose_needed = not self._transpose_invalid and self._transpose is not None
+        metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer, is_transpose_needed)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -789,7 +790,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         is_in_fp8_autocast = FP8GlobalStateManager.is_fp8_enabled()
         # print("is_in_fp8_autocast:", is_in_fp8_autocast)
         (data, ) = all_gather_outputs
-        (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer) = metadata
+        (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer, is_transpose_needed) = metadata
         orig_shape = data.size()
         if not is_in_fp8_autocast:
             # If backward, we need transposed data after weight allgather
@@ -797,7 +798,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             permute_dims = [data.dim() - 1] + list(range(data.dim() - 1))
             data = data.permute(*permute_dims).contiguous()
         if out is not None:
-            if is_in_fp8_autocast:
+            if is_in_fp8_autocast or not is_transpose_needed:
                 out._data = data
                 out.update_usage(rowwise_usage=True, columnwise_usage=False)
             else:
