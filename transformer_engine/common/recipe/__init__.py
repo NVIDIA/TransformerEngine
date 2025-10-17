@@ -161,7 +161,7 @@ class DelayedScaling(Recipe):
                                  where `Tensor` is a framework tensor type.
     reduce_amax: bool, default = `True`
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
-                tensors is reduced across the `fp8_group` (specified in the `fp8_autocast`
+                tensors is reduced across the `amax_reduction_group` (specified in the `autocast`
                 call). This keeps the amaxes and scaling factors synced across the given
                 distributed group. If set to `False`, this reduction is skipped and every
                 GPU maintains local amaxes and scaling factors. To ensure results are
@@ -169,7 +169,7 @@ class DelayedScaling(Recipe):
                 ranks must checkpoint in order to store the local tensors.
     fp8_dpa: bool, default = `False`
              Whether to enable FP8 dot product attention (DPA). When the model is placed in an
-             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             `autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
              inputs from higher precision to FP8, performs attention in FP8, and casts tensors
              back to higher precision as outputs. FP8 DPA currently is only supported in the
              `FusedAttention` backend.
