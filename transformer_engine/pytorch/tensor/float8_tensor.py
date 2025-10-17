@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
-
 import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -303,14 +302,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
             )
-
         # Construct FP8 tensor
         return Float8Tensor(
             shape=shape,
@@ -546,7 +543,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         dtype: Optional[torch.dtype] = None,
         requires_grad: bool = False,
         data: Optional[torch.Tensor] = None,
-        transpose: Optional[torch.Tensor] = None,
+        data_transpose: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Create new quantized tensor
 
@@ -559,42 +556,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         )
         if data is not None:
             new_tensor._data = data
-        if transpose is not None and not tensor._transpose_invalid:
-            new_tensor._transpose = transpose
+        if data_transpose is not None:
+            new_tensor._transpose = data_transpose
             new_tensor._transpose_invalid = False
         return new_tensor
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-        # View op
-        if func == aten.view.default:
-            tensor = args[0]
-            data = tensor._data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
-            out_transpose = None if tensor._transpose_invalid else tensor._transpose
-            if out_transpose is not None:
-                out_transpose_shape = out_transpose.size()
-                if (
-                    out_transpose_shape[0] != out_shape[-1]
-                    or out_transpose_shape[1:] != out_shape[:-1]
-                ):
-                    out_transpose = None
-            return Float8Tensor(
-                shape=out_shape,
-                dtype=tensor.dtype,
-                requires_grad=False,
-                data=out_data,
-                fp8_scale_inv=tensor._scale_inv,
-                fp8_dtype=tensor._fp8_dtype,
-                data_transpose=out_transpose,
-                quantizer=tensor._quantizer,
-            )
 
         if func in [aten.slice.Tensor, aten.select.int]:
             tensor = args[0]
@@ -621,14 +589,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # Compute corresponding split of the transpose cache if available
             if tensor._transpose is not None and not tensor._transpose_invalid:
                 transpose = tensor._transpose
-                nd = data.dim()
+                ndim = data.dim()
                 # Figure out the original split dim
                 if "dim" in kwargs:
                     dim_to_split = kwargs["dim"]
                 else:
                     dim_to_split = args[2] if len(args) > 2 else 0
-                # Transpose dim is reversed
-                t_dim = nd - 1 - dim_to_split
+                # Dimension along which transpose needs to be split
+                t_dim = 0 if dim_to_split == ndim - 1 else dim_to_split + 1
                 t_func_out = transpose.__torch_dispatch__(
                     func,
                     types,
@@ -639,7 +607,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 Float8Tensor.make_like(
                     tensor,
                     data=split_tensor,
-                    transpose=split_tranpose_tensor,
+                    data_transpose=split_tranpose_tensor,
                     shape=split_tensor.shape,
                 )
                 for split_tensor, split_tranpose_tensor in zip(func_out, t_func_out)
@@ -656,6 +624,17 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
+            func_transposed_out = None
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                size = args[1]
+                t_shape = [size[-1]] + list(size[:-1])
+                func_transposed_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, t_shape] + list(args[2:]),
+                    kwargs,
+                )
             # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
             quantizer = tensor._quantizer.copy()
@@ -665,6 +644,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 dtype=tensor.dtype,
                 fp8_dtype=tensor._fp8_dtype,
                 fp8_scale_inv=scale_inv,
+                data_transpose=func_transposed_out,
                 quantizer=quantizer,
             )
             return out_tensor
@@ -688,8 +668,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     storage_offset = kwargs["storage_offset"]
                 else:
                     storage_offset = args[3] if len(args) > 3 else 0
-                t_size = list(reversed(size)) if len(size) > 0 else size
-                t_stride = list(reversed(stride)) if len(stride) > 0 else stride
+                # Shape and strided needed for transpose matrix
+                t_size = [size[-1]] + list(size[:-1])
+                t_stride = [stride[-1]] + list(stride[:-1])
                 func_transposed_out = transpose.__torch_dispatch__(
                     func,
                     types,
@@ -697,7 +678,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     kwargs,
                 )
             return Float8Tensor.make_like(
-                tensor, data=func_out, transpose=func_transposed_out, shape=func_out.shape
+                tensor, data=func_out, data_transpose=func_transposed_out, shape=func_out.shape
             )
 
         if func == torch.ops.aten.detach.default:
@@ -786,7 +767,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             dtype=fake_dtype,
             quantizer=quantizer,
         )
-        out._create_transpose()
         return out, (data,)
 
     @classmethod

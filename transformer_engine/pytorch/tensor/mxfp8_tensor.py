@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Any
 
 import torch
 import transformer_engine_torch as tex
@@ -301,7 +301,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         memory_format: torch.memory_format = torch.contiguous_format,
     ) -> MXFP8Tensor:
         """Returns tensor with data in provided memory format
-
         Returns `self` if data is already in correct memory format.
 
         """
@@ -317,32 +316,221 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-
-        # View op
-        if func == aten.view.default:
+        # FSDP2 related functions
+        if func == aten.split.Tensor:
+            if "dim" in kwargs:
+                dim_to_split = kwargs["dim"]
+            else:
+                dim_to_split = args[2] if len(args) > 2 else 0
             tensor = args[0]
-            data = tensor._rowwise_data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
+            split_size = args[1]
+            dim0_size = tensor.size(0)
+            dimlast_size = math.prod(tensor.shape[1:])
+            if dim0_size % split_size != 0 or dim_to_split != 0 or split_size % 128 != 0\
+                or dimlast_size % 128 != 0:
+                # Handle splitting by dequantizing and splitting the hp tensor
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            out_data = []
+            for data in [tensor._rowwise_data, tensor._columnwise_data]:
+                func_out = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,)
+                out_data.append(func_out)
+            
+            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+            split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
+            for (scale_inv, split_size) in zip(scale_invs, split_sizes_for_scale):
+                scale_inv_out = scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [scale_inv, split_size] + list(args[2:]),
+                    kwargs,
+                )
+                out_data.append(scale_inv_out)
+            return [
+                MXFP8Tensor(
+                    shape=splitted_tensor_data[0].size(),
+                    dtype=tensor.dtype,
+                    rowwise_data=splitted_tensor_data[0],
+                    rowwise_scale_inv=splitted_tensor_data[2],
+                    columnwise_data=splitted_tensor_data[1],
+                    columnwise_scale_inv=splitted_tensor_data[3],
+                    quantizer=tensor._quantizer,
+                    requires_grad=False,
+                    fp8_dtype=tensor._fp8_dtype,
+                )
+                for splitted_tensor_data in zip(*out_data)
+            ]
+        if func == torch.ops.aten.as_strided.default:
+            shape = args[1]
+            strides = args[2]
+            tensor = args[0]
+            if strides[-1] != 1 or len(shape) != 2 or len(strides) != 2\
+                or strides[0] % 128 != 0 or shape[0] % 128 != 0 or\
+                    shape[1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            out_data = []
+            for data in [tensor._rowwise_data, tensor._columnwise_data]:
+                func_out = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,)
+                out_data.append(func_out)    
+            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+            scale_shapes = [[shape[0], shape[1]//MXFP8_BLOCK_SCALING_SIZE],
+                      [shape[0] // MXFP8_BLOCK_SCALING_SIZE, shape[1]]]
+            scale_strides = [[strides[0]//MXFP8_BLOCK_SCALING_SIZE, 1],
+                       strides]
+            for (scale_inv, scale_shape, scale_stride) in zip(scale_invs, scale_shapes, scale_strides):
+                scale_inv_out = scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [scale_inv, scale_shape, scale_stride] + list(args[3:]),
+                    kwargs,
+                )
+                out_data.append(scale_inv_out)
             return MXFP8Tensor(
-                shape=out_shape,
+                shape=shape,
                 dtype=tensor.dtype,
-                rowwise_data=out_data,
-                rowwise_scale_inv=tensor._rowwise_scale_inv,
-                columnwise_data=tensor._columnwise_data,
-                columnwise_scale_inv=tensor._columnwise_scale_inv,
+                rowwise_data=out_data[0],
+                rowwise_scale_inv=out_data[2],
+                columnwise_data=out_data[1],
+                columnwise_scale_inv=out_data[3],
+                quantizer=tensor._quantizer,
+                requires_grad=tensor.requires_grad,
+                fp8_dtype=tensor._fp8_dtype,
+            )
+        if func == torch.ops.aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
+                dst._rowwise_data.copy_(src._rowwise_data.detach())
+                dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
+                dst._columnwise_data.copy_(src._columnwise_data.detach())
+                dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                dst._quantizer = src._quantizer
+                return dst
+        if func == aten.slice.Tensor:
+            dim = args[1]
+            start = args[2]
+            length = args[3]
+            if dim != 0 or length % 128 != 0 or start % 128 != 0:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+            tensor = args[0]
+            out_data = []
+            for data in [tensor._rowwise_data, tensor._columnwise_data]:
+                func_out = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,)
+                out_data.append(func_out)    
+            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+            scale_lengths = [length, length // MXFP8_BLOCK_SCALING_SIZE]
+            for (scale_inv, scale_length) in zip(scale_invs, scale_lengths):
+                scale_inv_out = scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [scale_inv, dim, start, scale_length] + list(args[4:]),
+                    kwargs,
+                )
+                out_data.append(scale_inv_out)
+            return MXFP8Tensor(
+                shape=out_data[0].shape,
+                dtype=tensor.dtype,
+                rowwise_data=out_data[0],
+                rowwise_scale_inv=out_data[2],
+                columnwise_data=out_data[1],
+                columnwise_scale_inv=out_data[3],
                 quantizer=tensor._quantizer,
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
+        # if func == aten.new_zeros.default:
+        #     rowwise_data = None
+        #     columnwise_data = None
+        #     rowwise_scale_inv = None
+        #     columnwise_scale_inv = None
+        #     tensor = args[0]
+        #     shape = args[1]
 
+        #     if tensor._rowwise_data is not None:
+        #         rowwise_data = tensor._rowwise_data.__torch_dispatch__(
+        #             func,
+        #             types,
+        #             [tensor._rowwise_data] + list(args[1:]),
+        #             kwargs,
+        #         )
+        #         rowwise_scale_inv = tensor._rowwise_scale_inv.__torch_dispatch__(
+        #             func,
+        #             types,
+        #             [tensor._rowwise_scale_inv] + list(args[1:]),
+        #             kwargs,
+        #         )
+        #     if tensor._columnwise_data is not None:
+        #         columnwise_data = tensor._columnwise_data.__torch_dispatch__(
+        #             func,
+        #             types,
+        #             [tensor._columnwise_data] + list(args[1:]),
+        #             kwargs,
+        #         )
+        #         columnwise_scale_inv = tensor._columnwise_scale_inv.__torch_dispatch__(
+        #             func,
+        #             types,
+        #             [tensor._columnwise_scale_inv] + list(args[1:]),
+        #             kwargs,
+        #         )
+        #     return MXFP8Tensor(
+        #         shape=args[1],
+        #         dtype=tensor.dtype,
+        #         rowwise_data=rowwise_data,
+        #         rowwise_scale_inv=rowwise_scale_inv,
+        #         columnwise_data=columnwise_data,
+        #         columnwise_scale_inv=columnwise_scale_inv,
+        #         quantizer=tensor._quantizer.copy(),
+        #         requires_grad=False,
+        #         fp8_dtype=tensor._fp8_dtype,
+        #     )
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def fsdp_pre_all_gather(self, mesh):
+        sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv, self._columnwise_data, self._columnwise_scale_inv)
+        metadata = (self._fp8_dtype, self.dtype, self._quantizer)
+        return sharded_tensors, metadata
+    
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[torch.Tensor] = None,
+    ):
+        rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv = all_gather_outputs
+        fp8_dtype, dtype, quantizer = metadata
+        if out is not None:
+            out._rowwise_data.copy_(rowwise_data)
+            out._rowwise_scale_inv.copy_(rowwise_scale_inv)
+            out._columnwise_data.copy_(columnwise_data)
+            out._columnwise_scale_inv.copy_(columnwise_scale_inv)
+            # out._fp8_dtype = fp8_dtype
+            # out._quantizer = quantizer
+            return
+        return MXFP8Tensor(
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=fp8_dtype,
+            dtype=dtype,
+            shape=rowwise_data.shape,
+            quantizer=quantizer,
+        ), all_gather_outputs
 
     @classmethod
     def _make_in_reduce_ex(
@@ -481,10 +669,13 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != ctx.shape[-1]:
-            raise RuntimeError(
+            print(
                 "MXFP8Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
             )
+            # new_tensor = tensor.clone()
+            # new_tensor.shape = shape
+            return tensor.detach()
 
         # Construct new tensor if shape is provided
         new_rowwise_data = None
