@@ -31,21 +31,20 @@ namespace transformer_engine::pytorch {
   } while (false);
 
 extern PyTypeObject *Float8TensorPythonClass;
-extern PyTypeObject *Float8TensorBasePythonClass;
+extern PyTypeObject *Float8TensorStoragePythonClass;
 extern PyTypeObject *Float8QuantizerClass;
 extern PyTypeObject *Float8CurrentScalingQuantizerClass;
 extern PyTypeObject *MXFP8TensorPythonClass;
-extern PyTypeObject *MXFP8TensorBasePythonClass;
+extern PyTypeObject *MXFP8TensorStoragePythonClass;
 extern PyTypeObject *MXFP8QuantizerClass;
 extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
-extern PyTypeObject *Float8BlockwiseQTensorBasePythonClass;
+extern PyTypeObject *Float8BlockwiseQTensorStoragePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
+extern PyTypeObject *NVFP4TensorPythonClass;
+extern PyTypeObject *NVFP4TensorStoragePythonClass;
+extern PyTypeObject *NVFP4QuantizerClass;
 
 void init_extension();
-
-void init_float8_extension();
-
-void init_mxfp8_extension();
 
 namespace detail {
 
@@ -56,22 +55,28 @@ inline bool IsFloat8CurrentScalingQuantizers(PyObject *obj) {
 }
 
 inline bool IsFloat8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == Float8TensorPythonClass || Py_TYPE(obj) == Float8TensorBasePythonClass;
+  return Py_TYPE(obj) == Float8TensorPythonClass || Py_TYPE(obj) == Float8TensorStoragePythonClass;
 }
 
 inline bool IsMXFP8Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP8QuantizerClass; }
 
 inline bool IsMXFP8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == MXFP8TensorPythonClass || Py_TYPE(obj) == MXFP8TensorBasePythonClass;
+  return Py_TYPE(obj) == MXFP8TensorPythonClass || Py_TYPE(obj) == MXFP8TensorStoragePythonClass;
 }
 
 inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
 }
 
+inline bool IsNVFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
+
 inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass ||
-         Py_TYPE(obj) == Float8BlockwiseQTensorBasePythonClass;
+         Py_TYPE(obj) == Float8BlockwiseQTensorStoragePythonClass;
+}
+
+inline bool IsNVFP4Tensor(PyObject *obj) {
+  return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorStoragePythonClass;
 }
 
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
@@ -88,6 +93,8 @@ std::unique_ptr<Quantizer> CreateMXFP8Params(const py::handle params);
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
                                                    Quantizer *quantization_params);
 
+TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
+
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;
 }
@@ -100,8 +107,9 @@ constexpr std::array custom_types_converters = {
     std::make_tuple(IsMXFP8Tensor, IsMXFP8Quantizers, NVTETensorFromMXFP8Tensor,
                     CreateQuantizer<MXFP8Quantizer>),
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
-                    NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>)};
-
+                    NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
+    std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,
+                    CreateQuantizer<NVFP4Quantizer>)};
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

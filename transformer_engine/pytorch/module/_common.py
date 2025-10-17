@@ -4,14 +4,15 @@
 
 """Internal function used by multiple modules."""
 
-from typing import Any, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
-
+import dataclasses
 import queue
+from typing import Any, Callable, List, Optional, Tuple, Union
+
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
+from ..export import is_in_onnx_export_mode
 from ..utils import get_default_init_method
 
 
@@ -164,10 +165,12 @@ def noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 
-@dataclass
+@dataclasses.dataclass
 class _ParameterInitMeta:
     """
     Stores essential metadata needed to support deferred parameter initialization.

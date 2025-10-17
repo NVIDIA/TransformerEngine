@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor class with FP8 data"""
+"""Tensor class with MXFP8 data"""
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -16,8 +16,12 @@ from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+)
 
 aten = torch.ops.aten
 
@@ -67,6 +71,10 @@ class MXFP8Quantizer(Quantizer):
 
         return dst
 
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if inp.ndim < 2:
@@ -100,7 +108,7 @@ class MXFP8Quantizer(Quantizer):
 
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.zeros(
+        scale_inv = torch.empty(
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
             round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
@@ -112,7 +120,7 @@ class MXFP8Quantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
-            columnwise_scale_inv = torch.zeros(
+            columnwise_scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
@@ -136,11 +144,39 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
+    def create_tensor_from_data(
+        self,
+        data: torch.Tensor,
+        scale_inv: torch.Tensor,
+        fake_dtype: torch.dtype,
+        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+    ) -> MXFP8Tensor:
+        """Create a new MXFP8Tensor from data and scale_inv."""
+        return MXFP8Tensor(
+            shape=data.shape,
+            dtype=fake_dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=fp8_dtype,
+            quantizer=self,
+        )
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(dtype=torch.float32)
+        data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
+        return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: Union[MXFP8TensorStorage, MXFP8Tensor]) -> torch.Tensor:
+        return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
+
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
 
-class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
+class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -158,14 +194,13 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
                    be applied when casting from FP8 to higher
-                   precision. Can be inferred from fp8_meta if
-                   provided.
+                   precision.
     dtype: torch.dtype, default = torch.float32
            Nominal tensor datatype.
 
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,
@@ -209,17 +244,9 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             return _FromMXFP8Func.apply(self, dtype)
         return _FromMXFP8Func.forward(None, self, dtype)
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self._quantizer is not None:
-            return self._quantizer
-        return MXFP8Quantizer(
-            fp8_dtype=self._fp8_dtype,
-        )
+    def _build_default_quantizer(self) -> Optional[Quantizer]:
+        """Build default quantizer for the tensor"""
+        return MXFP8Quantizer(fp8_dtype=self._fp8_dtype)
 
     def quantize_(
         self,
@@ -239,8 +266,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def detach(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
@@ -405,7 +431,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv

@@ -39,6 +39,10 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       return CUDA_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return CUDA_R_8F_E5M2;
+#if CUDA_VERSION >= 12080
+    case DType::kFloat4E2M1:
+      return CUDA_R_4F_E2M1;
+#endif
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -50,6 +54,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
     update_tensor_scale_inv_kernel<<<1, 1, 0, stream>>>(
         reinterpret_cast<const float *>(t->scale.dptr),
         reinterpret_cast<float *>(t->scale_inv.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -91,6 +96,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     dim3 grid(numBlocks, 1, 1);                                                              \
     memset_kernel<vectorizedType>                                                            \
         <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
 
@@ -101,7 +107,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
   if (size_in_bytes > 4096) {
     // Use cudaMemsetAsync for larger sizes.
-    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(ptr, value, size_in_bytes, stream));
     return;
   }
 
@@ -113,6 +119,9 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {
@@ -155,7 +164,9 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_num_bits) {
+                          const uint32_t offset_elems, const size_t type_num_bits,
+                          const CUtensorMapSwizzle swizzle) {
+  cuda_driver::ensure_context_exists();
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
   static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
@@ -164,6 +175,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   }();
   // rank is the number of dimensions of the array
   constexpr uint32_t rank = 2;
+
+  // Dimension for the packed data types must reflect the number of individual U# values.
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
@@ -180,10 +193,10 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
                                            (offset_elems * type_num_bits) / 8);
 
-  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
+  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_GMEM_ALIGNMENT),
              "Tensor data pointer must be 16B aligned");
 
-  const int TMA_needed_size = (TMA_gmem_alignment * 8) / type_num_bits;
+  const int TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
              "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 
@@ -202,7 +215,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
 
       // Swizzling can be used to avoid shared memory bank conflicts.
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+      swizzle,
 
       // L2 Promotion can be used to widen the effect of a cache-policy to a wider
       // set of L2 cache lines.

@@ -29,6 +29,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         reduce_loss=False,
         dist_process_group=None,
         ignore_idx=-100,
+        is_cg_capturable=False,
     ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
@@ -47,10 +48,16 @@ class CrossEntropyFunction(torch.autograd.Function):
         tensor: The computed loss.
         """
         loss, _input = triton_cross_entropy.cross_entropy_forward(
-            _input, target, label_smoothing, reduce_loss, dist_process_group, ignore_idx
+            _input,
+            target,
+            label_smoothing,
+            reduce_loss,
+            dist_process_group,
+            ignore_idx,
         )
 
         ctx.save_for_backward(_input.detach())
+        ctx.is_cg_capturable = is_cg_capturable
         return loss
 
     @staticmethod
@@ -66,9 +73,13 @@ class CrossEntropyFunction(torch.autograd.Function):
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
         """
         (_input,) = ctx.saved_tensors
-        _input = triton_cross_entropy.cross_entropy_backward(_input, grad_output)
+        _input = triton_cross_entropy.cross_entropy_backward(
+            _input, grad_output, ctx.is_cg_capturable
+        )
         return (
             _input,
+            None,
+            None,
             None,
             None,
             None,

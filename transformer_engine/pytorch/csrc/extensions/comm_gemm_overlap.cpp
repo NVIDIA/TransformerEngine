@@ -381,5 +381,21 @@ void CommOverlapManager::execute(
                              use_split_accumulator, aux_out.data(), stream);
     }
   }
+
+std::pair<at::Stream, at::Stream> CommOverlapManager::get_communication_stream() {
+#ifndef NVTE_WITH_CUBLASMP
+  return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),
+          at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};
+#elif
+  NVTE_ERROR("Internal TE error: CommOverlapManager::get_communication_stream() is not ",
+             "supported with NVTE_WITH_CUBLASMP=1!");
+  return {};
 #endif
+}
+
+void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
+    CommOverlap &allgather_communicator, at::Stream send_stream, at::Stream recv_stream) {
+  auto main_stream = at::cuda::getCurrentCUDAStream();
+  allgather_communicator.bulk_overlap_external_ag(at::cuda::CUDAStream(send_stream),
+                                                  at::cuda::CUDAStream(recv_stream), main_stream);
 }

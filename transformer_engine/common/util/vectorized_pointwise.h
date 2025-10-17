@@ -11,7 +11,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
-
+#include "math.h"
 namespace transformer_engine {
 
 /* \brief Helper class that enables storing multiple values of type DType
@@ -183,6 +183,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -196,27 +197,28 @@ __launch_bounds__(unary_kernel_threads) __global__
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
       ComputeType temp = OP(val, p);
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
-
+      }
+      if constexpr (is_fp8<OutputType>::value) {
         temp = temp * s;
       }
-
       storer.separate()[i] = static_cast<OutputType>(temp);
     }
     storer.store(tid, N);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
-    }
 
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
+    }
+  }
+
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
@@ -236,6 +238,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -251,10 +254,11 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
       const ComputeType g = static_cast<ComputeType>(grad_loader.separate()[i]);
       ComputeType temp = OP(val, p) * g;
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
-
+      }
+      if constexpr (is_fp8<OutputType>::value) {
         temp = temp * s;
       }
 
@@ -262,16 +266,17 @@ __launch_bounds__(unary_kernel_threads) __global__
     }
     storer.store(tid, N);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
-    }
 
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
+    }
+  }
+
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
@@ -333,7 +338,7 @@ template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typen
           typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
                                    const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
-                                   const Param params, cudaStream_t stream) {
+                                   const Param &params, cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, output);
 
@@ -359,6 +364,7 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -366,7 +372,7 @@ template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename In
           typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
-                                       fp32 *scale_inv, const size_t N, const Param params,
+                                       fp32 *scale_inv, const size_t N, const Param &params,
                                        cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, grad, output);
@@ -393,6 +399,7 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -406,6 +413,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   const size_t M = num_aligned_elements * m;
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -423,27 +431,36 @@ __launch_bounds__(unary_kernel_threads) __global__
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
-      const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+      ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+
+      if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
+        // Clamp the gated value and add 1 at the end
+        ComputeType limit = p.limit;
+        val2 = std::min(std::max(-limit, val2), limit) + 1;
+      }
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
+      }
+      if constexpr (is_fp8<OutputType>::value) {
         temp = temp * s;
       }
       storer.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(temp));
     }
     storer.store(id_x, n);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
-    }
 
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
+    }
+  }
+
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
@@ -482,6 +499,7 @@ void GatedActivationKernelLauncher(const InputType *input, OutputType *output, c
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -497,6 +515,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   const size_t M = num_aligned_elements * m;
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -519,16 +538,26 @@ __launch_bounds__(unary_kernel_threads) __global__
     for (int i = 0; i < nvec; ++i) {
       const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
-      const ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+      bool dgate_in = true;
+
+      if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
+        // In case of GPT OSS, clamp the activation and gate values
+        const ComputeType limit = p.limit;
+        dgate_in = gate_in <= limit && gate_in >= -limit;  // Derivative of clamp
+        gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+      }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = grad_val * Activation(gelu_in, p);
+      ComputeType after_dgate = dgate_in ? grad_val * Activation(gelu_in, p) : 0.0f;
 
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(after_dgelu), max);
-        after_dgelu = after_dgelu * s;
         max = fmaxf(fabsf(after_dgate), max);
+      }
+      if constexpr (is_fp8<OutputType>::value) {
+        after_dgelu = after_dgelu * s;
         after_dgate = after_dgate * s;
       }
 
@@ -538,16 +567,17 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer0.store(id_x, n);
     storer1.store(id_x, n);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
-    }
 
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
+    }
+  }
+
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
@@ -589,6 +619,7 @@ void DGatedActivationKernelLauncher(const InputType *grad, const InputType *inpu
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

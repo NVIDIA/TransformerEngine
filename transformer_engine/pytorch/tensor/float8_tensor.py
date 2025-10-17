@@ -13,8 +13,12 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
-from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+)
 from ..constants import dist_group_type
 
 aten = torch.ops.aten
@@ -89,6 +93,10 @@ class Float8Quantizer(Quantizer):
 
         return dst
 
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
+
     def make_empty(
         self,
         shape: Iterable[int],
@@ -108,10 +116,9 @@ class Float8Quantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
             )
@@ -148,7 +155,7 @@ class Float8Quantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=1 / self.scale,
                 fp8_dtype=self.dtype,
@@ -167,8 +174,29 @@ class Float8Quantizer(Quantizer):
             quantizer=self,
         )
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Function using primitives with ONNX defined translations."""
+        # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
+        # custom ops, so cast the input if needed.
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data = torch.ops.tex.fp8_quantize(tensor, self.scale.item())
+        return self.create_tensor_from_data(data, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        out = torch.ops.tex.fp8_dequantize(tensor._data, tensor._scale_inv)
+        out = out.to(tensor.dtype)
+        return out
+
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return DelayedScaling
+
+    def supports_only_rowwise_all_gather(self) -> bool:
+        """
+        Float8Quantizer supports only rowwise all-gather
+        """
+        return True
 
 
 class Float8CurrentScalingQuantizer(Quantizer):
@@ -195,6 +223,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
     amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
+    """amax update options"""
+    use_existing_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -209,15 +239,17 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        use_existing_amax: bool = False,
         with_amax_reduction: bool = False,
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.ones(1, dtype=torch.float32, device=device)
+        self.scale = torch.empty(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
+        self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -246,6 +278,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,
@@ -309,7 +345,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             torch.float8_e5m2fnuz,
         ]
         if internal:
-            return Float8TensorBase(
+            return Float8TensorStorage(
                 data=data,
                 fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
@@ -328,6 +364,28 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer=self,
         )
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Function using primitives with ONNX defined translations."""
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data, scale_inv = torch.ops.tex.fp8_cs_quantize(tensor)
+        return Float8Tensor(
+            shape=data.shape,
+            dtype=torch.float32,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=False,
+            data_transpose=None,
+            quantizer=self,
+        )
+
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        out = torch.ops.tex.fp8_dequantize(tensor._data, tensor._scale_inv)
+        out = out.to(tensor.dtype)
+        return out
+
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""
         return canonicalize_process_group(self.amax_reduction_group)
@@ -335,8 +393,14 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8CurrentScaling
 
+    def supports_only_rowwise_all_gather(self) -> bool:
+        """
+        Float8CurrentScalingQuantizer supports only rowwise all-gather
+        """
+        return True
 
-class Float8Tensor(Float8TensorBase, QuantizedTensor):
+
+class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -391,19 +455,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             return _FromFloat8Func.apply(self, dtype)
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self._quantizer is not None:
-            return self._quantizer
-        # Now the quantizer for Float8Tensor can be not just Float8Quantizer (delayed scaling)
-        raise ValueError(
-            "Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable"
-        )
-
     def quantize_(
         self,
         tensor: torch.Tensor,
@@ -422,8 +473,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def detach(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
@@ -663,7 +713,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
             # Float8Tensor attributes
             self._data = tensor._data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._scale_inv = tensor._scale_inv
             self._transpose = tensor._transpose

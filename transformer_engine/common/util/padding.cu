@@ -35,6 +35,7 @@ struct MultiPaddingArgs {
   int padded_num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
   int row_length_list[kMaxTensorsPerKernel];
+  // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
   int block_range[kMaxTensorsPerKernel + 1];
   // Number of tensors being processed by kernel
@@ -247,6 +248,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
           const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
           multi_padding_kernel<nvec, Type>
           <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args.num_tensors = 0;
     }
 
@@ -276,6 +278,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
         const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
         multi_padding_kernel<nvec, Type>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -321,6 +324,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
           const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
           multi_unpadding_kernel<nvec, Type>
           <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args.num_tensors = 0;
     }
 
@@ -348,6 +352,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
         const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
         multi_unpadding_kernel<nvec, Type>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

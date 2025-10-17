@@ -1544,6 +1544,12 @@ def dtype_tols(
         rtol = eps_relaxed
     if atol is None:
         atol = max(ulp, eps_relaxed)
+
+    # Manually set tols for nvfp4
+    if dtype == jnp.float4_e2m1fn:
+        atol = 0.05
+        rtol = 0.1
+
     return {"rtol": rtol, "atol": atol}
 
 
@@ -1604,16 +1610,18 @@ def print_debug_tensor_stats(prefix, tensor, hist=False):
 
 @contextmanager
 def use_jax_gemm(enabled=False):
-    orig_custom_calls_filter = os.environ.get("NVTE_JAX_CUSTOM_CALLS_RE", None)
+    orig_custom_calls_filter = os.environ.get("NVTE_JAX_CUSTOM_CALLS", None)
 
     try:
         if enabled:
-            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+            os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=false"
+        else:
+            os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=true"
         yield
 
     finally:
         if enabled:
             if orig_custom_calls_filter is None:
-                os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
+                os.environ.pop("NVTE_JAX_CUSTOM_CALLS")
             else:
-                os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = orig_custom_calls_filter
+                os.environ["NVTE_JAX_CUSTOM_CALLS"] = orig_custom_calls_filter

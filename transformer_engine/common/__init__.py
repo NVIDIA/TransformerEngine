@@ -218,6 +218,11 @@ def _nvidia_cudart_include_dir() -> str:
     except ModuleNotFoundError:
         return ""
 
+    # Installing some nvidia-* packages, like nvshmem, create nvidia name, so "import nvidia"
+    # above doesn't through. However, they don't set "__file__" attribute.
+    if nvidia.__file__ is None:
+        return ""
+
     include_dir = Path(nvidia.__file__).parent / "cuda_runtime"
     return str(include_dir) if include_dir.exists() else ""
 
@@ -246,6 +251,18 @@ def _load_cudnn():
     if found:
         return handle
 
+    # Attempt to locate libcudnn via ldconfig
+    libs = subprocess.check_output(
+        f"ldconfig -p | grep 'libcudnn{_get_sys_extension()}'", shell=True
+    )
+    libs = libs.decode("utf-8").split("\n")
+    sos = []
+    for lib in libs:
+        if "libcudnn" in lib and "=>" in lib:
+            sos.append(lib.split(">")[1].strip())
+    if sos:
+        return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+
     # If all else fails, assume that it is in LD_LIBRARY_PATH and error out otherwise
     return ctypes.CDLL(f"libcudnn{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
@@ -267,12 +284,12 @@ def _load_nvrtc():
         return handle
 
     # Attempt to locate NVRTC via ldconfig
-    libs = subprocess.check_output("ldconfig -p | grep 'libnvrtc'", shell=True)
+    libs = subprocess.check_output(
+        f"ldconfig -p | grep 'libnvrtc{_get_sys_extension()}'", shell=True
+    )
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
-        if "stub" in lib or "libnvrtc-builtins" in lib:
-            continue
         if "libnvrtc" in lib and "=>" in lib:
             sos.append(lib.split(">")[1].strip())
     if sos:
@@ -280,6 +297,38 @@ def _load_nvrtc():
 
     # If all else fails, assume that it is in LD_LIBRARY_PATH and error out otherwise
     return ctypes.CDLL(f"libnvrtc{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
+
+
+@functools.lru_cache(maxsize=None)
+def _load_curand():
+    """Load cuRAND shared library."""
+    # Attempt to locate cuRAND in CUDA_HOME, CUDA_PATH or /usr/local/cuda
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "/usr/local/cuda"
+    libs = glob.glob(f"{cuda_home}/**/libcurand{_get_sys_extension()}*", recursive=True)
+    libs = list(filter(lambda x: not ("stub" in x), libs))
+    libs.sort(reverse=True, key=os.path.basename)
+    if libs:
+        return ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
+
+    # Attempt to locate cuRAND in Python dist-packages
+    found, handle = _load_nvidia_cuda_library("curand")
+    if found:
+        return handle
+
+    # Attempt to locate cuRAND via ldconfig
+    libs = subprocess.check_output(
+        f"ldconfig -p | grep 'libcurand{_get_sys_extension()}'", shell=True
+    )
+    libs = libs.decode("utf-8").split("\n")
+    sos = []
+    for lib in libs:
+        if "libcurand" in lib and "=>" in lib:
+            sos.append(lib.split(">")[1].strip())
+    if sos:
+        return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+
+    # If all else fails, assume that it is in LD_LIBRARY_PATH and error out otherwise
+    return ctypes.CDLL(f"libcurand{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
 
 @functools.lru_cache(maxsize=None)
@@ -291,6 +340,7 @@ def _load_core_library():
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     _CUDNN_LIB_CTYPES = _load_cudnn()
     _NVRTC_LIB_CTYPES = _load_nvrtc()
+    _CURAND_LIB_CTYPES = _load_curand()
     _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
     _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
     _TE_LIB_CTYPES = _load_core_library()

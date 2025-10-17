@@ -15,6 +15,8 @@ import jax
 import jax.numpy as jnp
 
 from .scaling_modes import ScalingMode
+from .hadamard import apply_rht, should_use_rht
+
 
 __all__ = ["ScalingModeToDequantizerMap"]
 
@@ -119,11 +121,8 @@ class BlockScaleDequantizer(Dequantizer):
             0 < flatten_axis < len(data_shape)
         ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
         scale_shape = scaling_mode.get_scale_shape(
-            data_shape, is_colwise, is_padded=False, flatten_axis=flatten_axis
+            data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
-        scale_inv = jax.lax.slice(
-            scale_inv, [0] * len(scale_shape), scale_shape
-        )  # slice out the padding
 
         data = data.reshape(
             *data_shape[: flatten_axis - 1],
@@ -164,10 +163,99 @@ class BlockScaleDequantizer(Dequantizer):
         )
 
 
+class NVFP4Dequantizer(Dequantizer):
+    """NVFP4 Dequantizer Class.
+
+    This class provides static methods for dequantizing tensors that have been
+    quantized using NVFP4 scaling modes.
+    """
+
+    @staticmethod
+    def _dequantize_func(data, scale_inv, amax, dq_dtype, scaling_mode, is_colwise, flatten_axis):
+        """Dequantize a tensor using block scaling.
+
+        Args:
+            data: The quantized tensor data
+            scale_inv: The inverse scaling factors
+            amax: The maximum absolute value of the tensor
+            dq_dtype: The data type for dequantized values
+            scaling_mode: The scaling mode used for quantization
+            is_colwise: Whether the scaling is column-wise
+            flatten_axis: The axis along which the tensor could be flattened to 2D
+
+        Returns:
+            The dequantized tensor
+        """
+
+        DATA_DTYPE_MAX = jnp.finfo(data.dtype).max.astype(jnp.float32)
+        SCALE_DTYPE_MAX = jnp.finfo(scale_inv.dtype).max.astype(jnp.float32)
+        tensor_scale_inv = amax / (DATA_DTYPE_MAX * SCALE_DTYPE_MAX)
+
+        data = data.astype(jnp.float32)
+        scale_inv = scale_inv.astype(jnp.float32) * tensor_scale_inv
+        data_layout = "T" if is_colwise else "N"
+
+        data_shape = data.shape
+        flatten_axis = len(data_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
+        assert (
+            0 < flatten_axis < len(data_shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
+        scale_shape = scaling_mode.get_scale_shape(
+            data_shape,
+            data_layout=data_layout,
+            is_colwise=is_colwise,
+            is_padded=False,
+            # expect the flatten_axis wrt the N layout
+            flatten_axis=flatten_axis if data_layout == "N" else len(data_shape) - flatten_axis,
+            broadcast_2d_scale_shape_to_1d=True,
+        )
+
+        data = data.reshape(
+            *data_shape[: flatten_axis - 1],
+            scale_shape[flatten_axis - 1],
+            int(data_shape[flatten_axis - 1] / scale_shape[flatten_axis - 1]),
+            *data_shape[flatten_axis:-1],
+            scale_shape[-1],
+            int(data_shape[-1] / scale_shape[-1]),
+        )
+
+        scale_inv = jnp.expand_dims(scale_inv, axis=(flatten_axis + 2 - 2, -1))
+        out = jnp.asarray(data * scale_inv, dq_dtype).reshape(data_shape)
+
+        # Apply inverse of RHT if needed
+        use_rht = should_use_rht(scaling_mode, is_colwise=is_colwise)
+        if use_rht:
+            out = apply_rht(out, inverse=True)
+
+        return out
+
+    @staticmethod
+    def dequantize(scaled_tensor):
+        """Dequantize a tensor using block scaling.
+
+        Args:
+            scaled_tensor: The quantized tensor to dequantize
+
+        Returns:
+            The dequantized tensor
+        """
+        return NVFP4Dequantizer._dequantize_func(
+            scaled_tensor.data,
+            scaled_tensor.scale_inv,
+            scaled_tensor.amax,
+            scaled_tensor.dq_dtype,
+            scaled_tensor.scaling_mode,
+            scaled_tensor.is_colwise,
+            scaled_tensor.flatten_axis,
+        )
+
+
 ScalingModeToDequantizerMap = {
     ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.CURRENT_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
+    ScalingMode.NVFP4_1D_SCALING: NVFP4Dequantizer,
+    ScalingMode.NVFP4_2D_SCALING: NVFP4Dequantizer,
     ScalingMode.NO_SCALING: NoopDequantizer,
 }
 
@@ -211,28 +299,38 @@ def _grouped_dequantize(grouped_scaled_tensor):
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"
         )
-        scale_shape_i = scaling_mode.get_scale_shape(
+        padded_scale_shape_i = scaling_mode.get_scale_shape(
             data_shape_i,
-            grouped_scaled_tensor.is_colwise,
+            is_colwise=grouped_scaled_tensor.is_colwise,
             is_padded=True,
             flatten_axis=flatten_axis,
         )
-        scale_shape_i_size = math.prod(scale_shape_i)
-        scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
+        unpadded_scale_shape_i = scaling_mode.get_scale_shape(
+            data_shape_i,
+            is_colwise=grouped_scaled_tensor.is_colwise,
+            is_padded=False,
+            flatten_axis=flatten_axis,
+        )
+        scale_inv_i = scale_inv[
+            scale_inv_ptr : scale_inv_ptr + math.prod(padded_scale_shape_i)
+        ].reshape(padded_scale_shape_i)
+        scale_inv_i = jax.lax.slice(
+            scale_inv_i, [0] * len(unpadded_scale_shape_i), unpadded_scale_shape_i
+        )
         dequantizer_type = ScalingModeToDequantizerMap.get(grouped_scaled_tensor.scaling_mode)
         if len(data_i) == 0:
             out_i = []
         else:
             out_i = dequantizer_type._dequantize_func(
                 data_i.reshape(data_shape_i),
-                scale_inv_i.reshape(scale_shape_i),
+                scale_inv_i,
                 grouped_scaled_tensor.dq_dtype,
                 scaling_mode=grouped_scaled_tensor.scaling_mode,
                 is_colwise=grouped_scaled_tensor.is_colwise,
                 flatten_axis=grouped_scaled_tensor.flatten_axis,
             )
         output.append(out_i)
-        scale_inv_ptr += scale_shape_i_size
+        scale_inv_ptr += math.prod(padded_scale_shape_i)
 
     return output
 

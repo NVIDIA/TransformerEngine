@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 from typing import Optional
+import os
 
 import torch
 
-from ...utils import clear_tensor_data
-from .._common import maybe_dequantize
-from ..op import BasicOperation, OperationContext
+from ... import torch_version
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
@@ -20,6 +20,9 @@ from ...jit import (
     warmup_jit_l2normalization_all_dtypes,
 )
 from ...tensor import Quantizer
+from ...utils import clear_tensor_data
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize
 
 
 class L2Normalization(BasicOperation):
@@ -60,7 +63,11 @@ class L2Normalization(BasicOperation):
 
         # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
-            if torch.cuda.is_available():
+            if (
+                torch.cuda.is_available()
+                and torch_version() >= (2, 0, 0)
+                and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1")))
+            ):
                 set_jit_fusion_options()
                 # For L2Normalization, we don't know the hidden size until forward pass,
                 # but we can warm up with common sizes. For QK normalization, this will be
@@ -74,7 +81,7 @@ class L2Normalization(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         # Use input directly - torch.compile can handle multi-dimensional tensors
@@ -86,7 +93,7 @@ class L2Normalization(BasicOperation):
         # Compute L2 normalization using fused implementation
         # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
         if requires_grad:
-            # Training: use version that returns both output and intermediate values
+            # Training: use version that returns output and intermediate values for backward pass
             y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
         else:
             # Inference: use lightweight version that only returns output
@@ -95,6 +102,8 @@ class L2Normalization(BasicOperation):
 
         # Save state for backward pass
         if requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y
@@ -110,7 +119,7 @@ class L2Normalization(BasicOperation):
 
         dy = maybe_dequantize(grad_output)
 
-        # Compute L2 norm backward pass using fused implementation
+        # Compute L2 norm backward pass using fused implementation - recalculates l2_norm_squared_eps
         dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
 
         # Clear saved tensors if possible

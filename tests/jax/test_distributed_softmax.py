@@ -15,7 +15,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
 from utils import make_causal_mask, make_self_mask
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 DTYPES = [jnp.float16, jnp.bfloat16]
@@ -41,11 +41,11 @@ class TestDistributedSoftmax:
 
         if not bad_sharding:
             x_pspec = PartitionSpec(
-                mesh_resource.dp_resource, mesh_resource.tp_resource, None, None
+                mesh_resource.dp_resource, mesh_resource.tpsp_resource, None, None
             )
         else:
             x_pspec = PartitionSpec(
-                mesh_resource.dp_resource, None, None, mesh_resource.tp_resource
+                mesh_resource.dp_resource, None, None, mesh_resource.tpsp_resource
             )
 
         if broadcast_batch_mask:
@@ -102,9 +102,11 @@ class TestDistributedSoftmax:
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(mesh_resource=mesh_resource):
-            x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            mask_ = jax.device_put(mask, NamedSharding(mesh, mask_pspec))
+        with mesh, autocast(mesh_resource=mesh_resource):
+            x_named_sharding = NamedSharding(mesh, x_pspec)
+            mask_named_sharding = NamedSharding(mesh, mask_pspec)
+            x_ = jax.device_put(x, x_named_sharding)
+            mask_ = jax.device_put(mask, mask_named_sharding)
 
             with warnings.catch_warnings(record=True) as warns:
                 try:
@@ -116,8 +118,8 @@ class TestDistributedSoftmax:
                         grad_args=(0,),
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, mask_pspec),
-                        out_shardings=(None, (x_pspec,)),
+                        in_shardings=(x_named_sharding, mask_named_sharding),
+                        out_shardings=(None, x_named_sharding),
                     )
                 except AssertionError as err:
                     # Softmax should still produce the correct numerical result with
@@ -135,7 +137,7 @@ class TestDistributedSoftmax:
                         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("data_shape", [[32, 12, 128, 128], [64, 16, 1024, 1024]])
+    @pytest.mark.parametrize("data_shape", [[32, 12, 128, 128], [8, 8, 1024, 1024]])
     @pytest.mark.parametrize(
         "softmax_type",
         [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED, SoftmaxType.SCALED_UPPER_TRIANG_MASKED],
@@ -168,14 +170,14 @@ class TestDistributedSoftmax:
             dtype,
             bad_sharding,
             broadcast_batch_mask,
-            use_shardy=False,
+            use_shardy=True,
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest.mark.parametrize("softmax_type", [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED])
     @pytest.mark.parametrize("bad_sharding", [False, True])
     @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
-    def test_softmax_shardy(
+    def test_softmax_gspmd(
         self,
         device_count,
         mesh_shape,
@@ -196,5 +198,5 @@ class TestDistributedSoftmax:
             dtype=DTYPES[0],
             bad_sharding=bad_sharding,
             broadcast_batch_mask=broadcast_batch_mask,
-            use_shardy=True,
+            use_shardy=False,
         )
