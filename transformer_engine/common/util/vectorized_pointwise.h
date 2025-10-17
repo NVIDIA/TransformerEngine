@@ -541,21 +541,23 @@ __launch_bounds__(unary_kernel_threads) __global__
       ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
       bool dgate_in = true;
 
+      ComputeType act_in, dact_in;
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
         // In case of GPT OSS, clamp the activation and gate values
         const ComputeType limit = p.limit;
         dgate_in = gate_in <= limit && gate_in >= -limit;  // Derivative of clamp
         gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+        dact_in = Dactivation(gelu_in, p);
+        act_in = Activation(gelu_in, p);
       }
-
-      ComputeType act_in, dact_in;
-      if constexpr ((Activation == &silu<fp32, fp32>) && (Dactivation == &dsilu<fp32, fp32>)) {
+      else if constexpr ((Activation == &silu<fp32, fp32>) &&
+                         (Dactivation == &dsilu<fp32, fp32>)) {
         const float s = sigmoidf(gelu_in);
         dact_in = gelu_in * s * (1 - s) + s;
         act_in = gelu_in * s;
       } else {
-        dact_in = Dactivation(gelu_in, p);
         act_in = Activation(gelu_in, p);
+        dact_in = Dactivation(gelu_in, p);
       }
 
       ComputeType after_dgelu = dact_in * grad_val * gate_in;

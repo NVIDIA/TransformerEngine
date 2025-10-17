@@ -2084,7 +2084,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 @pytest.mark.parametrize("recipe", [recipe.MXFP8BlockScaling()])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("activation", all_activations)
-def test_grouped_linear_fp8_input(
+def test_grouped_linear_quantized_input(
     dtype,
     num_gemms,
     bs,
@@ -2097,7 +2097,7 @@ def test_grouped_linear_fp8_input(
     if config.max_seqlen_q % 32 != 0:
         pytest.skip("MXFP8 requires sequence length to be divisible by 32.")
 
-    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8_model_params, recipe=recipe):
         grouped_linear_bf16_input = GroupedLinear(
             num_gemms,
             config.hidden_size,

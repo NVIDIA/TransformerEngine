@@ -123,7 +123,7 @@ class _GroupedLinear(torch.autograd.Function):
                 f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
-        fp8_input = isinstance(inp, QuantizedTensorBase)
+        fp8_input = isinstance(inp, QuantizedTensorStorage)
         inputmats: list
         if fp8 and fp8_input:
             inputmats = tex.split_quantized_tensor(inp, m_splits)
@@ -286,7 +286,7 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_view = grad_output
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if isinstance(grad_output_view, QuantizedTensorBase):
+            if isinstance(grad_output_view, QuantizedTensorStorage):
                 assert not ctx.use_bias, "Bias is not supported for quantized grad output"
                 grad_output = tex.split_quantized_tensor(grad_output_view, ctx.m_splits)
             elif ctx.fp8:

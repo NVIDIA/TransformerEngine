@@ -179,56 +179,6 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
   return buffer;
 }
 
-std::vector<py::object> split_quantized_tensor(py::handle tensor, std::vector<size_t>& m_splits) {
-  init_extension();
-
-  NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "Input must be MXFP8Tensor.");
-
-  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
-  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
-  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
-
-  const transformer_engine::DType fp8_dtype =
-      tensor.attr("_fp8_dtype").cast<transformer_engine::DType>();
-
-  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_inv_list;
-  if (rowwise_usage) {
-    auto rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
-    auto rowwise_scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
-
-    split_quantized_tensor_impl(rowwise_data, rowwise_scale_inv, m_splits, rowwise_data_list,
-                                rowwise_scale_inv_list, true);
-  }
-
-  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_inv_list;
-  if (columnwise_usage) {
-    auto columnwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
-    auto columnwise_scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
-
-    split_quantized_tensor_impl(columnwise_data, columnwise_scale_inv, m_splits,
-                                columnwise_data_list, columnwise_scale_inv_list, false);
-  }
-
-  // Construct mxfp8 tensors
-  auto quantizer = tensor.attr("_quantizer");
-  std::vector<py::object> tensor_py_list;
-  py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorBasePythonClass));
-  for (size_t i = 0; i < m_splits.size(); ++i) {
-    // Create tensor objects with proper reference counting
-    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
-    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_inv_list[i]) : py::none();
-    py::object columnwise_data =
-        (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
-    py::object columnwise_scale =
-        (columnwise_usage ? py::cast(columnwise_scale_inv_list[i]) : py::none());
-    // Construct Python tensor
-    tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
-                                                 columnwise_scale, fp8_dtype, quantizer));
-  }
-
-  return tensor_py_list;
-}
-
 namespace {
 
 constexpr size_t fp8_elem_size = 1;
@@ -289,6 +239,56 @@ void split_quantized_tensor_impl(at::Tensor& data, at::Tensor& scale_inv,
 }
 
 }  // namespace
+
+std::vector<py::object> split_quantized_tensor(py::handle tensor, std::vector<size_t>& m_splits) {
+  init_extension();
+
+  NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "Input must be MXFP8Tensor.");
+
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
+
+  const transformer_engine::DType fp8_dtype =
+      tensor.attr("_fp8_dtype").cast<transformer_engine::DType>();
+
+  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_inv_list;
+  if (rowwise_usage) {
+    auto rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    auto rowwise_scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+
+    split_quantized_tensor_impl(rowwise_data, rowwise_scale_inv, m_splits, rowwise_data_list,
+                                rowwise_scale_inv_list, true);
+  }
+
+  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_inv_list;
+  if (columnwise_usage) {
+    auto columnwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    auto columnwise_scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+
+    split_quantized_tensor_impl(columnwise_data, columnwise_scale_inv, m_splits,
+                                columnwise_data_list, columnwise_scale_inv_list, false);
+  }
+
+  // Construct mxfp8 tensors
+  auto quantizer = tensor.attr("_quantizer");
+  std::vector<py::object> tensor_py_list;
+  py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
+  for (size_t i = 0; i < m_splits.size(); ++i) {
+    // Create tensor objects with proper reference counting
+    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_inv_list[i]) : py::none();
+    py::object columnwise_data =
+        (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
+    py::object columnwise_scale =
+        (columnwise_usage ? py::cast(columnwise_scale_inv_list[i]) : py::none());
+    // Construct Python tensor
+    tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, fp8_dtype, quantizer));
+  }
+
+  return tensor_py_list;
+}
 
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper& input,
                                                  bool rowwise) {
