@@ -2759,7 +2759,7 @@ def fused_attn_fwd(
             assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX
             softmax_offset = jnp.zeros(0, dtype=jnp.float32)
     else:
-        softmax_offset = softmax_offset.astype(jnp.float32)
+        assert softmax_offset.dtype == jnp.float32
         # Shard by heads dimension if not VANILLA_SOFTMAX
         if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = with_sharding_constraint_by_logical_axes(
@@ -2897,13 +2897,7 @@ def fused_attn_bwd(
     if softmax_offset is None:
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # Extract number of heads from qkv shape
-            # For qkvpacked (BS3HD): shape is (..., seq, 3, heads, dim) → index -2
-            # For separate/kvpacked (BSHD): shape is (..., seq, heads, dim) → index -2
-            if qkv_layout.is_qkvpacked():
-                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BS3HD
-            else:
-                num_heads = qkv[0].shape[-2]  # heads is at index -2 for BSHD
+            num_heads = qkv[0].shape[-2]
             # Create properly-sized tensor [1, h, 1, 1] filled with zeros
             softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
             # Shard by heads dimension
