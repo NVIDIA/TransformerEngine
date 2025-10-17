@@ -105,7 +105,7 @@ def get_rht_matrix(with_random_sign_mask: bool) -> torch.Tensor:
 def get_random_sign_mask_for_rht(with_random_sign_mask: bool) -> int:
     """Sign mask for random Hadamard transform."""
     if with_random_sign_mask:
-        return get_sign_from_vector(get_wgrad_sign_vector()).item()
+        return get_sign_from_vector(get_wgrad_sign_vector())
     return 0
 
 
