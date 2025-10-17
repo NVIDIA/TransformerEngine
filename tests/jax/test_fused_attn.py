@@ -113,8 +113,6 @@ def general_dot_product_attention(
             softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
             softmax_out = softmax_with_extra[..., :-1].astype(dtype)
         case AttnSoftmaxType.LEARNABLE_SOFTMAX:
-            # Reshape softmax_offset from (1, h_q, 1, 1) to (1, h_kv, num_groups, s_q, 1) to match logits
-            # logits shape: (b, h_kv, num_groups, s_q, s_kv)
             # Append learnable offset logit, apply standard softmax, then remove last column
             learnable_logit = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
             learnable_logit = jnp.broadcast_to(learnable_logit, logits.shape[:-1] + (1,))
@@ -522,7 +520,6 @@ class FusedAttnRunner:
             self.softmax_offset = jax.random.uniform(
                 softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0
             )
-            self.softmax_offset = jnp.ones((1, self.num_heads_q, 1, 1), dtype=jnp.float32) + 10
         else:
             self.softmax_offset = None
 
@@ -898,7 +895,6 @@ class FusedAttnRunner:
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
-        # arg positions: q=0, k=1, v=2, bias=3, softmax_offset=4
         if self.bias_shape == BiasShape._1HSS:
             arg_nums = (0, 1, 2, 3)
             grad_shardings = (
