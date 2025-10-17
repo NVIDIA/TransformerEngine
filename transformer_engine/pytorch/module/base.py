@@ -233,9 +233,9 @@ def initialize_ub(
                 elif torch.distributed.is_gloo_available():
                     bootstrap_backend = "gloo"
         elif tex.nvte_built_with_cublasmp():
-            assert bootstrap_backend == "nccl", (
-                "Comm+GEMM overlap w/ cuBlasMp needs `bootstrap_backend=\"nccl\"`."
-            )
+            assert (
+                bootstrap_backend == "nccl"
+            ), 'Comm+GEMM overlap w/ cuBlasMp needs `bootstrap_backend="nccl"`.'
         else:
             assert bootstrap_backend in [
                 "gloo",

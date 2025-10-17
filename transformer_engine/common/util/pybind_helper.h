@@ -8,8 +8,8 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_PYBIND_HELPER_H_
 
 #include <pybind11/pybind11.h>
-#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/comm_gemm.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 

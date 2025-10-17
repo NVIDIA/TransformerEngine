@@ -12,7 +12,6 @@
 #include <cudnn.h>
 #include <nvrtc.h>
 
-
 #include "nccl.h"
 
 #ifdef NVTE_WITH_CUBLASMP

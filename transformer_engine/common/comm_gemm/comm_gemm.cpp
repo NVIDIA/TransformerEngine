@@ -6,7 +6,6 @@
 
 #include "transformer_engine/comm_gemm.h"
 
-
 #include <cublasmp.h>
 #include <cuda_runtime.h>
 #include <nvshmem.h>
@@ -102,7 +101,6 @@ CublasMpMatmulDesc CublasMpMatmulDescCreate(cublasComputeType_t compute_type) {
 
 }  // namespace
 
-
 struct NVTECommGemmCtx {
   int64_t nranks;
   int64_t rank;
@@ -121,7 +119,6 @@ struct NVTECommGemmCtx {
 };
 
 namespace {
-
 
 int64_t block_size(NVTECommGemmCtx* ctx, int64_t global_size) {
   // Use non-cyclic layout to maximize opportunity for comm overlap.
