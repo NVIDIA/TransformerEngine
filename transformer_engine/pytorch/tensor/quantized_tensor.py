@@ -481,15 +481,6 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
 
-        if func == torch.ops.aten.new_zeros.default:
-            # create fresh new tensor with zeros.
-            # Used in FSDP to create fresh new tensor for sharded weights
-            tensor = args[0]
-            quantizer = tensor._quantizer.copy()
-            shape = args[1]
-            zero_tensor = torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
-            return quantizer(zero_tensor.detach())
-
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
                 return arg.dequantize(dtype=arg.dtype)

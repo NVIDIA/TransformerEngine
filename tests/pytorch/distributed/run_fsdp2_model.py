@@ -110,8 +110,8 @@ def _train(args):
 
     # FP8 Configuration
     fp8_format = Format.HYBRID
-    # fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
-    fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
+    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
+    # fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
     # fp8_recipe = MXFP8BlockScaling(fp8_format=fp8_format)    
     build_model_context_args = {}
     if not args.fp8_init:
@@ -119,7 +119,6 @@ def _train(args):
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
-
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
@@ -127,7 +126,7 @@ def _train(args):
     # Build the model with the specified context
     with build_model_context(**build_model_context_args):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    # model.to(device)
+    model.to(device)
 
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
@@ -160,7 +159,6 @@ def _train(args):
             fully_shard(sub_module, mesh=mesh)
     fully_shard(model, mesh=mesh)
     restore_custom_attrs(model, custom_attrs)
-
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for iteration in range(args.iter):

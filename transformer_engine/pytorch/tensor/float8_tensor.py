@@ -563,7 +563,38 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-
+        if func == aten.view.default:
+            tensor = args[0]
+            data = tensor._data
+            out_data = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            out_shape = out_data.size()
+            out_transpose = None if tensor._transpose_invalid else tensor._transpose
+            if out_transpose is not None:
+                out_transpose_shape = out_transpose.size()
+                if (
+                    out_transpose_shape[0] != out_shape[-1]
+                    or out_transpose_shape[1:] != out_shape[:-1]
+                ):
+                    out_transpose = None
+                else:
+                    view_shape_for_transpose = [out_shape[-1]] + list(out_shape[:-1])
+                    out_transpose = out_transpose.view(*view_shape_for_transpose)
+            return Float8Tensor(
+                shape=out_shape,
+                dtype=tensor.dtype,
+                requires_grad=False,
+                data=out_data,
+                fp8_scale_inv=tensor._scale_inv,
+                fp8_dtype=tensor._fp8_dtype,
+                data_transpose=out_transpose,
+                quantizer=tensor._quantizer,
+            )
+    
         if func in [aten.slice.Tensor, aten.select.int]:
             tensor = args[0]
             data = tensor._data
@@ -750,24 +781,41 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             Tuple[Float8Tensor, Tuple[torch.Tensor, ...]]: Allgathered Float8Tensor and tuple of internal tensors
             used by the Float8Tensor that was actually allgathered
         """
-        if out is not None:
-            # The Float8tensor object returned in the post_all_gather is used over and over again.
-            # So no need to create a new one.
-            # In torchao implementation of Float8Tensor, this condition is used to set the scale inverse.
-            # since scale inverse is set after the allgather. However we take care of it during quantization
-            # itself by passing the amax reduction group to the quantizer.
-            return
-        (data,) = all_gather_outputs
+        # Import here to avoid circular imports
+        from ..fp8 import FP8GlobalStateManager
+        # Detect if we're within fp8_autocast scope. We'll be in 
+        # forward pass when within the fp8_autocast scope. Backward
+        # pass when outside of the fp8_autocast scope.
+        is_in_fp8_autocast = FP8GlobalStateManager.is_fp8_enabled()
+        # print("is_in_fp8_autocast:", is_in_fp8_autocast)
+        (data, ) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer) = metadata
-        out = Float8Tensor(
-            data=data,
-            fp8_scale_inv=fp8_scale_inv,
-            fp8_dtype=fp8_dtype,
-            shape=data.shape,
-            dtype=fake_dtype,
-            quantizer=quantizer,
-        )
-        return out, (data,)
+        orig_shape = data.size()
+        if not is_in_fp8_autocast:
+            # If backward, we need transposed data after weight allgather
+            # to compute the gradients.
+            permute_dims = [data.dim() - 1] + list(range(data.dim() - 1))
+            data = data.permute(*permute_dims).contiguous()
+        if out is not None:
+            if is_in_fp8_autocast:
+                out._data = data
+                out.update_usage(rowwise_usage=True, columnwise_usage=False)
+            else:
+                out._transpose = data
+                out._transpose_invalid = False
+                out.update_usage(rowwise_usage=False, columnwise_usage=True)
+            return
+        fp8_args = {"shape": orig_shape,
+                  "dtype": fake_dtype,
+                  "fp8_scale_inv": fp8_scale_inv,
+                  "fp8_dtype": fp8_dtype,
+                  "quantizer": quantizer,
+                  "requires_grad": False,
+                  "data": None,
+                  "data_transpose": None,
+                  }
+        fp8_args.update({"data" if is_in_fp8_autocast else "data_transpose": data})
+        return Float8Tensor(**fp8_args), (data, )
 
     @classmethod
     def _make_in_reduce_ex(
@@ -886,6 +934,9 @@ class _ViewFunc(torch.autograd.Function):
             out_transpose_shape = out_transpose.size()
             if out_transpose_shape[0] != out_shape[-1] or out_transpose_shape[1:] != out_shape[:-1]:
                 out_transpose = None
+            else:
+                view_shape_for_transpose = [shape[-1]] + list(shape[:-1])
+                out_transpose = out_transpose.view(*view_shape_for_transpose)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -930,6 +981,9 @@ class _ReshapeFunc(torch.autograd.Function):
             out_transpose_shape = out_transpose.size()
             if out_transpose_shape[0] != out_shape[-1] or out_transpose_shape[1:] != out_shape[:-1]:
                 out_transpose = None
+            else:
+                reshape_shape_for_transpose = [shape[-1]] + list(shape[:-1])
+                out_transpose = out_transpose.reshape(*reshape_shape_for_transpose)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,

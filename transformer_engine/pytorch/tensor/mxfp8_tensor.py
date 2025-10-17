@@ -499,6 +499,25 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     def fsdp_pre_all_gather(self, mesh):
+        """Functions FSDP2 calls before all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
+            to shard the weights.
+
+        Returns:
+            shareded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
+            that need to be all-gathered.
+            metadata: Tuple[Any]: Metadata needed for reconstructing the
+            MXFP8Tensor after all-gather.
+        """
+        # Import here to avoid circular imports
+        from ..fp8 import FP8GlobalStateManager
+        # Detect if we're within fp8_autocast scope. We ll be in 
+        # forward pass when within the fp8_autocast scope. Backward
+        # pass when outside of the fp8_autocast scope.
+        is_in_fp8_autocast = FP8GlobalStateManager.is_fp8_enabled()
+        
         sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv, self._columnwise_data, self._columnwise_scale_inv)
         metadata = (self._fp8_dtype, self.dtype, self._quantizer)
         return sharded_tensors, metadata
@@ -514,10 +533,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv = all_gather_outputs
         fp8_dtype, dtype, quantizer = metadata
         if out is not None:
-            out._rowwise_data.copy_(rowwise_data)
-            out._rowwise_scale_inv.copy_(rowwise_scale_inv)
-            out._columnwise_data.copy_(columnwise_data)
-            out._columnwise_scale_inv.copy_(columnwise_scale_inv)
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv
+            out._columnwise_data = columnwise_data
+            out._columnwise_scale_inv = columnwise_scale_inv
             # out._fp8_dtype = fp8_dtype
             # out._quantizer = quantizer
             return
