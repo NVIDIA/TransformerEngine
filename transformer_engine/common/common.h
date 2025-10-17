@@ -154,8 +154,7 @@ struct Tensor {
     return acc;
   }
 
-  // Check for size (not just pointer) for 0-dim or no token cases.
-  bool has_data() const noexcept { return data.dptr != nullptr || data.shape.size() != 0; }
+  bool has_data() const noexcept { return data.dptr != nullptr; }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept {
@@ -184,21 +183,38 @@ struct Tensor {
      * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109569).
      */
     switch (scaling_mode) {
-      case NVTE_NVFP4_1D_SCALING:
       case NVTE_DELAYED_TENSOR_SCALING:
-        if (!has_data() && has_columnwise_data()) {
+      case NVTE_NVFP4_1D_SCALING: {
+        // Choose data buffer based on whether it is initialized
+        // Note: Uninitialized buffers currently have shape=[].
+        // However, this is logically incorrect. 0-D tensors have 1
+        // entry, and uninitialized tensors should have shape=[0].
+        bool use_columnwise_shape = false;
+        if (data.dptr != nullptr) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.dptr != nullptr) {
+          use_columnwise_shape = true;
+        } else if (data.shape.size() != 0) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.shape.size() != 0) {
+          use_columnwise_shape = true;
+        }
+
+        // Infer shape based on data
+        if (use_columnwise_shape) {
+          // Column-wise data is transposed
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
+            ret.reserve(columnwise_data.shape.size());
             for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
               ret.push_back(columnwise_data.shape[i]);
             }
             ret.push_back(columnwise_data.shape.front());
           }
           return ret;
-        } else {
-          return data.shape;
         }
-        break;
+        return data.shape;
+      }
       case NVTE_MXFP8_1D_SCALING:
         if (!has_data() && has_columnwise_data()) {
           return columnwise_data.shape;

@@ -22,9 +22,9 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   TORCH_CHECK(amax.numel() == 1, "amax must have exactly one element");
   auto* amax_ptr = amax.data_ptr<float>();
   TensorWrapper fake_te_output(
-      amax_ptr, te_input.shape(),
+      nullptr, te_input.shape(),
       DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
-      amax_ptr, nullptr, amax_ptr);
+      amax_ptr);
 
   nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
 }
