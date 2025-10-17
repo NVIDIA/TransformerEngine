@@ -7,9 +7,9 @@
 #include "util.h"
 
 #include "common.h"
+#include "common/common.h"
 #include "extensions.h"
 #include "pybind.h"
-#include "common/common.h"
 
 namespace transformer_engine::pytorch {
 

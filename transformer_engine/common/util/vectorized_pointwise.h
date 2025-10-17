@@ -549,9 +549,8 @@ __launch_bounds__(unary_kernel_threads) __global__
         gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
         dact_in = Dactivation(gelu_in, p);
         act_in = Activation(gelu_in, p);
-      }
-      else if constexpr ((Activation == &silu<fp32, fp32>) &&
-                         (Dactivation == &dsilu<fp32, fp32>)) {
+      } else if constexpr ((Activation == &silu<fp32, fp32>) &&
+                           (Dactivation == &dsilu<fp32, fp32>)) {
         const float s = sigmoidf(gelu_in);
         dact_in = gelu_in * s * (1 - s) + s;
         act_in = gelu_in * s;
