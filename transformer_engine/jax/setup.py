@@ -23,7 +23,6 @@ behaviors for:
 
 import sys
 import os
-import re
 import shutil
 from pathlib import Path
 
@@ -59,12 +58,18 @@ def get_cuda_major_version() -> int:
     """Get CUDA major version using Jax backend."""
 
     assert (
-        jax.lib.xla_bridge.get_backend().platform == "gpu"
+        jax._src.lib.cuda_versions is not None
     ), "GPU backend is required to build TE jax extensions."
 
-    platform_version = jax.lib.xla_bridge.get_backend().platform_version
-    cuda_version = int(re.search(r"cuda (\d+)", platform_version).group(1))
-    cuda_major_version = cuda_version // 1000
+    # Jax currently does not have any stable/public method to get cuda version.
+    # Try using internal function and default to cuda12 if not found.
+    try:
+        cuda_version = jax._src.lib.cuda_versions.cuda_runtime_get_version()
+        cuda_major_version = cuda_version // 1000
+    except AttributeError:
+        cuda_version = os.getenv("CUDA_VERSION", "12")
+        cuda_major_version = int(cuda_version.split(".")[0])
+
     assert cuda_major_version in (12, 13), f"Unsupported cuda version {cuda_version}."
     return cuda_major_version
 

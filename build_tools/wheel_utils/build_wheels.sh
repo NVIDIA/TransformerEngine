@@ -38,7 +38,7 @@ if $BUILD_COMMON ; then
         # Create the wheel.
         /opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
-        # Repack the wheel for cuda specific package, i.e. cu12.
+        # Repack the wheel for specific cuda version.
         /opt/python/cp310-cp310/bin/wheel unpack dist/*
         # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
         sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
@@ -63,7 +63,7 @@ fi
 
 if $BUILD_JAX ; then
 	cd /TransformerEngine/transformer_engine/jax
-	/opt/python/cp310-cp310/bin/pip install "jax[cuda12_local]" jaxlib
+	/opt/python/cp310-cp310/bin/pip install "jax[cuda${CUDA_MAJOR}_local]" jaxlib
 	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
 	cp dist/* /wheelhouse/
 fi
