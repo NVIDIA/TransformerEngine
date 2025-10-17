@@ -103,8 +103,10 @@ class TestDistributedSoftmax:
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, autocast(mesh_resource=mesh_resource):
-            x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            mask_ = jax.device_put(mask, NamedSharding(mesh, mask_pspec))
+            x_named_sharding = NamedSharding(mesh, x_pspec)
+            mask_named_sharding = NamedSharding(mesh, mask_pspec)
+            x_ = jax.device_put(x, x_named_sharding)
+            mask_ = jax.device_put(mask, mask_named_sharding)
 
             with warnings.catch_warnings(record=True) as warns:
                 try:
@@ -116,8 +118,8 @@ class TestDistributedSoftmax:
                         grad_args=(0,),
                         metric_fwd_dtype=dtype,
                         metric_bwd_dtype=dtype,
-                        in_shardings=(x_pspec, mask_pspec),
-                        out_shardings=(None, (x_pspec,)),
+                        in_shardings=(x_named_sharding, mask_named_sharding),
+                        out_shardings=(None, x_named_sharding),
                     )
                 except AssertionError as err:
                     # Softmax should still produce the correct numerical result with
