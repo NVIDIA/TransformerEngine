@@ -105,7 +105,6 @@ def general_dot_product_attention(
     match softmax_type:
         case AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_out = jax.nn.softmax(logits).astype(dtype)
-            jax.debug.print("vanilla_softmax_out {softmax_out}", softmax_out=softmax_out)
         case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
             # Append a zero logit, apply standard softmax, then remove last column

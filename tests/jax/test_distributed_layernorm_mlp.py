@@ -195,7 +195,6 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        return
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
