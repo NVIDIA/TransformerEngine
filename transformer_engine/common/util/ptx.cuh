@@ -1025,7 +1025,7 @@ __device__ __forceinline__ floatx4 up_cast(const fp16x4 &in) {
       "cvt.f32.f16 %2, f16_3;\n\t"
       "cvt.f32.f16 %3, f16_4;\n\t"
       "}\n\t"
-      : "=f"(out.x), "=f"(out.y), "=f"(out.z), "=f"(out.w)
+      : "=f"(out.x1), "=f"(out.x2), "=f"(out.x3), "=f"(out.x4)
       : "l"(reinterpret_cast<int64_t const &>(in)));
   return out;
 }
@@ -1052,8 +1052,8 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
       "prmt.b32 %3, 0x0, %5, 0x7632;\n\t"
       "prmt.b32 %2, 0x0, %5, 0x5410;\n\t"
       "}\n\t"
-      : "=r"(reinterpret_cast<int32_t &>(out.x)), "=r"(reinterpret_cast<int32_t &>(out.y)),
-        "=r"(reinterpret_cast<int32_t &>(out.z)), "=r"(reinterpret_cast<int32_t &>(out.w))
+      : "=r"(reinterpret_cast<int32_t &>(out.x1)), "=r"(reinterpret_cast<int32_t &>(out.x2)),
+        "=r"(reinterpret_cast<int32_t &>(out.x3)), "=r"(reinterpret_cast<int32_t &>(out.x4))
       : "r"(in2[0]), "r"(in2[1]));
   return out;
 }
