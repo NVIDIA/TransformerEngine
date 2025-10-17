@@ -34,7 +34,7 @@ load_framework_extension("jax")
 from . import flax
 from . import quantize
 
-from .quantize import fp8_autocast, update_collections
+from .quantize import autocast, fp8_autocast, update_collections
 from .quantize import NVTE_FP8_COLLECTION_NAME
 
 from .sharding import MeshResource
@@ -45,6 +45,7 @@ from ..common.utils import DeprecatedEnum
 
 __all__ = [
     "NVTE_FP8_COLLECTION_NAME",
+    "autocast",
     "fp8_autocast",
     "update_collections",
     "MeshResource",
