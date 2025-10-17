@@ -37,5 +37,17 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
  * this doesn't hold.
  */
 std::vector<py::object> split_quantized_tensor(py::handle tensor, std::vector<size_t> &m_splits);
+
+/*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
+ *
+ * If rowwise==false, the columnwise data will be reinterpreted as rowwise data to avoid
+ * transposing it in memory. Due to differences in how block scaling and mxfp8 store data,
+ * this requires the calling code to treat the output tensor as having been tranposed in this case.
+ *
+ * Returns the swizzled scaling factor of the converted mxfp8 tensor.
+ * The returned swizzled scaling factor tensor should be kept alive during the GEMM.
+ */
+at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
+                                                 bool rowwise);
 }  // namespace transformer_engine::pytorch
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

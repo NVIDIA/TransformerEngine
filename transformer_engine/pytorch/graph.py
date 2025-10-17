@@ -6,6 +6,7 @@
 from collections.abc import Iterable
 import contextlib
 import gc
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
@@ -15,8 +16,8 @@ from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from .fp8 import (
-    fp8_autocast,
+from .quantization import (
+    autocast,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -84,7 +85,7 @@ def _make_graphed_callables(
     sample_args: SingleOrTuple[Tuple[torch.Tensor, ...]],
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
-    fp8_weight_caching: bool = False,
+    cache_quantized_params: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
     _num_layers_per_chunk: Optional[List[int]] = None,
@@ -252,7 +253,7 @@ def _make_graphed_callables(
                     consumed_sample_q[sample_keys].append(per_callable_fwd_idx)
                 fwd_sample_qs[m_chunk] = fwd_sample_qs[m_chunk][num_consumed_samples:]
 
-    if fp8_weight_caching:
+    if cache_quantized_params:
         # Initialize flag that controls FP8 weight updates
         FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
 
@@ -687,7 +688,7 @@ def _make_graphed_callables(
 
             # Decide whether to update FP8 weights
             skip_fp8_weight_update = None
-            if fp8_weight_caching:
+            if cache_quantized_params:
                 assert "is_first_microbatch" in user_kwargs and isinstance(
                     user_kwargs["is_first_microbatch"], bool
                 ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
@@ -796,14 +797,14 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: Optional[Recipe],
+    recipe: Optional[Recipe],
 ) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
 
-    if not isinstance(fp8_recipe, DelayedScaling):
+    if not isinstance(recipe, DelayedScaling):
         return None
 
     fp8_tensors = []
@@ -812,10 +813,10 @@ def save_fp8_tensors(
             module_tensors = None
             if isinstance(m, TransformerEngineBaseModule):
                 if m.primary_weights_in_fp8:
-                    m.adjust_amax_history_length(fp8_recipe.amax_history_len)
+                    m.adjust_amax_history_length(recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
             elif isinstance(m, BasicOperation):
-                m.reset_recipe_state(recipe=fp8_recipe)
+                m.reset_recipe_state(recipe=recipe)
                 module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors
@@ -850,11 +851,16 @@ def make_graphed_callables(
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
-    fp8_enabled: SingleOrTuple[bool] = False,
-    fp8_calibrating: bool = False,
+    fp8_enabled: Optional[SingleOrTuple[bool]] = None,
+    fp8_calibrating: Optional[bool] = None,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
-    fp8_weight_caching: bool = False,
+    fp8_weight_caching: Optional[bool] = None,
+    enabled: Optional[SingleOrTuple[bool]] = None,
+    calibrating: Optional[bool] = None,
+    recipe: Optional[Recipe] = None,
+    amax_reduction_group: Optional[dist_group_type] = None,
+    cache_quantized_params: Optional[bool] = None,
     _order: Optional[List[int]] = None,
     _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
@@ -869,6 +875,11 @@ def make_graphed_callables(
     the
     `original PyTorch implementation <https://pytorch.org/docs/stable/generated/torch.cuda.make_graphed_callables.html>`_
     for more documentation.
+
+    .. warning::
+
+       Arguments 'fp8_enabled', 'fp8_calibrating', 'fp8_recipe', 'fp8_group', and 'fp8_weight_caching' are deprecated.
+       Use arguments 'enabled', 'calibrating', 'recipe', 'amax_reduction_group', and 'cache_quantized_params' instead.
 
     Graphing parameters
     -------------------
@@ -894,30 +905,110 @@ def make_graphed_callables(
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
 
-    FP8-related parameters
+    Quantization related parameters
     ----------------------
-    fp8_enabled: (tuple of) bool, default = `False`
-                 whether or not to enable fp8.
-                 If tuple, the length must match the number of modules.
-    fp8_calibrating: bool, default = `False`
-                     calibration mode allows collecting statistics such as amax and scale
-                     data of fp8 tensors even when executing without fp8 enabled. This is
-                     useful for saving an inference ready fp8 checkpoint while training
-                     using a higher precision.
-    fp8_recipe: Recipe, default = `None`
-                recipe used for FP8 training.
-    fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
-               distributed group over which amaxes for the fp8 tensors
-               are reduced at the end of each training step.
-    fp8_weight_caching: bool, default = `False`
-                        Whether or not to cache FP8 weights across microbatches. if set to `True`,
-                        the `is_first_microbatch` boolean argument must be passed into the forward
-                        method for TransformerEngine modules. When storing primary weights in FP8
-                        using TE's `fp8_model_init` API and using an FP8 aware optimizer, this arg
-                        must be set to `False` if calculating weight transposes' outside TE, e.g.,
-                        in the optimizer step.
+    enabled: (tuple of) bool, default = `False`
+             whether or not to enable low precision quantization (FP8/FP4).
+             If tuple, the length must match the number of modules.
+    calibrating: bool, default = `False`
+                 calibration mode allows collecting statistics such as amax and scale
+                 data of quantized tensors even when executing without quantization enabled.
+                 This is useful for saving an inference ready checkpoint while training
+                 using a higher precision.
+    recipe: recipe.Recipe, default = `None`
+            recipe used for low precision quantization.
+    amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
+                          distributed group over which amaxes for the quantized tensors
+                          are reduced at the end of each training step.
+    cache_quantized_params: bool, default = `False`
+                            Whether or not to cache quantized weights across microbatches. if set to `True`,
+                            the `is_first_microbatch` boolean argument must be passed into the forward
+                            method for TransformerEngine modules. When storing primary weights in low precision
+                            using TE's `quantized_model_init` API and using an quantization aware optimizer,
+                            this arg must be set to `False` if calculating weight transposes' outside TE, e.g.,
+                            in the optimizer step.
 
     """
+
+    # Handle deprecated args. If old kwargs are set, they are prioritized with warning.
+    if fp8_enabled is not None:
+        if enabled is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_enabled` kwarg "
+                "in favor of `enabled`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_enabled` kwarg in favor of `enabled`. "
+            "`fp8_enabled` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        enabled = fp8_enabled
+    if enabled is None:
+        enabled = False
+
+    if fp8_calibrating is not None:
+        if calibrating is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_calibrating` kwarg "
+                "in favor of `calibrating`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_calibrating` kwarg in favor of "
+            "`calibrating`. `fp8_calibrating` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        calibrating = fp8_calibrating
+    if calibrating is None:
+        calibrating = False
+
+    if fp8_recipe is not None:
+        if recipe is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg in favor of "
+                "`recipe`. `fp8_recipe` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg "
+                "in favor of `recipe`, but both kwargs are set."
+            )
+        recipe = fp8_recipe
+
+    if fp8_group is not None:
+        if amax_reduction_group is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_group` kwarg in favor of "
+                "`amax_reduction_group`. `fp8_group` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_group` kwarg "
+                "in favor of `amax_reduction_group`, but both kwargs are set."
+            )
+        amax_reduction_group = fp8_group
+
+    if fp8_weight_caching is not None:
+        if cache_quantized_params is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_weight_caching` kwarg "
+                "in favor of `cache_quantized_params`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_weight_caching` kwarg in favor of "
+            "`cache_quantized_params`. `fp8_weight_caching` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        cache_quantized_params = fp8_weight_caching
+    if cache_quantized_params is None:
+        cache_quantized_params = False
+
     set_capture_start()
 
     # Handle single module.
@@ -926,21 +1017,21 @@ def make_graphed_callables(
         just_one_callable = True
         modules = (modules,)
 
-    if not isinstance(fp8_enabled, tuple):
-        assert isinstance(fp8_enabled, bool), "fp8_enabled must be a bool or a tuple of bools"
-        fp8_enabled = (fp8_enabled,) * len(modules)
+    if not isinstance(enabled, tuple):
+        assert isinstance(enabled, bool), "enabled must be a bool or a tuple of bools"
+        enabled = (enabled,) * len(modules)
     else:
-        assert len(fp8_enabled) == len(
+        assert len(enabled) == len(
             modules
-        ), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
-    if any(fp8_enabled) and fp8_recipe is None:
-        fp8_recipe = get_default_fp8_recipe()
-    elif not any(fp8_enabled):
-        fp8_recipe = None
-    module_uses_fp8 = dict(zip((id(m) for m in modules), fp8_enabled))
+        ), f"enabled length ({len(enabled)}) must match modules length ({len(modules)})"
+    if any(enabled) and recipe is None:
+        recipe = get_default_fp8_recipe()
+    elif not any(enabled):
+        recipe = None
+    module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
 
     # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
+    saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
 
     # FP8 wrapper.
     old_call_funcs = {}
@@ -954,11 +1045,11 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            with fp8_autocast(
+            with autocast(
                 enabled=module_uses_fp8.get(id(self), False),
-                calibrating=fp8_calibrating,
-                fp8_recipe=fp8_recipe,
-                fp8_group=fp8_group,
+                calibrating=calibrating,
+                recipe=recipe,
+                amax_reduction_group=amax_reduction_group,
                 _graph=True,
             ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)
@@ -992,7 +1083,7 @@ def make_graphed_callables(
         sample_args,
         num_warmup_iters=num_warmup_iters,
         allow_unused_input=allow_unused_input,
-        fp8_weight_caching=fp8_weight_caching,
+        cache_quantized_params=cache_quantized_params,
         sample_kwargs=sample_kwargs,
         _order=_order,
         _num_layers_per_chunk=_num_layers_per_chunk,

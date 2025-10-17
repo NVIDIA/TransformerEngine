@@ -13,19 +13,16 @@ import torch.nn as nn
 from torch.nn import Parameter
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    fp8_autocast,
-    fp8_model_init,
-)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
-    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
     DotProductAttention,
     LayerNormLinear,
     LayerNormMLP,
@@ -37,26 +34,28 @@ from transformer_engine.pytorch import (
     LayerNorm,
     Fp8Padding,
     Fp8Unpadding,
-)
-from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    get_device_compute_capability,
+    is_fp8_available,
+    is_mxfp8_available,
+    is_fp8_block_scaling_available,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available = is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -79,7 +78,7 @@ module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
@@ -563,7 +562,7 @@ def _test_e2e_selective_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -590,7 +589,7 @@ def _test_e2e_selective_recompute(
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -652,7 +651,7 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -680,7 +679,7 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
                 block,
@@ -1103,7 +1102,7 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False,
     )
     inp_hidden_states.retain_grad()
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         out = block(inp_hidden_states)
         if isinstance(out, (List, Tuple)):
             out = out[0]
@@ -1319,7 +1318,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         te_linear_ref = Linear(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1796,7 +1795,7 @@ def _test_grouped_linear_accuracy(
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
             out = output_act_func(block(input_act_func(inp_hidden_states), m_splits.tolist()))
@@ -1858,7 +1857,7 @@ def test_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -1994,7 +1993,7 @@ def test_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2232,7 +2231,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 
     m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
             out = block(inp_hidden_states, m_splits)
         else:
@@ -2280,7 +2279,7 @@ def test_padding_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2291,7 +2290,7 @@ def test_padding_grouped_linear_accuracy(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2351,7 +2350,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2362,7 +2361,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2512,7 +2511,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -2539,7 +2538,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=True, fp8_recipe=recipe):
+    with autocast(enabled=True, recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()

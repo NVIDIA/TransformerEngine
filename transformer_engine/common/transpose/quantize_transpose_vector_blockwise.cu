@@ -17,6 +17,7 @@
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
+#include "common/util/cuda_runtime.h"
 #include "common/utils.cuh"
 
 namespace transformer_engine {
@@ -528,6 +529,11 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                                          const bool pow2_scale, const SimpleTensor& noop_tensor,
                                          cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise);
+
+  if (transformer_engine::cuda::sm_arch() >= 100) {
+    NVTE_CHECK(pow2_scale, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
+               "with MXFP8, which requires using power of two scaling factors.");
+  }
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_elements = row_length;

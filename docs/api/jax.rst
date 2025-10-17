@@ -30,6 +30,7 @@ Modules
 
 
 .. autoapifunction:: transformer_engine.jax.fp8_autocast
+.. autoapifunction:: transformer_engine.jax.autocast
 .. autoapifunction:: transformer_engine.jax.update_collections
 
 

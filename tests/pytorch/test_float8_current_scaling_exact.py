@@ -8,12 +8,9 @@ import torch
 import pytest
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import Float8CurrentScaling
-from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
+from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -24,7 +21,7 @@ if tensor_dump_dir_env is not None:
 
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
 
 class GetRecipes:
@@ -273,6 +270,14 @@ class TestFP8RecipeLinearBase:
             if bgrad_list is not None and bgrad is not None:
                 bgrad_list.append(bgrad.detach().clone())
 
+        # Stack the results
+        return (
+            torch.stack(y_q_list),
+            torch.stack(dgrad_list),
+            torch.stack(wgrad_list),
+            torch.stack(bgrad_list) if bgrad_list is not None else None,
+        )
+
     @classmethod
     def run_linear(
         cls,
@@ -387,7 +392,7 @@ class TestFP8RecipeLinearBase:
         # recipe1
         using_fp8_recipe = recipe1() != GetRecipes.none()
         if using_fp8_recipe:
-            with fp8_autocast(enabled=True, fp8_recipe=recipe1()):
+            with autocast(enabled=True, recipe=recipe1()):
                 y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_linear(x, w, bias, gradient)
         else:
             y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_linear(x, w, bias, gradient)
@@ -395,7 +400,7 @@ class TestFP8RecipeLinearBase:
         # recipe2
         using_fp8_recipe = recipe2() != GetRecipes.none()
         if using_fp8_recipe:
-            with fp8_autocast(enabled=True, fp8_recipe=recipe2()):
+            with autocast(enabled=True, recipe=recipe2()):
                 y_q, dgrad, wgrad, bgrad = self.run_linear(x, w, bias, gradient)
         else:
             y_q, dgrad, wgrad, bgrad = self.run_linear(x, w, bias, gradient)
@@ -610,7 +615,7 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         # recipe1
         using_fp8_recipe = recipe1() != GetRecipes.none()
         if using_fp8_recipe:
-            with fp8_autocast(enabled=True, fp8_recipe=recipe1()):
+            with autocast(enabled=True, recipe=recipe1()):
                 y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_layernorm_linear(
                     x,
                     w,
@@ -632,7 +637,7 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         # recipe2
         using_fp8_recipe = recipe2() != GetRecipes.none()
         if using_fp8_recipe:
-            with fp8_autocast(enabled=True, fp8_recipe=recipe2()):
+            with autocast(enabled=True, recipe=recipe2()):
                 y_q, ln_out, dgrad, wgrad, bgrad = self.run_layernorm_linear(
                     x,
                     w,
