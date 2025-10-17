@@ -303,9 +303,7 @@ def _load_cudnn():
         return handle
 
     # Attempt to locate libcudnn via ldconfig
-    libs = subprocess.check_output(
-        f"ldconfig -p | grep 'libcudnn{_get_sys_extension()}'", shell=True
-    )
+    libs = subprocess.check_output(["ldconfig", "-p"])
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
@@ -335,9 +333,7 @@ def _load_nvrtc():
         return handle
 
     # Attempt to locate NVRTC via ldconfig
-    libs = subprocess.check_output(
-        f"ldconfig -p | grep 'libnvrtc{_get_sys_extension()}'", shell=True
-    )
+    libs = subprocess.check_output(["ldconfig", "-p"])
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
@@ -367,9 +363,7 @@ def _load_curand():
         return handle
 
     # Attempt to locate cuRAND via ldconfig
-    libs = subprocess.check_output(
-        f"ldconfig -p | grep 'libcurand{_get_sys_extension()}'", shell=True
-    )
+    libs = subprocess.check_output(["ldconfig", "-p"])
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
