@@ -449,7 +449,7 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
                                            const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -467,7 +467,7 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
                                            const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -484,7 +484,7 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -508,7 +508,7 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, con
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -532,7 +532,7 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, con
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -556,7 +556,7 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, con
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const fp16x2 &in, const floatx2 &scale) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
