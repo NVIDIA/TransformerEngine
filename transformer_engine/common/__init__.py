@@ -34,13 +34,13 @@ def _is_package_installed(package) -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def _is_package_installed_via_pypi(package) -> bool:
+def _is_package_installed_from_wheel(package) -> bool:
     """Check if the given package is installed via PyPI."""
 
     if not _is_package_installed(package):
         return False
 
-    te_dist = distribution("transformer-engine")
+    te_dist = distribution(package)
     te_wheel_file = ""
     for file_path in te_dist.files:
         if file_path.name == "WHEEL":
@@ -166,9 +166,9 @@ def load_framework_extension(framework: str) -> None:
     te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
     te_framework_installed = _is_package_installed(module_name)
     te_installed = _is_package_installed("transformer_engine")
-    te_installed_via_pypi = _is_package_installed_via_pypi("transformer_engine")
+    te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
 
-    assert te_installed, "Could not find `transformer-engine`."
+    assert te_installed, "Could not find `transformer_engine`."
 
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
@@ -197,7 +197,7 @@ def sanity_checks_for_pypi_installation() -> None:
 
     te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
     te_installed = _is_package_installed("transformer_engine")
-    te_installed_via_pypi = _is_package_installed_via_pypi("transformer_engine")
+    te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
 
     assert te_installed, "Could not find `transformer-engine`."
 
