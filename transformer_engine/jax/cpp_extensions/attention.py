@@ -2749,7 +2749,7 @@ def fused_attn_fwd(
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             num_heads = qkv[0].shape[-2]
-            # Create properly-sized tensor [1, h, 1, 1] filled with zeros
+            # Create tensor [1, h, 1, 1] filled with zeros
             softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
             # Shard by heads dimension
             softmax_offset = with_sharding_constraint_by_logical_axes(
@@ -2898,7 +2898,7 @@ def fused_attn_bwd(
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             num_heads = qkv[0].shape[-2]
-            # Create properly-sized tensor [1, h, 1, 1] filled with zeros
+            # Create tensor [1, h, 1, 1] filled with zeros
             softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
             # Shard by heads dimension
             softmax_offset = with_sharding_constraint_by_logical_axes(
