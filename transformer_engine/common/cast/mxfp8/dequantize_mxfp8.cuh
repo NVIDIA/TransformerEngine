@@ -4,36 +4,27 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file dequantize_kernels.cuh
- *  \brief CUDA kernels to cast from MXFP8.
+/*! \file dequantize_mxfp8.cuh
+ *  \brief CUDA kernels to dequantize from MXFP8.
  */
 
-#ifndef TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
-#define TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+#ifndef TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
+#define TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
+#include <transformer_engine/transformer_engine.h>
 
-#include <cfloat>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-
-#include "../common.h"
-#include "../transpose/cast_transpose.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
-#include "math.h"
-#include "ptx.cuh"
-#include "transformer_engine/activation.h"
-#include "transformer_engine/transformer_engine.h"
-#include "transformer_engine/transpose.h"
+#include "../../common.h"
+#include "../../util/math.h"
+#include "../../util/ptx.cuh"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
-
-namespace dequantization {
+namespace dispatch {
+namespace mxfp8 {
+namespace dequantize_kernel {
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -228,29 +219,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+}  // namespace dequantize_kernel
 
-void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
-  NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
-
-  const size_t N = product(input.data.shape);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      input.data.dtype, IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          output->data.dtype, OType,
-
-          constexpr int nvec = 32 / sizeof(OType);
-          detail::DequantizeParam p;
-          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
-          VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
-              reinterpret_cast<const IType *>(input.data.dptr), nullptr,
-              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
-}
-
-void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+  using namespace dequantize_kernel;
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);
@@ -334,113 +306,8 @@ void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) 
   );                                                                          // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
-
-#if CUDA_VERSION >= 12080
-template <typename OType>
-__global__ void __launch_bounds__(512)
-    dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
-                          const float *const tensor_amax, const size_t N, const size_t M,
-                          const size_t scale_stride) {
-  const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const size_t x = thread_idx % M;
-  const size_t y = thread_idx / M;
-
-  union fp4vec {
-    uint64_t vec;
-    fp4e2m1x4 small_vec[4];
-  };
-  using OVec = Vec<OType, 4>;
-  const uint64_t *const input_vectorized = reinterpret_cast<const uint64_t *>(input);
-  OVec *output_vec = reinterpret_cast<OVec *>(output);
-
-  const size_t my_index = x + y * M;
-  const size_t my_scale_index = x + y * scale_stride;
-  const size_t my_output_index = (x + y * M) * 4;
-  fp4vec value;
-  value.vec = input_vectorized[my_index];
-  fp8e4m3 scale = scales[my_scale_index];
-  float amax = *tensor_amax;
-  constexpr float factor_inv = 1.0 / (6.0 * 448.0);
-  float final_scale = static_cast<float>(scale) * amax * factor_inv;
-#pragma unroll
-  for (int i = 0; i < 4; i++) {
-    float4 current = static_cast<float4>(value.small_vec[i]);
-    OVec out;
-    out.data.elt[0] = static_cast<OType>(current.x * final_scale);
-    out.data.elt[1] = static_cast<OType>(current.y * final_scale);
-    out.data.elt[2] = static_cast<OType>(current.z * final_scale);
-    out.data.elt[3] = static_cast<OType>(current.w * final_scale);
-    output_vec[my_output_index + i] = out;
-  }
-}
-#endif  // CUDA_VERSION
-
-void fp4_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
-#if CUDA_VERSION >= 12080
-  CheckInputTensor(input, "input");
-  CheckOutputTensor(*output, "output");
-  NVTE_CHECK(input.data.dtype == DType::kFloat4E2M1, "Input must have FP4 type.");
-  NVTE_CHECK(is_high_precision_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
-
-  constexpr int FP4_BLOCK_SIZE = 16;
-  const size_t N = input.flat_first_dim();
-  const size_t M = input.flat_last_dim();
-
-  NVTE_CHECK(M % FP4_BLOCK_SIZE == 0, "Last dimension of FP4 tensors needs to be divisible by ",
-             FP4_BLOCK_SIZE, ", but got ", input.data.shape, ".");
-
-  const size_t Mread = M / FP4_BLOCK_SIZE;
-  const size_t total = N * Mread;
-  const size_t threads = 512;
-  const size_t blocks = DIVUP(total, threads);
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      output->data.dtype, OType,
-
-      dequantize_fp4_kernel<<<blocks, threads, 0, stream>>>(
-          input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
-          reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
-          reinterpret_cast<float *>(input.amax.dptr), N, Mread,
-          input.scale_inv.shape.back()););  // NOLINT(*)
-  NVTE_CHECK_CUDA(cudaGetLastError());
-#else
-  NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
-#endif  // CUDA_VERSION >= 12080
-}
-
-}  // namespace dequantization
-
-namespace detail {
-
-void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  CheckInputTensor(input, "cast_input");
-  CheckOutputTensor(*output, "cast_output");
-
-  switch (input.scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      dequantization::fp8_dequantize(input, output, stream);
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      if (is_supported_by_CC_100()) {
-        dequantization::mxfp8_dequantize(input, output, stream);
-      } else {
-        NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
-      }
-      break;
-    }
-    case NVTE_NVFP4_1D_SCALING: {
-      dequantization::fp4_dequantize(input, output, stream);
-      break;
-    }
-    default:
-      NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
-  }
-}
-
-}  // namespace detail
-
+}  // namespace mxfp8
+}  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+#endif  // TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
