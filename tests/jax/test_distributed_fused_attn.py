@@ -580,6 +580,66 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=True,
         )
 
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        [
+            pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
+            pytest.param(
+                QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"
+            ),
+            pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="BSHD_KVPACKED-NO_MASK"),
+            pytest.param(
+                QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
+    )
+    def test_context_parallel_alltoall_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+        load_balanced,
+    ):
+        if data_shape[2] % (mesh_shape[1] * mesh_shape[2] * kv_groups) != 0:
+            pytest.skip(
+                "Skipping test as num_heads is not divisible by cp_size * tp_size * kv_groups"
+            )
+        if load_balanced:
+            pytest.skip(
+                "Load balanced causal attention is not yet supported with all-to-all strategy"
+            )
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced=load_balanced,
+            cp_strategy=CPStrategy.ALL_TO_ALL,
+            use_shardy=False,
+        )
+
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L0": [[]],
