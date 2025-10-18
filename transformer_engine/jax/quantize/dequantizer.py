@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from .scaling_modes import ScalingMode
-from .hadamard import apply_rht, should_use_rht
+from .hadamard import apply_rht
 
 
 __all__ = ["ScalingModeToDequantizerMap"]
@@ -171,7 +171,9 @@ class NVFP4Dequantizer(Dequantizer):
     """
 
     @staticmethod
-    def _dequantize_func(data, scale_inv, amax, dq_dtype, scaling_mode, is_colwise, flatten_axis):
+    def _dequantize_func(
+        data, scale_inv, amax, dq_dtype, scaling_mode, is_colwise, flatten_axis, has_rht_applied
+    ):
         """Dequantize a tensor using block scaling.
 
         Args:
@@ -182,6 +184,7 @@ class NVFP4Dequantizer(Dequantizer):
             scaling_mode: The scaling mode used for quantization
             is_colwise: Whether the scaling is column-wise
             flatten_axis: The axis along which the tensor could be flattened to 2D
+            has_rht_applied: Whether the quantization has RHT applied and we need to apply the inverse RHT to dequantize
 
         Returns:
             The dequantized tensor
@@ -223,8 +226,7 @@ class NVFP4Dequantizer(Dequantizer):
         out = jnp.asarray(data * scale_inv, dq_dtype).reshape(data_shape)
 
         # Apply inverse of RHT if needed
-        use_rht = should_use_rht(scaling_mode, is_colwise=is_colwise)
-        if use_rht:
+        if has_rht_applied:
             out = apply_rht(out, inverse=True)
 
         return out
@@ -247,6 +249,7 @@ class NVFP4Dequantizer(Dequantizer):
             scaled_tensor.scaling_mode,
             scaled_tensor.is_colwise,
             scaled_tensor.flatten_axis,
+            scaled_tensor.has_rht_applied,
         )
 
 

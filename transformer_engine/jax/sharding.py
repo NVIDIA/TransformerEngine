@@ -238,6 +238,19 @@ def num_of_devices():
     return len(jax.devices())
 
 
+def get_num_devices_in_mesh(mesh=None):
+    """
+    Get the number of devices in the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return 1
+    return np.prod(list(mesh.shape.values()))
+
+
 def get_mesh_axis_size(axis, mesh=None):
     """
     Get the axis size of the given mesh.

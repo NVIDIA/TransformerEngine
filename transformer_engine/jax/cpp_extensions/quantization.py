@@ -31,7 +31,7 @@ from .misc import (
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
-    num_of_devices,
+    get_num_devices_in_mesh,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -45,7 +45,6 @@ from ..quantize import (
     compute_scale_from_amax,
     NoScaleTensor,
     get_rht_matrix,
-    should_use_rht,
 )
 
 
@@ -108,17 +107,18 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 "sr_rng_state must be a uint32 array when stochastic_rounding is True but"
                 f" received {sr_rng_state_aval}"
             )
-            if is_outer:
+            if is_outer and get_num_devices_in_mesh() > 1:
                 assert (
-                    sr_rng_state_aval.shape[0] == num_of_devices()
+                    sr_rng_state_aval.shape[0] == get_num_devices_in_mesh()
                     and sr_rng_state_aval.shape[1] == 4
                 ), (
                     "sr_rng_state must be of shape (num_devices, 4) when stochastic_rounding is"
                     f" True and is_outer is True but received {sr_rng_state_aval.shape}"
                 )
             else:
-                assert sr_rng_state_aval.shape == (4,), (
-                    "Sharded sr_rng_state must be of shape (4,) per device when"
+                # We cannot assert the shape is exactly (4,) here because if the quantized data is not perfectly sharded across all devices then we will have extra rng state here. For example, this could occur when the weights are not sharded when using data parallelism. However, this is okay because the extra rng state will simply not be used and each device still has a unique rng state.
+                assert sr_rng_state_aval.size >= 4, (
+                    "Sharded sr_rng_state must have at least 4 elements per device when"
                     f" stochastic_rounding is True but received {sr_rng_state_aval.shape}"
                 )
 
@@ -552,8 +552,13 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             desc="BaseDBiasQuantizePrimitive.colwise_scale_inv",
         )
 
-        # TODO(jberchtold): Assert the sr_rng state is sharded along all mesh axes
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings[3] = NamedSharding(
+            mesh,
+            PartitionSpec(tuple(x for x in x_spec if x is not None), None),
+            desc="BaseDBiasQuantizePrimitive.sr_rng_state",
+        )
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
@@ -564,6 +569,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         )
 
         def sharded_impl(x, scale, amax, sr_rng_state, post_rht_amax, rht_matrix):
+            if sr_rng_state.size > 4:
+                # See comment in abstract method for explanation of why we cannot assert exact shape
+                sr_rng_state = sr_rng_state.flatten()[:4]
             (
                 local_x,
                 local_colwise_x,
@@ -754,9 +762,10 @@ def _quantize_dbias_impl(
     # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
     # fall back on the native-JAX quantize implementation
     PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
-    is_unsupported = (
-        quantizer.q_layout == QuantizeLayout.COLWISE
-        and quantizer.scaling_mode != ScalingMode.NVFP4_1D_SCALING
+    is_unsupported = quantizer.q_layout == QuantizeLayout.COLWISE and not (
+        quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
+        and hasattr(quantizer, "use_rht")
+        and quantizer.use_rht
     )
     if is_unsupported or not PrimitiveClass.enabled():
         if is_dbias:
@@ -792,7 +801,7 @@ def _quantize_dbias_impl(
     rht_matrix = jnp.empty((1, 1), jnp.bfloat16)
     amax = x.amax
 
-    if should_use_rht(quantizer.scaling_mode, q_layout=quantizer.q_layout):
+    if hasattr(quantizer, "use_rht") and quantizer.use_rht:
         use_rht = True
         rht_matrix = get_rht_matrix()
 
@@ -861,7 +870,11 @@ def _quantize_dbias_impl(
         x.data,
         scale,
         amax,
-        sr_rng_state if sr_rng_state is not None else jnp.empty((num_of_devices(), 1), jnp.uint32),
+        (
+            sr_rng_state
+            if sr_rng_state is not None
+            else jnp.empty((get_num_devices_in_mesh(), 1), jnp.uint32)
+        ),
         post_rht_amax if post_rht_amax is not None else jnp.zeros((1,), jnp.float32),
         rht_matrix,
         out_dtype=quantizer.q_dtype,
@@ -902,6 +915,7 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
+        colwise_has_rht_applied=use_rht,
     )
     return out, dbias.astype(dq_dtype)
 

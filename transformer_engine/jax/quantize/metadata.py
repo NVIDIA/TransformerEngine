@@ -26,6 +26,26 @@ class QuantizeMeta:
 
     """
 
+    @staticmethod
+    def merge(a: "QuantizeMeta", b: "QuantizeMeta") -> "QuantizeMeta":
+        """Merge two QuantizeMeta instances.
+
+        Args:
+            a (QuantizeMeta): The first QuantizeMeta instance.
+            b (QuantizeMeta): The second QuantizeMeta instance.
+
+        Returns:
+            QuantizeMeta: A new QuantizeMeta instance with merged metadata.
+        """
+        assert isinstance(a, QuantizeMeta)
+        assert isinstance(b, QuantizeMeta)
+        for key in b.get_kwargs_dictionary().keys():
+            if key in a.get_kwargs_dictionary():
+                assert (
+                    a.get_kwargs_dictionary()[key] == b.get_kwargs_dictionary()[key]
+                ), f"Conflict in merging QuantizeMeta: {key} has different values."
+        return QuantizeMeta(**{**a.get_kwargs_dictionary(), **b.get_kwargs_dictionary()})
+
     def __init__(self, **kwargs):
         self._kwargs = kwargs
 
