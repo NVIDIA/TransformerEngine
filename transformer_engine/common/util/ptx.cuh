@@ -19,43 +19,164 @@
 #endif  // CUDA_VERSION >= 12080
 
 namespace transformer_engine {
-namespace ptx {
 
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+template <int N>
+struct Arch {
+  constexpr static int id = N * 10;
+  constexpr static bool is_arch = true;
+  constexpr static bool is_family = false;
+};
+
+template <int CurrentArch, int ArchSpecific, int FamilySpecific, int N>
+struct ArchHelper {
+  constexpr static bool compatible() {
+    if constexpr (CurrentArch == N) {
+      static_assert(ArchSpecific == CurrentArch,
+                    "Compiled for the generic architecture, while utilizing arch-specific "
+                    "features. Please compile for smXXXa architecture instead of smXXX "
+                    "architecture.");
+      return true;
+    } else {
+      return false;
+    }
+  }
+};
+
+template <int N>
+struct Family {
+  constexpr static int id = N * 10;
+  constexpr static bool is_arch = false;
+  constexpr static bool is_family = true;
+};
+
+template <int CurrentArch, int ArchSpecific, int FamilySpecific, int N>
+struct FamilyHelper {
+  constexpr static bool compatible() {
+    if constexpr ((CurrentArch / 100) == (N / 100)) {
+      static_assert(FamilySpecific == CurrentArch,
+                    "Compiled for the generic architecture, while utilizing family-specific "
+                    "features. Please compile for smXXXf architecture instead of smXXX "
+                    "architecture.");
+      return true;
+    } else {
+      return false;
+    }
+  }
+};
+
+template <int Arch, int ArchSpecific, int FamilySpecific, class T, class... U>
+constexpr bool is_supported_arch() {
+  constexpr bool compatible = [&] {
+    if constexpr (T::is_arch) {
+      return ArchHelper<Arch, ArchSpecific, FamilySpecific, T::id>::compatible();
+    } else {
+      return FamilyHelper<Arch, ArchSpecific, FamilySpecific, T::id>::compatible();
+    }
+  }();
+  if constexpr (compatible) {
+    return true;
+  } else if constexpr (sizeof...(U) != 0) {
+    return is_supported_arch<Arch, ArchSpecific, FamilySpecific, U...>();
+  } else {
+    return false;
+  }
+}
+
+#if CUDA_VERSION < 12090
+#if __CUDA_ARCH_HAS_FEATURE__(SM90_ALL)
+#define __CUDA_ARCH_SPECIFIC__ 900
+#define __CUDA_ARCH_FAMILY_SPECIFIC__ 900
+#endif
+#if __CUDA_ARCH_HAS_FEATURE__(SM100_ALL)
+#define __CUDA_ARCH_SPECIFIC__ 1000
+#define __CUDA_ARCH_FAMILY_SPECIFIC__ 1000
+#endif
+#if __CUDA_ARCH_HAS_FEATURE__(SM101_ALL)
+#define __CUDA_ARCH_SPECIFIC__ 1010
+#define __CUDA_ARCH_FAMILY_SPECIFIC__ 1010
+#endif
+#if __CUDA_ARCH_HAS_FEATURE__(SM120_ALL)
+#define __CUDA_ARCH_SPECIFIC__ 1200
+#define __CUDA_ARCH_FAMILY_SPECIFIC__ 1200
+#endif
+#endif
+
+#ifdef __CUDA_ARCH__
+#define __NVTE_CURRENT_ARCH__ constexpr int current_arch = __CUDA_ARCH__;
+#else
+#define __NVTE_CURRENT_ARCH__ constexpr int current_arch = 0;
+#endif
+
+#ifdef __CUDA_ARCH_SPECIFIC__
+#define __NVTE_ARCH_SPECIFIC__ constexpr int ArchSpecific = __CUDA_ARCH_SPECIFIC__;
+#else
+#define __NVTE_ARCH_SPECIFIC__ constexpr int ArchSpecific = 0;
+#endif
+
+#ifdef __CUDA_ARCH_FAMILY_SPECIFIC__
+#define __NVTE_ARCH_FAMILY_SPECIFIC__ constexpr int FamilySpecific = __CUDA_ARCH_FAMILY_SPECIFIC__;
+#else
+#define __NVTE_ARCH_FAMILY_SPECIFIC__ constexpr int FamilySpecific = 0;
+#endif
+
+#define ARCH_SPECIFIC(...)                                                                   \
+  [&] {                                                                                      \
+    __NVTE_CURRENT_ARCH__                                                                    \
+    __NVTE_ARCH_SPECIFIC__                                                                   \
+    __NVTE_ARCH_FAMILY_SPECIFIC__                                                            \
+    return transformer_engine::is_supported_arch<current_arch, ArchSpecific, FamilySpecific, \
+                                                 __VA_ARGS__>();                             \
+  }();
+
+#define ARCH_BLACKWELL_FAMILY ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>)
+#define ARCH_HAS_STOCHASTIC_ROUNDING ARCH_SPECIFIC(Arch<100>, Arch<103>)
+
+namespace ptx {
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(mbar_ptr), "r"(count) : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-inval
 __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.inval.shared.b64 [%0];" ::"r"(mbar_ptr) : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
 __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.shared.b64 _, [%0];" ::"r"(mbar_ptr) : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
 __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(mbar_ptr), "r"(tx_count)
                : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile("fence.mbarrier_init.release.cluster;");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // global -> shared::cluster
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
     uint64_t *dst_shmem, const uint64_t *src_global_ptr, const uint32_t size, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t dst_shmem_ptr = __cvta_generic_to_shared(dst_shmem);
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   // triggers async copy, i.e. the thread continues until wait() on mbarrier
@@ -67,6 +188,7 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
       ".mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst_shmem_ptr),
       "l"(src_global_ptr), "r"(size), "r"(mbar_ptr)
       : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
@@ -74,6 +196,7 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
 __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
     uint64_t *dst_shmem, const uint64_t *tensor_map_ptr, const uint32_t offset_x,
     const uint32_t offset_y, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t dst_shmem_ptr = __cvta_generic_to_shared(dst_shmem);
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   // triggers async copy, i.e. the thread continues until wait() on mbarrier
@@ -85,9 +208,11 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
       "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
       : "memory");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, const uint32_t parity) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t waitComplete;
   asm volatile(
       "{\n\t .reg .pred P_OUT; \n\t"
@@ -98,15 +223,17 @@ __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, cons
       : "r"(mbar_ptr), "r"(parity)
       : "memory");
   return static_cast<bool>(waitComplete);
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  return true;
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
   }
-}
-
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
 
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
@@ -121,55 +248,51 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
-#define CUDA_ARCH_HAS_FEATURE_SM10X_ALL                                                \
-  ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-   (__CUDA_ARCH_HAS_FEATURE__(SM103_ALL)))
-
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-
-  uint16_t out;
-  asm volatile(
-      "{\n"
-      "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
-      "}"
-      : "=h"(out)
-      : "f"(val));
-  return *reinterpret_cast<e8m0_t *>(&out);
-#else
-  // TODO: nan/inf needs to be set for any value
-  // of nan/inf in input not just amax.
-  if (isnan(val)) {
-    return 0xFF;
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint16_t out;
+    asm volatile(
+        "{\n"
+        "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
+        "}"
+        : "=h"(out)
+        : "f"(val));
+    return *reinterpret_cast<e8m0_t *>(&out);
+  } else {
+    // TODO: nan/inf needs to be set for any value
+    // of nan/inf in input not just amax.
+    if (isnan(val)) {
+      return 0xFF;
+    }
+    if (isinf(val)) {
+      return 0xFE;
+    }
+    if (val == 0.0f) {
+      return 0x00;
+    }
+    uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
+    e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
+    uint32_t mantissa = val_u32 & 0x7FFFFF;
+    // Round up exponent and deal with satfinite.
+    if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
+      ++exponent;
+    }
+    return exponent;
   }
-  if (isinf(val)) {
-    return 0xFE;
-  }
-  if (val == 0.0f) {
-    return 0x00;
-  }
-  uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
-  e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
-  uint32_t mantissa = val_u32 & 0x7FFFFF;
-  // Round up exponent and deal with satfinite.
-  if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
-    ++exponent;
-  }
-  return exponent;
-#endif
 }
-
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
                                                                          const uint64_t *src_shmem,
                                                                          const uint32_t size) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t src_shmem_ptr = __cvta_generic_to_shared(src_shmem);
   asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" ::"l"(dst_global_ptr),
                "r"(src_shmem_ptr), "r"(size)
                : "memory");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
@@ -177,51 +300,73 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_
 __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
     const uint64_t *tensor_map_ptr, const uint32_t offset_x, const uint32_t offset_y,
     uint64_t *src_shmem) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t src_shmem_ptr = __cvta_generic_to_shared(src_shmem);
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%1, %2}], [%3];" ::"l"(
                    tensor_map_ptr),
                "r"(offset_x), "r"(offset_y), "r"(src_shmem_ptr)
                : "memory");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group 0;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 0;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 0;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 1;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 2;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 4;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.commit_group;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // Proxy fence (bi-directional):
-__device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.async;"); }
+__device__ __forceinline__ void fence_proxy_async() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("fence.proxy.async;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
 
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.proxy.async.shared::cta;");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 template <typename T>
@@ -282,15 +427,6 @@ static_assert(sizeof(fp4e2m1x2) == 1);
 static_assert(sizeof(fp4e2m1x4) == 2);
 #endif  // CUDA_VERSION >= 12080
 
-// cvt.rn.satfinite.e2m1x2.f32 d, a, b;  // Convert two FP32 values to two packed e2m1
-
-// cvt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 introduced in PTX ISA version 8.6.
-
-// vt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 is supported on following architectures:
-// sm_100a
-// sm_101a
-// sm_120a
-
 // When converting to .e2m1x2 data formats, the destination operand d has .b8 type.
 // When converting two .f32 inputs to .e2m1x2, each input is converted to the specified format,
 // and the converted values are packed in the destination operand d such that the value
@@ -313,6 +449,7 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
                                            const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -325,10 +462,12 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "l"(reinterpret_cast<const uint64_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
                                            const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -341,9 +480,11 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "l"(reinterpret_cast<const uint64_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -363,9 +504,11 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -385,9 +528,11 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -407,9 +552,11 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const fp16x2 &in, const floatx2 &scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -429,23 +576,26 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const fp16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void abs_max_2x(bf16x2 &dst, const bf16x2 &p1, const bf16x2 &p2) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
   asm volatile("max.xorsign.abs.bf16x2 %0, %1, %2;"
                : "=r"(reinterpret_cast<uint32_t &>(dst))
                : "r"(reinterpret_cast<const uint32_t &>(p1)),
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
 __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const fp16x2 &p2) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
   asm volatile("max.xorsign.abs.f16x2 %0, %1, %2;"
                : "=r"(reinterpret_cast<uint32_t &>(dst))
                : "r"(reinterpret_cast<const uint32_t &>(p1)),
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
-
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 }  // namespace ptx
 
