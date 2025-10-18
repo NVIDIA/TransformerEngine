@@ -59,6 +59,7 @@ class Kernel {
   template <typename... ArgTs>
   void launch(int device_id, const dim3 grid_dim, const dim3 block_dim,
               unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+    cuda_driver::ensure_context_exists();
     void *arg_ptrs[] = {const_cast<void *>(static_cast<const void *>(&args))...};
     NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchKernel, get_function(device_id), grid_dim.x, grid_dim.y,
                                 grid_dim.z, block_dim.x, block_dim.y, block_dim.z, shared_mem_bytes,

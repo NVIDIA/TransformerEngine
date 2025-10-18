@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ...fp8 import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer
@@ -18,8 +18,8 @@ from ...tensor import Quantizer
 class Quantize(BasicOperation):
     """Quantize tensor data
 
-    Uses FP8 recipe from `fp8_autocast` context. When called outside
-    of an `fp8_autocast` context, this is an identity operation.
+    Uses recipe from `autocast` context. When called outside
+    of an `autocast` context, this is an identity operation.
 
     Parameters
     ----------
@@ -50,7 +50,7 @@ class Quantize(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
@@ -64,7 +64,8 @@ class Quantize(BasicOperation):
         if quantize_forward and not is_quantized_tensor(out):
             out = self.get_quantizer("forward", 0)(out)
 
-        ctx.quantize_backward = quantize_backward
+        if ctx.requires_grad:
+            ctx.quantize_backward = quantize_backward
         return out
 
     def op_backward(

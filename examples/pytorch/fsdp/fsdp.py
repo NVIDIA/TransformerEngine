@@ -173,7 +173,7 @@ def parse_fsdp_args():
         "--no-fp8",
         action="store_true",
         default=False,
-        help="Disables the te.fp8_autocast() context.",
+        help="Disables the te.autocast() context.",
     )
     parser.add_argument(
         "--no-defer-init",
@@ -284,11 +284,11 @@ def train(opts):
             dtype=opts.dtype,
             device="cuda",
         )
-        # fp8_autocast needs to be given the FSDP process group for amax reductions
-        with te.fp8_autocast(enabled=not opts.no_fp8, fp8_recipe=fp8_recipe, fp8_group=all_gpus):
+        # autocast needs to be given the FSDP process group for amax reductions
+        with te.autocast(enabled=not opts.no_fp8, recipe=fp8_recipe, amax_reduction_group=all_gpus):
             y = te_model(x)
             loss = y.sum()
-        # calculate gradient and take training step outside the fp8_autocast context
+        # calculate gradient and take training step outside the autocast context
         loss.backward()
         optim.step()
         optim.zero_grad(set_to_none=True)

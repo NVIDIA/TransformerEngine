@@ -96,8 +96,9 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
  *  \param[in]     probs           Probabilities from the forward pass.
  *  \param[in]     tokens_per_expert  Number of tokens per expert.
  *  \param[in]     total_num_tokens   Number of total tokens. Will be used in seq/global aux loss.
- *  \param[in]     num_tokens      Number of tokens.
  *  \param[in]     num_experts     Number of experts.
+ *  \param[in]     num_rows        Number of rows of probs.
+ *  \param[in]     num_cols        Number of columns of probs.
  *  \param[in]     topk            Topk value.
  *  \param[in]     coeff           Coefficient.
  *  \param[out]    aux_loss        Output GPU scalar for auxiliary loss.
@@ -105,24 +106,24 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
-                                     int total_num_tokens, int num_tokens, int num_experts,
-                                     int topk, float coeff, NVTETensor aux_loss,
+                                     int total_num_tokens, int num_experts, int num_rows,
+                                     int num_cols, int topk, float coeff, NVTETensor aux_loss,
                                      NVTETensor Const_buf, cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *
  *  \param[in]     Const_buf       Constant buffer from the forward pass.
  *  \param[in]     tokens_per_expert  Number of tokens per expert.
- *  \param[in]     num_tokens      Number of total tokens.
- *  \param[in]     num_experts     Number of experts.
+ *  \param[in]     num_rows        Number of rows of probs.
+ *  \param[in]     num_cols        Number of columns of probs.
  *  \param[in]     grad_aux_loss   Gradient of auxiliary loss.
  *  \param[out]    grad_probs      Gradient of probs.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
-                                      const NVTETensor tokens_per_expert, int num_tokens,
-                                      int num_experts, NVTETensor grad_aux_loss,
-                                      NVTETensor grad_probs, cudaStream_t stream);
+                                      const NVTETensor tokens_per_expert, int num_rows,
+                                      int num_cols, NVTETensor grad_aux_loss, NVTETensor grad_probs,
+                                      cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

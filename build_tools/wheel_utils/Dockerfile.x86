@@ -7,23 +7,34 @@ FROM quay.io/pypa/manylinux_2_28_x86_64
 WORKDIR /TransformerEngine/
 COPY ../.. /TransformerEngine/
 
-ARG VER="12-3"
-ARG ARCH="x86_64"
-RUN dnf -y install vim
+ARG CUDA_MAJOR="12"
+ARG CUDA_MINOR="3"
+
+# Args for build_wheels.sh
+ARG BUILD_METAPACKAGE=true
+ARG BUILD_COMMON=true
+ARG BUILD_PYTORCH=true
+ARG BUILD_JAX=true
+ENV BUILD_METAPACKAGE=${BUILD_METAPACKAGE}
+ENV BUILD_COMMON=${BUILD_COMMON}
+ENV BUILD_PYTORCH=${BUILD_PYTORCH}
+ENV BUILD_JAX=${BUILD_JAX}
+ENV CUDA_MAJOR=${CUDA_MAJOR}
 
 # Cuda toolkit, cudnn, driver.
 RUN dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 RUN dnf -y install epel-release
-RUN dnf -y install cuda-compiler-${VER}.${ARCH} \
-                   cuda-libraries-${VER}.${ARCH} \
-                   cuda-libraries-devel-${VER}.${ARCH}
-RUN dnf -y install --allowerasing cudnn9-cuda-12
+RUN dnf -y install cuda-compiler-${CUDA_MAJOR}-${CUDA_MINOR}.x86_64 \
+                   cuda-libraries-${CUDA_MAJOR}-${CUDA_MINOR}.x86_64 \
+                   cuda-libraries-devel-${CUDA_MAJOR}-${CUDA_MINOR}.x86_64
+RUN dnf -y install --allowerasing cudnn9-cuda-${CUDA_MAJOR}
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/999_nvidia_cuda.conf
-RUN dnf -y install cuda-toolkit
+RUN dnf -y install cuda-toolkit-${CUDA_MAJOR}
 RUN dnf clean all
 RUN dnf -y install glog.x86_64 glog-devel.x86_64
+RUN dnf -y install libnccl libnccl-devel libnccl-static
 
 ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
@@ -33,4 +44,4 @@ ENV CUDA_PATH=/usr/local/cuda
 ENV CUDADIR=/usr/local/cuda
 ENV NVTE_RELEASE_BUILD=1
 
-CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true", "true"]
+CMD ["/bin/bash", "-c", "bash /TransformerEngine/build_tools/wheel_utils/build_wheels.sh manylinux_2_28_x86_64 $BUILD_METAPACKAGE $BUILD_COMMON $BUILD_PYTORCH $BUILD_JAX $CUDA_MAJOR"]

@@ -27,22 +27,22 @@ VERSION=`cat $TE_PATH/build_tools/VERSION.txt`
 WHL_BASE="transformer_engine-${VERSION}"
 
 # Core wheel.
-NVTE_RELEASE_BUILD=1 python3 setup.py bdist_wheel || error_exit "Failed to setup bdist_wheel"
-wheel unpack dist/* || error_exit "Failed to unpack dist/*"
+NVTE_RELEASE_BUILD=1 pip3 wheel --no-build-isolation -vvv --wheel-dir ./dist . || error_exit "Failed to setup bdist_wheel"
+wheel unpack dist/${WHL_BASE}-* || error_exit "Failed to unpack dist/${WHL_BASE}-*.whl"
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info" || error_exit "Failed to move ${WHL_BASE}.dist-info to transformer_engine_cu12-${VERSION}.dist-info"
 wheel pack ${WHL_BASE} || error_exit "Failed to pack ${WHL_BASE}"
 rm dist/*.whl || error_exit "Failed to remove dist/*.whl"
 mv *.whl dist/ || error_exit "Failed to move *.whl to dist/"
-NVTE_RELEASE_BUILD=1 NVTE_BUILD_METAPACKAGE=1 python3 setup.py bdist_wheel || error_exit "Failed to setup metapackage"
+NVTE_RELEASE_BUILD=1 NVTE_BUILD_METAPACKAGE=1 pip3 wheel --no-build-isolation --no-deps -vvv --wheel-dir ./dist . || error_exit "Failed to setup metapackage"
 
 cd transformer_engine/pytorch
-NVTE_RELEASE_BUILD=1 python3 setup.py sdist || error_exit "Failed to setup sdist"
+NVTE_RELEASE_BUILD=1 pip3 wheel --no-build-isolation --no-deps -vvv --wheel-dir ./dist . || error_exit "Failed to setup sdist"
 
-pip3 install dist/* || error_exit "Failed to install dist/*"
+pip3 install --no-build-isolation --no-deps -vvv dist/* || error_exit "Failed to install dist/*"
 cd $TE_PATH
-pip3 install dist/*.whl --no-deps || error_exit "Failed to install dist/*.whl --no-deps"
+pip3 install --no-build-isolation --no-deps -vvv dist/*.whl || error_exit "Failed to install dist/*.whl --no-deps"
 
 python3 $TE_PATH/tests/pytorch/test_sanity_import.py || test_fail "test_sanity_import.py"
 

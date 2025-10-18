@@ -14,5 +14,6 @@ from .quantizer import *
 from .dequantizer import *
 from .scaling_modes import *
 from .metadata import *
+from .hadamard import *
 from .helper import *
 from .device_utils import *

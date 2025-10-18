@@ -1,0 +1,19 @@
+test:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors_struct:
+        - tensor: activation
+          stats: [cur_amax, dynamic_range, mean, std, l1_norm]
+          start_step: 1
+          freq: 3
+    LogFp8TensorStats:
+      enabled: True
+      tensors: activation
+      stats: [underflows%]
+      start_step: 1
+      freq: 5
+  

@@ -67,6 +67,12 @@ bool supports_multicast(int device_id = -1);
  */
 const std::string &include_directory(bool required = false);
 
+/* \brief CUDA Runtime version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+int cudart_version();
+
 }  // namespace cuda
 
 }  // namespace transformer_engine

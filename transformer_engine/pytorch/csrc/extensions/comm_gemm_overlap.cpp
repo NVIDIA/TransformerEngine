@@ -216,8 +216,10 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<i
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
-at::Stream CommOverlap::get_communication_stream() {
-  return at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device());
+std::pair<at::Stream, at::Stream> CommOverlap::get_communication_stream() {
+  // Return the same stream for both send and recv
+  return {at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device()),
+          at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device())};
 }
 
 /***************************************************************************************************
@@ -305,6 +307,14 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
-at::Stream CommOverlapP2P::get_communication_stream() {
-  return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
+std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
+  return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),
+          at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};
+}
+
+void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
+    CommOverlap &allgather_communicator, at::Stream send_stream, at::Stream recv_stream) {
+  auto main_stream = at::cuda::getCurrentCUDAStream();
+  allgather_communicator.bulk_overlap_external_ag(at::cuda::CUDAStream(send_stream),
+                                                  at::cuda::CUDAStream(recv_stream), main_stream);
 }

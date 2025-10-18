@@ -58,26 +58,27 @@ struct ComputeScaleAndScaleInvFunctor {
 void multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, Tensor noop_flag,
                                                    std::vector<std::vector<Tensor *>> tensor_lists,
                                                    float max_fp8, bool force_pow_2_scales,
-                                                   float epsilon, const int device_id,
-                                                   cudaStream_t stream) {
+                                                   float epsilon, cudaStream_t stream) {
   multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                        ComputeScaleAndScaleInvFunctor(), device_id, stream, max_fp8,
-                        force_pow_2_scales, epsilon);
+                        ComputeScaleAndScaleInvFunctor(), stream, max_fp8, force_pow_2_scales,
+                        epsilon);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace multi_tensor_compute_scale
 }  // namespace transformer_engine
 
-void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
-    int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists, const size_t num_tensor_lists,
-    const size_t num_tensors_per_list, float max_fp8, int force_pow_2_scales, float epsilon,
-    const int device_id, cudaStream_t stream) {
+void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETensor noop_flag,
+                                                        NVTETensor **tensor_lists,
+                                                        const size_t num_tensor_lists,
+                                                        const size_t num_tensors_per_list,
+                                                        float max_fp8, int force_pow_2_scales,
+                                                        float epsilon, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_compute_scale_and_scale_inv_cuda);
   using namespace transformer_engine;
 
   multi_tensor_compute_scale::multi_tensor_compute_scale_and_scale_inv_cuda(
       chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), max_fp8,
-      force_pow_2_scales, epsilon, device_id, stream);
+      force_pow_2_scales, epsilon, stream);
 }

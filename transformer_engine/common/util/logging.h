@@ -12,8 +12,15 @@
 #include <cudnn.h>
 #include <nvrtc.h>
 
+#include "nccl.h"
+
+#ifdef NVTE_WITH_CUBLASMP
+#include <cublasmp.h>
+#endif  // NVTE_WITH_CUBLASMP
+
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 #include "../util/string.h"
 
@@ -85,6 +92,26 @@
     if (status_NVTE_CHECK_NVRTC != NVRTC_SUCCESS) {                              \
       NVTE_ERROR("NVRTC Error: ", nvrtcGetErrorString(status_NVTE_CHECK_NVRTC)); \
     }                                                                            \
+  } while (false)
+
+#ifdef NVTE_WITH_CUBLASMP
+
+#define NVTE_CHECK_CUBLASMP(expr)                             \
+  do {                                                        \
+    const cublasMpStatus_t status = (expr);                   \
+    if (status != CUBLASMP_STATUS_SUCCESS) {                  \
+      NVTE_ERROR("cuBLASMp Error: ", std::to_string(status)); \
+    }                                                         \
+  } while (false)
+
+#endif  // NVTE_WITH_CUBLASMP
+
+#define NVTE_CHECK_NCCL(expr)                                                 \
+  do {                                                                        \
+    const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
+    if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
+      NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
+    }                                                                         \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

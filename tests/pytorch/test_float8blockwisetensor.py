@@ -11,12 +11,11 @@ import pytest
 import torch
 
 import transformer_engine.common.recipe
-import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
+    get_device_compute_capability,
 )
-from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
@@ -219,7 +218,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
-            all_gather_usage=True,
+            all_gather_usage=(block_scaling_dim == 1),
         )
         self._test_quantize_dequantize(
             quantizer=quantizer,

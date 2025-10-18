@@ -75,6 +75,69 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
                               const int stride_b, const int stride_h, const int stride_d,
                               cudaStream_t stream);
 
+/*! \brief Apply rotary positional embedding to the combined QKV input tensor.
+ *
+ *  \param[in]     qkv_input       Combined QKV input tensor for fused rope.
+ *  \param[in]     q_freqs         The freqs tensor for Q.
+ *  \param[in]     k_freqs         The freqs tensor for K.
+ *  \param[in]     start_positions The beginning offsets for applying RoPE embeddings.
+ *  \param[out]    q_out           Output tensor for Q.
+ *  \param[out]    k_out           Output tensor for K.
+ *  \param[out]    v_out           Output tensor for V.
+ *  \param[in]     qkv_format      QKV format.
+ *  \param[in]     interleaved     Whether to use interleaved rotary position embedding.
+ *  \param[in]     cp_size         Context parallel world size.
+ *  \param[in]     cp_rank         Context parallel rank.
+ *  \param[in]     s               Length of the s dimension of input.
+ *  \param[in]     b               Length of the b dimension of input.
+ *  \param[in]     h               Length of the h dimension of input.
+ *  \param[in]     d               Length of the d dimension of input.
+ *  \param[in]     d2              Length of the d dimension of freqs.
+ *  \param[in]     qkv_split_arg_list_0  The hidden size for Q.
+ *  \param[in]     qkv_split_arg_list_1  The hidden size for K.
+ *  \param[in]     qkv_split_arg_list_2  The hidden size for V.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
+void nvte_fused_qkv_rope_forward(const NVTETensor qkv_input, const NVTETensor q_freqs,
+                                 const NVTETensor k_freqs, const NVTETensor start_positions,
+                                 NVTETensor q_out, NVTETensor k_out, NVTETensor v_out,
+                                 const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                 const int cp_size, const int cp_rank, const int s, const int b,
+                                 const int h, const int d, const int d2,
+                                 const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
+                                 const int qkv_split_arg_list_2, cudaStream_t stream);
+
+/*! \brief Compute the backward of the fused qkv rope.
+ *
+ *  \param[in]     q_grad_out      Incoming gradient tensor for Q.
+ *  \param[in]     k_grad_out      Incoming gradient tensor for K.
+ *  \param[in]     v_grad_out      Incoming gradient tensor for V.
+ *  \param[in]     q_freqs         The freqs tensor for Q.
+ *  \param[in]     k_freqs         The freqs tensor for K.
+ *  \param[out]    qkv_grad_input  Input gradient tensor to calculate.
+ *  \param[in]     qkv_format      QKV format.
+ *  \param[in]     interleaved     Whether to use interleaved rotary position embedding.
+ *  \param[in]     cp_size         Context parallel world size.
+ *  \param[in]     cp_rank         Context parallel rank.
+ *  \param[in]     s               Length of the s dimension of input.
+ *  \param[in]     b               Length of the b dimension of input.
+ *  \param[in]     h               Length of the h dimension of input.
+ *  \param[in]     d               Length of the d dimension of input.
+ *  \param[in]     d2              Length of the d dimension of freqs.
+ *  \param[in]     qkv_split_arg_list_0  The hidden size for Q.
+ *  \param[in]     qkv_split_arg_list_1  The hidden size for K.
+ *  \param[in]     qkv_split_arg_list_2  The hidden size for V.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
+void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor k_grad_out,
+                                  const NVTETensor v_grad_out, const NVTETensor q_freqs,
+                                  const NVTETensor k_freqs, NVTETensor qkv_grad_input,
+                                  const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                  const int cp_size, const int cp_rank, const int s, const int b,
+                                  const int h, const int d, const int d2,
+                                  const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
+                                  const int qkv_split_arg_list_2, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

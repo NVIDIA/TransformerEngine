@@ -501,6 +501,12 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
   q_opts.amax_epsilon = eps;
   q_opts.block_scaling_dim = 2u;
 
+  // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
+  // which requires using power of two scaling factors. Skip unsupported tests.
+  if (getDeviceComputeCapability() >= blackwellComputeCapability && !force_pow_2) {
+    GTEST_SKIP();
+  }
+
   if (colwise && matrix_size.size() < 2) {
     // test_common Tensor initialization code does not
     // handle this case.
@@ -551,6 +557,12 @@ TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
   q_opts.force_pow_2_scales = force_pow_2;
   q_opts.amax_epsilon = eps;
   q_opts.block_scaling_dim = 1u;
+
+  // On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,
+  // which requires using power of two scaling factors. Skip unsupported tests.
+  if (getDeviceComputeCapability() >= blackwellComputeCapability && !force_pow_2) {
+    GTEST_SKIP();
+  }
 
   if (colwise && matrix_size.size() < 2) {
     // test_common Tensor initialization code does not
