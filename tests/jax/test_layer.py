@@ -82,6 +82,7 @@ _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
 _KEY_OF_WINDOW_SIZE = "window_size"
+_KEY_OF_SOFTMAX_TYPE = "softmax_type"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -274,6 +275,14 @@ ATTRS = [
     {
         _KEY_OF_RELATIVE_EMBEDDING: True,
         _KEY_OF_SELF_ATTN_BIAS_TYPE: "post_scale_bias",
+    },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+    },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
     },
 ]
 
