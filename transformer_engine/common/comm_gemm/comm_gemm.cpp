@@ -157,6 +157,7 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
                                                      get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   }
+
   NVTE_CHECK(d0 == n, "Unsupported tensor dimension in D: expected ", n, ", got ", d0);
   *ldd = block_size(ctx, m);
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, block_size(ctx, m), block_size(ctx, n), 0,
@@ -229,6 +230,7 @@ void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
                                                      block_size(ctx, k), get_cuda_dtype(b->dtype()),
                                                      ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
+
   NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
   *ldd = m;
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, *ldd,
@@ -472,21 +474,12 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
 }
 
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
-  NVTE_API_CALL(nvte_comm_gemm_ctx_destroy);
-  nvshmemx_sync_all_on_stream(ctx->stream.get());
   delete ctx;
-}
 
 void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
-  NVTE_API_CALL(nvte_all_gather_gemm);
-  cublasmp_gemm(AgGemmInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
-                convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
-                convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
 }
 
 void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,

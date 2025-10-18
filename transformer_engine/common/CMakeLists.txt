@@ -170,6 +170,7 @@ target_link_libraries(transformer_engine PUBLIC
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+
 target_include_directories(transformer_engine PRIVATE ${MATHDX_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
