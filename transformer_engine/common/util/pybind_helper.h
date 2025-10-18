@@ -22,7 +22,8 @@
       .value("kFloat16", transformer_engine::DType::kFloat16)                                      \
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
-      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);                               \
+      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
+      .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1);                               \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \
@@ -36,6 +37,10 @@
       .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)       \
       .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",                                              \
              NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);                               \
+  pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())             \
+      .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)                      \
+      .value("NVTE_OFF_BY_ONE_SOFTMAX", NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX)                \
+      .value("NVTE_LEARNABLE_SOFTMAX", NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX);                 \
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())                 \
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)                                              \
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)                                              \
@@ -94,7 +99,9 @@
              transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                          \
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
-      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
+      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P)        \
+      .value("EXTERNAL_BULK_OVERLAP_AG",                                                           \
+             transformer_engine::CommOverlapAlgo::EXTERNAL_BULK_OVERLAP_AG);                       \
   py::class_<transformer_engine::CommOverlapCore,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
                                                                    pybind11::module_local())       \

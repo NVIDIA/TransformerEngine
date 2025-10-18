@@ -39,6 +39,14 @@ inline CUresult call(const char *symbol, ArgTs... args) {
   return (*func)(args...);
 }
 
+/*! \brief Ensure that the calling thread has a CUDA context
+ *
+ * Each thread maintains a stack of CUDA contexts. If the calling
+ * thread has an empty stack, the primary context is added to the
+ * stack.
+ */
+void ensure_context_exists();
+
 }  // namespace cuda_driver
 
 }  // namespace transformer_engine

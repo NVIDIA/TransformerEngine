@@ -4,7 +4,6 @@
 
 import pytest
 import torch
-import torch.distributed as dist
 
 import transformer_engine.pytorch as te
 

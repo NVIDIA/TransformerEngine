@@ -27,6 +27,12 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         expert_bias: torch.Tensor,
     ):
         # pylint: disable=missing-function-docstring
+        # Save the shape of the logits
+        tensor_shape = logits.shape
+        logits = logits.view(-1, tensor_shape[-1])
+        # Get the metadata of the viewed logits
+        num_tokens = logits.size(0)
+        num_experts = logits.size(1)
         probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
@@ -37,9 +43,11 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             score_function,
             expert_bias,
         )
+        # Restore the shape
+        probs = probs.view(tensor_shape)
         ctx.save_for_backward(routing_map, intermediate_output)
-        ctx.num_tokens = logits.size(0)
-        ctx.num_experts = logits.size(1)
+        ctx.num_tokens = num_tokens
+        ctx.num_experts = num_experts
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
@@ -50,17 +58,23 @@ class FusedTopkScoreFunction(torch.autograd.Function):
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
+        # Save the shape of the grad_probs
+        tensor_shape = grad_probs.shape
+        # Adjust the shape of the grad_probs to 2D shape
+        grad_probs = grad_probs.contiguous().view(-1, tensor_shape[-1])
         grad_logits = tex.fused_topk_with_score_function_bwd(
             ctx.num_tokens,
             ctx.num_experts,
             routing_map,
             intermediate_output,
-            grad_probs.contiguous(),
+            grad_probs,
             ctx.topk,
             ctx.use_pre_softmax,
             ctx.scaling_factor,
             ctx.score_function,
         )
+        # Restore the shape
+        grad_logits = grad_logits.view(tensor_shape)
         return grad_logits, None, None, None, None, None, None, None
 
 
@@ -124,6 +138,12 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         score_function: str,
     ):
         # pylint: disable=missing-function-docstring
+        # Save the shape of the logits
+        tensor_shape = logits.shape
+        logits = logits.view(-1, tensor_shape[-1])
+        # Get the metadata of the viewed logits
+        num_tokens = logits.size(0)
+        num_experts = logits.size(1)
         scores, routing_map, intermediate_output = tex.fused_score_for_moe_aux_loss_fwd(
             logits=logits,
             topk=topk,
@@ -132,22 +152,28 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         ctx.save_for_backward(intermediate_output)
         ctx.topk = topk
         ctx.score_function = score_function
-        ctx.num_tokens = logits.size(0)
-        ctx.num_experts = logits.size(1)
+        ctx.num_tokens = num_tokens
+        ctx.num_experts = num_experts
         return routing_map, scores
 
     @staticmethod
     def backward(ctx, _, grad_scores):
         # pylint: disable=missing-function-docstring
         intermediate_output = ctx.saved_tensors[0]
+        # Save the shape of the grad_scores
+        tensor_shape = grad_scores.shape
+        # Adjust the shape of the grad_scores to 2D shape
+        grad_scores = grad_scores.contiguous().view(-1, tensor_shape[-1])
         grad_logits = tex.fused_score_for_moe_aux_loss_bwd(
             num_tokens=ctx.num_tokens,
             num_experts=ctx.num_experts,
             intermediate_output=intermediate_output,
-            grad_scores=grad_scores.contiguous(),
+            grad_scores=grad_scores,
             topk=ctx.topk,
             score_function=ctx.score_function,
         )
+        # Restore the shape
+        grad_logits = grad_logits.view(tensor_shape)
         return grad_logits, None, None
 
 
@@ -189,19 +215,21 @@ class FusedAuxLoss(torch.autograd.Function):
         coeff: float,
     ):
         # pylint: disable=missing-function-docstring
-        num_tokens = probs.size(0)
+        num_rows = probs.size(0)
+        num_cols = probs.size(1)
         aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
             probs=probs,
             tokens_per_expert=tokens_per_expert,
             total_num_tokens=total_num_tokens,
-            num_tokens=num_tokens,
             num_experts=num_experts,
+            num_rows=num_rows,
+            num_cols=num_cols,
             topk=topk,
             coeff=coeff,
         )
         ctx.save_for_backward(Const_buf, tokens_per_expert)
-        ctx.num_tokens = num_tokens
-        ctx.num_experts = num_experts
+        ctx.num_rows = num_rows
+        ctx.num_cols = num_cols
         return aux_loss
 
     @staticmethod
@@ -211,8 +239,8 @@ class FusedAuxLoss(torch.autograd.Function):
         grad_probs = tex.fused_moe_aux_loss_bwd(
             Const_buf=Const_buf,
             tokens_per_expert=tokens_per_expert,
-            num_tokens=ctx.num_tokens,
-            num_experts=ctx.num_experts,
+            num_rows=ctx.num_rows,
+            num_cols=ctx.num_cols,
             grad_aux_loss=grad_aux_loss,
         )
         return grad_probs, None, None, None, None, None

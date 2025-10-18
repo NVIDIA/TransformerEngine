@@ -35,17 +35,20 @@ void nvshmem_wait_on_stream(uint64_t* sig_addr, WaitKind wait_kind, cudaStream_t
   switch (wait_kind) {
     case WaitKind::KERNEL_WAIT:
       wait_until_on_stream_and_reset<<<1, 1, 0, cur_stream>>>(sig_addr, wait_value, signal_reset);
+      NVTE_CHECK_CUDA(cudaGetLastError());
       break;
     case WaitKind::NVSHMEM_WAIT:
       nvshmemx_uint64_wait_until_on_stream(sig_addr, NVSHMEM_CMP_EQ, wait_value, cur_stream);
-      cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)signal_reset,
-                           CU_STREAM_WRITE_VALUE_DEFAULT);
+      NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr,
+                                                  (cuuint64_t)signal_reset,
+                                                  CU_STREAM_WRITE_VALUE_DEFAULT));
       break;
     case WaitKind::STREAM_WAIT:
-      cuStreamWaitValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)wait_value,
-                          CU_STREAM_WAIT_VALUE_GEQ);
-      cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)signal_reset,
-                           CU_STREAM_WRITE_VALUE_DEFAULT);
+      NVTE_CHECK_CUDA_DRIVER(cuStreamWaitValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr,
+                                                 (cuuint64_t)wait_value, CU_STREAM_WAIT_VALUE_GEQ));
+      NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr,
+                                                  (cuuint64_t)signal_reset,
+                                                  CU_STREAM_WRITE_VALUE_DEFAULT));
       break;
   }
 }

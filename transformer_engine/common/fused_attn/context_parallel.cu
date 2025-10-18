@@ -341,6 +341,7 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
   thd_read_half_tensor_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
       half.data.dptr, tensor.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
       hidden_size_in_bytes, half_idx, tensor_shape[seq_dim]);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 /***************************************************************************************************
@@ -397,11 +398,13 @@ void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
         reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(lse_per_step.data.dptr),
         reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
         second_half_lse_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     thd_lse_kernel<false, LseCorrectionFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
         reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(lse_per_step.data.dptr),
         reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
         second_half_lse_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -446,11 +449,13 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
         reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(half_lse.data.dptr),
         reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
         second_half_lse_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     thd_lse_kernel<false, ReadLseFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
         reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(half_lse.data.dptr),
         reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
         second_half_lse_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -519,6 +524,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     thd_out_correction_kernel<dtype, only_second_half, tile, false>
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
@@ -528,6 +534,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -602,6 +609,7 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
           reinterpret_cast<dtype *>(grad.data.dptr),
           reinterpret_cast<dtype *>(grad_per_step.data.dptr),
           reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, hidden_size, total_tokens);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename dtype>
@@ -667,6 +675,7 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
       reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
       batch, total_tokens, world_size, rank);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace context_parallel

@@ -243,11 +243,13 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
 
     moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
                                                         num_out_tokens);
+    NVTE_CHECK_CUDA(cudaGetLastError());
 
     blocks = num_rows;
     threads = std::min(num_cols / kElementsPerAccess, 1024);
     moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
         input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     // moe_unpermute_bwd
 
@@ -259,6 +261,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
 
       moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
           input, input_fwd, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
+      NVTE_CHECK_CUDA(cudaGetLastError());
     } else {
       // moe_unpermute_bwd with probs
 
@@ -282,6 +285,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
       } else {
         NVTE_ERROR("topK cannot exceed 128.");
       }
+      NVTE_CHECK_CUDA(cudaGetLastError());
     }
   }
 }
@@ -306,11 +310,13 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
 
     moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, nullptr, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     // moe_unpermute_fwd with probs
 
     moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, prob, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

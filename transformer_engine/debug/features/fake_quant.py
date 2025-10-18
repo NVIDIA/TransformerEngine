@@ -19,7 +19,7 @@ from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.fp8 import _default_sf_compute
+from transformer_engine.pytorch.quantization import _default_sf_compute
 
 
 def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):
@@ -127,14 +127,14 @@ class FakeQuant(TEConfigAPIMapper):
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for selecting between high-precision and FP8 GEMM execution."""
-        return False
+        return False, None
 
     @api_method
     def modify_tensor_enabled(
         self, config, layer_name: str, tensor_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run process_tensor() in the forward."""
-        return True
+        return True, iteration + 1
 
     @api_method
     def modify_tensor(

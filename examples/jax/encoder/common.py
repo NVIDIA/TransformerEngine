@@ -33,6 +33,13 @@ def is_mxfp8_supported():
     return gpu_arch >= 100
 
 
+@lru_cache
+def is_nvfp4_supported():
+    """Return if FP8 has hardware supported"""
+    gpu_arch = get_device_compute_capability(0)
+    return gpu_arch >= 100
+
+
 def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01, print_info=False):
     """Checks whether most params are sharded across sharding axis.
 
@@ -98,7 +105,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01, print_info=
     )
 
 
-def get_fp8_recipe_from_name_string(name: str):
+def get_quantization_recipe_from_name_string(name: str):
     """Query recipe from a given name string"""
     match name:
         case "DelayedScaling":
@@ -107,5 +114,7 @@ def get_fp8_recipe_from_name_string(name: str):
             return recipe.MXFP8BlockScaling()
         case "Float8CurrentScaling":
             return recipe.Float8CurrentScaling()
+        case "NVFP4BlockScaling":
+            return recipe.NVFP4BlockScaling()
         case _:
-            raise ValueError(f"Invalid fp8_recipe, got {name}")
+            raise ValueError(f"Invalid quantization_recipe, got {name}")

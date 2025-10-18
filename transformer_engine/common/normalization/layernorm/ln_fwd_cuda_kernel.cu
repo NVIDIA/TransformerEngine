@@ -13,15 +13,15 @@ using namespace transformer_engine::normalization;
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
           int BYTES_PER_LDG>
-void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
-                   const bool configure_params) {  // NOLINT(*)
+void launch_ln_fwd_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
+                          const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG>;
   auto kernel = &ln_fwd_tuned_kernel<Kernel_traits>;
   if (configure_params) {
     int ctas_per_sm;
-    cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD);
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD));
     launch_params.params.ctas_per_row = CTAS_PER_ROW;
     launch_params.params.ctas_per_col =
         launch_params.multiprocessorCount * ctas_per_sm / launch_params.params.ctas_per_row;
@@ -45,19 +45,21 @@ void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
   if (ctas_per_row == 1) {
     kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD, stream>>>(
         launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_,  // NOLINT(*)
-                                Kernel_traits::SMEM_BYTES_FWD, stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_),
+                                                Kernel_traits::SMEM_BYTES_FWD, stream));
   }
 }
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG>
-void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
-                     const bool configure_params) {  // NOLINT(*)
+void launch_ln_fwd_general_(LaunchParams<ForwardKernelParams> &launch_params,
+                            const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       1, WARPS_M, WARPS_N, BYTES_PER_LDG>;
   auto kernel = &ln_fwd_general_kernel<Kernel_traits>;
@@ -70,8 +72,8 @@ void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
   int ctas_per_row = launch_params.params.ctas_per_row;
   if (configure_params) {
     int ctas_per_sm;
-    cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0);
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0));
     const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
     ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
     ctas_per_col = std::min(ceil_div(rows, WARPS_M), max_ctas / ctas_per_row);
@@ -91,10 +93,11 @@ void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
   dim3 block(Kernel_traits::THREADS_PER_CTA);
   if (ctas_per_row == 1) {
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                                reinterpret_cast<void **>(&params_), 0, stream));
   }
 }
 
@@ -104,8 +107,8 @@ void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
   void                                                                                                          \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(  \
           LaunchParams<NORM_STAGE##KernelParams> &launch_params, const bool configure_params) {                 \
-    launch_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, __VA_ARGS__>(                    \
-        launch_params, configure_params);                                                                       \
+    launch_ln_fwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                           \
+                                   __VA_ARGS__>(launch_params, configure_params);                               \
   }                                                                                                             \
   REGISTER_NORM_BASE(                                                                                           \
       NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                              \

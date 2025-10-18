@@ -5,7 +5,8 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union
+import warnings
+from typing import Dict, Union, Tuple, Optional
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -101,12 +102,22 @@ required_kwargs = {
 class TEDefaultFeatures:
     """Transformer Engine API calls default behavior."""
 
-    def fp8_gemm_enabled(self, config: Dict, layer_name: str, gemm: str, iteration: int) -> bool:
+    def fp8_gemm_enabled(
+        self,
+        config: Dict,
+        layer_name: str,
+        gemm: str,
+        iteration: int,
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
         If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
         then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
         If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
+
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be disabled.
+        It can return (bool, None) if the feature will never be enabled for that layer and gemm.
+        Returning the next enabled iteration can help optimize CPU usage.
 
         Parameters
         ----------
@@ -122,9 +133,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is True
+        Union[bool, Tuple[bool, Optional[int]]] - default is (True, None)
         """
-        return True  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
+        return True, None  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
         self,
@@ -133,9 +144,16 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
-        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
+        It has **higher priority** than fp8_gemm; if *modify_tensor_enabled* returns True or (True, next_enabled_iter),
+        then modify_tensor call is invoked for the respective tensor no matter what.
+
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor.
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
+        Returning only a bool is deprecated.
 
         Parameters
         ----------
@@ -153,9 +171,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False
+        return False, None
 
     def modify_tensor(
         self,
@@ -167,7 +185,7 @@ class TEDefaultFeatures:
         default_quantizer: Quantizer,
         iteration: int,
         out: Union[torch.Tensor, QuantizedTensor],
-    ) -> Union[torch.Tensor, QuantizedTensor, None]:
+    ) -> torch.Tensor | QuantizedTensor | None:
         """
         It allows tensor modification.
         For example, feature `FakeQuant` uses it to emulate casting to FP8.
@@ -227,6 +245,9 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor],
+        columnwise_quantized_tensor: Optional[torch.Tensor],
+        quantizer: Optional[Quantizer],
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
@@ -243,6 +264,12 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in high precision,
+        rowwise_quantized_tensor: Optional[torch.Tensor]
+            rowwise quantized tensor,
+        columnwise_quantized_tensor: Optional[torch.Tensor]
+            columnwise quantized tensor,
+        quantizer: Optional[Quantizer]
+            quantizer,
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -260,12 +287,15 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        gemm: str,
         tensor: torch.Tensor,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
+        rowwise: bool,
     ) -> None:
         """
+
+        This is deprecated call, we advise to use *inspect_tensor* instead.
+
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
@@ -278,8 +308,6 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in fp8 or processed tensor after the modify_tensor call,
-        gemm: str
-            one of [`fprop`, `dgrad`, `wgrad`],
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -298,9 +326,15 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
-        It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
+        It is a routing call, which is run at the initialization of the layer.
+        Determines if *inspect_tensor* for a given GEMM and tensor will be invoked.
+
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer and tensor.
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
+        Returning only a bool is deprecated.
 
         Parameters
         ----------
@@ -316,9 +350,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False
+        return False, None
 
     def inspect_tensor_postquantize_enabled(
         self,
@@ -327,11 +361,18 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
+        This is deprecated call, we advise to use *inspect_tensor* and *inspect_tensor_enabled* instead.
+
         It is a routing call, which is run at the initialization of the layer.
-        If it returns true, then *inspect_tensor_postquantize* for
-        a given GEMM and tensor will be invoked.
+        Determines if *inspect_tensor_postquantize* for a given GEMM and tensor will be invoked.
+
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor name.
+        Returning the next enabled iteration can help optimize CPU usage,
+        especially when the interval between inspect_tensor_postquantize is large.
+        Returning only a bool is deprecated.
 
         Parameters
         ----------
@@ -349,9 +390,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False
+        return False, None
 
 
 @Registry.register_namespace_api(namespace="transformer_engine")
@@ -371,8 +412,8 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "modify_tensor": ["tensor_name", "gemm"],
             "inspect_tensor": ["tensor_name"],
             "inspect_tensor_postquantize": ["tensor_name"],
-            "inspect_tensor_enabled": ["tensor_name"],
-            "inspect_tensor_postquantize_enabled": ["tensor_name"],
+            "inspect_tensor_enabled": ["tensor_name", "iteration"],
+            "inspect_tensor_postquantize_enabled": ["tensor_name", "iteration"],
             "modify_tensor_enabled": ["tensor_name"],
         }
 
@@ -420,7 +461,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
     def output_assertions_hook(self, api_name, ret, **kwargs):
         """Output hooks used to check correctness of the outputs of the API calls."""
         if "enabled" in api_name or api_name == "fp8_gemm":
-            assert isinstance(ret, bool)
+            assert isinstance(ret, (bool, tuple))
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
@@ -431,6 +472,57 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
+
+    def call_feature(self, call, feat_config, layer_name, **kwargs):
+        """
+        For backward compatibility, remove kwargs that are not needed for the call
+        """
+        if call.__name__ == "inspect_tensor":
+            kwargs_copy = kwargs.copy()
+            for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
+                if k not in call.__code__.co_varnames:
+                    kwargs_copy.pop(k)
+        else:
+            kwargs_copy = kwargs
+
+        if call.__name__ == "inspect_tensor_postquantize":
+            warnings.warn(
+                "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
+                DeprecationWarning,
+            )
+
+        return call(feat_config, layer_name, **kwargs_copy)
+
+    def handle_multi_feature_output(
+        self, api_name, multi_feature_outputs, features_to_invoke, **kwargs
+    ):
+        """
+        Handle multi-tensor output of the API calls.
+        """
+        if "enabled" in api_name:
+            # *_enabled feature calls can return bool, or tuple (bool, Optional[int]).
+            # If any of them returns bool, then we return bool - this means that we cannot state anything
+            # about enablement in the next steps.
+            # If all of them return a tuple (bool, Optional[int]), we return the minimum value,
+            # representing the number of steps after the feature will be enabled next time.
+            # If the second value is None, that means that the feature will never be enabled.
+            all_ret_tuple = all(
+                isinstance(feature_output, tuple) for feature_output in multi_feature_outputs
+            )
+            if all_ret_tuple:
+                run_current = any(feature_output[0] for feature_output in multi_feature_outputs)
+                next_iter = None
+                for feature_output in multi_feature_outputs:
+                    if next_iter is None:
+                        next_iter = feature_output[1]
+                    elif feature_output[1] is not None:
+                        next_iter = min(next_iter, feature_output[1])
+                return run_current, next_iter
+            run_current = any(feature_output for feature_output in multi_feature_outputs)
+            return run_current, None
+        return super().handle_multi_feature_output(
+            api_name, multi_feature_outputs, features_to_invoke, **kwargs
+        )
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""

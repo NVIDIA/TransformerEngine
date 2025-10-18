@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="960"
+   height="379.95526"
+   overflow="hidden"
+   version="1.1"
+   id="svg19"
+   sodipodi:docname="fp8_model_init_2_half.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="2.1718178"
+     inkscape:cx="502.34416"
+     inkscape:cy="194.07705"
+     inkscape:window-width="3440"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg19" />
+  <defs
+     id="defs19">
+    <clipPath
+       clipPathUnits="userSpaceOnUse"
+       id="clipPath20">
+      <rect
+         style="fill:none"
+         id="rect21"
+         width="1014.7587"
+         height="379.95526"
+         x="-21.430403"
+         y="44.598408" />
+    </clipPath>
+  </defs>
+  <g
+     id="g19"
+     clip-path="url(#clipPath20)"
+     transform="translate(-76.837568,-52.086815)" />
+  <path
+     d="M 434.81331,26.957307 V 370.26931"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-miterlimit="8"
+     fill="none"
+     fill-rule="evenodd"
+     id="path1" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="700"
+     font-size="24px"
+     id="text2"
+     x="216.69165"
+     y="33.663437">FP8</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="700"
+     font-size="24px"
+     id="text3"
+     x="508.73199"
+     y="32.565033">FP8 with fp8_model_init()</text>
+  <rect
+     x="481.81332"
+     y="182.95731"
+     width="129"
+     height="164"
+     stroke="#042433"
+     stroke-width="2"
+     stroke-miterlimit="8"
+     fill="#e8e8e8"
+     id="rect3" />
+  <rect
+     x="496.26413"
+     y="238.08121"
+     width="101"
+     height="45"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#d9f2d0"
+     id="rect4" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text4"
+     x="534.22107"
+     y="257.08121">FP8</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text5"
+     x="525.13409"
+     y="273.08121">weight</text>
+  <rect
+     x="692.2641"
+     y="238.08121"
+     width="82"
+     height="45"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#c1e5f5"
+     id="rect5" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text6"
+     x="721.31403"
+     y="257.08121">FP8</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text7"
+     x="712.6441"
+     y="273.08121">GEMM</text>
+  <path
+     d="m 597.2641,260.08121 h 89.04001 v 2 H 597.2641 Z m 87.71001,-3 8,4 -8,4 z"
+     id="path7" />
+  <rect
+     x="60.813313"
+     y="182.95731"
+     width="129"
+     height="164"
+     stroke="#042433"
+     stroke-width="2"
+     stroke-miterlimit="8"
+     fill="#e8e8e8"
+     id="rect19" />
+  <rect
+     x="74.714897"
+     y="225.53201"
+     width="103"
+     height="71"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#d9f2d0"
+     id="rect20" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text20"
+     x="111.5769"
+     y="249.53201">High</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text21"
+     x="97.823906"
+     y="265.53201">precision</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text22"
+     x="104.82391"
+     y="281.53201">weight</text>
+  <rect
+     x="218.71492"
+     y="238.53201"
+     width="81"
+     height="44"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#fbe3d6"
+     id="rect22" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text23"
+     x="247.02687"
+     y="256.53201">FP8</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text24"
+     x="236.52687"
+     y="272.53201">Weight</text>
+  <g
+     id="g33"
+     transform="translate(-315.33871,-135.90297)">
+    <rect
+       x="638.21271"
+       y="302.41418"
+       width="81"
+       height="44"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#fbe3d6"
+       id="rect22-2" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       id="text23-7"
+       x="666.52472"
+       y="320.41418">FP8</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       id="text24-6"
+       x="662.06604"
+       y="336.96341">Input</text>
+  </g>
+  <rect
+     x="322.71494"
+     y="238.53201"
+     width="82"
+     height="44"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#c1e5f5"
+     id="rect26" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text27"
+     x="351.37491"
+     y="256.53201">FP8</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text28"
+     x="342.70889"
+     y="272.53201">GEMM</text>
+  <path
+     d="m 177.73063,262.17188 34.00266,-0.5351 -0.0314,-1.99976 -34.00273,0.53511 z m 32.71676,2.4855 7.9361,-4.12538 -8.062,-3.87362 z"
+     id="path28" />
+  <path
+     d="m 299.71489,259.532 h 15.791 v 2 h -15.791 z m 14.458,-3 8,4 -8,4 z"
+     id="path29" />
+  <path
+     d="m 364.71489,141.4494 v 21.98469 h -2 V 141.4494 Z m 3,21.60945 -4,2.25033 -4,-2.25033 z"
+     id="path30"
+     style="stroke-width:0.53037" />
+  <path
+     d="m 364.98466,212.86098 v 21.98469 h -2 v -21.98469 z m 3,21.60945 -4,2.25033 -4,-2.25033 z"
+     id="path30-2"
+     style="stroke-width:0.53037" />
+  <rect
+     x="314.86691"
+     y="72.209839"
+     width="103"
+     height="71"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#d9f2d0"
+     id="rect23" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text29"
+     x="352.04691"
+     y="95.209839">High</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text32"
+     x="338.29391"
+     y="111.20985">precision</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text33"
+     x="350.2139"
+     y="127.20984">input</text>
+  <g
+     id="g33-9"
+     transform="translate(54.923173,-135.99173)">
+    <rect
+       x="638.21271"
+       y="302.41418"
+       width="81"
+       height="44"
+       stroke="#000000"
+       stroke-width="2"
+       stroke-linejoin="round"
+       stroke-miterlimit="10"
+       fill="#fbe3d6"
+       id="rect22-2-5" />
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       id="text23-7-4"
+       x="666.52472"
+       y="320.41418">FP8</text>
+    <text
+       font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+       font-weight="400"
+       font-size="13px"
+       id="text24-6-3"
+       x="662.06604"
+       y="336.96341">Input</text>
+  </g>
+  <path
+     d="m 734.97681,141.36065 v 21.98469 h -2 v -21.98469 z m 3,21.60945 -4,2.25033 -4,-2.25033 z"
+     id="path30-1"
+     style="stroke-width:0.53037" />
+  <path
+     d="m 735.24651,212.77223 v 21.98469 h -2 v -21.98469 z m 3,21.60945 -4,2.25033 -4,-2.25033 z"
+     id="path30-2-2"
+     style="stroke-width:0.53037" />
+  <rect
+     x="685.12872"
+     y="72.121094"
+     width="103"
+     height="71"
+     stroke="#000000"
+     stroke-width="2"
+     stroke-linejoin="round"
+     stroke-miterlimit="10"
+     fill="#d9f2d0"
+     id="rect23-3" />
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text29-3"
+     x="722.30878"
+     y="95.121094">High</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text32-4"
+     x="708.55573"
+     y="111.12111">precision</text>
+  <text
+     font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
+     font-weight="400"
+     font-size="13px"
+     id="text33-1"
+     x="720.47577"
+     y="127.12106">input</text>
+</svg>

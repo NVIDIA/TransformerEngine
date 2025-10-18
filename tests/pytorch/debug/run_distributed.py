@@ -16,7 +16,7 @@ import transformer_engine
 import transformer_engine_torch as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import is_fp8_available
 
 from test_numerics import (
     _emulate_linear,
@@ -45,7 +45,7 @@ FEATURE_DIRS = None
 all_boolean = [True, False]
 TEST_NR = 0
 
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_available = is_fp8_available()
 
 
 def _get_tensors(parallel_mode, weight_seed=SEED, data_seed=SEED, tp_size=None, tp_rank=None):
@@ -117,7 +117,7 @@ class AllGather(torch.autograd.Function):
 
 
 def _run_forward_backward(x, model, parallel_mode=None, group=None):
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=True, recipe=FP8_RECIPE):
         y = model(x)
 
     y.requires_grad_(True)
@@ -365,6 +365,40 @@ def test_log_distributed(parallel_mode, gather_weight, **kwargs):
 
 
 @run_debug_test
+def sanity_test_log_quantized_stats(parallel_mode, gather_weight, **kwargs):
+    from test_log import LOG_QUANTIZED_CONFIG
+
+    kwargs["config_file"].write(LOG_QUANTIZED_CONFIG)
+    kwargs["config_file"].flush()
+    _init_debug(kwargs["config_file"].name, kwargs["log_dir"], FEATURE_DIRS)
+    set_weight_tensor_tp_group_reduce(gather_weight)
+    if WORLD_SIZE % 2 != 0:
+        return  # skip
+    TP_SIZE = WORLD_SIZE // 2
+    DP_SIZE = 2
+    TP_RANK = WORLD_RANK % TP_SIZE
+    DP_RANK = (WORLD_RANK - TP_RANK) // TP_SIZE
+
+    debug_api.set_tensor_reduction_group(NCCL_WORLD)
+
+    x, weight = _get_tensors(
+        parallel_mode,
+        weight_seed=TP_RANK * 1234,
+        data_seed=DP_RANK * 1234,
+        tp_size=TP_SIZE,
+        tp_rank=TP_RANK,
+    )
+
+    tp_group_ranks = [i for i in range(DP_RANK * TP_SIZE, (DP_RANK + 1) * TP_SIZE)]
+    tp_group = dist.new_group(ranks=tp_group_ranks)
+
+    model = _init_model(weight, parallel_mode=parallel_mode, tp_group=tp_group)
+    _run_forward_backward(x, model, parallel_mode=parallel_mode, group=tp_group)
+
+    set_weight_tensor_tp_group_reduce(True)  # reset
+
+
+@run_debug_test
 def test_log_expert_parallel(**kwargs):
     """
     This test tests the scenario, when one of the node of data parallel does not invoke the debug layer.
@@ -379,13 +413,13 @@ def test_log_expert_parallel(**kwargs):
     )  # data parallel
     model = _init_model(weight, parallel_mode=None, name="linear1")
     model1 = _init_model(weight, parallel_mode=None, name="linear2")
-    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=fp8_available, recipe=FP8_RECIPE):
         y1 = model(x)
         y2 = model1(x)
         y = y1 + y2
     y.sum().backward()
     debug_api.step()
-    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=fp8_available, recipe=FP8_RECIPE):
         y = model(x)
         if WORLD_RANK != 0:
             y = y + model1(x)
@@ -498,7 +532,7 @@ def test_per_tensor_scaling(
 
     LOSS_MULTIPLIER = 100
 
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=True, recipe=FP8_RECIPE):
         y = model(x)
         model.zero_grad()
         if parallel_mode == "column":

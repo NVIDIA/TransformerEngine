@@ -53,7 +53,11 @@ jobs:
            || github.actor == 'lhb8125'
            || github.actor == 'kunlunl'
            || github.actor == 'pstjohn'
-           || github.actor == 'mk-61'
+           || github.actor == 'vcherepanov-nv'
+           || github.actor == 'tdophung'
+           || github.actor == 'vthumbe1503'
+           || github.actor == 'janekb04'
+           || github.actor == 'shengfangd'
          )
     steps:
       - name: Check if comment is issued by authorized person
