@@ -18,7 +18,9 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
-from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import nvfp4_ref_rht_2d_quantizer_factory
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
+    nvfp4_ref_rht_2d_quantizer_factory,
+)
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -38,9 +40,13 @@ def test_custom_recipe_sanity_modules_nvfp4(module_type):
     if module_type == "Linear":
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
     elif module_type == "LayerNormLinear":
-        model = LayerNormLinear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+        model = LayerNormLinear(
+            in_features, out_features, params_dtype=torch.bfloat16, bias=False
+        ).cuda()
     else:  # OpsLinear
-        model = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16, bias=False)
+        model = te_ops.Linear(
+            in_features, out_features, device="cuda", dtype=torch.bfloat16, bias=False
+        )
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Use NVFP4 quantizer factory
