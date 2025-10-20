@@ -44,11 +44,10 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states, get_available_attention_backends
+from utils import ModelConfig, reset_rng_states
 
 
 # Only run FP8 tests on supported devices.
@@ -169,23 +168,6 @@ use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
 if torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
-
-
-def is_fused_attn_available(
-    config: ModelConfig,
-    dtype: torch.dtype,
-    qkv_layout="bshd_bshd_bshd",
-    is_training=True,
-    deterministic=False,
-):
-    _, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        is_training=is_training,
-        deterministic=deterministic,
-    )
-    return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -904,8 +886,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, deterministic=True):
-        pytest.skip("No attention backend available.")
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
@@ -952,10 +932,6 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
-    if not is_fused_attn_available(
-        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
-    ):
-        pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -1067,10 +1043,6 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
-    if not is_fused_attn_available(
-        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
-    ):
-        pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(
         config.hidden_size,
