@@ -4,7 +4,6 @@
 
 """Helper functions for using fp8 tensors as weights"""
 
-import os
 from typing import Optional, Union
 import torch
 import transformer_engine_torch as tex
