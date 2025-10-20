@@ -853,8 +853,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, deterministic=True):
-        pytest.skip("No attention backend available.")
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
