@@ -1039,8 +1039,8 @@ void fused_attn_arbitrary_seqlen_fwd(
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = cu_seqlens_kv_padded->data.dptr;
-  void *devPtrPageTableK = page_table_k->data.dptr;
-  void *devPtrPageTableV = page_table_v->data.dptr;
+  void *devPtrPageTableK = page_table_k ? page_table_k->data.dptr : nullptr;
+  void *devPtrPageTableV = page_table_v ? page_table_v->data.dptr : nullptr;
 
   size_t max_batch_size = 0;
   size_t max_tokens_q = 0;

@@ -15,6 +15,76 @@
 #include "fused_attn_fp8.h"
 #include "utils.h"
 
+namespace {
+// Helper function to create a tensor view with modified shape and optional pointer offset
+transformer_engine::Tensor make_tensor_view(const transformer_engine::Tensor* source,
+                                            const std::vector<size_t>& shape,
+                                            size_t offset_bytes = 0) {
+  transformer_engine::Tensor view = *source;
+  if (offset_bytes > 0) {
+    view.data.dptr = static_cast<void*>(static_cast<int8_t*>(source->data.dptr) + offset_bytes);
+  }
+  view.data.shape = shape;
+  view.nvte_tensor = 0;  // Mark as unmanaged/local tensor view
+  return view;
+}
+
+// Helper function to calculate stride for packed QKV tensor unpacking
+size_t calculate_qkv_stride(NVTE_QKV_Layout_Group layout_group, 
+                             transformer_engine::DType dtype,
+                             size_t h, size_t d) {
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    stride = (transformer_engine::typeToNumBits(dtype) * h * d) / 8;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    stride = (transformer_engine::typeToNumBits(dtype) * d) / 8;
+  }
+  return stride;
+}
+
+// Helper function to determine unpacked shape for QKV packed tensor
+std::vector<size_t> calculate_qkv_unpacked_shape(const transformer_engine::Tensor* qkv_tensor,
+                                                   size_t h, size_t d) {
+  std::vector<size_t> unpacked_shape;
+  if (qkv_tensor->data.shape.size() == 4) {
+    // T3HD or TH3D (4D) -> THD (3D): remove dimension "3" at position 1
+    unpacked_shape = {qkv_tensor->data.shape[0], h, d};
+  } else {
+    // BS3HD/SB3HD or BSH3D/SBH3D (5D) -> BSHD/SBHD (4D): remove dimension "3" at position 2
+    unpacked_shape = {qkv_tensor->data.shape[0], qkv_tensor->data.shape[1], h, d};
+  }
+  return unpacked_shape;
+}
+
+// Helper function to calculate stride for packed KV tensor unpacking
+size_t calculate_kv_stride(NVTE_QKV_Layout_Group layout_group, 
+                            transformer_engine::DType dtype,
+                            size_t h_kv, size_t d) {
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    stride = (transformer_engine::typeToNumBits(dtype) * h_kv * d) / 8;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    stride = (transformer_engine::typeToNumBits(dtype) * d) / 8;
+  }
+  return stride;
+}
+
+// Helper function to determine unpacked shape for KV packed tensor
+std::vector<size_t> calculate_kv_unpacked_shape(const transformer_engine::Tensor* kv_tensor,
+                                                  NVTE_QKV_Layout_Group layout_group,
+                                                  NVTE_QKV_Format kv_format,
+                                                  size_t t_kv, size_t h_kv, size_t d) {
+  std::vector<size_t> unpacked_kv_shape;
+  if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+    unpacked_kv_shape = {t_kv, h_kv, d};
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD ||
+             layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    unpacked_kv_shape = {kv_tensor->data.shape[0], kv_tensor->data.shape[1], h_kv, d};
+  }
+  return unpacked_kv_shape;
+}
+}  // namespace
+
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
   switch (qkv_layout) {
@@ -467,16 +537,12 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     // Unpack QKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
     size_t stride = 2 * h * d;  // For max512, layout is always BS3HD or SB3HD (3HD group)
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
-
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+    // Create tensor views for Q, K, V
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
     fused_attn_max_512_fwd(b, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
                            qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
@@ -488,26 +554,14 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     // Unpack QKV and call the non-packed function
-    // Create separate tensor views for Q, K, V from the packed QKV tensor
     const auto QKV_type = input_QKV->data.dtype;
-    NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = (typeToNumBits(QKV_type) * h * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = (typeToNumBits(QKV_type) * d) / 8;
-    }
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
     // Create tensor views for Q, K, V
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
-
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
     fused_attn_arbitrary_seqlen_fwd(
         b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training, attn_scale,
@@ -523,22 +577,13 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 #if (CUDNN_VERSION >= 8900)
     // Unpack QKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = (typeToNumBits(QKV_type) * h * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = (typeToNumBits(QKV_type) * d) / 8;
-    }
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
-
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+    // Create tensor views for Q, K, V
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
     fused_attn_fp8_fwd(b, h, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
                        qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
@@ -607,27 +652,18 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
 
     // Unpack QKV and dQKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
     size_t stride = 2 * h * d;
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
-
-    Tensor dQ_view = *output_dQKV;
-    dQ_view.data.dptr = output_dQKV->data.dptr;
-
-    Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
-
-    Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
 
     fused_attn_max_512_bwd(b, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
                            bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_dO, output_S,
@@ -651,35 +687,17 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
     // Unpack QKV and dQKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
-    NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = (typeToNumBits(QKV_type) * h * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = (typeToNumBits(QKV_type) * d) / 8;
-    }
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
-    // Create tensor views for Q, K, V from input
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
-
-    // Create tensor views for dQ, dK, dV from output
-    Tensor dQ_view = *output_dQKV;
-    dQ_view.data.dptr = output_dQKV->data.dptr;
-
-    Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
-
-    Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
 
     fused_attn_arbitrary_seqlen_bwd(
         b, h, h, max_seqlen, max_seqlen, d, d, t, t, attn_scale, dropout, qkv_layout, bias_type,
@@ -701,32 +719,17 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
     // Unpack QKV and dQKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-      stride = (typeToNumBits(QKV_type) * h * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-      stride = (typeToNumBits(QKV_type) * d) / 8;
-    }
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
-    Tensor Q_view = *input_QKV;
-    Q_view.data.dptr = input_QKV->data.dptr;
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
-    Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
-
-    Tensor V_view = *input_QKV;
-    V_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
-
-    Tensor dQ_view = *output_dQKV;
-    dQ_view.data.dptr = output_dQKV->data.dptr;
-
-    Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
-
-    Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr =
-        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
 
     fused_attn_fp8_bwd(b, h, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
                        bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_O, input_dO,
@@ -832,11 +835,18 @@ void nvte_fused_attn_fwd_kvpacked(
     // Unpack KV and call the non-packed function
     size_t stride = 2 * h_q * d;  // For max512, KV layout is BS2HD or SB2HD
 
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
+    // Create tensor views for K, V
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    std::vector<size_t> unpacked_kv_shape;
+    if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+      unpacked_kv_shape = {t_kv, h_kv, d};
+    } else {
+      // BS2HD or SB2HD -> BSHD or SBHD
+      unpacked_kv_shape = {input_KV->data.shape[0], input_KV->data.shape[1], h_kv, d};
+    }
 
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
     fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout,
                            qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
@@ -849,19 +859,13 @@ void nvte_fused_attn_fwd_kvpacked(
 #if (CUDNN_VERSION >= 8903)
     // Unpack KV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = (typeToNumBits(Q_type) * h_kv * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = (typeToNumBits(Q_type) * d) / 8;
-    }
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape = 
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
-    // Create tensor views for K, V from input_KV
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
-
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, num_pages_k, num_pages_v,
@@ -879,18 +883,13 @@ void nvte_fused_attn_fwd_kvpacked(
 #if (CUDNN_VERSION >= 8900)
     // Unpack KV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = (typeToNumBits(Q_type) * h_kv * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = (typeToNumBits(Q_type) * d) / 8;
-    }
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape = 
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
-
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
     fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale,
                        dropout, qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
@@ -971,17 +970,21 @@ void nvte_fused_attn_bwd_kvpacked(
     // Unpack KV and dKV and call the non-packed function
     size_t stride = 2 * h_q * d;
 
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
+    // Create tensor views for K, V
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    std::vector<size_t> unpacked_kv_shape;
+    if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+      unpacked_kv_shape = {t_kv, h_kv, d};
+    } else {
+      // BS2HD or SB2HD -> BSHD or SBHD
+      unpacked_kv_shape = {input_KV->data.shape[0], input_KV->data.shape[1], h_kv, d};
+    }
 
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
-    Tensor dK_view = *output_dKV;
-    dK_view.data.dptr = output_dKV->data.dptr;
-
-    Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
 
     fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout,
                            bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_dO, output_S,
@@ -1006,26 +1009,17 @@ void nvte_fused_attn_bwd_kvpacked(
     // Unpack KV and dKV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = (typeToNumBits(Q_type) * h_kv * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = (typeToNumBits(Q_type) * d) / 8;
-    }
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape = 
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
-    // Create tensor views for K, V from input_KV
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
-
-    // Create tensor views for dK, dV from output_dKV
-    Tensor dK_view = *output_dKV;
-    dK_view.data.dptr = output_dKV->data.dptr;
-
-    Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+    // Create tensor views for dK, dV
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
 
     fused_attn_arbitrary_seqlen_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
@@ -1048,24 +1042,16 @@ void nvte_fused_attn_bwd_kvpacked(
 
     // Unpack KV and dKV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
-    size_t stride = 0;
-    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-      stride = (typeToNumBits(Q_type) * h_kv * d) / 8;
-    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-      stride = (typeToNumBits(Q_type) * d) / 8;
-    }
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape = 
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
-    Tensor K_view = *input_KV;
-    K_view.data.dptr = input_KV->data.dptr;
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
 
-    Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
-
-    Tensor dK_view = *output_dKV;
-    dK_view.data.dptr = output_dKV->data.dptr;
-
-    Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
 
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
                        qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_O,
