@@ -221,7 +221,6 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         For MXFP8, columnwise scaled output is only produced by x2
         scaling kernels, so this function only disables usages.
         """
-
         # Default usage is based on available data
         if rowwise_usage is None:
             rowwise_usage = self._rowwise_data is not None

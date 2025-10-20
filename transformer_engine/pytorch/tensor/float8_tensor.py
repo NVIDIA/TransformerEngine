@@ -748,7 +748,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
-        quantizer = self._quantizer
+        quantizer = self._quantizer.copy()
         if isinstance(quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
@@ -756,8 +756,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             quantizer.amax_reduction_group = mesh.get_group()
             quantizer.with_amax_reduction = True
-        sharded_tensors = (self._data,)
         is_transpose_needed = not self._transpose_invalid and self._transpose is not None
+        quantizer.set_usage(rowwise=not is_transpose_needed, columnwise=is_transpose_needed)
+        sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer, is_transpose_needed)
         return sharded_tensors, metadata
 

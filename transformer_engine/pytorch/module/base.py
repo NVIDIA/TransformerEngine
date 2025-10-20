@@ -1371,6 +1371,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Note: Make sure weights have required usages, but do not
         # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
+            quantizer = tensor._quantizer
             update_rowwise_usage = True if quantizer.rowwise_usage else None
             update_columnwise_usage = True if quantizer.columnwise_usage else None
             tensor.update_usage(

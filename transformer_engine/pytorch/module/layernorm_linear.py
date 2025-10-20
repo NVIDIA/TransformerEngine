@@ -280,8 +280,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if fp8 or debug:
             quantized_weight = not isinstance(weight, QuantizedTensorStorage)
 
-            # Configure quantizer
-            if weight_quantizer is not None:
+            # Configure quantizer.
+            # No need to set the quantizer states if weight is already quantized
+            if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             # Get quantized weight

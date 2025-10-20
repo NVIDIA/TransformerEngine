@@ -71,6 +71,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
+    QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -347,8 +348,11 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            # No need to set the quantizer states if weights are already quantized
+            if not isinstance(fc1_weight, QuantizedTensor):
+                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            if not isinstance(fc2_weight, QuantizedTensor):
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
