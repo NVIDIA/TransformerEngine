@@ -467,16 +467,17 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     // Unpack QKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
     size_t stride = 2 * h * d;  // For max512, layout is always BS3HD or SB3HD (3HD group)
-    
+
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     fused_attn_max_512_fwd(b, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
                            qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
                            input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens,
@@ -496,24 +497,24 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
       stride = (typeToNumBits(QKV_type) * d) / 8;
     }
-    
+
     // Create tensor views for Q, K, V
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     fused_attn_arbitrary_seqlen_fwd(
-        b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training,
-        attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, 
-        window_size_left, window_size_right, &Q_view, &K_view, &V_view, input_Bias,
-        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens,
-        input_cu_seqlens_padded, input_cu_seqlens_padded, nullptr, nullptr, input_rng_state,
-        wkspace, stream, handle);
+        b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training, attn_scale,
+        dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left,
+        window_size_right, &Q_view, &K_view, &V_view, input_Bias, input_SoftmaxOffset, output_O,
+        Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens, input_cu_seqlens_padded,
+        input_cu_seqlens_padded, nullptr, nullptr, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
@@ -528,16 +529,17 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
       stride = (typeToNumBits(QKV_type) * d) / 8;
     }
-    
+
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     fused_attn_fp8_fwd(b, h, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
                        qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
                        input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens,
@@ -603,32 +605,34 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    
+
     // Unpack QKV and dQKV and call the non-packed function
     size_t stride = 2 * h * d;
-    
+
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     Tensor dQ_view = *output_dQKV;
     dQ_view.data.dptr = output_dQKV->data.dptr;
-    
+
     Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + stride);
-    
+    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
+
     Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + 2 * stride);
-    
+    dV_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+
     fused_attn_max_512_bwd(b, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
-                           bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_dO,
-                           output_S, &dQ_view, &dK_view, &dV_view, output_dBias,
-                           input_cu_seqlens, input_cu_seqlens, wkspace, stream, handle);
+                           bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_dO, output_S,
+                           &dQ_view, &dK_view, &dV_view, output_dBias, input_cu_seqlens,
+                           input_cu_seqlens, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
@@ -644,7 +648,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
-    
+
     // Unpack QKV and dQKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
     NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
@@ -654,34 +658,35 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
       stride = (typeToNumBits(QKV_type) * d) / 8;
     }
-    
+
     // Create tensor views for Q, K, V from input
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     // Create tensor views for dQ, dK, dV from output
     Tensor dQ_view = *output_dQKV;
     dQ_view.data.dptr = output_dQKV->data.dptr;
-    
+
     Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + stride);
-    
+    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
+
     Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + 2 * stride);
-    
+    dV_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+
     fused_attn_arbitrary_seqlen_bwd(
         b, h, h, max_seqlen, max_seqlen, d, d, t, t, attn_scale, dropout, qkv_layout, bias_type,
-        attn_mask_type, softmax_type, window_size_left, window_size_right, deterministic,
-        &Q_view, &K_view, &V_view, input_O, input_dO, input_Bias, input_SoftmaxOffset,
-        output_S, &dQ_view, &dK_view, &dV_view, output_dBias, output_dSoftmaxOffset,
-        input_cu_seqlens, input_cu_seqlens, input_cu_seqlens_padded, input_cu_seqlens_padded,
-        input_rng_state, wkspace, stream, handle);
+        attn_mask_type, softmax_type, window_size_left, window_size_right, deterministic, &Q_view,
+        &K_view, &V_view, input_O, input_dO, input_Bias, input_SoftmaxOffset, output_S, &dQ_view,
+        &dK_view, &dV_view, output_dBias, output_dSoftmaxOffset, input_cu_seqlens, input_cu_seqlens,
+        input_cu_seqlens_padded, input_cu_seqlens_padded, input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention "
@@ -693,7 +698,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    
+
     // Unpack QKV and dQKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
     size_t stride = 0;
@@ -702,29 +707,32 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
       stride = (typeToNumBits(QKV_type) * d) / 8;
     }
-    
+
     Tensor Q_view = *input_QKV;
     Q_view.data.dptr = input_QKV->data.dptr;
-    
+
     Tensor K_view = *input_QKV;
-    K_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + stride);
-    
+    K_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + stride);
+
     Tensor V_view = *input_QKV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_QKV->data.dptr) + 2 * stride);
-    
+    V_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(input_QKV->data.dptr) + 2 * stride);
+
     Tensor dQ_view = *output_dQKV;
     dQ_view.data.dptr = output_dQKV->data.dptr;
-    
+
     Tensor dK_view = *output_dQKV;
-    dK_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + stride);
-    
+    dK_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + stride);
+
     Tensor dV_view = *output_dQKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dQKV->data.dptr) + 2 * stride);
-    
+    dV_view.data.dptr =
+        static_cast<void *>(static_cast<int8_t *>(output_dQKV->data.dptr) + 2 * stride);
+
     fused_attn_fp8_bwd(b, h, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
                        bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_O, input_dO,
                        input_M, input_ZInv, input_S, input_output_dP, &dQ_view, &dK_view, &dV_view,
-                       input_cu_seqlens, input_cu_seqlens, input_rng_state, wkspace, stream, handle);
+                       input_cu_seqlens, input_cu_seqlens, input_rng_state, wkspace, stream,
+                       handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -823,16 +831,16 @@ void nvte_fused_attn_fwd_kvpacked(
 #if (CUDNN_VERSION >= 8901)
     // Unpack KV and call the non-packed function
     size_t stride = 2 * h_q * d;  // For max512, KV layout is BS2HD or SB2HD
-    
+
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
-    fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale,
-                           dropout, qkv_layout, bias_type, attn_mask_type, input_Q, &K_view,
-                           &V_view, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
+    fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout,
+                           qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
+                           input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
                            input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
@@ -847,22 +855,22 @@ void nvte_fused_attn_fwd_kvpacked(
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
       stride = (typeToNumBits(Q_type) * d) / 8;
     }
-    
+
     // Create tensor views for K, V from input_KV
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, num_pages_k, num_pages_v,
-        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
-        attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, input_Q, &K_view, &V_view, input_Bias,
-        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
-        input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k,
-        input_page_table_v, input_rng_state, wkspace, stream, handle);
+        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training, attn_scale,
+        dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left,
+        window_size_right, input_Q, &K_view, &V_view, input_Bias, input_SoftmaxOffset, output_O,
+        Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
+        input_cu_seqlens_kv_padded, input_page_table_k, input_page_table_v, input_rng_state,
+        wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
@@ -877,13 +885,13 @@ void nvte_fused_attn_fwd_kvpacked(
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
       stride = (typeToNumBits(Q_type) * d) / 8;
     }
-    
+
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
     fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale,
                        dropout, qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
                        input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
@@ -959,26 +967,26 @@ void nvte_fused_attn_bwd_kvpacked(
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    
+
     // Unpack KV and dKV and call the non-packed function
     size_t stride = 2 * h_q * d;
-    
+
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
     Tensor dK_view = *output_dKV;
     dK_view.data.dptr = output_dKV->data.dptr;
-    
+
     Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dKV->data.dptr) + stride);
-    
-    fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
-                           qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
-                           input_dO, output_S, output_dQ, &dK_view, &dV_view, output_dBias,
-                           input_cu_seqlens_q, input_cu_seqlens_kv, wkspace, stream, handle);
+    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+
+    fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout,
+                           bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_dO, output_S,
+                           output_dQ, &dK_view, &dV_view, output_dBias, input_cu_seqlens_q,
+                           input_cu_seqlens_kv, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
@@ -994,7 +1002,7 @@ void nvte_fused_attn_bwd_kvpacked(
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
-    
+
     // Unpack KV and dKV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -1004,21 +1012,21 @@ void nvte_fused_attn_bwd_kvpacked(
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
       stride = (typeToNumBits(Q_type) * d) / 8;
     }
-    
+
     // Create tensor views for K, V from input_KV
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
     // Create tensor views for dK, dV from output_dKV
     Tensor dK_view = *output_dKV;
     dK_view.data.dptr = output_dKV->data.dptr;
-    
+
     Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dKV->data.dptr) + stride);
-    
+    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+
     fused_attn_arbitrary_seqlen_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right, deterministic,
@@ -1037,7 +1045,7 @@ void nvte_fused_attn_bwd_kvpacked(
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    
+
     // Unpack KV and dKV and call the non-packed function
     const auto Q_type = input_Q->data.dtype;
     size_t stride = 0;
@@ -1046,24 +1054,24 @@ void nvte_fused_attn_bwd_kvpacked(
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
       stride = (typeToNumBits(Q_type) * d) / 8;
     }
-    
+
     Tensor K_view = *input_KV;
     K_view.data.dptr = input_KV->data.dptr;
-    
+
     Tensor V_view = *input_KV;
-    V_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(input_KV->data.dptr) + stride);
-    
+    V_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(input_KV->data.dptr) + stride);
+
     Tensor dK_view = *output_dKV;
     dK_view.data.dptr = output_dKV->data.dptr;
-    
+
     Tensor dV_view = *output_dKV;
-    dV_view.data.dptr = static_cast<void*>(static_cast<int8_t*>(output_dKV->data.dptr) + stride);
-    
+    dV_view.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
                        qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_O,
-                       input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ,
-                       &dK_view, &dV_view, input_cu_seqlens_q, input_cu_seqlens_kv,
-                       input_rng_state, wkspace, stream, handle);
+                       input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ, &dK_view,
+                       &dV_view, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace,
+                       stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
