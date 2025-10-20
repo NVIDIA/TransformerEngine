@@ -10,7 +10,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
-from ..quantization import QuantizedTensor, Quantizer, QuantizedTensorStorage
+from ..quantization_base import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer

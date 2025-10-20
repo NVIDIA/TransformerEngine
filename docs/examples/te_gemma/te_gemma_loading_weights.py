@@ -9,7 +9,7 @@ import torch
 
 from typing import List
 
-from transformer_engine.pytorch.fp8 import fp8_model_init
+from transformer_engine.pytorch.quantization import quantized_model_init
 
 from transformers.modeling_utils import load_state_dict
 from transformers.utils.hub import get_checkpoint_shard_files
@@ -88,10 +88,10 @@ def load_te_model(cls, config):
     config.use_cache = False  # To make TransformerLayer compatible with GemmaModel
 
     # Loading model with FP8 only weights needs both the following context managers.
-    # 1. fp8_model_init(config.fp8_model_init) to tell TE to use FP8 only weights.
+    # 1. quantized_model_init(config.quantized_model_init) to tell TE to use FP8 only weights.
     # 2. torch.no_grad() during TE modules' initilization so that they respect
-    #    the `fp8_model_init` context manager.
-    with torch.no_grad(), fp8_model_init(config.fp8_model_init):
+    #    the `quantized_model_init` context manager.
+    with torch.no_grad(), quantized_model_init(config.quantized_model_init):
         # Just create a model with random weights.
         vanilla_model = cls(config).cuda()
 

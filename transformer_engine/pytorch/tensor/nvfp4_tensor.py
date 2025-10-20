@@ -22,7 +22,7 @@ from ..utils import (
 )
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
-from ..quantization import QuantizedTensor, Quantizer
+from ..quantization_base import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
@@ -30,7 +30,7 @@ aten = torch.ops.aten
 
 def get_no_random_sign_vector() -> torch.Tensor:
     """Non-random sign vector for Hadamard transform."""
-    return torch.tensor([1], dtype=torch.float32)
+    return torch.tensor([1], dtype=torch.float32, device="cuda")
 
 
 def get_sign_from_vector(vector: torch.Tensor) -> int:
@@ -42,7 +42,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     mask = 0
     for i, v in enumerate(vector):
         mask |= (v == -1) << i
-    return mask
+    return mask.item()
 
 
 def get_wgrad_sign_vector() -> torch.Tensor:
@@ -54,6 +54,7 @@ def get_wgrad_sign_vector() -> torch.Tensor:
     return torch.tensor(
         [1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1],
         dtype=torch.float32,
+        device="cuda",
     )
 
 
@@ -82,6 +83,7 @@ def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
                 [1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, -1, -1, 1],
             ],
             dtype=torch.float32,
+            device="cuda",
         )
         * hadamard_scale
     )
@@ -95,9 +97,9 @@ def get_rht_matrix(with_random_sign_mask: bool) -> torch.Tensor:
         signs = get_wgrad_sign_vector()
     else:
         signs = get_no_random_sign_vector()
-    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32)
+    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device="cuda")
     rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension)
-    return rht_matrix.to(dtype=torch.bfloat16).cuda()
+    return rht_matrix.to(dtype=torch.bfloat16)
 
 
 @functools.lru_cache(maxsize=None)

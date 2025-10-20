@@ -11,7 +11,7 @@ import torch
 
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
-from transformer_engine.pytorch.quantization import QuantizedTensorStorage, Quantizer
+from transformer_engine.pytorch.quantization_base import QuantizedTensorStorage, Quantizer
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):

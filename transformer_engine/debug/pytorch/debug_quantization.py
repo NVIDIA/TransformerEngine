@@ -15,7 +15,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.quantization import (
+from transformer_engine.pytorch.quantization_base import (
     QuantizedTensor,
     Quantizer,
     QuantizedTensorStorage,

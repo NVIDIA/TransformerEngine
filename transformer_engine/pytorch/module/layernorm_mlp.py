@@ -28,7 +28,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -70,7 +70,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ..quantization import (
+from ..quantization_base import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,

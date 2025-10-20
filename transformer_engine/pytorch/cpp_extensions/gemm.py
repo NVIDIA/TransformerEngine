@@ -11,7 +11,7 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..quantization import Quantizer
+from ..quantization_base import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm

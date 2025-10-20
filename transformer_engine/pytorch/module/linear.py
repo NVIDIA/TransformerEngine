@@ -26,7 +26,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import noop_cat, WeightGradStore
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -57,7 +57,7 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..quantization import (
+from ..quantization_base import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,

@@ -27,7 +27,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
     assert_dim_for_all_gather,
@@ -56,7 +56,7 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import apply_normalization, noop_cat, WeightGradStore
-from ..quantization import (
+from ..quantization_base import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,

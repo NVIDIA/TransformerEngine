@@ -13,11 +13,9 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ...quantization import QuantizedTensorStorage
+from ...quantization_base import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
-
-from ...quantization import Quantizer
 
 from ...utils import _empty_tensor
 

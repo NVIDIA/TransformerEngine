@@ -13,11 +13,9 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
-from ...quantization import QuantizedTensorStorage
-
+from ...quantization_base import QuantizedTensorStorage, Quantizer
+git
 from ...constants import TE_DType_To_Torch
-
-from ...quantization import Quantizer
 
 from ...utils import _empty_tensor
 

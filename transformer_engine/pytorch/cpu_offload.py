@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .quantization import QuantizedTensorStorage
+from .quantization_base import QuantizedTensorStorage
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]

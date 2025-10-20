@@ -12,7 +12,7 @@ from transformer_engine.pytorch.custom_recipes.quantization import (
     MMParams,
     GEMMType,
 )
-from transformer_engine.pytorch.quantization import QuantizedTensorStorage, Quantizer
+from transformer_engine.pytorch.quantization_base import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.tensor.utils import is_custom
 
 
