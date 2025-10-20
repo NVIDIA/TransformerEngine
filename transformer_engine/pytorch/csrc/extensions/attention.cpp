@@ -253,7 +253,7 @@ std::vector<py::object> fused_attn_fwd(
   // f16_max512   : S [b, h, sq, skv]
   // f16_arbitrary:
   // return_max_score=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // return_max_score=true: Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv]
+  // return_max_score=true: Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
   // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
@@ -262,7 +262,7 @@ std::vector<py::object> fused_attn_fwd(
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // fp8 has an additional softmax stats tensor, ZInv
+  // fp8 has an additional softmax stats tensor, ZInv; return_max_score=true has an additional Sum_Exp tensor
   if (return_max_score || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),

@@ -1845,7 +1845,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         return out_ret
 
     @staticmethod
-    def backward(ctx, dout, *args):
+    def backward(ctx, dout, *_args):
         # pylint: disable=missing-function-docstring
 
         # add NVTX range
@@ -2864,7 +2864,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, dout, *args):
+    def backward(ctx, dout, *_args):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)
@@ -3425,7 +3425,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         return out_ret
 
     @staticmethod
-    def backward(ctx, dout, *args):
+    def backward(ctx, dout, *_args):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)

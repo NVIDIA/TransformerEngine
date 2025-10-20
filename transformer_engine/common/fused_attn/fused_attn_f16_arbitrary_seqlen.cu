@@ -324,18 +324,31 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
 
       std::shared_ptr<fe::graph::Tensor_attributes> Max, Sum_Exp;
+      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+        offset_stats =
+            mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("offset_stats")
+                                  .set_dim({b + 1, 1, 1, 1})
+                                  .set_stride({1, 1, 1, 1})
+                                  .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+      }
       if (return_max_score) {
         Max = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Max")
                                     .set_dim({b, h, s_q, 1})
-                                    .set_stride({h * s_q, s_q, 1, 1})
                                     .set_data_type(fe::DataType_t::FLOAT));
-        sdpa_options.set_logit_max(Max);
         Sum_Exp = mha_graph->tensor(fe::graph::Tensor_attributes()
                                         .set_name("Sum_Exp")
                                         .set_dim({b, h, s_q, 1})
-                                        .set_stride({h * s_q, s_q, 1, 1})
                                         .set_data_type(fe::DataType_t::FLOAT));
+        if (is_ragged_q && cudnn_runtime_version >= 90600) {
+          Max->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+          Sum_Exp->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+        } else {
+          Max->set_stride({h * s_q, s_q, 1, 1});
+          Sum_Exp->set_stride({h * s_q, s_q, 1, 1});
+        }
+        sdpa_options.set_logit_max(Max);
         sdpa_options.set_score_sum_exp(Sum_Exp);
       }
 
@@ -357,12 +370,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       if (!return_max_score) {
         Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
         if (is_ragged_q && cudnn_runtime_version >= 90600) {
-          offset_stats =
-              mha_graph->tensor(fe::graph::Tensor_attributes()
-                                    .set_name("offset_stats")
-                                    .set_dim({b + 1, 1, 1, 1})
-                                    .set_stride({1, 1, 1, 1})
-                                    .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
           Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
         } else {
           Stats->set_stride({h * s_q, s_q, 1, 1});

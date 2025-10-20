@@ -486,9 +486,6 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_score")
-        if use_fused_attention and qkv_format == "thd":
-            logger.debug("Disabling FusedAttention for max_score and qkv_format = thd")
-            use_fused_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
