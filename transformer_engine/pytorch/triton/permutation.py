@@ -12,13 +12,15 @@ import triton.language as tl
 
 from triton.language import core
 from triton.language.standard import _log2
+from packaging import version
 
 
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698
 
-
-get_int_dtype_wrapped = triton.constexpr_function(core.get_int_dtype)
+get_int_dtype_wrapped = core.get_int_dtype
+if version.parse(triton.__version__) >= version.parse("3.5.0"):
+    get_int_dtype_wrapped = triton.constexpr_function(get_int_dtype_wrapped)
 
 
 @triton.jit
