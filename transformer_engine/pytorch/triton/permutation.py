@@ -18,9 +18,9 @@ from packaging import version
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698
 
-get_int_dtype_wrapped = core.get_int_dtype
+get_int_dtype = core.get_int_dtype
 if version.parse(triton.__version__) >= version.parse("3.5.0"):
-    get_int_dtype_wrapped = triton.constexpr_function(get_int_dtype_wrapped)
+    get_int_dtype = triton.constexpr_function(get_int_dtype)
 
 
 @triton.jit
