@@ -42,7 +42,7 @@ def _compare_and_swap(x, indices, flip, i: tl.constexpr, n_dims: tl.constexpr):
     l_indice = tl.reshape(tl.broadcast_to(tl.sum(z * (1 - mask), 1)[:, None, :], shape), x.shape)
     r_indice = tl.reshape(tl.broadcast_to(tl.sum(z * mask, 1)[:, None, :], shape), x.shape)
 
-    idtype = get_int_dtype_wrapped(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+    idtype = get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
 
     il_value = l_value.to(idtype, bitcast=True)
     ir_value = r_value.to(idtype, bitcast=True)
