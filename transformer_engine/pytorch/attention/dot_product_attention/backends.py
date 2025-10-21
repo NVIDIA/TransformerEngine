@@ -1273,11 +1273,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
-<<<<<<< HEAD
-        qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
 
-=======
->>>>>>> upstream/main
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
             *qkvo_tensors,
