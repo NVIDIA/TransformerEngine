@@ -715,7 +715,8 @@ class NVFP4Quantizer(Quantizer):
         x_shape = x.shape
 
         # We currently only have a single flag 'use_rht' on the quantizer. To avoid an unused rowwise flag, we assume RHT is only used for colwise quantization for now.
-        if self.use_rht and not is_colwise:
+        use_rht = self.use_rht and is_colwise and self.scaling_mode == ScalingMode.NVFP4_1D_SCALING
+        if use_rht:
             x = apply_rht(x)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
@@ -816,7 +817,7 @@ class NVFP4Quantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=rowwise_flatten_axis,
-            has_rht_applied=self.use_rht,
+            has_rht_applied=use_rht,
         )
 
 
