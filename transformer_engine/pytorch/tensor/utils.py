@@ -439,9 +439,10 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 
 def post_all_gather_processing(model_weights: Union[QuantizedTensor, List[QuantizedTensor]]):
     """
-    Post-processing after all-gather for FP8 weights in distributed optimizer.
+    Post-processing after all-gather for weights in distributed optimizer.
     - Float8Tensor: may need to create a transposed view to match backend GEMM.
     - Float8BlockwiseQTensor: create column-wise storage.
+    - Plain pytorch tensor: noop.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
@@ -454,7 +455,7 @@ def post_all_gather_processing(model_weights: Union[QuantizedTensor, List[Quanti
         elif isinstance(model_weight, Float8BlockwiseQTensor):
             # Blockwise scaling: create column-wise storage.
             model_weight._create_columnwise()
-        else:
+        elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 
 
