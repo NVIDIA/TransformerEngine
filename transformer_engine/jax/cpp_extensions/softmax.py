@@ -842,12 +842,28 @@ def jax_general_softmax(
     """
     JAX based implementation of general softmax with optional masking and offset.
     """
+    # Compute max of x
     x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+    
+    if offset is not None:
+        # Cast offset to x.dtype to prevent type promotion
+        if isinstance(offset, (int, float)):
+            offset = jnp.array(offset, dtype=x.dtype)
+        else:
+            offset = offset.astype(x.dtype)
+        
+        # Include offset in max: x_max = max(x_max, offset)
+        # This is equivalent to computing max over [x..., offset]
+        x_max = jnp.maximum(x_max, offset)
+    
     x_safe = x if where is None else jnp.where(where, x, initial)
     unnormalized = jnp.exp(x_safe - x_max)
     denominator = jnp.sum(unnormalized, axis, where=where, keepdims=True)
+    
     if offset is not None:
-        denominator = denominator + offset
+        # Add exp(offset - x_max) to denominator
+        denominator = denominator + jnp.exp(offset - x_max)
+    
     result = unnormalized / denominator
     if where is not None:
         result = jnp.where(where, result, 0)
