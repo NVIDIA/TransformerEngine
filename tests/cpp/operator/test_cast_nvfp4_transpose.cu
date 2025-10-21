@@ -661,7 +661,7 @@ std::vector<std::vector<size_t>> tensor_dims = {
     {4096, 13312},
 };
 
-// No activation except the "Identity" is yet supported
+// Only the Identity activation is currently supported.
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity
 };
