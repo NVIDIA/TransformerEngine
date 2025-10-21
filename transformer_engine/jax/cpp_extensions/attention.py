@@ -1893,7 +1893,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
-            ):
+        ):
             _not_used = jnp.zeros(0, dtype=v.dtype)
 
             # Combine KV tensors if separate for better permute scheduling and performance.
