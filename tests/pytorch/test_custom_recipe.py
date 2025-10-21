@@ -17,7 +17,6 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
 )
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
 )
