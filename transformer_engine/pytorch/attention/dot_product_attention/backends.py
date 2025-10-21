@@ -296,11 +296,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 cu_seqlens_q,
                 max_seqlen_q,
             )
-            key_layer, value_layer = [ConvertTHDtoBSHD.apply(
+            key_layer, value_layer = [
+                ConvertTHDtoBSHD.apply(
                     x,
                     cu_seqlens_kv,
                     max_seqlen_kv,
-                ) for x in [key_layer, value_layer]]
+                )
+                for x in [key_layer, value_layer]
+            ]
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1).contiguous() for x in [query_layer, key_layer, value_layer]
             ]
