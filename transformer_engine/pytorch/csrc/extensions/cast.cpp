@@ -491,6 +491,207 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   return retval;
 }
 
+// allocate fp4 data, fp8 scalings, and amax values
+// layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
+// amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nvfp4_tensors(
+    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
+  init_extension();
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  auto &tensor_py_list = std::get<0>(retval);
+  auto &tensor_cpp_list = std::get<1>(retval);
+
+  // Number of tensors
+  const size_t num_tensors = shape_list.size();
+  if (num_tensors == 0) {
+    return retval;
+  }
+
+  // Quantization parameters
+  const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
+  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
+  const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
+  constexpr size_t scale_elem_size = 1;
+
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
+                            size_t offset, at::ScalarType dtype) -> at::Tensor {
+    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    bool is_empty_shape = product(shape) == 0;
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
+      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+    }
+    return at::from_blob(
+        buffer->data_ptr<uint8_t>() + offset, shape_int64,
+        [buffer](void *) {},  // deleter holds shared_ptr
+        at::device(at::kCUDA).dtype(dtype));
+  };
+
+  // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
+  auto to_fp4_shape = [](const std::vector<size_t> &shape) {
+    std::vector<size_t> fp4_shape(shape.begin(), shape.end());
+    if (!fp4_shape.empty()) {
+      fp4_shape.back() /= 2;
+    }
+    return fp4_shape;
+  };
+
+  // Allocate row-wise data
+  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list, amax_rowwise_list;
+  std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
+  if (rowwise_usage) {
+    // Tensor sizes
+    for (size_t i = 0; i < num_tensors; ++i) {
+      rowwise_data_shapes.emplace_back(shape_list[i]);
+      rowwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 256);  // align to 256B
+      data_offsets.push_back(buffer_size);
+      // Store ceil(product/2) bytes for fp4 (since each element is 4 bits = 0.5 bytes).
+      // Integer arithmetic: ceil(product / 2) == (product + 1) / 2.
+      buffer_size += (product(rowwise_data_shapes[i]) + 1) / 2;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      amax_offsets.push_back(buffer_size);
+      // amax is scalar in fp32, 4 bytes each
+      buffer_size += 4;
+    }
+
+    // Allocate full buffer
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i = 0; i < num_tensors; ++i) {
+      rowwise_data_list.emplace_back(make_torch_view(buffer, to_fp4_shape(rowwise_data_shapes[i]),
+                                                     data_offsets[i], torch::kUInt8));
+      rowwise_scale_list.emplace_back(
+          make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      amax_rowwise_list.emplace_back(
+          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kUInt8));
+    }
+  }
+
+  // Allocate column-wise data
+  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list, amax_columnwise_list;
+  std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
+  if (columnwise_usage) {
+    // Tensor sizes
+    for (size_t i = 0; i < num_tensors; ++i) {
+      // push the transposed shape into NVFP4 columnwise shape
+      // NVFP4 on SM100 is TN only
+      columnwise_data_shapes.emplace_back();
+      auto &shape = columnwise_data_shapes.back();
+      shape.push_back(shape_list[i].back());
+      for (size_t j = 0; j < shape_list[i].size() - 1; ++j) {
+        shape.push_back(shape_list[i][j]);
+      }
+      columnwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 256);  // align to 256B
+      data_offsets.push_back(buffer_size);
+      // Store ceil(product/2) bytes for fp4 (since each element is 4 bits = 0.5 bytes).
+      // Integer arithmetic: ceil(product / 2) == (product + 1) / 2.
+      buffer_size += (product(columnwise_data_shapes[i]) + 1) / 2;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      amax_offsets.push_back(buffer_size);
+      // amax is scalar in fp32, 4 bytes each
+      buffer_size += 4;
+    }
+
+    // Allocate full buffer
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i = 0; i < num_tensors; ++i) {
+      columnwise_data_list.emplace_back(make_torch_view(
+          buffer, to_fp4_shape(columnwise_data_shapes[i]), data_offsets[i], torch::kUInt8));
+      columnwise_scale_list.emplace_back(
+          make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      amax_columnwise_list.emplace_back(
+          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kUInt8));
+    }
+  }
+
+  // Construct nvfp4 tensors
+  py::handle NVFP4TensorClass(reinterpret_cast<PyObject *>(NVFP4TensorStoragePythonClass));
+  for (size_t i = 0; i < num_tensors; ++i) {
+    // Create tensor objects with proper reference counting
+    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
+    py::object columnwise_data =
+        (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
+    py::object columnwise_scale =
+        (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
+    py::object amax_rowwise = rowwise_usage ? py::cast(amax_rowwise_list[i]) : py::none();
+    py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
+
+    // Construct Python tensor
+    tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, amax_rowwise, amax_columnwise,
+                                                 fp4_dtype, quantizer_py_list[i]));
+
+    // Construct C++ tensor
+    // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
+    // then set the amax and amax_columnwise values.
+    {
+      auto tensor_wrapper = makeTransformerEngineTensor(
+          rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
+          columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
+          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
+          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp4_dtype,
+          /*amax_ptr=*/nullptr,
+          /*scale_ptr=*/nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+          columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
+          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
+          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode);
+
+      // Set the amax rowwise and amax columnwise if available
+      if (rowwise_usage) {
+        tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32,
+                                std::vector<size_t>{1});
+      }
+      if (columnwise_usage) {
+        tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
+                                           std::vector<size_t>{1});
+      }
+      tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
+    }
+  }
+
+  return retval;
+}
+
 }  // namespace
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
@@ -549,7 +750,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   bool use_fused_bulk_alloc = true;
   for (size_t i = 0; i < quantizer_list.size(); i++) {
     if (!detail::IsFloat8BlockwiseQuantizers(quantizer_list[i].ptr()) &&
-        !detail::IsMXFP8Quantizers(quantizer_list[i].ptr())) {
+        !detail::IsMXFP8Quantizers(quantizer_list[i].ptr()) &&
+        !detail::IsNVFP4Quantizers(quantizer_list[i].ptr())) {
       use_fused_bulk_alloc = false;
       break;
     }
@@ -570,6 +772,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     // TODO(zhongbo): make a better api to make this part less hacky
     bool is_fp8_blockwise = detail::IsFloat8BlockwiseQuantizers(quantizer_list[0].ptr());
     bool is_mxfp8 = detail::IsMXFP8Quantizers(quantizer_list[0].ptr());
+    bool is_nvfp4 = detail::IsNVFP4Quantizers(quantizer_list[0].ptr());
     if (is_fp8_blockwise) {
       // FP8 block-scaling: construct output tensors with bulk allocations
       std::vector<Float8BlockQuantizer *> blockwise_quantizers;
@@ -586,6 +789,14 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       }
       std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
+    } else if (is_nvfp4) {
+      // NVFP4: construct output tensors with bulk allocations
+      std::vector<NVFP4Quantizer *> nvfp4_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+      }
+      std::tie(output_py_list, output_cpp_list) =
+          bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
     } else {
       NVTE_CHECK(false, "Expected either FP8 block-scaling or MXFP8 quantizer");
     }
