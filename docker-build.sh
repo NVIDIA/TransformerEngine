@@ -249,6 +249,9 @@ fi
 
 JOB_ID=${CI_JOB_ID:-NONE}
 
+# Token from service account only for reading public images from ghcr.io
+echo $GHCRIO_RATE_LIMIT_TOKEN | docker login ghcr.io -u tempuserghcr --password-stdin
+
 FROM_IMAGE_ARG=$(docker pull "${FROM_IMAGE}" >& /dev/null && echo "--build-arg FROM_IMAGE_NAME=${FROM_IMAGE}")
 [[ -n "${FRAMEWORK}" ]] \
     && FRAMEWORK_ARG="--build-arg FRAMEWORK=${FRAMEWORK}" \
