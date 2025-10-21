@@ -468,7 +468,7 @@ class TestTELayers:
 
         # Ops-based layers don't support is_first_microbatch parameter
         is_ops_layer = layer_type in ["linear_op", "layernorm_mlp_ops"]
-        
+
         with recipe_ctx():
             if is_ops_layer:
                 out = layer(inp, **m_splits)

@@ -1304,7 +1304,8 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.fast_zero_fill = fast_zero_fill
 
         from transformer_engine.pytorch.cpu_offload_old_path import (
-            CPUOffloadedLayer, CPUOffloadEnabled
+            CPUOffloadedLayer,
+            CPUOffloadEnabled,
         )
 
         # If interleaved tensor is offloaded, reloaded tensor will be
