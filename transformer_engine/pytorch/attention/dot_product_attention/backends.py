@@ -58,6 +58,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     combine_and_quantize,
     combine_and_dequantize,
     print_quantizers,
+    ConvertTHDtoBSHD,
+    ConvertBSHDtoTHD,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
@@ -186,64 +188,6 @@ class FP8EmulationFunc(torch.autograd.Function):
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
-
-
-class ConvertTHDtoBSHD(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
-        batch_size = cu_seqlens.shape[0] - 1
-        if not thd_tensor.is_contiguous():
-            thd_tensor = thd_tensor.contiguous()
-        bshd_tensor = tex.convert_thd_to_bshd(
-            thd_tensor,
-            cu_seqlens,
-            batch_size,
-            max_seqlen,
-        )
-        ctx.save_for_backward(cu_seqlens)
-        ctx.num_tokens = thd_tensor.shape[0]
-        return bshd_tensor
-    @staticmethod
-    def backward(ctx, bshd_tensor):
-        (cu_seqlens,) = ctx.saved_tensors
-        if not bshd_tensor.is_contiguous():
-            bshd_tensor = bshd_tensor.contiguous()
-        thd_tensor = tex.convert_bshd_to_thd(
-            bshd_tensor,
-            cu_seqlens,
-            ctx.num_tokens,
-        )
-        return thd_tensor, None, None
-
-
-class ConvertBSHDtoTHD(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, bshd_tensor, cu_seqlens):
-        num_tokens = cu_seqlens[-1]
-        max_seqlen = bshd_tensor.shape[1]
-        if not bshd_tensor.is_contiguous():
-            bshd_tensor = bshd_tensor.contiguous()
-        thd_tensor = tex.convert_bshd_to_thd(
-            bshd_tensor,
-            cu_seqlens,
-            num_tokens,
-        )
-        ctx.save_for_backward(cu_seqlens)
-        ctx.max_seqlen = max_seqlen
-        return thd_tensor
-    @staticmethod
-    def backward(ctx, thd_tensor):
-        (cu_seqlens,) = ctx.saved_tensors
-        batch_size = cu_seqlens.shape[0] - 1
-        if not thd_tensor.is_contiguous():
-            thd_tensor = thd_tensor.contiguous()
-        bshd_tensor = tex.convert_thd_to_bshd(
-            thd_tensor,
-            cu_seqlens,
-            batch_size,
-            ctx.max_seqlen,
-        )
-        return bshd_tensor, None
 
 
 class UnfusedDotProductAttention(torch.nn.Module):

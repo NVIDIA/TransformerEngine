@@ -1662,6 +1662,66 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
+class ConvertTHDtoBSHD(torch.autograd.Function):
+    """Convert a tensor from qkv_format=thd to qkv_format=bshd"""
+    @staticmethod
+    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            max_seqlen,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.num_tokens = thd_tensor.shape[0]
+        return bshd_tensor
+    @staticmethod
+    def backward(ctx, bshd_tensor):
+        (cu_seqlens,) = ctx.saved_tensors
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            ctx.num_tokens,
+        )
+        return thd_tensor, None, None
+
+
+class ConvertBSHDtoTHD(torch.autograd.Function):
+    """Convert a tensor from qkv_format=bshd to qkv_format=thd"""
+    @staticmethod
+    def forward(ctx, bshd_tensor, cu_seqlens):
+        num_tokens = cu_seqlens[-1]
+        max_seqlen = bshd_tensor.shape[1]
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            num_tokens,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.max_seqlen = max_seqlen
+        return thd_tensor
+    @staticmethod
+    def backward(ctx, thd_tensor):
+        (cu_seqlens,) = ctx.saved_tensors
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            ctx.max_seqlen,
+        )
+        return bshd_tensor, None
+
+
 def get_qkv_format(
     qkv_layout: str = "bshd_bshd_bshd",
     inference_params: InferenceParams = None,
