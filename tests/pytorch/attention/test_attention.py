@@ -130,6 +130,9 @@ def test_dot_product_attention(
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
+    qkv_format = qkv_layout.replace("3","").replace("2","").split("_")[0]
+    if qkv_format == "thd" and "padding" not in config.attn_mask_type:
+        config.attn_mask_type = "padding_" + config.attn_mask_type if config.attn_mask_type != "no_mask" else "padding"
 
     # Get backends
     is_training = True

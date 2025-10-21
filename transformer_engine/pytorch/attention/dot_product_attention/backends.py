@@ -188,6 +188,64 @@ class FP8EmulationFunc(torch.autograd.Function):
         return tensors[0], tensors[1], tensors[2], None, None, None
 
 
+class ConvertTHDtoBSHD(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            max_seqlen,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.num_tokens = thd_tensor.shape[0]
+        return bshd_tensor
+    @staticmethod
+    def backward(ctx, bshd_tensor):
+        (cu_seqlens,) = ctx.saved_tensors
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            ctx.num_tokens,
+        )
+        return thd_tensor, None, None
+
+
+class ConvertBSHDtoTHD(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, bshd_tensor, cu_seqlens):
+        num_tokens = cu_seqlens[-1]
+        max_seqlen = bshd_tensor.shape[1]
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            num_tokens,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.max_seqlen = max_seqlen
+        return thd_tensor
+    @staticmethod
+    def backward(ctx, thd_tensor):
+        (cu_seqlens,) = ctx.saved_tensors
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            ctx.max_seqlen,
+        )
+        return bshd_tensor, None
+
+
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
@@ -241,6 +299,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         cu_seqlens_kv: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+        max_seqlen_q: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+        max_seqlen_kv: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
@@ -272,9 +332,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if qkv_format == "sbhd_2bshd":
             key_layer, value_layer = [x.transpose(0, 1) for x in [key_layer, value_layer]]
 
-        total_tokens, batch_size = None, None
         if qkv_format == "thd_2bshd":
-            total_tokens, batch_size = query_layer.shape[0], key_layer.shape[0]
+            batch_size = key_layer.shape[0]
             query_layer = tex.convert_thd_to_bshd(
                 query_layer,
                 cu_seqlens_q,
@@ -284,6 +343,24 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
+
+        if qkv_format == "thd":
+            assert cu_seqlens_q is not None and cu_seqlens_kv is not None
+            assert max_seqlen_q is not None and max_seqlen_kv is not None
+            query_layer = ConvertTHDtoBSHD.apply(
+                query_layer,
+                cu_seqlens_q,
+                max_seqlen_q,
+            )
+            key_layer, value_layer = [ConvertTHDtoBSHD.apply(
+                    x,
+                    cu_seqlens_kv,
+                    max_seqlen_kv,
+                ) for x in [key_layer, value_layer]]
+            query_layer, key_layer, value_layer = [
+                x.transpose(0, 1).contiguous() for x in [query_layer, key_layer, value_layer]
+            ]
+
         batch_size, max_seqlen_q, max_seqlen_kv = (
             query_layer.shape[1],
             query_layer.shape[0],
@@ -518,14 +595,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
             # [b, sq, np, hn] --> [tq, np, hn]
-            context_layer = tex.convert_bshd_to_thd(
+            context_layer = ConvertBSHDtoTHD.apply(
                 context_layer,
                 cu_seqlens_q,
-                total_tokens,
             )
 
             # [tq, np, hn] --> [tq, hp]
-            context_layer = context_layer.view(total_tokens, -1)
+            context_layer = context_layer.view(context_layer.shape[0], -1)
 
         if fp8:
             # quantize and dequantize O to emulate FP8
