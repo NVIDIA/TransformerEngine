@@ -504,7 +504,10 @@ class QuantizedTensor(torch.Tensor):
                 and isinstance(src, QuantizedTensor)
                 and type(dst._quantizer) is type(src._quantizer)
                 and set(src.get_usages().keys()) == set(dst.get_usages().keys())
-                and all(src.get_usages()[usage] == dst.get_usages()[usage] for usage in src.get_usages().keys())
+                and all(
+                    src.get_usages()[usage] == dst.get_usages()[usage]
+                    for usage in src.get_usages().keys()
+                )
             ):
 
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()

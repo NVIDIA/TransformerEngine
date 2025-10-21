@@ -157,7 +157,9 @@ class TensorGroupProcessor:
             if _check_if_offload_base_tensor(tensor):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
                 tensor = tensor._base
-                assert tensor is not None, "Cannot offload base tensor, if the tensor is not a view."
+                assert (
+                    tensor is not None
+                ), "Cannot offload base tensor, if the tensor is not a view."
                 tensor_group.tensor_list[tensor_id] = tensor
             else:
                 aux["views"].append(None)
