@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...fp8 import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -80,7 +80,9 @@ class BasicLinear(BasicOperation):
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
         meaningful. This is primarily intented to integrate with
-        Megatron-LM.
+        Megatron-LM. This argument along with weight tensor having
+        attribute 'overwrite_main_grad' set to True will overwrite
+        `main_grad` instead of accumulating.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -301,8 +303,8 @@ class BasicLinear(BasicOperation):
                     "Tried to quantize weight with deferred initialization "
                     "due to meta device, but no quantizer was available. "
                     "This is most likely because the weight was initialized "
-                    "within fp8_model_init, but the forward pass was not "
-                    "performed within fp8_autocast."
+                    "within quantized_model_init, but the forward pass was not "
+                    "performed within autocast."
                 )
             quantizer.set_usage(
                 rowwise=True,
@@ -1019,6 +1021,7 @@ class BasicLinear(BasicOperation):
             weight_param = self.weight
             if hasattr(weight_param, "__fsdp_param__"):
                 weight_param.main_grad = weight_param.get_main_grad()
+            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
             if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "

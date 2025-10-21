@@ -140,8 +140,11 @@ if __name__ == "__main__":
         ext_modules = []
         package_data = {}
         include_package_data = False
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = []
         extras_require = {
+            "core": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu12": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }

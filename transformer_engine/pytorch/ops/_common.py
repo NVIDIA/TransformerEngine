@@ -11,7 +11,7 @@ import torch
 
 from transformer_engine_torch import FP8TensorMeta
 from .. import torch_version
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
