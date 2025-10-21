@@ -228,7 +228,7 @@ class DotProductAttention(nn.Module):
                 "softmax_offset",
                 nn.initializers.zeros,
                 (1, num_attention_heads, 1, 1),
-                input_dtype,
+                jnp.float32,
             )
 
         if self.scale_attn_logits:

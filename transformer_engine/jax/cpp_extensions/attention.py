@@ -1893,10 +1893,8 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
-        ):
+            ):
             _not_used = jnp.zeros(0, dtype=v.dtype)
-            # Ring attention does not support softmax offset
-            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -1931,7 +1929,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -1957,7 +1955,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv_part,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -1980,7 +1978,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
@@ -2123,8 +2121,6 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
             _kv_segment_pos,
         ):
             _not_used = jnp.zeros(0, dtype=output.dtype)
-            # Ring attention does not support softmax offset
-            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2159,7 +2155,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,
@@ -2188,7 +2184,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         kv_part,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,
@@ -2227,7 +2223,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         softmax_aux_part,
                         rng_state,
                         output_part,
@@ -2378,7 +2374,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[4] = seed_sharding
+        arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2402,8 +2398,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
 
             _not_used = jnp.zeros(0, dtype=v.dtype)
-            # Ring attention does not support softmax offset
-            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2441,7 +2435,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         seed,
                         q_seqlen,
                         kv_seqlen,
@@ -2552,8 +2546,6 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
 
             _not_used = jnp.zeros(0, dtype=output.dtype)
-            # Ring attention does not support softmax offset
-            softmax_offset = _not_used
 
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
@@ -2588,7 +2580,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                         kv,
                         _not_used,
                         bias,
-                        softmax_offset,
+                        _softmax_offset,
                         softmax_aux,
                         rng_state,
                         output,

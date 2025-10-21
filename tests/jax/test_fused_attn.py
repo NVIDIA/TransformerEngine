@@ -518,7 +518,7 @@ class FusedAttnRunner:
 
         if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
             self.softmax_offset = jax.random.uniform(
-                softmax_key, (1, self.num_heads_q, 1, 1), self.dtype, -1.0
+                softmax_key, (1, self.num_heads_q, 1, 1), jnp.float32, -1.0
             )
         else:
             self.softmax_offset = None

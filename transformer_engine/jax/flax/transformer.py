@@ -165,8 +165,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 "softmax_offset",
                 nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
                 (1, num_attention_heads, 1, 1),
-                self.dtype,
-            ).astype(input_dtype)
+                jnp.float32,
+            )
 
         if self.scale_factor is None:
             scale_factor = 1.0 / sqrt(query.shape[-1])
