@@ -437,7 +437,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         )
 
 
-def post_all_gather_processing(model_weights: Union[QuantizedTensor, List[QuantizedTensor]]):
+def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
     Post-processing after all-gather for weights in distributed optimizer.
     - Float8Tensor: may need to create a transposed view to match backend GEMM.
