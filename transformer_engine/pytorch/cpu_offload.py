@@ -109,7 +109,7 @@ class TensorGroupProcessor:
     @staticmethod
     def tensor_group_process_before_offload(tensor_group: TensorGroup) -> tuple[TensorGroup, Any]:
         """
-        Public API call - for a tensor group, just before offloading logic happens.
+        Call for a tensor group, just before offloading logic.
 
         aux is a dictionary that contains auxiliary data, needed to restore pre-offload state.
         """
@@ -121,7 +121,7 @@ class TensorGroupProcessor:
     @staticmethod
     def tensor_group_process_after_reload(tensor_group: TensorGroup):
         """
-        Public API call - for a tensor group, just after reload logic happens.
+        Call for a tensor group, just after reload logic.
         """
         assert tensor_group.aux is not None
         tensor_group = TensorGroupProcessor._restore_tensor_duplicates(tensor_group)
@@ -428,7 +428,7 @@ class OffloadableLayerState:
         def get_tensor_size_mb(tensor):
             if tensor is None:
                 return 0
-            if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorBase):
+            if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorStorage):
                 return sum(get_tensor_size_mb(t) for t in tensor.get_data_tensors())
             return tensor.numel() * tensor.element_size() / (1024**2)
 

@@ -843,7 +843,6 @@ class FlashAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                 )
         else:
-
             from transformer_engine.pytorch.cpu_offload import (
                 mark_activation_offload,
             )
@@ -1304,8 +1303,8 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
 
-        from transformer_engine.pytorch.cpu_offload import (
-            CPUOffloadedLayer,
+        from transformer_engine.pytorch.cpu_offload_old_path import (
+            CPUOffloadedLayer, CPUOffloadEnabled
         )
 
         # If interleaved tensor is offloaded, reloaded tensor will be

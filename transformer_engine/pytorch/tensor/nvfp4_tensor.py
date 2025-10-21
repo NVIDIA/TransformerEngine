@@ -509,7 +509,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return self
         raise ValueError("NVFP4Tensor does not support different memory formats!")
 
-    def get_usage(self) -> Dict[str, bool]:
+    def get_usages(self) -> Dict[str, bool]:
         return {
             "rowwise": self._rowwise_data is not None,
             "columnwise": self._columnwise_data is not None,

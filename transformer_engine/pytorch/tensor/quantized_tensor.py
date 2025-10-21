@@ -64,10 +64,10 @@ class QuantizedTensorStorage:
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
-    def get_usage(self) -> Dict[str, bool]:
+    def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
         raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement get_usage function"
+            f"{self.__class__.__name__} class does not implement get_usages function"
         )
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
@@ -322,7 +322,7 @@ class Quantizer(abc.ABC):
         """Returns whether or not given tensor can be quantized"""
         return True
 
-    def get_usage(self) -> Dict[str, bool]:
+    def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""
         return {
             "rowwise": self.rowwise_usage,
@@ -503,7 +503,7 @@ class QuantizedTensor(torch.Tensor):
                 isinstance(dst, QuantizedTensor)
                 and isinstance(src, QuantizedTensor)
                 and type(dst._quantizer) is type(src._quantizer)
-                and all(d == s for d, s in zip(dst.get_usage(), src.get_usage()))
+                and all(d == s for d, s in zip(dst.get_usages(), src.get_usages()))
             ):
 
                 dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
@@ -533,8 +533,8 @@ class QuantizedTensor(torch.Tensor):
             device = kwargs.get("device", tensor.device)
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
-            usage = tensor.get_usage()
-            quantizer_usage = tensor._quantizer.get_usage()
+            usage = tensor.get_usages()
+            quantizer_usage = tensor._quantizer.get_usages()
             tensor._quantizer.set_usage(**usage)
             out = tensor._quantizer.make_empty(
                 shape=tensor.shape,

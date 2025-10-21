@@ -228,7 +228,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             self._transpose = None
             self._transpose_invalid = True
 
-    def get_usage(self) -> Dict[str, bool]:
+    def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
         return {
             "rowwise": self._data is not None,

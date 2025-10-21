@@ -186,7 +186,7 @@ class Utils:
     def get_tensor_size_mb(tensor):
         if tensor is None:
             return 0
-        if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorBase):
+        if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorStorage):
             return sum(Utils.get_tensor_size_mb(t) for t in tensor.get_data_tensors())
         else:
             return tensor.numel() * tensor.element_size() / (1024**2)
@@ -435,7 +435,11 @@ class TestTELayers:
         out = inp
         for i in range(NUM_LAYERS):
             with offload_ctx, recipe_ctx():
-                out = layers[i](out, is_first_microbatch=False, **m_splits)
+                # Ops-based layers don't support is_first_microbatch parameter
+                if layer_type in ["linear_op", "layernorm_mlp_ops"]:
+                    out = layers[i](out, **m_splits)
+                else:
+                    out = layers[i](out, is_first_microbatch=False, **m_splits)
             out = sync_function(out)
         out.sum().backward()
         torch.cuda.synchronize()
@@ -462,8 +466,14 @@ class TestTELayers:
             else {}
         )
 
+        # Ops-based layers don't support is_first_microbatch parameter
+        is_ops_layer = layer_type in ["linear_op", "layernorm_mlp_ops"]
+        
         with recipe_ctx():
-            out = layer(inp, is_first_microbatch=True, **m_splits)
+            if is_ops_layer:
+                out = layer(inp, **m_splits)
+            else:
+                out = layer(inp, is_first_microbatch=True, **m_splits)
         out.sum().backward()
 
         del inp
@@ -472,7 +482,10 @@ class TestTELayers:
         # run layer without offload
         inp = Utils.create_tensor(None)
         with recipe_ctx():
-            out = layer(inp, is_first_microbatch=False, **m_splits)
+            if is_ops_layer:
+                out = layer(inp, **m_splits)
+            else:
+                out = layer(inp, is_first_microbatch=False, **m_splits)
         with recipe_ctx():
             out = out + 1
         del inp
@@ -482,7 +495,10 @@ class TestTELayers:
         # run layer with offload
         inp = Utils.create_tensor(None)
         with offload_ctx, recipe_ctx():
-            out = layer(inp, is_first_microbatch=False, **m_splits)
+            if is_ops_layer:
+                out = layer(inp, **m_splits)
+            else:
+                out = layer(inp, is_first_microbatch=False, **m_splits)
         out = sync_function(out)
         with offload_ctx, recipe_ctx():
             out = out + 1
