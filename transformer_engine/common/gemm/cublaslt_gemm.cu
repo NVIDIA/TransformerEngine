@@ -140,6 +140,22 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
+    } else if (nvte_is_non_tn_fp8_gemm_supported() && !A.has_data()) {
+      // Blackwell supports any GEMM layout for FP8, so we can use column-wise/transposed
+      // data  with the mirrored transpose-flag if we don't have row-wise data.
+      NVTE_CHECK(A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype),
+                 "Input A is missing column-wise usage");
+      ret.A = A.columnwise_data.dptr;
+      ret.transA = is_A_transposed ? CUBLAS_OP_N : CUBLAS_OP_T;
+      ret.Atype = A.columnwise_data.dtype;
+      ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+      ret.lda = is_A_transposed ? m : k;
+    }
+
+    if (is_fp8_dtype(ret.Atype)) {
+      // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
+      NVTE_CHECK(ret.lda % 16 == 0,
+                 "Leading dimension requirement on A for FP8 GEMM. Caller must pad.");
     }
   } else if (nvfp4) {
     // NVFP4 GEMM. Either the pure NVFP4 recipe or the FWD pass of the Hybrid NVFP4/MXFP8 recipe.
@@ -187,7 +203,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
     // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
     NVTE_CHECK((ret.lda % 16) == 0,
-               "Inner dimension requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
+               "Leading dimension requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
     // Divisibility of 8 derived from FP8 (m * CTypeSize) % 16 == 0 requirement.
     // Smallest supported CType is 2 bytes in this scaling mode.
     NVTE_CHECK((m % 8) == 0,
@@ -215,6 +231,22 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
       }
+    } else if (nvte_is_non_tn_fp8_gemm_supported() && !B.has_data()) {
+      // Blackwell supports any GEMM layout for FP8, so we can use column-wise/transposed
+      // data with the mirrored transpose-flag if we don't have row-wise data.
+      NVTE_CHECK(B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype),
+                 "Input B is missing column-wise usage");
+      ret.B = B.columnwise_data.dptr;
+      ret.transB = is_B_transposed ? CUBLAS_OP_N : CUBLAS_OP_T;
+      ret.Btype = B.columnwise_data.dtype;
+      ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+      ret.ldb = is_B_transposed ? k : n;
+    }
+
+    if (is_fp8_dtype(ret.Atype)) {
+      // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
+      NVTE_CHECK(ret.ldb % 16 == 0,
+                 "Leading dimension requirement on B for FP8 GEMM. Caller must pad.");
     }
   } else if (nvfp4) {
     if (is_B_transposed) {
@@ -679,6 +711,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #endif
   }
 
+  // align the workspace to 256 B
+  const int required_alignment = 256;
+  const auto original_workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
+  uint8_t *aligned_workspace_ptr =
+      reinterpret_cast<uint8_t *>(workspace) + required_alignment - original_workspace_alignment;
+  workspaceSize = workspaceSize - required_alignment + original_workspace_alignment;
+  const auto new_workspace_alignment =
+      _getAlignment(reinterpret_cast<uintptr_t>(aligned_workspace_ptr));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
@@ -686,7 +726,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
   const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
   const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
-  const auto workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &A_alignment, sizeof(A_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -695,8 +734,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &C_alignment, sizeof(C_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
-  NVTE_CHECK(workspace_alignment % 256 == 0,
-             "cuBLAS workspace pointer must be aligned to 256 bytes, got ", workspace_alignment);
+  NVTE_CHECK(new_workspace_alignment % 256 == 0,
+             "cuBLAS workspace pointer must be aligned to 256 bytes, got ",
+             new_workspace_alignment);
 
   const auto status =
       cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
@@ -714,7 +754,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    C,                            /* C */
                                    Cdesc, D,                     /* D */
                                    Ddesc, &heuristicResult.algo, /* algo */
-                                   workspace,                    /* workspace */
+                                   aligned_workspace_ptr,        /* workspace */
                                    workspaceSize, stream));      /* stream */
 
   // Update FP8 scale-inv in output tensor

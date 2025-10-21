@@ -13,7 +13,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorBase
+from ..quantized_tensor import QuantizedTensorStorage
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
@@ -28,7 +28,7 @@ class _FromMXFP8Func(torch.autograd.Function):
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: MXFP8TensorBase,
+        tensor: MXFP8TensorStorage,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -49,7 +49,7 @@ class _FromMXFP8Func(torch.autograd.Function):
         return grad, None
 
 
-class MXFP8TensorBase(QuantizedTensorBase):
+class MXFP8TensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of MXFP8Tensor.
 
     MXFP8Tensor inherits from the PyTorch tensor class and this mixin
@@ -77,7 +77,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         *args,
         **kwargs,
     ):
-        if cls is MXFP8TensorBase:
+        if cls is MXFP8TensorStorage:
             instance = object.__new__(cls)
         else:
             instance = super().__new__(cls, *args, **kwargs)
@@ -112,7 +112,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
             self._rowwise_data,
@@ -192,7 +192,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         if cur_columnwise_data is not None:
             new_columnwise_data = cur_columnwise_data.view(*shape)
 
-        return MXFP8TensorBase(
+        return MXFP8TensorStorage(
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=self._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
@@ -205,7 +205,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         data_rowwise = self.dequantize()
 
         return (
-            "MXFP8TensorBase("
+            "MXFP8TensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
             f"rowwise_scaled_data={data_rowwise}"
             f"rowwise_scale_inv={self._rowwise_scale_inv}, "

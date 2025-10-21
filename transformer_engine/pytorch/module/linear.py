@@ -25,8 +25,8 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, WeightGradStore, get_module_quantizers
-from ..fp8 import FP8GlobalStateManager
+from ._common import noop_cat, WeightGradStore
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -59,7 +59,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -183,7 +183,7 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                if not isinstance(inputmat, QuantizedTensorBase) and not experimental:
+                if not isinstance(inputmat, QuantizedTensorStorage) and not experimental:
                     own_quantized_input = True
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                     if isinstance(
@@ -221,7 +221,7 @@ class _Linear(torch.autograd.Function):
 
         else:  # Do not all-gather input tensor
             if fp8 or debug:
-                if isinstance(inputmat, QuantizedTensorBase):
+                if isinstance(inputmat, QuantizedTensorStorage):
                     inputmat.update_usage(rowwise_usage=True)
                 else:
                     if input_quantizer is None:
@@ -380,7 +380,7 @@ class _Linear(torch.autograd.Function):
             if (
                 backward_needs_input
                 and own_quantized_input
-                and isinstance(inputmat, QuantizedTensorBase)
+                and isinstance(inputmat, QuantizedTensorStorage)
             ):
                 if (
                     ctx.backward_input_needs_gather
@@ -399,7 +399,7 @@ class _Linear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensorBase):
+                if isinstance(weightmat, QuantizedTensorStorage):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -412,7 +412,7 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,
-                weightmat if fp8 and not isinstance(weight, QuantizedTensorBase) else None,
+                weightmat if fp8 and not isinstance(weight, QuantizedTensorStorage) else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
@@ -622,7 +622,7 @@ class _Linear(torch.autograd.Function):
             inputmat_total_work = None
             if ctx.requires_wgrad:
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(inputmat, QuantizedTensorBase):
+                    if isinstance(inputmat, QuantizedTensorStorage):
                         # Input tensor is already quantized
                         pass
                     elif ctx.debug or ctx.experimental:
@@ -641,7 +641,7 @@ class _Linear(torch.autograd.Function):
                             quantizer.set_usage(rowwise=False, columnwise=True)
                         inputmat = quantizer(inputmat)
                 else:
-                    if isinstance(inputmat, QuantizedTensorBase):
+                    if isinstance(inputmat, QuantizedTensorStorage):
                         inputmat = inputmat.dequantize(dtype=ctx.activation_dtype)
                     else:
                         inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
@@ -686,9 +686,11 @@ class _Linear(torch.autograd.Function):
             if ctx.requires_dgrad:
 
                 # Make sure required data is available
-                if isinstance(grad_output, QuantizedTensorBase):
+                if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
-                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
+                if ctx.weight_quantizer is not None and isinstance(
+                    weight_fp8, QuantizedTensorStorage
+                ):
                     weight_fp8.update_usage(columnwise_usage=True)
 
                 # Choose whether to use GEMM kernel with split accumulator
@@ -772,7 +774,7 @@ class _Linear(torch.autograd.Function):
                     inputmat_total_work.wait()
                     inputmat_total_work = None
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(inputmat_total, QuantizedTensorBase):
+                    if isinstance(inputmat_total, QuantizedTensorStorage):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -814,7 +816,7 @@ class _Linear(torch.autograd.Function):
                     )
 
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(grad_output, QuantizedTensorBase):
+                    if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -850,7 +852,11 @@ class _Linear(torch.autograd.Function):
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
@@ -967,7 +973,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensorBase):
+        if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
@@ -1068,7 +1074,9 @@ class Linear(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
@@ -1429,7 +1437,11 @@ class Linear(TransformerEngineBaseModule):
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
+            quantizers = (
+                self._get_quantizers(fp8_output, fp8_grad)
+                if not debug
+                else self._get_debug_quantizers(fp8_output, fp8_grad)
+            )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False
@@ -1533,7 +1545,7 @@ class Linear(TransformerEngineBaseModule):
             for name, q in zip(names, original_quantizers)
         )
 
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         unfused_weights = [getattr(self, name) for name in self.weight_names]
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):

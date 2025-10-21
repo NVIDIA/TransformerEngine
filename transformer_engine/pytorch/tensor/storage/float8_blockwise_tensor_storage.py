@@ -13,7 +13,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
-from ..quantized_tensor import QuantizedTensorBase
+from ..quantized_tensor import QuantizedTensorStorage
 
 from ...constants import TE_DType_To_Torch
 
@@ -22,7 +22,7 @@ from ..quantized_tensor import Quantizer
 from ...utils import _empty_tensor
 
 
-class Float8BlockwiseQTensorBase(QuantizedTensorBase):
+class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
     Float8BlockwiseQTensor inherits from the PyTorch tensor class and this
@@ -53,7 +53,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         *args,
         **kwargs,
     ):
-        if cls is Float8BlockwiseQTensorBase:
+        if cls is Float8BlockwiseQTensorStorage:
             instance = object.__new__(cls)
         else:
             instance = super().__new__(cls, *args, **kwargs)
@@ -98,7 +98,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
     def prepare_for_saving(
         self,
-    ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
+    ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorStorage]:
         """
         Prepare the tensor base for saving for backward
         """
@@ -366,7 +366,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             data = self.dequantize()
             descriptor = "columnwise"
         return (
-            "Float8BlockwiseQTensorBase("
+            "Float8BlockwiseQTensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
             f"{descriptor}_scaled_data={data}"
         )

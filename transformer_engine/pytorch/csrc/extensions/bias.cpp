@@ -54,10 +54,25 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
 
-  // Unfused impl if quantizer is not supported
-  const bool with_fused_dbias_quantize_kernel =
-      detail::IsFloat8Quantizers(quantizer.ptr()) || detail::IsMXFP8Quantizers(quantizer.ptr());
-  if (!with_fused_dbias_quantize_kernel) {
+  // Check if fused kernel is supported
+  bool with_fused_kernel = false;
+  if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+    auto prop = at::cuda::getCurrentDeviceProperties();
+    const size_t sm_arch = 10 * prop->major + prop->minor;
+    if (sm_arch >= 100) {
+      // Fused kernel for dbias + FP8 cast on SM arch 10.0+
+      with_fused_kernel = true;
+    } else if (quantizer_cpp->rowwise_usage && quantizer_cpp->columnwise_usage) {
+      // Fused kernel for dbias + FP8 cast + FP8 transpose
+      with_fused_kernel = true;
+    }
+  } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    // Fused kernel for dbias + MXFP8 quantize
+    with_fused_kernel = true;
+  }
+
+  // Apply unfused impl if fused kernel is not supported
+  if (!with_fused_kernel) {
     at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};

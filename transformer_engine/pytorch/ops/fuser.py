@@ -11,7 +11,7 @@ import itertools
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe, DelayedScaling
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, Recipe, DelayedScaling
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -471,6 +471,10 @@ class OperationFuser:
 
         # Attempt to fuse operations if neccesary
         self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+
+        # Initialization before forward
+        for idx, op in enumerate(self._basic_ops):
+            op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass
         if is_grad_enabled:

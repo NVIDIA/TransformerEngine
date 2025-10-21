@@ -16,6 +16,9 @@ from .tensor.quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
+__all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
+
+
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
     for tensor in tensors:
@@ -184,7 +187,7 @@ def combine_tensors(
     num_tensors = len(tensors)
     new_shape = list(tensors[0].shape)
     new_shape.insert(dim, num_tensors)
-    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
     if isinstance(tensors[0], Float8Tensor):
         new_stride = list(tensors[0]._data.stride())
@@ -224,14 +227,16 @@ class SplitAlongDim(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
-        from transformer_engine.pytorch.float8_tensor import Float8Tensor
-        from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
 
-        if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
+        if isinstance(mixed_x_layer, Float8TensorStorage) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
             return tuple(
-                Float8TensorBase(
+                Float8TensorStorage(
                     fp8_scale_inv=mixed_x_layer._scale_inv,
                     fp8_dtype=mixed_x_layer._fp8_dtype,
                     data=x.squeeze(split_dim) if squeeze else x,
@@ -276,7 +281,7 @@ class SplitAlongDim(torch.autograd.Function):
             split_sizes = [ctx.split_size_or_sections] * len(grad_outputs)
         dims = len(grad_outputs[0].shape)
         split_dim = (ctx.split_dim + dims) % dims
-        from transformer_engine.pytorch.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
         if isinstance(grad_outputs[0], Float8Tensor):
             noop_ok = True
@@ -451,11 +456,34 @@ def assert_dim_for_all_gather(
         )
 
 
-def is_bf16_compatible() -> None:
+def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+def is_bf16_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine whether bfloat16 (BF16) computation is supported on the current device.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating BF16 availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when BF16 is not available. When BF16 is available,
+        the reason will be an empty string.
+
+    """
+    available = is_bf16_compatible()
+    if not return_reason:
+        return available
+
+    reason = (
+        "" if available else "BF16 support requires a GPU with compute capability 8.0 or higher."
+    )
+    return available, reason
 
 
 @functools.lru_cache(maxsize=None)

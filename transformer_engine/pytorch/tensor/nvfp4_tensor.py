@@ -22,7 +22,7 @@ from ..utils import (
     round_up_to_nearest_multiple,
 )
 
-from ._internal.nvfp4_tensor_base import NVFP4TensorBase, _FromNVFP4Func
+from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 
 aten = torch.ops.aten
@@ -30,7 +30,7 @@ aten = torch.ops.aten
 
 def get_no_random_sign_vector() -> torch.Tensor:
     """Non-random sign vector for Hadamard transform."""
-    return torch.tensor([1], dtype=torch.float32)
+    return torch.tensor([1], dtype=torch.float32, device="cuda")
 
 
 def get_sign_from_vector(vector: torch.Tensor) -> int:
@@ -42,7 +42,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     mask = 0
     for i, v in enumerate(vector):
         mask |= (v == -1) << i
-    return mask
+    return mask.item()
 
 
 def get_wgrad_sign_vector() -> torch.Tensor:
@@ -54,6 +54,7 @@ def get_wgrad_sign_vector() -> torch.Tensor:
     return torch.tensor(
         [1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1],
         dtype=torch.float32,
+        device="cuda",
     )
 
 
@@ -82,6 +83,7 @@ def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
                 [1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, -1, -1, 1],
             ],
             dtype=torch.float32,
+            device="cuda",
         )
         * hadamard_scale
     )
@@ -95,9 +97,9 @@ def get_rht_matrix(with_random_sign_mask: bool) -> torch.Tensor:
         signs = get_wgrad_sign_vector()
     else:
         signs = get_no_random_sign_vector()
-    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32)
+    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device="cuda")
     rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension)
-    return rht_matrix.to(dtype=torch.bfloat16).cuda()
+    return rht_matrix.to(dtype=torch.bfloat16)
 
 
 @functools.lru_cache(maxsize=None)
@@ -173,6 +175,10 @@ class NVFP4Quantizer(Quantizer):
         tex.quantize(src, self, dst, noop_flag)
 
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -344,7 +350,7 @@ class NVFP4Quantizer(Quantizer):
         return NVFP4BlockScaling
 
 
-class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
+class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
     """Quantized tensor class with FP4 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -377,7 +383,7 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
         Nominal tensor datatype, used in dequantize.
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a NVFP4TensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a NVFP4TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,

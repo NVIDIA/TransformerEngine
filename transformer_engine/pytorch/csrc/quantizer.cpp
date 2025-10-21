@@ -152,7 +152,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
-    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
+    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass));
     out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = *scale_inv,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
                                "quantizer"_a = this->quantizer);
@@ -357,7 +357,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   py::object data_py = with_data ? py::cast(data_tensor) : py::none();
   py::object transpose_py = with_transpose ? py::cast(transpose_tensor) : py::none();
   if (internal) {
-    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
+    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass));
     out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = scale_inv_tensor,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
                                "quantizer"_a = this->quantizer);
@@ -390,9 +390,13 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 
 std::pair<TensorWrapper, py::object>
 Float8CurrentScalingQuantizer::create_unquantized_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                   DType dtype) {
+                                                                   DType dtype,
+                                                                   std::optional<at::Tensor> data) {
   amax.zero_();
-  auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
+  auto out = data.has_value() ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
+                              : NoneQuantizer(py::none()).create_tensor(shape, dtype);
+  TensorWrapper out_cpp = std::move(out.first);
+  py::object out_py = std::move(out.second);
   out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
                    getTensorShape(amax));
   return {std::move(out_cpp), std::move(out_py)};
@@ -626,7 +630,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   py::object ret;
   if (internal) {
     py::handle Float8BlockwiseQTensorClass(
-        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
+        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass));
     ret = Float8BlockwiseQTensorClass(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
@@ -946,7 +950,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   // Construct Python MXFP8 tensor
   py::object out_py;
   if (internal) {
-    py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorBasePythonClass));
+    py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
     out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py,
                               "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
@@ -1196,6 +1200,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+    // nvte_compute_amax_with_config will zero out the pointer if needed
     amax_rowwise = at::empty({1}, bit32_tensor_opts);
   }
   if (columnwise_usage) {
@@ -1209,6 +1215,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), bit8_tensor_opts);
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+    // nvte_compute_amax_with_config will zero out the pointer if needed
     amax_columnwise = at::empty({1}, bit32_tensor_opts);
   }
 
@@ -1226,7 +1234,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   // Construct Python NVFP4 tensor
   py::object out_py;
   if (internal) {
-    py::handle NVFP4TensorClass(reinterpret_cast<PyObject*>(NVFP4TensorBasePythonClass));
+    py::handle NVFP4TensorClass(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass));
     out_py = NVFP4TensorClass(
         "rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
         "rowwise_scale_inv"_a = rowwise_scale_inv_py,
@@ -1348,6 +1356,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_rowwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+      // nvte_compute_amax_with_config will zero out the pointer if needed
       amax_rowwise = at::empty({1}, opts);
       tensor.attr("_amax_rowwise") = *amax_rowwise;
     }
@@ -1388,7 +1398,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_columnwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-      amax_columnwise = at::zeros({1}, opts);
+      // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+      // nvte_compute_amax_with_config will zero out the pointer if needed
+      amax_columnwise = at::empty({1}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
     }
   } else {  // columnwise_usage == false
