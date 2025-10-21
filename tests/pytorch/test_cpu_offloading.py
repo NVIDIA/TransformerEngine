@@ -105,6 +105,8 @@ class Utils:
             "grouped_linear",
             "multihead_attention",
             "transformer_layer",
+            "linear_op",
+            "layernorm_mlp_ops",
         ]
 
     @staticmethod
@@ -129,6 +131,15 @@ class Utils:
                 attention_dropout=0.0,
                 hidden_dropout=0.0,
                 params_dtype=torch.bfloat16,
+            )
+        elif layer_type == "linear_op":
+            return te.ops.Linear(Utils._D, Utils._D, dtype=torch.bfloat16)
+        elif layer_type == "layernorm_mlp_ops":
+            return te.ops.Sequential(
+                te.ops.LayerNorm(Utils._D, dtype=torch.bfloat16),
+                te.ops.Linear(Utils._D, Utils._D, dtype=torch.bfloat16),
+                te.ops.GELU(),
+                te.ops.Linear(Utils._D, Utils._D, dtype=torch.bfloat16),
             )
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
