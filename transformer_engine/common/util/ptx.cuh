@@ -25,7 +25,7 @@ namespace transformer_engine {
 namespace ptx {
 
 template <int N>
-struct Arch {
+struct ArchSpecific {
   constexpr static int id = N * 10;
 
   template <int CurrentArch, int ArchSpecific, int FamilySpecific>
@@ -43,7 +43,7 @@ struct Arch {
 };
 
 template <int N>
-struct Family {
+struct FamilySpecific {
   constexpr static int id = N * 10;
 
   template <int CurrentArch, int ArchSpecific, int FamilySpecific>
@@ -108,7 +108,7 @@ constexpr bool is_supported_arch() {
 #define __NVTE_ARCH_FAMILY_SPECIFIC__ constexpr int FamilySpecific = 0;
 #endif
 
-#define ARCH_SPECIFIC(...)                                                                        \
+#define NVTE_CUDA_ARCH_MATCHES(...)                                                                        \
   [&] {                                                                                           \
     __NVTE_CURRENT_ARCH__                                                                         \
     __NVTE_ARCH_SPECIFIC__                                                                        \
@@ -117,8 +117,11 @@ constexpr bool is_supported_arch() {
                                                       __VA_ARGS__>();                             \
   }();
 
-#define ARCH_BLACKWELL_FAMILY ARCH_SPECIFIC(ptx::Family<100>, ptx::Family<110>, ptx::Family<120>)
-#define ARCH_HAS_STOCHASTIC_ROUNDING ARCH_SPECIFIC(ptx::Arch<100>, ptx::Arch<103>)
+#define ARCH_BLACKWELL_FAMILY NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>, \
+                                                     ptx::FamilySpecific<110>, \
+                                                     ptx::FamilySpecific<120>)
+#define ARCH_HAS_STOCHASTIC_ROUNDING NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, \
+                                                            ptx::ArchSpecific<103>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
