@@ -52,10 +52,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.softmax import F
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
-    is_current_layer_offloaded,
     start_offload,
     mark_activation_offload,
 )
+from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils

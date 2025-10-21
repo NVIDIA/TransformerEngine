@@ -73,7 +73,7 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         # Attach an event to mark when the tensor is ready for reload.
         t.start_reload_event = torch.cuda.Event()
         t.start_reload_event.record(torch.cuda.current_stream())
-        if offload_base_tensor:
+        if offload_base_tensor and t._base is not None:
             setattr(t, "offload_base_tensor", True)
 
     tensors, tensor_obj = prepare_for_saving(*tensors)
