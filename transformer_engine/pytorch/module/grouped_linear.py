@@ -211,11 +211,6 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
 
-            # Do not offload weights and biases
-            for i in range(num_gemms):
-                weights[i].offloading_activation = False
-                weights_fp8[i].offloading_activation = False
-                biases[i].offloading_activation = False
             ctx.fine_grained_activation_offloading = fine_grained_activation_offloading
 
             if fine_grained_activation_offloading and cpu_offloading:

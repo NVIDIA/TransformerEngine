@@ -435,12 +435,6 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            # Do not offload weights and biases
-            weight.offloading_activation = False
-            weightmat.offloading_activation = False
-            if bias is not None:
-                bias.offloading_activation = False
-            ln_weight.offloading_activation = False
             ctx.fine_grained_activation_offloading = fine_grained_activation_offloading
 
             if fine_grained_activation_offloading and cpu_offloading:

@@ -442,11 +442,6 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
-            # Do not offload weights and biases
-            weight.offloading_activation = False
-            weightmat.offloading_activation = False
-            if bias is not None:
-                bias.offloading_activation = False
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
