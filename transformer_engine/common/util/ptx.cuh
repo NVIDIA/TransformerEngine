@@ -18,19 +18,19 @@
 #include <cuda_fp4.h>
 #endif  // CUDA_VERSION >= 12080
 
+#include "common/utils.cuh"
+
 namespace transformer_engine {
+
+namespace ptx {
 
 template <int N>
 struct Arch {
   constexpr static int id = N * 10;
-  constexpr static bool is_arch = true;
-  constexpr static bool is_family = false;
-};
 
-template <int CurrentArch, int ArchSpecific, int FamilySpecific, int N>
-struct ArchHelper {
+  template <int CurrentArch, int ArchSpecific, int FamilySpecific>
   constexpr static bool compatible() {
-    if constexpr (CurrentArch == N) {
+    if constexpr (CurrentArch == id) {
       static_assert(ArchSpecific == CurrentArch,
                     "Compiled for the generic architecture, while utilizing arch-specific "
                     "features. Please compile for smXXXa architecture instead of smXXX "
@@ -45,14 +45,10 @@ struct ArchHelper {
 template <int N>
 struct Family {
   constexpr static int id = N * 10;
-  constexpr static bool is_arch = false;
-  constexpr static bool is_family = true;
-};
 
-template <int CurrentArch, int ArchSpecific, int FamilySpecific, int N>
-struct FamilyHelper {
+  template <int CurrentArch, int ArchSpecific, int FamilySpecific>
   constexpr static bool compatible() {
-    if constexpr ((CurrentArch / 100) == (N / 100)) {
+    if constexpr ((CurrentArch / 100) == (id / 100)) {
       static_assert(FamilySpecific == CurrentArch,
                     "Compiled for the generic architecture, while utilizing family-specific "
                     "features. Please compile for smXXXf architecture instead of smXXX "
@@ -66,14 +62,7 @@ struct FamilyHelper {
 
 template <int Arch, int ArchSpecific, int FamilySpecific, class T, class... U>
 constexpr bool is_supported_arch() {
-  constexpr bool compatible = [&] {
-    if constexpr (T::is_arch) {
-      return ArchHelper<Arch, ArchSpecific, FamilySpecific, T::id>::compatible();
-    } else {
-      return FamilyHelper<Arch, ArchSpecific, FamilySpecific, T::id>::compatible();
-    }
-  }();
-  if constexpr (compatible) {
+  if constexpr (T::template compatible<Arch, ArchSpecific, FamilySpecific>()) {
     return true;
   } else if constexpr (sizeof...(U) != 0) {
     return is_supported_arch<Arch, ArchSpecific, FamilySpecific, U...>();
@@ -119,25 +108,25 @@ constexpr bool is_supported_arch() {
 #define __NVTE_ARCH_FAMILY_SPECIFIC__ constexpr int FamilySpecific = 0;
 #endif
 
-#define ARCH_SPECIFIC(...)                                                                   \
-  [&] {                                                                                      \
-    __NVTE_CURRENT_ARCH__                                                                    \
-    __NVTE_ARCH_SPECIFIC__                                                                   \
-    __NVTE_ARCH_FAMILY_SPECIFIC__                                                            \
-    return transformer_engine::is_supported_arch<current_arch, ArchSpecific, FamilySpecific, \
-                                                 __VA_ARGS__>();                             \
+#define ARCH_SPECIFIC(...)                                                                        \
+  [&] {                                                                                           \
+    __NVTE_CURRENT_ARCH__                                                                         \
+    __NVTE_ARCH_SPECIFIC__                                                                        \
+    __NVTE_ARCH_FAMILY_SPECIFIC__                                                                 \
+    return transformer_engine::ptx::is_supported_arch<current_arch, ArchSpecific, FamilySpecific, \
+                                                      __VA_ARGS__>();                             \
   }();
 
-#define ARCH_BLACKWELL_FAMILY ARCH_SPECIFIC(Family<100>, Family<110>, Family<120>)
-#define ARCH_HAS_STOCHASTIC_ROUNDING ARCH_SPECIFIC(Arch<100>, Arch<103>)
-
-namespace ptx {
+#define ARCH_BLACKWELL_FAMILY ARCH_SPECIFIC(ptx::Family<100>, ptx::Family<110>, ptx::Family<120>)
+#define ARCH_HAS_STOCHASTIC_ROUNDING ARCH_SPECIFIC(ptx::Arch<100>, ptx::Arch<103>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(mbar_ptr), "r"(count) : "memory");
+#else
+  NVTE_DEVICE_ERROR("mbarrier_init is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -146,6 +135,8 @@ __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.inval.shared.b64 [%0];" ::"r"(mbar_ptr) : "memory");
+#else
+  NVTE_DEVICE_ERROR("mbarrier_invalid is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -154,6 +145,8 @@ __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.shared.b64 _, [%0];" ::"r"(mbar_ptr) : "memory");
+#else
+  NVTE_DEVICE_ERROR("mbarrier_arrive is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -163,12 +156,16 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const 
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(mbar_ptr), "r"(tx_count)
                : "memory");
+#else
+  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile("fence.mbarrier_init.release.cluster;");
+#else
+  NVTE_DEVICE_ERROR("fence_mbarrier_init_release_cluster is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -188,6 +185,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
       ".mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst_shmem_ptr),
       "l"(src_global_ptr), "r"(size), "r"(mbar_ptr)
       : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_1d_global_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -208,6 +207,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
       "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
       : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -223,6 +224,8 @@ __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, cons
       : "r"(mbar_ptr), "r"(parity)
       : "memory");
   return static_cast<bool>(waitComplete);
+#else
+  NVTE_DEVICE_ERROR("mbarrier_try_wait_parity is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   return true;
 }
@@ -232,6 +235,8 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint3
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
   }
+#else
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -292,6 +297,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_
   asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;" ::"l"(dst_global_ptr),
                "r"(src_shmem_ptr), "r"(size)
                : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_1d_shared_to_global is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -306,6 +313,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
                    tensor_map_ptr),
                "r"(offset_x), "r"(offset_y), "r"(src_shmem_ptr)
                : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_shared_to_global is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -313,6 +322,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group 0;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -321,6 +332,8 @@ template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 0;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -328,24 +341,32 @@ template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 0;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 1;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 2;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group.read 4;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -353,6 +374,8 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.commit_group;");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_commit_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -360,12 +383,16 @@ __device__ __forceinline__ void cp_async_bulk_commit_group() {
 __device__ __forceinline__ void fence_proxy_async() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.proxy.async;");
+#else
+  NVTE_DEVICE_ERROR("fence_proxy_async is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.proxy.async.shared::cta;");
+#else
+  NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
@@ -462,7 +489,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "l"(reinterpret_cast<const uint64_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
@@ -480,7 +509,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "l"(reinterpret_cast<const uint64_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, const floatx2 &scale) {
@@ -504,7 +535,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const bf16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, const floatx2 &scale) {
@@ -528,7 +561,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const bf16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, const floatx2 &scale) {
@@ -552,7 +587,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const fp16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const fp16x2 &in, const floatx2 &scale) {
@@ -576,7 +613,9 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const fp16x2 &in, con
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in)),
         "l"(reinterpret_cast<const uint64_t &>(scale)));
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 __device__ __forceinline__ void abs_max_2x(bf16x2 &dst, const bf16x2 &p1, const bf16x2 &p2) {
@@ -585,6 +624,8 @@ __device__ __forceinline__ void abs_max_2x(bf16x2 &dst, const bf16x2 &p1, const 
                : "=r"(reinterpret_cast<uint32_t &>(dst))
                : "r"(reinterpret_cast<const uint32_t &>(p1)),
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
+#else
+  NVTE_DEVICE_ERROR("abs_max_2x is only supported on SM 8.9+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
@@ -594,6 +635,8 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
                : "=r"(reinterpret_cast<uint32_t &>(dst))
                : "r"(reinterpret_cast<const uint32_t &>(p1)),
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
+#else
+  NVTE_DEVICE_ERROR("abs_max_2x is only supported on SM 8.9+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
@@ -614,6 +657,8 @@ __forceinline__ __device__ void initialize_barriers(uint64_t *mbar, const bool i
   }
   // Syncthreads so initialized barrier is visible to all threads.
   __syncthreads();
+#else
+  NVTE_DEVICE_ERROR("initialize_barriers is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -629,6 +674,8 @@ __forceinline__ __device__ void destroy_barriers(uint64_t *mbar, const bool is_m
       ptx::mbarrier_invalid(&mbar[iter]);
     }
   }
+#else
+  NVTE_DEVICE_ERROR("destroy_barriers is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -648,6 +695,8 @@ __forceinline__ __device__ void copy_1d_to_shared(void *dst, const void *src,
     // Other threads just arrive
     ptx::mbarrier_arrive(barrier);
   }
+#else
+  NVTE_DEVICE_ERROR("copy_1d_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -667,6 +716,8 @@ __forceinline__ __device__ void copy_2d_to_shared(void *dst, const void *src, co
     // Other threads just arrive
     ptx::mbarrier_arrive(barrier);
   }
+#else
+  NVTE_DEVICE_ERROR("copy_2d_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -693,6 +744,8 @@ __forceinline__ __device__ void copy_2d_to_sharedx2(void *dst, const void *src,
     // Other threads just arrive
     ptx::mbarrier_arrive(barrier);
   }
+#else
+  NVTE_DEVICE_ERROR("copy_2d_to_sharedx2 is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -722,6 +775,8 @@ __forceinline__ __device__ void copy_2d_to_sharedx3(
     // Other threads just arrive
     ptx::mbarrier_arrive(barrier);
   }
+#else
+  NVTE_DEVICE_ERROR("copy_2d_to_sharedx3 is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
