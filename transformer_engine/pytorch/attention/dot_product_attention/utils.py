@@ -1663,9 +1663,13 @@ class UnpackTensor(torch.autograd.Function):
 
 
 class ConvertTHDtoBSHD(torch.autograd.Function):
-    """Convert a tensor from qkv_format=thd to qkv_format=bshd"""
+    """
+    Convert a tensor from qkv_format = thd to qkv_format = bshd.
+    """
+
     @staticmethod
     def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        # pylint: disable=missing-function-docstring
         batch_size = cu_seqlens.shape[0] - 1
         if not thd_tensor.is_contiguous():
             thd_tensor = thd_tensor.contiguous()
@@ -1678,8 +1682,10 @@ class ConvertTHDtoBSHD(torch.autograd.Function):
         ctx.save_for_backward(cu_seqlens)
         ctx.num_tokens = thd_tensor.shape[0]
         return bshd_tensor
+
     @staticmethod
     def backward(ctx, bshd_tensor):
+        # pylint: disable=missing-function-docstring
         (cu_seqlens,) = ctx.saved_tensors
         if not bshd_tensor.is_contiguous():
             bshd_tensor = bshd_tensor.contiguous()
@@ -1692,9 +1698,13 @@ class ConvertTHDtoBSHD(torch.autograd.Function):
 
 
 class ConvertBSHDtoTHD(torch.autograd.Function):
-    """Convert a tensor from qkv_format=bshd to qkv_format=thd"""
+    """
+    Convert a tensor from qkv_format = bshd to qkv_format = thd.
+    """
+
     @staticmethod
     def forward(ctx, bshd_tensor, cu_seqlens):
+        # pylint: disable=missing-function-docstring
         num_tokens = cu_seqlens[-1]
         max_seqlen = bshd_tensor.shape[1]
         if not bshd_tensor.is_contiguous():
@@ -1707,8 +1717,10 @@ class ConvertBSHDtoTHD(torch.autograd.Function):
         ctx.save_for_backward(cu_seqlens)
         ctx.max_seqlen = max_seqlen
         return thd_tensor
+
     @staticmethod
     def backward(ctx, thd_tensor):
+        # pylint: disable=missing-function-docstring
         (cu_seqlens,) = ctx.saved_tensors
         batch_size = cu_seqlens.shape[0] - 1
         if not thd_tensor.is_contiguous():
