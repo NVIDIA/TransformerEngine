@@ -230,7 +230,9 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
-        return {
-            "rowwise": self._data is not None,
-            "columnwise": self._transpose is not None and not self._transpose_invalid,
-        }
+        usages = {"rowwise": self._data is not None}
+        if is_non_tn_fp8_gemm_supported():
+            usages["columnwise"] = self._data is not None
+        else:
+            usages["columnwise"] = self._transpose is not None and not self._transpose_invalid
+        return usages

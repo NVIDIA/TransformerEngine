@@ -483,7 +483,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.main_grad_func = weight.get_main_grad
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
-            ctx.quantized_weight = quantized_weight
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer

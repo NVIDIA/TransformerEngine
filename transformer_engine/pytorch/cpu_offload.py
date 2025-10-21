@@ -15,7 +15,7 @@ import torch
 from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch.cpu_offload_old_path as old_code_path
+import transformer_engine.pytorch.cpu_offload_v1 as v1_code_path
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
     prepare_for_saving,
@@ -24,27 +24,27 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 
 __all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
 
-NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH = os.environ.get("NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH", "0") == "1"
+NVTE_CPU_OFFLOAD_V1 = os.environ.get("NVTE_CPU_OFFLOAD_V1", "0") == "1"
 
 OFFLOAD_SYNCHRONIZER = None
 
 
 def is_cpu_offload_enabled():
     """Returns True if CPU offload is enabled."""
-    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
-        return old_code_path.is_cpu_offload_enabled()
+    if NVTE_CPU_OFFLOAD_V1:
+        return v1_code_path.is_cpu_offload_enabled()
     return OFFLOAD_SYNCHRONIZER is not None
 
 
 def mark_activation_offload(*tensors):
     """Set the type of the offloading needed for a tensor."""
-    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
-        old_code_path.mark_activation_offload(*tensors)
+    if NVTE_CPU_OFFLOAD_V1:
+        v1_code_path.mark_activation_offload(*tensors)
 
 
 def mark_not_offload(*tensors: torch.Tensor):
     """Marks tensors to prevent them from being offloaded."""
-    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+    if NVTE_CPU_OFFLOAD_V1:
         return
 
     tensors, tensor_obj = prepare_for_saving(*tensors)
@@ -64,7 +64,7 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
     It is useful when multiple tensors are views of the same base tensor,
     for example in MultiHeadAttention for interleaved q, k, v tensors.
     """
-    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+    if NVTE_CPU_OFFLOAD_V1:
         return
 
     def _mark_tensor_for_offload(t):
@@ -157,7 +157,7 @@ class TensorGroupProcessor:
             if _check_if_offload_base_tensor(tensor):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
                 tensor = tensor._base
-                assert tensor is not None
+                assert tensor is not None, "Cannot offload base tensor, if the tensor is not a view."
                 tensor_group.tensor_list[tensor_id] = tensor
             else:
                 aux["views"].append(None)
@@ -728,14 +728,14 @@ def get_cpu_offload_context(
         for i in range(num_layers):
             out[i].sum().backward()
 
-    Old code path
+    V1 code path
     ----------
-    If you want to use the old code path for offloading,
-    please set the environment variable NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH to 1.
+    If you want to use the v1 code path for offloading,
+    please set the environment variable NVTE_CPU_OFFLOAD_V1 to 1.
 
     """
-    if NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
-        return old_code_path.get_cpu_offload_context(
+    if NVTE_CPU_OFFLOAD_V1:
+        return v1_code_path.get_cpu_offload_context(
             enabled=enabled,
             num_layers=num_layers,
             model_layers=model_layers,

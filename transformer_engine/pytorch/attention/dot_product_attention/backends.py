@@ -53,6 +53,7 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
+    mark_activation_offload,
 )
 
 # Import attention utils
@@ -68,6 +69,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch import export
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.cpu_offload_v1 import is_cpu_offload_enabled, is_cpu_offload_layer
 
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
@@ -654,9 +656,6 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        if is_cpu_offload_enabled():
-            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
-
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
@@ -702,6 +701,9 @@ class FlashAttention(torch.nn.Module):
                 query_layer._data, key_layer._data, value_layer._data = [
                     x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
+
+        if is_cpu_offload_enabled():
+            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
 
         # get batch_size, max_seqlen and cu_seqlens
         batch_size, context_len = None, None
@@ -843,10 +845,6 @@ class FlashAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                 )
         else:
-            from transformer_engine.pytorch.cpu_offload import (
-                mark_activation_offload,
-            )
-
             if is_cpu_offload_enabled():
                 mark_activation_offload(
                     query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
@@ -1258,10 +1256,10 @@ class FusedAttnFunc(torch.autograd.Function):
 
         from transformer_engine.pytorch.cpu_offload import (
             mark_activation_offload,
-            NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH,
+            NVTE_CPU_OFFLOAD_V1,
         )
 
-        if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_LEGACY_CODE_PATH:
+        if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_V1:
             if ctx.fp8:
                 tensor_list = fp8_tensors
             else:
@@ -1303,15 +1301,10 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
 
-        from transformer_engine.pytorch.cpu_offload_old_path import (
-            CPUOffloadedLayer,
-            CPUOffloadEnabled,
-        )
-
         # If interleaved tensor is offloaded, reloaded tensor will be
         # non-interleaved, so we need to modify the QKV layout
         # for backward
-        if CPUOffloadedLayer and CPUOffloadEnabled:
+        if is_cpu_offload_layer() and is_cpu_offload_enabled():
             reload_layout = ""
             split_list = qkv_layout.split("_")
             for split in split_list:
