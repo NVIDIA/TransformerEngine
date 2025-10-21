@@ -52,6 +52,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.softmax import F
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
+    is_current_layer_offloaded,
     start_offload,
     mark_activation_offload,
 )
@@ -69,7 +70,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch import export
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.cpu_offload_v1 import is_cpu_offload_enabled, is_cpu_offload_layer
 
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
@@ -1254,10 +1254,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # used when some tensors are base tensors and loose the "dtype" attribute
         ctx.nominal_dtype = out_nominal_dtype
 
-        from transformer_engine.pytorch.cpu_offload import (
-            mark_activation_offload,
-            NVTE_CPU_OFFLOAD_V1,
-        )
+        from transformer_engine.pytorch.cpu_offload import NVTE_CPU_OFFLOAD_V1
 
         if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_V1:
             if ctx.fp8:
@@ -1304,7 +1301,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # If interleaved tensor is offloaded, reloaded tensor will be
         # non-interleaved, so we need to modify the QKV layout
         # for backward
-        if is_cpu_offload_layer() and is_cpu_offload_enabled():
+        if is_current_layer_offloaded() and is_cpu_offload_enabled():
             reload_layout = ""
             split_list = qkv_layout.split("_")
             for split in split_list:

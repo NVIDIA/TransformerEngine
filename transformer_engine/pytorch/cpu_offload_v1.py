@@ -45,7 +45,7 @@ def is_cpu_offload_enabled() -> bool:
     return CPUOffloadEnabled
 
 
-def is_cpu_offload_layer() -> bool:
+def is_current_layer_offloaded() -> bool:
     """Check if current layers is being offloaded."""
     return CPUOffloadedLayer
 

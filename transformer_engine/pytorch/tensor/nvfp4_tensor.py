@@ -6,9 +6,8 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 import functools
-from typing import Dict
 
 import torch
 import transformer_engine_torch as tex
