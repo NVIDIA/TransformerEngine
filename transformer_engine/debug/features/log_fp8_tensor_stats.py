@@ -290,10 +290,16 @@ class LogFp8TensorStats(BaseLogTensorStats):
         for stat in config["stats"]:
             self.check_if_stat_is_supported(stat, recipe_name)
 
+        start_step = config.get("start_step", None)
+        end_step = config.get("end_step", None)
+        start_end_list = config.get("start_end_list", None)
+        if start_end_list is not None:
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
+
         options = (
-            config.get("start_step", None),
-            config.get("end_step", None),
-            config.get("start_end_list", None),
+            start_step,
+            end_step,
+            start_end_list,
             "fp8",
         )
 
