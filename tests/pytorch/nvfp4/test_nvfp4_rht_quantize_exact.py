@@ -15,7 +15,6 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp4_te_dtype
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 import pytest
