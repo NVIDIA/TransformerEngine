@@ -264,10 +264,10 @@ class DotProductAttention(nn.Module):
         # Add attention sink to the last column if not vanilla softmax
         if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             # Add extra column with softmax_offset
-            # softmax_offset shape: [h], attn_weights shape: [b, h, q, k]
+            # softmax_offset shape: (1, h, 1, 1), attn_weights shape: [b, h, q, k]
             extra_col = jnp.broadcast_to(
                 softmax_offset,
-                (attn_weights.shape[0], softmax_offset.shape[0], attn_weights.shape[2], 1),
+                (attn_weights.shape[0], attn_weights.shape[1], attn_weights.shape[2], 1),
             )
             attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
 

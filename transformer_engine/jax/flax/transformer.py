@@ -156,16 +156,10 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         # query shape: [..., h, d] where h is num_attention_heads
         num_attention_heads = query.shape[-2]
 
-        # Initialize softmax_offset for off-by-one or learnable softmax
+        # Initialize softmax_offset for learnable softmax
+        # Note: OFF_BY_ONE_SOFTMAX is handled internally by the Softmax module
         softmax_offset = None
-        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            # For off-by-one softmax, use zeros with shape (1, h, 1, 1)
-            softmax_offset = jnp.zeros((1, num_attention_heads, 1, 1), dtype=input_dtype)
-            # Shard by heads dimension
-            softmax_offset = with_sharding_constraint_by_logical_axes(
-                softmax_offset, (None, HEAD_AXES, None, None)
-            )
-        elif self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
             # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
             softmax_offset = self.param(
                 "softmax_offset",

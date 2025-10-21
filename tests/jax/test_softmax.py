@@ -17,6 +17,7 @@ from jax.typing import DTypeLike
 from utils import assert_allclose
 
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
+from transformer_engine.jax.cpp_extensions.attention import AttnSoftmaxType
 from transformer_engine.jax.softmax import SoftmaxFusion, softmax
 from transformer_engine.jax.flax.module import Softmax
 
@@ -52,6 +53,7 @@ class SoftmaxRunner:
     scale_factor: float
     softmax_fusion: SoftmaxFusion
     dtype: DTypeLike
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @staticmethod
     def reference_softmax(logits, mask, scale_factor, **_):
@@ -69,6 +71,7 @@ class SoftmaxRunner:
     def _is_support(self):
         return is_softmax_kernel_available(
             self.softmax_fusion,
+            self.softmax_type,
             self.batch_size,
             self.num_heads,
             self.max_seqlen_q,
