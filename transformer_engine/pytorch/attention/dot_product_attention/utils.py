@@ -613,21 +613,21 @@ def get_attention_backend(
             use_flash_attention_3 = False
 
     # Filter: QKV layout
-    if qkv_format == "thd" and pad_between_seqs:
+    if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug(
-                "Disabling UnfusedDotProductAttention for qkv_format = thd when there is "
-                "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
+                "Disabling UnfusedDotProductAttention for qkv_format = thd"
             )
             use_unfused_attention = False
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-        ):
-            logger.debug(
-                "Disabling FlashAttention for qkv_format = thd when there is "
-                "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
-            )
-        use_flash_attention = False
+        if pad_between_seqs:
+            if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+                use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+            ):
+                logger.debug(
+                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
+                )
+            use_flash_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
