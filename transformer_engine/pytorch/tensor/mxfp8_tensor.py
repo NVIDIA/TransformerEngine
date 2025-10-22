@@ -17,11 +17,8 @@ from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
-from .quantized_tensor import (
-    QuantizedTensor,
-    Quantizer,
-    _IdentityFunc,
-)
+from ..quantized_tensor import QuantizedTensor, Quantizer
+from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
 

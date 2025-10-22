@@ -17,6 +17,48 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
 )
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
+    nvfp4_ref_rht_2d_quantizer_factory,
+)
+
+
+@pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
+def test_custom_recipe_sanity_modules_nvfp4(module_type):
+    """Test modules with NVFP4 custom recipe support"""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+
+    torch.manual_seed(0)
+
+    # Simple linear layer with dims divisible by 16
+    in_features = 64
+    out_features = 64
+    batch = 32
+
+    if module_type == "Linear":
+        model = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+    elif module_type == "LayerNormLinear":
+        model = LayerNormLinear(
+            in_features, out_features, params_dtype=torch.bfloat16, bias=False
+        ).cuda()
+    else:  # OpsLinear
+        model = te_ops.Linear(
+            in_features, out_features, device="cuda", dtype=torch.bfloat16, bias=False
+        )
+    inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    # Use NVFP4 quantizer factory
+    custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+
+    # Execute with custom recipe
+    with autocast(enabled=True, recipe=custom_recipe):
+        out = model(inp)
+    loss = out.float().sum()
+    loss.backward()
+
+    # Basic sanity: gradients exist
+    assert inp.grad is not None
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear", "LayerNormMLP"])

@@ -43,7 +43,7 @@ from ..graph import is_graph_capturing
 from ..cpu_offload import is_cpu_offload_enabled
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.quantized_tensor import (
+from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,

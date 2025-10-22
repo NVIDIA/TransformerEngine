@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from . import torch_version
-from .tensor.quantized_tensor import Quantizer
+from .quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
