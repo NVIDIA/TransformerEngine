@@ -126,8 +126,56 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
+def git_check_submodules() -> None:
+    """
+    Attempt to checkout git submodules automatically during setup.
+
+    This runs successfully only if the submodules are
+    either in the correct or uninitialized state.
+
+    Note to devs: With this, any updates to the submodules itself, e.g. moving to a newer
+    commit, must be commited before build. This also ensures that stale submodules aren't
+    being silently used by developers.
+    """
+
+    # Require git executable.
+    if shutil.which("git") is None:
+        return
+
+    # Require a .gitmodules file.
+    if not (current_file_path / ".gitmodules").exists():
+        return
+
+    try:
+        submodules = subprocess.check_output(
+            ["git", "submodule", "status", "--recursive"],
+            cwd=str(current_file_path),
+            text=True,
+        ).splitlines()
+
+        for submodule in submodules:
+            # '-' start is for an uninitialized submodule.
+            # ' ' start is for a submodule on the correct commit.
+            assert submodule[0] in (
+                " ",
+                "-",
+            ), "Submodules are initialized incorrectly. If this isn't intended,"
+            " run `git submodule update --init --recursive` to checkout the "
+            "correct submodule commits. Otherwise, any changes to submodules"
+            " must first be committed to git before build."
+
+        subprocess.check_call(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=str(current_file_path),
+        )
+    except subprocess.CalledProcessError:
+        return
+
+
 if __name__ == "__main__":
     __version__ = te_version()
+
+    git_check_submodules()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
