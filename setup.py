@@ -6,6 +6,8 @@
 
 from importlib import metadata
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -159,10 +161,12 @@ def git_check_submodules() -> None:
             assert submodule[0] in (
                 " ",
                 "-",
-            ), "Submodules are initialized incorrectly. If this isn't intended,"
-            " run `git submodule update --init --recursive` to checkout the "
-            "correct submodule commits. Otherwise, any changes to submodules"
-            " must first be committed to git before build."
+            ), (
+                "Submodules are initialized incorrectly. If this isn't intended,"
+                " run `git submodule update --init --recursive` to checkout the "
+                "correct submodule commits. Otherwise, any changes to submodules"
+                " must first be committed to git before build."
+            )
 
         subprocess.check_call(
             ["git", "submodule", "update", "--init", "--recursive"],
