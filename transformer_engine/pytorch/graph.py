@@ -378,7 +378,9 @@ def _make_graphed_callables(
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
 
-            def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
+            def hook_fn(
+                module, inputs, outputs, func_idx=func_idx
+            ):  # pylint: disable=unused-argument
                 modules = set()
                 if isinstance(module, TransformerEngineBaseModule):
                     modules.add(module)
@@ -774,7 +776,7 @@ def _make_graphed_callables(
         te_modules = visited_te_modules.get(i, set())
         if isinstance(func, torch.nn.Module):
 
-            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd):
+            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd, te_modules):
                 def new_fwd(*user_args, **user_kwargs):
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
@@ -820,7 +822,7 @@ def _make_graphed_callables(
 
                 return new_fwd
 
-            forward = make_graphed_forward(func, func.training, graphed, func.forward)
+            forward = make_graphed_forward(func, func.training, graphed, func.forward, te_modules)
             if _order is None:
                 func.forward = forward
                 ret.append(func)
