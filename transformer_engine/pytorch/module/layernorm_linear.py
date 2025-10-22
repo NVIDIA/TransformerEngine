@@ -442,25 +442,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     "Do not use both fine_grained_activation_offloading and cpu_offloading."
                 )
 
-            # Record the attributes grad_added_to_main_grad of weights for backward pass
-            # since these attributes will be lost during offloading
-            if (
-                fine_grained_activation_offloading
-                and weight.requires_grad
-                and fuse_wgrad_accumulation
-            ):
-                if hasattr(weight, "grad_added_to_main_grad"):
-                    ctx.has_grad_added_to_main_grad = True
-                    ctx.grad_added_to_main_grad = weight.grad_added_to_main_grad
-                    weight.grad_added_to_main_grad = True
-                    ctx.weight_object = weight
-                else:
-                    ctx.has_grad_added_to_main_grad = False
+            if cpu_offloading or fine_grained_activation_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
 
-            if cpu_offloading:
-                ctx.has_grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.has_grad_added_to_main_grad:
+                if ctx.grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
                     # get back torch.Tensor. Torch rips off the Parameter wrapper.
                     # You need to preserve the weight object to have all the attributes user
@@ -595,10 +580,8 @@ class _LayerNormLinear(torch.autograd.Function):
             # we need to connect them into one.
             # Restore the attributes grad_added_to_main_grad of weights
             if ctx.cpu_offloading or ctx.fine_grained_activation_offloading:
-                if ctx.has_grad_added_to_main_grad:
+                if ctx.grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
-                    if ctx.fine_grained_activation_offloading:
-                        origin_weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
                     origin_weight.main_grad = main_grad
 
