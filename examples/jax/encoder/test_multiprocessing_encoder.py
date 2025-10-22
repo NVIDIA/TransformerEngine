@@ -27,11 +27,13 @@ from common import (
     is_mxfp8_supported,
     is_nvfp4_supported,
     get_quantization_recipe_from_name_string,
+    hf_login_if_available,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 
+hf_login_if_available()
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
@@ -393,9 +395,9 @@ def train_and_evaluate(args):
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
         devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-    ) as mesh, te.fp8_autocast(
+    ) as mesh, te.autocast(
         enabled=args.use_fp8,
-        fp8_recipe=fp8_recipe,
+        recipe=fp8_recipe,
         mesh_resource=te.MeshResource(
             dp_resource=DEVICE_DP_AXIS,
             tpsp_resource=DEVICE_TP_AXIS,
@@ -413,7 +415,7 @@ def train_and_evaluate(args):
 
         # Create custom Flax logical axis rules for sharding.
         customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
-        # Extend the logical axis rules with TE's rules. This must be done inside fp8_autocast.
+        # Extend the logical axis rules with TE's rules. This must be done inside autocast.
         sharding_rules = te_flax.extend_logical_axis_rules(customized_rules)
 
         with flax.linen.logical_axis_rules(sharding_rules):
