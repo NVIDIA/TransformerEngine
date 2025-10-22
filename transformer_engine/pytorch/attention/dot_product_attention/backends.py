@@ -268,6 +268,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
 
+        # convert to sbhd
+        # training: bshd, thd
+        # inference: bshd, sbhd_2bshd, thd_2bshd
         if qkv_format == "bshd":
             # convert to sbhd and use sbhd implementation for now
             query_layer, key_layer, value_layer = [
@@ -287,7 +290,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
-
         if qkv_format == "thd":
             assert cu_seqlens_q is not None and cu_seqlens_kv is not None
             assert max_seqlen_q is not None and max_seqlen_kv is not None

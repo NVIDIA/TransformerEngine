@@ -262,7 +262,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                      max_score = max(S), where S = mask(Q*K^T*softmax_scale + bias) in shape [b, h, s_q, s_kv],
                      and max_score is in shape [h].
 
-
     Parallelism parameters
     ----------------------
     sequence_parallel : bool, default = `False`
