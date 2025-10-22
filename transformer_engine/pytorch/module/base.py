@@ -1395,10 +1395,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Note: Make sure weights have required usages, but do not
         # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
-            # In case of FSDP2, this will be an allgathered tensor, which can have
-            # different usage settings specified in its quantizer copy compared
-            # to the quantizer used for the original weight shard.
-            quantizer = tensor._quantizer
             update_rowwise_usage = True if quantizer.rowwise_usage else None
             update_columnwise_usage = True if quantizer.columnwise_usage else None
             tensor.update_usage(

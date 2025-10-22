@@ -351,8 +351,13 @@ class _LayerNormMLP(torch.autograd.Function):
             # No need to set the quantizer states if weights are already quantized
             if not isinstance(fc1_weight, QuantizedTensor):
                 fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            else:
+                fc1_weight_quantizer = fc1_weight._quantizer
             if not isinstance(fc2_weight, QuantizedTensor):
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            else:
+                fc2_weight_quantizer = fc2_weight._quantizer
+            
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,

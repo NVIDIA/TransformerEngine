@@ -284,7 +284,11 @@ class _LayerNormLinear(torch.autograd.Function):
             # No need to set the quantizer states if weight is already quantized
             if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-
+            if isinstance(weight, QuantizedTensor):
+                # In case of FSDP2, this will be an allgathered quantized tensor, which can have
+                # different usage settings specified in its quantizer copy compared
+                # to the quantizer used for the original weight shard.
+                weight_quantizer = weight._quantizer
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(

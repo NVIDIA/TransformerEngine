@@ -249,7 +249,11 @@ class _Linear(torch.autograd.Function):
                         and not in_fp8_activation_recompute_phase()
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-
+            if isinstance(weight, QuantizedTensor):
+                # In case of FSDP2, this will be an allgathered quantized tensor, which can have
+                # different usage settings specified in its quantizer copy compared
+                # to the quantizer used for the original weight shard.
+                weight_quantizer = weight._quantizer
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
