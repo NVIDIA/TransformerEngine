@@ -57,7 +57,7 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..quantization_base import (
+from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,

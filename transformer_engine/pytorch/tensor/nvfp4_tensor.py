@@ -22,7 +22,7 @@ from ..utils import (
 )
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
-from ..quantization_base import QuantizedTensor, Quantizer
+from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten

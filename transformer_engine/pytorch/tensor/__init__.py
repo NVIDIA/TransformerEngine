@@ -6,7 +6,7 @@
 
 import torch
 
-from ..quantization_base import (
+from ..quantized_tensor import (
     QuantizedTensorStorage,
     QuantizedTensor,
     Quantizer,

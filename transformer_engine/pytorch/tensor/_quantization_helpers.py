@@ -13,7 +13,7 @@ from typing import Callable, Optional, Tuple, Any, Dict, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from transformer_engine.pytorch.quantization_base import QuantizedTensor
+    from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 
 
 class _QuantizeFunc(torch.autograd.Function):
