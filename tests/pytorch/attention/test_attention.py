@@ -995,6 +995,8 @@ def _run_dot_product_attention(
             layout = layout.replace("d", "dqk")
         tensor_shape = [dim_to_num[j] for j in layout.split("_")]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        # tensor: with padding tokens
+        # tensor_orig: without padding tokens
         tensor_orig = tensor
         if qkv_format == "thd" and pad_between_seqs:
             tensor_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
