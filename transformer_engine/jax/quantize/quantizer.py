@@ -19,7 +19,7 @@ from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
-from .hadamard import apply_rht, should_use_rht
+from .hadamard import apply_rht
 from .tensor import (
     ScaledTensor,
     ScaledTensor1x,
@@ -590,11 +590,13 @@ class NVFP4Quantizer(Quantizer):
         q_layout: Quantization axis
         data_layout: Data layout string (default: "NT")
         stochastic_rounding_rng_state: RNG state for stochastic rounding, must be of shape (4,) and dtype uint32. If None, stochastic rounding is disabled.
+        use_rht: Whether to apply Randomized Hadamard Transform (RHT) before quantization.
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVFP4_1D_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
     data_layout: str = "NT"
+    use_rht: bool = False
     stochastic_rounding_rng_state: Optional[jnp.ndarray] = None
 
     def __post_init__(self):
@@ -602,6 +604,30 @@ class NVFP4Quantizer(Quantizer):
             self.q_dtype == jnp.float4_e2m1fn
         ), "NVFP4 quantization must use a q_dtype of float4_e2m1fn"
         assert self.scaling_mode.is_nvfp4_scaling, "NVFP4Quantizer must use NVFP4 scaling modes"
+
+    def tree_flatten(self):
+        """Flatten the quantizer for JAX tree operations.
+
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = (self.stochastic_rounding_rng_state,)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.use_rht)
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        """Reconstruct a quantizer from its flattened representation.
+
+        Args:
+            aux_data: Auxiliary data containing quantizer parameters
+            children: Unused children data
+
+        Returns:
+            A reconstructed Quantizer instance
+        """
+        stochastic_rounding_rng_state = children[0]
+        return cls(*aux_data, stochastic_rounding_rng_state=stochastic_rounding_rng_state)
 
     def _apply_stochastic_rounding(self, x):
         assert (
@@ -688,8 +714,9 @@ class NVFP4Quantizer(Quantizer):
             flatten_axis = x.ndim - flatten_axis
         x_shape = x.shape
 
-        if should_use_rht(self.scaling_mode, is_colwise=is_colwise):
-            # We only apply RHT for 1D colwise nvfp4
+        # We currently only have a single flag 'use_rht' on the quantizer. To avoid an unused rowwise flag, we assume RHT is only used for colwise quantization for now.
+        use_rht = self.use_rht and is_colwise and self.scaling_mode == ScalingMode.NVFP4_1D_SCALING
+        if use_rht:
             x = apply_rht(x)
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
@@ -790,6 +817,7 @@ class NVFP4Quantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=rowwise_flatten_axis,
+            has_rht_applied=use_rht,
         )
 
 

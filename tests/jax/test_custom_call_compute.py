@@ -40,7 +40,6 @@ from transformer_engine.jax.quantize import (
     QuantizerFactory,
     QuantizeLayout,
     noop_quantizer_set,
-    should_use_rht,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -685,21 +684,14 @@ class TestQuantize:
     Purely quantization related tests that will always test on a wider set of types and shapes
     """
 
-    def _skip_for_fp4(self, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
-        """Temporary hack to skip unsupported FP4 cases until we implement them"""
+    def _skip_unsupported_dtypes(self, q_dtype, scaling_mode):
+        """Skip unsupported dtypes for given scaling mode. For example, NVFP4 only supports the float4_e2m1 dtype not float8 dtypes."""
         if q_dtype not in scaling_mode.get_compatible_q_dtypes():
             pytest.skip(f"Quantize dtype {q_dtype} is not supported by {scaling_mode}")
             return
 
-        # HACK: FIXME TODO(jberchtold)
-        row = reduce(operator.mul, input_shape[flatten_axis:], 1)
-        col = reduce(operator.mul, input_shape[:flatten_axis], 1)
-        will_use_rht = should_use_rht(scaling_mode, q_layout=q_layout)
-        if will_use_rht and (row % 64 != 0 or col % 128 != 0):
-            pytest.skip("Unfused RHT is not supported currently, skipping")
-
     def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
-        self._skip_for_fp4(input_shape, q_dtype, scaling_mode, q_layout, flatten_axis)
+        self._skip_unsupported_dtypes(q_dtype, scaling_mode)
 
         key = jax.random.PRNGKey(0)
 
@@ -780,22 +772,8 @@ class TestQuantize:
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
     def _should_use_precise_comparison(
-        self, in_dtype, scaling_mode, q_layout, input_shape, flatten_axis
+        self, in_dtype, scaling_mode, quantizer, input_shape, flatten_axis
     ):
-        # TODO(jberchtold): Remove this hack once we have a better solution to ensure bitwise identical results between TE and JAX RHT+quant implementations. Currently for certain shapes the quantized fp4 data differs by a small amount on <0.5% of the values.
-        RHT_SLIGHT_MISMATCH_SHAPES = [
-            ((32, 256, 128), -1),
-            ((64, 32, 32, 256), -1),
-            ((8192, 2, 4096), -2),
-        ]
-
-        if (
-            should_use_rht(scaling_mode, q_layout=q_layout)
-            and (input_shape, flatten_axis) in RHT_SLIGHT_MISMATCH_SHAPES
-        ):
-            # TE fused RHT+quant and JAX RHT+quant have slight implementation differences which can lead to small numerical differences on certain shapes
-            return False
-
         if scaling_mode.is_nvfp4_scaling and in_dtype != jnp.bfloat16:
             # With NVFP4 scaling, TE kernels internally use bfloat16 so using a different input dtype can lead to small numerical differences compared to the JAX implementation
             return False
@@ -805,7 +783,7 @@ class TestQuantize:
     def test_quantize_bitwise(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
     ):
-        self._skip_for_fp4(input_shape, q_dtype, scaling_mode, q_layout, flatten_axis)
+        self._skip_unsupported_dtypes(q_dtype, scaling_mode)
 
         key = jax.random.PRNGKey(0)
         input = jax.random.uniform(key, input_shape, in_dtype)
@@ -816,28 +794,20 @@ class TestQuantize:
 
         jax_output = _jax_quantize(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        try:
-            te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
-        except AssertionError as e:
-            if should_use_rht(scaling_mode, q_layout=q_layout) and in_dtype != jnp.bfloat16:
-                error_message = e.args[0]
-                if "RHT requires input to be bfloat16" in error_message:
-                    # Successfully caught the expected error, early return from the test
-                    return
-            raise e
+        te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
 
         assert_bitwise_scaled_tensors(
             te_output,
             jax_output,
             precise_comparison=self._should_use_precise_comparison(
-                in_dtype, scaling_mode, q_layout, input_shape, flatten_axis
+                in_dtype, scaling_mode, te_quantizer, input_shape, flatten_axis
             ),
         )
 
     def test_quantize_bitwise_jitted(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
     ):
-        self._skip_for_fp4(input_shape, q_dtype, scaling_mode, q_layout, flatten_axis)
+        self._skip_unsupported_dtypes(q_dtype, scaling_mode)
 
         key = jax.random.PRNGKey(0)
         input = jax.random.uniform(key, input_shape, in_dtype)
@@ -851,21 +821,13 @@ class TestQuantize:
 
         jax_output = jax_impl_func_jit(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        try:
-            te_output = te_impl_func_jit(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
-        except AssertionError as e:
-            if should_use_rht(scaling_mode, q_layout=q_layout) and in_dtype != jnp.bfloat16:
-                error_message = e.args[0]
-                if "RHT requires input to be bfloat16" in error_message:
-                    # Successfully caught the expected error, early return from the test
-                    return
-            raise e
+        te_output = te_impl_func_jit(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
 
         assert_bitwise_scaled_tensors(
             te_output,
             jax_output,
             precise_comparison=self._should_use_precise_comparison(
-                in_dtype, scaling_mode, q_layout, input_shape, flatten_axis
+                in_dtype, scaling_mode, te_quantizer, input_shape, flatten_axis
             ),
         )
 
@@ -985,12 +947,6 @@ class TestStochasticRounding:
 
     def test_sr_nvfp4(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
         """Tests that the mean absolute error of stochastic rounding is smaller than round nearest quantization over multiple samples for both TE and JAX implementations. Asserts that the MAE of both implementations is close to each other."""
-        # HACK: FIXME TODO(jberchtold)
-        row = reduce(operator.mul, input_shape[flatten_axis:], 1)
-        col = reduce(operator.mul, input_shape[:flatten_axis], 1)
-        will_use_rht = should_use_rht(scaling_mode, q_layout=q_layout)
-        if will_use_rht and (row % 64 != 0 or col % 128 != 0):
-            pytest.skip("Unfused RHT is not supported currently, skipping")
 
         key = jax.random.PRNGKey(0)
         inputs = jax.random.uniform(key, input_shape, in_dtype)
@@ -1005,6 +961,97 @@ class TestStochasticRounding:
         )
 
         assert_allclose(te_mean_error, jax_mean_error, rtol=0.2, atol=1e-4)
+
+
+@pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
+@pytest_parametrize_wrapper("q_dtype", [jnp.float4_e2m1fn])
+@pytest_parametrize_wrapper(
+    "scaling_mode", [s for s in supported_scaling_modes if s == ScalingMode.NVFP4_1D_SCALING]
+)
+class TestRandomizedHadamardTransform:
+
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
+    )
+    @pytest_parametrize_wrapper("input_shape,flatten_axis", [((64, 128), -1)])
+    def test_rht_quantize_bitwise_jitted(
+        self, in_dtype, q_dtype, scaling_mode, q_layout, input_shape, flatten_axis
+    ):
+        key = jax.random.PRNGKey(0)
+        inputs = jax.random.uniform(key, input_shape, in_dtype)
+
+        te_quantizer, jax_quantizer = QuantizerFactory.create(
+            n_quantizers=2,
+            q_dtype=q_dtype,
+            scaling_mode=scaling_mode,
+            q_layout=q_layout,
+            use_rht=True,
+        )
+
+        jax_impl_func_jit = jax.jit(_jax_quantize, static_argnums=(2, 3))
+        te_impl_func_jit = jax.jit(tex.quantize, static_argnums=(2,))
+
+        jax_output = jax_impl_func_jit(inputs, quantizer=jax_quantizer, flatten_axis=flatten_axis)
+
+        te_output = te_impl_func_jit(inputs, quantizer=te_quantizer, flatten_axis=flatten_axis)
+
+        assert_bitwise_scaled_tensors(te_output, jax_output)
+
+    def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
+        if data_layout[0] == "T":
+            a = jnp.swapaxes(a, -1, -2)
+        if data_layout[1] == "T":
+            b = jnp.swapaxes(b, -1, -2)
+        return jnp.dot(a, b)
+
+    def _generate_gemm_input(self, m, n, k, data_layout):
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+        x = jax.random.uniform(
+            subkeys[0],
+            (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
+            dtype=jnp.bfloat16,
+        ) / jnp.sqrt(k)
+        w = jax.random.uniform(
+            subkeys[1],
+            (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
+            dtype=jnp.bfloat16,
+        ) / jnp.sqrt(n)
+        lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+        rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
+        contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+
+        return (x, w, contracting_dims)
+
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    # We do not test NN and TT layouts here as they do not have both inputs using RHT due to RHT only supporting the colwise layout currently
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT"])
+    @pytest_parametrize_wrapper("with_jax_gemm", [True, False])
+    def test_rht_gemm(self, in_dtype, q_dtype, scaling_mode, m, n, k, data_layout, with_jax_gemm):
+        key = jax.random.PRNGKey(0)
+
+        lhs_scaling_mode, rhs_scaling_mode = scaling_mode, scaling_mode
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
+        lhs_quantizer = QuantizerFactory.create(
+            scaling_mode=lhs_scaling_mode,
+            q_dtype=jnp.float4_e2m1fn,
+            use_rht=True,
+        )
+        rhs_quantizer = QuantizerFactory.create(
+            scaling_mode=rhs_scaling_mode,
+            q_dtype=jnp.float4_e2m1fn,
+            use_rht=True,
+        )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            primitive_out = tex.gemm(
+                x,
+                w,
+                contracting_dims=contracting_dims,
+                lhs_quantizer=lhs_quantizer,
+                rhs_quantizer=rhs_quantizer,
+            )
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
+        assert_allclose(primitive_out, ref_out, dtype=jnp.float4_e2m1fn)
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
