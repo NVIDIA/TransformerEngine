@@ -17,6 +17,7 @@
 
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>
+#include <cassert>
 #else
 // Importing C++ standard headers is a pain with NVRTC
 using uint8_t = unsigned char;
