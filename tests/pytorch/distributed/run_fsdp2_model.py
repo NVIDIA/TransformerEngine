@@ -110,8 +110,8 @@ def _train(args):
     # FP8 Configuration
     fp8_format = Format.HYBRID
     # fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
-    # fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
-    fp8_recipe = MXFP8BlockScaling(fp8_format=fp8_format)    
+    fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
+    # fp8_recipe = MXFP8BlockScaling(fp8_format=fp8_format)    
 
     build_model_context_args = {}
     if not args.fp8_init:

@@ -8,6 +8,7 @@ import os
 from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 import torch
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -735,7 +736,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             pass
         return super().__torch_dispatch__(func, types, args, kwargs)
 
-    def fsdp_pre_all_gather(self, mesh):
+    def fsdp_pre_all_gather(self, mesh,
+        orig_size,
+        contiguous_orig_stride,
+        module,
+        mp_policy):
         """Functions FSDP2 calls before all-gather of the
         weights for both forward and backward passes.
         Args:
@@ -762,9 +767,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             quantizer.with_amax_reduction = True
         # Transpose is needed at all for Blackwell+
         tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
-        # Import here to avoid circular imports
-        from ..fp8 import FP8GlobalStateManager
-        is_forward_pass = FP8GlobalStateManager.is_fp8_enabled()
+        is_forward_pass = module._get_fsdp_state()._training_state == TrainingState.FORWARD
         transpose_needed = tensor_has_transpose and not is_forward_pass
         quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
@@ -798,7 +801,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         orig_shape = data.size()
         
         # Quantizer has only columnwise usage set for backward pass
-        # and only rowwise usage set for forward pass.
+        # with pre-hopper architectures.
         if quantizer.columnwise_usage:
             permute_dims = [data.dim() - 1] + list(range(data.dim() - 1))
             transpose = data.permute(*permute_dims).contiguous()

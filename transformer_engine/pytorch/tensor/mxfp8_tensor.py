@@ -11,13 +11,13 @@ from typing import Optional, Tuple, Union, Any
 import warnings
 
 import torch
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
-
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from .quantized_tensor import (
     QuantizedTensor,
@@ -501,7 +501,11 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 
-    def fsdp_pre_all_gather(self, mesh):
+    def fsdp_pre_all_gather(self, mesh,
+        orig_size,
+        contiguous_orig_stride,
+        module,
+        mp_policy):
         """Functions FSDP2 calls before all-gather of the
         weights for both forward and backward passes.
         Args:
@@ -514,9 +518,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             MXFP8Tensor after all-gather.
         """
-        # Import here to avoid circular imports
-        from ..fp8 import FP8GlobalStateManager
-        is_forward_pass = FP8GlobalStateManager.is_fp8_enabled()
+        is_forward_pass = module._get_fsdp_state()._training_state == TrainingState.FORWARD
         # sharded tensors should still have both rowwise and columnwise data
         # if needed. Only the allgathered tensors need one usage to be set.
         # Hence need to create a copy of quantizer for the allgathered tensor
