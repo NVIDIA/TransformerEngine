@@ -145,15 +145,25 @@ if __name__ == "__main__":
         )
     ]
 
+    # Setup version and requirements.
+    # Having the framework extension depend on the core lib allows
+    # us to detect CUDA version dynamically during compilation and
+    # choose the correct wheel for te core lib.
+    __version__ = te_version()
+    cuda_major_version = parse(torch.version.cuda).major
+    assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
+    te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
+    install_requires = install_requirements() + [te_core]
+
     # Configure package
     setuptools.setup(
         name=PACKAGE_NAME,
-        version=te_version(),
+        version=__version__,
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
         python_requires=f">={min_python_version_str()}",
-        install_requires=install_requirements(),
+        install_requires=install_requires,
         tests_require=test_requirements(),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

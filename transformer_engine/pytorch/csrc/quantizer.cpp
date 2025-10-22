@@ -1200,6 +1200,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+    // nvte_compute_amax_with_config will zero out the pointer if needed
     amax_rowwise = at::empty({1}, bit32_tensor_opts);
   }
   if (columnwise_usage) {
@@ -1213,6 +1215,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), bit8_tensor_opts);
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+    // nvte_compute_amax_with_config will zero out the pointer if needed
     amax_columnwise = at::empty({1}, bit32_tensor_opts);
   }
 
@@ -1352,6 +1356,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_rowwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+      // nvte_compute_amax_with_config will zero out the pointer if needed
       amax_rowwise = at::empty({1}, opts);
       tensor.attr("_amax_rowwise") = *amax_rowwise;
     }
@@ -1392,7 +1398,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_columnwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-      amax_columnwise = at::zeros({1}, opts);
+      // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
+      // nvte_compute_amax_with_config will zero out the pointer if needed
+      amax_columnwise = at::empty({1}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
     }
   } else {  // columnwise_usage == false

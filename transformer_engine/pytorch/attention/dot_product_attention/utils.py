@@ -115,7 +115,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.1")
+    max_version = PkgVersion("2.8.3")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -983,7 +983,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-        if is_training and device_compute_capability >= (10, 0) and cudnn_version <= (9, 14, 0):
+        if is_training and device_compute_capability >= (10, 0):
             logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
             use_fused_attention = False
             fused_attention_backend = None
