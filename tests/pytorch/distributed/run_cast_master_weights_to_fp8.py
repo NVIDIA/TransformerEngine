@@ -27,7 +27,7 @@ from transformer_engine.pytorch import (
     Float8BlockwiseQTensor,
 )
 from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
-from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
 
 
 def _get_raw_data(quantized_tensor):
@@ -203,12 +203,15 @@ class MiniZero_1:
         # -----------------------------------------------------------------------------------------
         # Step 7: Copy the gathered weights from weight buffer to the actual weights
         # -----------------------------------------------------------------------------------------
+        quantized_weights = []
         for weight, offset in zip(self.weights, self.offsets[:-1]):
             start = offset
             end = offset + weight.numel()
             if isinstance(weight, QuantizedTensor):
+                quantized_weights.append(weight)
                 weight = _get_raw_data(weight)
             weight.view(-1).data.copy_(self.weight_buffer[start:end])
+        post_all_gather_processing(quantized_weights)
 
 
 class MiniOptimizer:
@@ -252,10 +255,6 @@ class MiniFSDP:
         self.dp_group = dp_group
 
         # Flatten the weights and pad to align with world size
-        raw_data_list = [
-            _get_raw_data(w).view(-1) if isinstance(w, QuantizedTensor) else w.view(-1)
-            for w in weights
-        ]
         if isinstance(weights[0], QuantizedTensor):
             raw_data_list = [_get_raw_data(w).view(-1) for w in weights]
         else:
@@ -264,7 +263,9 @@ class MiniFSDP:
 
         # Split flattened weights into shards
         self.local_weight_shard = torch.chunk(self.flatten_weight, world_size)[rank]
-        self.local_main_grad_shard = torch.zeros_like(self.local_weight_shard)
+        self.local_main_grad_shard = torch.zeros_like(
+            self.local_weight_shard, dtype=torch.float32, device="cuda"
+        )
         shard_size = self.flatten_weight.size(0) // world_size
 
         # Map original tensors to flattened indices
@@ -341,9 +342,8 @@ class MiniFSDP:
 
         padding_needed = (world_size - original_length % world_size) % world_size
         if padding_needed > 0:
-            flatten_tensor = torch.cat(
-                [flatten_tensor, torch.zeros(padding_needed, dtype=flatten_tensor.dtype)]
-            )
+            zeros = torch.zeros(padding_needed, dtype=flatten_tensor.dtype, device="cuda")
+            flatten_tensor = torch.cat([flatten_tensor, zeros])
 
         return flatten_tensor, original_length
 
@@ -369,10 +369,10 @@ class MiniFSDP:
         main_grad_buffer, _ = self._flatten_tensors_with_pad(
             [weight.main_grad.view(-1) for weight in self.weights]
         )
-        main_grad_buffer = main_grad_buffer.to(self.local_main_grad_shard.dtype)
         dist.reduce_scatter_tensor(
             self.local_main_grad_shard, main_grad_buffer, group=self.dp_group
         )
+        self.local_main_grad_shard /= dist.get_world_size(self.dp_group)
 
         # Step 2: Update the master weights
         for weight, master_weight, (shard_start, shard_end) in zip(
@@ -416,6 +416,11 @@ class MiniFSDP:
         dist.all_gather_into_tensor(
             self.flatten_weight, self.local_weight_shard, group=self.dp_group
         )
+        quantized_weights = []
+        for weight in self.weights:
+            if isinstance(weight, QuantizedTensor):
+                quantized_weights.append(weight)
+        post_all_gather_processing(quantized_weights)
 
 
 def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
@@ -435,7 +440,7 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
     linear_kwargs = {
         "params_dtype": torch.bfloat16,
         "bias": False,
-        "fuse_wgrad_accumulation": False,
+        "fuse_wgrad_accumulation": True,
     }
 
     # Create model with FP8 weights
@@ -503,14 +508,9 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
 
         torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
 
-    print(
-        f"✅ Successfully validated FSDP {NUM_STEPS} training steps with"
-        f" {quantization} quantization"
-    )
 
-
-def _test_zero_1(dp_group):
-    """Make sure the implementation of zero-1 optimizer is correct"""
+def _test_mini_optimizer(dp_group):
+    """Make sure the implementation of MiniZero_1 and MiniFSDP is correct"""
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
@@ -525,13 +525,15 @@ def _test_zero_1(dp_group):
 
     weights_1 = weights
     weights_2 = [weight.clone() for weight in weights]
+    weights_3 = [weight.clone() for weight in weights]
 
     lr = 1.0
     optimizer_1 = MiniZero_1(weights_1, lr, dp_group)
     optimizer_2 = MiniOptimizer(weights_2, lr, dp_group)
+    optimizer_3 = MiniFSDP(weights_3, lr, dp_group)
 
     for _ in range(100):
-        for w1, w2 in zip(weights_1, weights_2):
+        for w1, w2, w3 in zip(weights_1, weights_2, weights_3):
             main_grads = [
                 torch.randn_like(w1, dtype=torch.float32, device="cuda") for _ in range(world_size)
             ]
@@ -539,12 +541,16 @@ def _test_zero_1(dp_group):
             main_grad = main_grads[rank]
             w1.main_grad = main_grad
             w2.main_grad = main_grad
+            w3.main_grad = main_grad
 
         optimizer_1.step()
         optimizer_2.step()
+        optimizer_3.step()
 
         for w1, w2 in zip(weights_1, weights_2):
             torch.testing.assert_close(w1, w2, atol=0, rtol=0)
+        for w1, w3 in zip(weights_1, weights_3):
+            torch.testing.assert_close(w1, w3, atol=0, rtol=0)
 
 
 def quantization_recipe(quantization) -> Recipe:
@@ -671,7 +677,7 @@ def main(argv=None, namespace=None):
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")
-    _test_zero_1(dp_group)
+    _test_mini_optimizer(dp_group)
     _test_cast_master_weights_to_fp8(args.quantization, dp_group)
     _test_fsdp_cast_master_weights_to_fp8(args.quantization, dp_group)
 
