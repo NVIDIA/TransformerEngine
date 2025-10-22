@@ -615,9 +615,7 @@ def get_attention_backend(
     # Filter: QKV layout
     if qkv_format == "thd":
         if use_unfused_attention:
-            logger.debug(
-                "Disabling UnfusedDotProductAttention for qkv_format = thd"
-            )
+            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
         if pad_between_seqs:
             if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
