@@ -17,6 +17,7 @@ from types import MethodType
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
@@ -1243,21 +1244,39 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         metedata used in deferred initialization.
         """
         super().register_parameter(name, param)
-        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+        # Initialize param_init_meta exactly once during the init. FSDP2 can call 
+        # register parameter again to change parameters to DTensors. And it calls
+        # it without custom fp8 specific kwargs that we need. And so we dont want
+        # our fp8 init attributes. 
+        if hasattr(self, "param_init_meta") and name not in self.param_init_meta:
+            self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
     def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
         """
         Reset all module parameters to initial values. Unless deferred initialization
-        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        is specified, all parameters on a 'meta' device are also param_to_update on a real cuda
         device before the values are reset to initial.
         """
         if defer_init:
             return
 
         for name, param in self.named_parameters(recurse=False):
+            # Check if parameter is a DTensor (FSDP2) or regular tensor
+            is_dtensor = isinstance(param, DTensor)
+            dtensor_param = param if is_dtensor else None
+            # Need to update/quantize local tensor in case of DTensor
+            param = param._local_tensor if is_dtensor else param
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
                 param = torch.empty_like(param, device="cuda")
+                if is_dtensor:
+                    dtensor_param = DTensor.from_local(
+                        param,
+                        device_mesh=dtensor_param.device_mesh,
+                        placements=dtensor_param.placements,
+                        shape=dtensor_param.size(),
+                        stride=dtensor_param.stride(),
+                    )
 
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
@@ -1295,7 +1314,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            param = torch.nn.Parameter(param)
+            if is_dtensor:
+                dtensor_param._local_tensor = param
+                dtensor_param = torch.nn.Parameter(dtensor_param)
+            else:
+                param = torch.nn.Parameter(param)
 
             # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
@@ -1323,8 +1346,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param._high_precision_init_val = high_precision_init_val
                 param.get_high_precision_init_val = MethodType(get, param)
                 param.clear_high_precision_init_val = MethodType(clear, param)
+                        # Update the parameter based on its type
 
-            setattr(self, name, param)
+            setattr(self, name, param) if not is_dtensor else setattr(self, name, dtensor_param)
 
     @abstractmethod
     def forward(self):
@@ -1371,6 +1395,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Note: Make sure weights have required usages, but do not
         # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
+            # In case of FSDP2, this will be an allgathered tensor, which can have
+            # different usage settings specified in its quantizer copy compared
+            # to the quantizer used for the original weight shard.
             quantizer = tensor._quantizer
             update_rowwise_usage = True if quantizer.rowwise_usage else None
             update_columnwise_usage = True if quantizer.columnwise_usage else None

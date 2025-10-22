@@ -748,6 +748,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
+        # sharded tensors should still have both data and transpose
+        # if needed(Hopp). Only the allgathered tensors need exactly one usage to be set.
+        # Hence need to create a copy of quantizer for the allgathered tensor
+        # which will be set in the maxfp8 tensor post-allgather.
         quantizer = self._quantizer.copy()
         if isinstance(quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
@@ -756,10 +760,15 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             quantizer.amax_reduction_group = mesh.get_group()
             quantizer.with_amax_reduction = True
-        is_transpose_needed = not self._transpose_invalid and self._transpose is not None
-        quantizer.set_usage(rowwise=not is_transpose_needed, columnwise=is_transpose_needed)
+        # Transpose is needed at all for Blackwell+
+        tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
+        # Import here to avoid circular imports
+        from ..fp8 import FP8GlobalStateManager
+        is_forward_pass = FP8GlobalStateManager.is_fp8_enabled()
+        transpose_needed = tensor_has_transpose and not is_forward_pass
+        quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
-        metadata = (self._scale_inv, self._fp8_dtype, self.dtype, quantizer, is_transpose_needed)
+        metadata = (self._scale_inv, self._fp8_dtype, quantizer)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -781,43 +790,42 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
         Returns:
             Tuple[Float8Tensor, Tuple[torch.Tensor, ...]]: Allgathered Float8Tensor and tuple of internal tensors
-            used by the Float8Tensor that was actually allgathered
+            used by the Float8Tensor that was being computed after allgather.
         """
-        # Import here to avoid circular imports
-        from ..fp8 import FP8GlobalStateManager
-        # Detect if we're within fp8_autocast scope. We'll be in 
-        # forward pass when within the fp8_autocast scope. Backward
-        # pass when outside of the fp8_autocast scope.
-        is_in_fp8_autocast = FP8GlobalStateManager.is_fp8_enabled()
-        # print("is_in_fp8_autocast:", is_in_fp8_autocast)
+
         (data, ) = all_gather_outputs
-        (fp8_scale_inv, fp8_dtype, fake_dtype, quantizer, is_transpose_needed) = metadata
+        (fp8_scale_inv, fp8_dtype, quantizer) = metadata
         orig_shape = data.size()
-        if not is_in_fp8_autocast:
-            # If backward, we need transposed data after weight allgather
-            # to compute the gradients.
+        
+        # Quantizer has only columnwise usage set for backward pass
+        # and only rowwise usage set for forward pass.
+        if quantizer.columnwise_usage:
             permute_dims = [data.dim() - 1] + list(range(data.dim() - 1))
-            data = data.permute(*permute_dims).contiguous()
+            transpose = data.permute(*permute_dims).contiguous()
+            data = None
+        else:
+            transpose = None
+            
         if out is not None:
-            if is_in_fp8_autocast or not is_transpose_needed:
-                out._data = data
-                out.update_usage(rowwise_usage=True, columnwise_usage=False)
-            else:
-                out._transpose = data
-                out._transpose_invalid = False
-                out.update_usage(rowwise_usage=False, columnwise_usage=True)
+            out._data = data
+            out._transpose = transpose
+            out._transpose_invalid = not quantizer.columnwise_usage
+            out.update_usage(
+                rowwise_usage=quantizer.rowwise_usage,
+                columnwise_usage=quantizer.columnwise_usage,
+            )
             return
+
         fp8_args = {"shape": orig_shape,
-                  "dtype": fake_dtype,
+                  "dtype": param_dtype,
                   "fp8_scale_inv": fp8_scale_inv,
                   "fp8_dtype": fp8_dtype,
                   "quantizer": quantizer,
                   "requires_grad": False,
-                  "data": None,
-                  "data_transpose": None,
+                  "data": data,
+                  "data_transpose": transpose,
                   }
-        fp8_args.update({"data" if is_in_fp8_autocast else "data_transpose": data})
-        return Float8Tensor(**fp8_args), (data, )
+        return Float8Tensor(**fp8_args), (data if quantizer.rowwise_usage else transpose, )
 
     @classmethod
     def _make_in_reduce_ex(

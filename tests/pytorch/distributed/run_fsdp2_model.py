@@ -23,10 +23,10 @@ from contextlib import nullcontext
 
 
 class SimpleNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size, output_size, device="cuda"):
         super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size)
-        self.fc2 = te.Linear(hidden_size, output_size)
+        self.fc1 = te.Linear(input_size, hidden_size, device=device)
+        self.fc2 = te.Linear(hidden_size, output_size, device=device)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -53,7 +53,6 @@ def restore_custom_attrs(module, custom_attrs):
         if name in custom_attrs:
             for attr_name, attr_value in custom_attrs[name].items():
                 setattr(param, attr_name, attr_value)
-
 
 def _parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(description="Toy example for debugging fully_shard()")
@@ -123,19 +122,23 @@ def _train(args):
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
-    # Move the model to the correct device
-    # Build the model with the specified context
-    with build_model_context(**build_model_context_args):
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
-    model.to(device)
 
     if LOCAL_RANK == 0:
+        print("Memory before model init:", torch.cuda.memory_allocated(device)/1e6, "MB")  
+    # Create the model on meta device for deferred initialization
+    with build_model_context(**build_model_context_args):
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, device="meta")
+    if LOCAL_RANK == 0:
+        print("Memory before FSDP:", torch.cuda.memory_allocated(device)/1e6, "MB")
+    if LOCAL_RANK == 0:
+        print(f"Rank {LOCAL_RANK}: Model created on meta device...")
         print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
     # Creating a DeviceMesh for fully_shard
     world_size = int(WORLD_SIZE)
     device_ids = list(range(world_size))
     if LOCAL_RANK == 0:
         print(f"sharding-dims:{args.sharding_dims}")
+        
     # Setup the sharding mesh for FSDP/HSDP
     if args.sharding_dims == None:  # FSDP
         mesh = DeviceMesh("cuda", device_ids)
@@ -151,7 +154,9 @@ def _train(args):
         )
     else:
         assert False
-    # Apply FSDP/HSDP
+        
+    # Apply FSDP/HSDP on meta device first
+    # FSDP will create sharded parameters that are still on meta device
     custom_attrs = save_custom_attrs(model)
     for sub_module in model.modules():
         if any(
@@ -160,6 +165,21 @@ def _train(args):
             fully_shard(sub_module, mesh=mesh)
     fully_shard(model, mesh=mesh)
     restore_custom_attrs(model, custom_attrs)
+
+    if LOCAL_RANK == 0:
+        print(f"Rank {LOCAL_RANK}: FSDP applied, now materializing sharded parameters...")
+        print("Memory after FSDP:", torch.cuda.memory_allocated(device)/1e6, "MB")
+
+    # After FSDP has been applied, materialize and initialize the sharded parameters
+    # TransformerEngine's reset_parameters() now properly handles DTensors and FP8 initialization
+    for module in model.modules():
+        if hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
+
+    if LOCAL_RANK == 0:
+        print(f"Rank {LOCAL_RANK}: Sharded parameters materialized and initialized.")
+        print("Memory after materialization:", torch.cuda.memory_allocated(device)/1e6, "MB")
+
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for iteration in range(args.iter):

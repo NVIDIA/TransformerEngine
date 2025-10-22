@@ -1,3 +1,4 @@
+
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 from typing import Optional, Tuple, Union, Any
+import warnings
 
 import torch
 import transformer_engine_torch as tex
@@ -514,16 +516,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         # Import here to avoid circular imports
         from ..fp8 import FP8GlobalStateManager
-        # Detect if we're within fp8_autocast scope. We ll be in 
-        # forward pass when within the fp8_autocast scope. Backward
-        # pass when outside of the fp8_autocast scope.
-        is_in_fp8_autocast = FP8GlobalStateManager.is_fp8_enabled()
-        is_data_rowwise = is_in_fp8_autocast
+        is_forward_pass = FP8GlobalStateManager.is_fp8_enabled()
+        # sharded tensors should still have both rowwise and columnwise data
+        # if needed. Only the allgathered tensors need one usage to be set.
+        # Hence need to create a copy of quantizer for the allgathered tensor
+        # which will be set in the mxfp8 tensor post-allgather.
         quantizer = self._quantizer.copy()
-        quantizer.set_usage(rowwise=is_data_rowwise, columnwise=not is_data_rowwise)
-        sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv) if is_data_rowwise \
+        quantizer.set_usage(rowwise=is_forward_pass, columnwise=not is_forward_pass)
+        sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv) if is_forward_pass \
             else (self._columnwise_data, self._columnwise_scale_inv)
-        metadata = (self._fp8_dtype, self.dtype, quantizer, is_data_rowwise)
+        metadata = (self._fp8_dtype, quantizer)
         return sharded_tensors, metadata
     
     def fsdp_post_all_gather(
@@ -535,11 +537,11 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         out: Optional[torch.Tensor] = None,
     ):
         data, scale_inv = all_gather_outputs
-        fp8_dtype, dtype, quantizer, is_data_rowwise = metadata
-        rowwise_data = data if is_data_rowwise else None
-        rowwise_scale_inv = scale_inv if is_data_rowwise else None
-        columnwise_data = data if not is_data_rowwise else None
-        columnwise_scale_inv = scale_inv if not is_data_rowwise else None
+        fp8_dtype, quantizer = metadata
+        rowwise_data = data if quantizer.rowwise_usage else None
+        rowwise_scale_inv = scale_inv if quantizer.rowwise_usage else None
+        columnwise_data = data if quantizer.columnwise_usage else None
+        columnwise_scale_inv = scale_inv if quantizer.columnwise_usage else None
         if out is not None:
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv
@@ -554,7 +556,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=fp8_dtype,
-            dtype=dtype,
+            dtype=param_dtype,
             shape=rowwise_data.shape,
             quantizer=quantizer,
         ), all_gather_outputs
@@ -696,12 +698,11 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != ctx.shape[-1]:
-            print(
-                "MXFP8Tensor does not support reshaping inner dimension "
+            warnings.warn(
+                "MXFP8Tensor does not support reshaping inner dimension."
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                "If you are using this for FSDP2, then ignore this warning."
             )
-            # new_tensor = tensor.clone()
-            # new_tensor.shape = shape
             return tensor.detach()
 
         # Construct new tensor if shape is provided
