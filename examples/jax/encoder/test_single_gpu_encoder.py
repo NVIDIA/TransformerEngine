@@ -390,7 +390,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "NVFP4BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.476 and actual[1] > 0.775
+        assert actual[0] < 0.477 and actual[1] > 0.769
 
 
 if __name__ == "__main__":

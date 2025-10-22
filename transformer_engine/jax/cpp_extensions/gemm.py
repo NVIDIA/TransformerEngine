@@ -44,7 +44,6 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    should_use_rht,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
@@ -169,16 +168,13 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     assert not isinstance(lhs_q, ScaledTensor2x)
     assert not isinstance(rhs_q, ScaledTensor2x)
 
-    def uses_rht(q: AbstractBaseTensor) -> bool:
-        return isinstance(q, ScaledTensor1x) and should_use_rht(
-            q.scaling_mode, is_colwise=q.is_colwise
-        )
+    def has_rht_applied(q: AbstractBaseTensor) -> bool:
+        return isinstance(q, ScaledTensor1x) and q.has_rht_applied
 
-    # TODO(jberchtold): Move RHT usage check to a bool flag on the ScaledTensor class
-    assert uses_rht(lhs_q) == uses_rht(rhs_q), (
-        "With NVFP4_1D_SCALING, if one operand is colwise quantized, the other must be colwise"
-        " quantized as well. This is to ensure the RHT is applied to both and will cancel out in"
-        " the GEMM."
+    assert has_rht_applied(lhs_q) == has_rht_applied(rhs_q), (
+        "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be quantized"
+        " with RHT as well. This is to ensure the RHT is applied to both and will cancel out in the"
+        " GEMM."
     )
 
     return lhs_q, rhs_q
