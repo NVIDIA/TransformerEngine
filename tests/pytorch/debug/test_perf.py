@@ -6,71 +6,70 @@
 import pytest
 import torch
 import transformer_engine.pytorch as te
-import time
 
 import nvdlfw_inspect.api as debug_api
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
-def _run_cpu_overhead(debug_tools_initialized, layer, configs_dir, feature_dirs):
-    debug_api.end_debug()
-    TEDebugState._reset()
-    if debug_tools_initialized:
-        # This config log stats starting from 0, every N iterations for huge N >> NUM_ITERS.
-        # So after 1 warm-up iteration, this layers should work in non-debug mode.
-        debug_api.initialize(
-            config_file=configs_dir + "/perf_config.yaml", feature_dirs=feature_dirs
-        )
+@pytest.mark.parametrize("use_microbatching", [False, True])
+def test_layer_switches_to_nondebug_mode(configs_dir, feature_dirs, use_microbatching):
+    """
+    Test that layers switch to non-debug mode when no features are active.
+
+    Uses TestDummyFeature with inspect_only_once=True, which makes inspect_tensor_enabled return (False, None).
+    The TE should:
+    1. Call inspect_tensor_enabled to check if feature is needed
+    2. Never call inspect_tensor
+    3. Allow layers to switch to non-debug mode for optimal performance,
+       so that inspect_tensor_enabled is never called again.
+
+    Tests both with and without microbatching to ensure proper behavior in both scenarios.
+    """
 
     try:
-        if layer == "linear":
-            model = torch.nn.Sequential(
-                te.Linear(1, 1, name="linear1"), te.Linear(1, 1, name="linear2")
-            ).cuda()
-            NUM_ITERS = 18000
-        elif layer == "transformer":
-            model = torch.nn.Sequential(
-                te.TransformerLayer(1, 1, 1, name="transformer1"),
-                te.TransformerLayer(1, 1, 1, name="transformer2"),
-            ).cuda()
-            NUM_ITERS = 2000
+        debug_api.initialize(
+            config_file=configs_dir + "/test_switch_to_nondebug_mode.yaml",
+            feature_dirs=feature_dirs,
+        )
+        import transformer_engine.debug.features._test_dummy_feature as dummy_feature
 
-        x = torch.randn(1, 1, 1).cuda()
+        # Reset counters
+        dummy_feature._inspect_tensor_enabled_call_count = 0
+        dummy_feature._inspect_tensor_call_count = 0
 
-        y = model(x)
-        y.sum().backward()
-        debug_api.step()
-        torch.cuda.synchronize()
+        model = te.Linear(256, 256, name="test_linear").cuda()
+        x = torch.randn(8, 256, 256).cuda()
 
-        time_start = time.time()
-        for i in range(NUM_ITERS):
-            y = model(x)
+        # Run multiple iterations
+        for i in range(20):
+            if use_microbatching:
+                # Alternate between first and non-first microbatch
+                is_first_microbatch = i % 2 == 0
+                y = model(x, is_first_microbatch=is_first_microbatch)
+            else:
+                # Run without specifying is_first_microbatch
+                y = model(x)
             y.sum().backward()
-            if debug_tools_initialized:
-                debug_api.step()
-        torch.cuda.synchronize()
-        time_end = time.time()
+            debug_api.step()
+
+        # Verify inspect_tensor_enabled was called only once per tensor
+        # (activation, weight, gradient, output, wgrad, dgrad)
+        enabled_call_count = dummy_feature._inspect_tensor_enabled_call_count
+        microbatch_info = "with microbatching" if use_microbatching else "without microbatching"
+        assert enabled_call_count == 6, (
+            f"inspect_tensor_enabled was called {enabled_call_count} times ({microbatch_info}), "
+            "but should be called 6 times to check if feature is needed for each tensor "
+            "(activation, weight, gradient, output, wgrad, dgrad)"
+        )
+
+        # Verify inspect_tensor was never called - it should not be called if inspect_tensor_enabled returns (False, None)
+        inspect_call_count = dummy_feature._inspect_tensor_call_count
+        assert inspect_call_count == 0, (
+            f"inspect_tensor was called {inspect_call_count} times ({microbatch_info}), "
+            "but should never be called when inspect_tensor_enabled returns (False, None)"
+        )
 
     finally:
-        if debug_tools_initialized:
-            debug_api.end_debug()
-
-    return time_end - time_start
-
-
-@pytest.mark.parametrize("layer", ["linear", "transformer"])
-def test_cpu_overhead(layer, configs_dir, feature_dirs):
-    # runs one layer many times on very small tensor
-    # - gpu time should be negligible, so time should be dominated by cpu time.
-    # if layers does not invoke any feature in current iteration,
-    # then it changed into non-debug mode and should not have any non-negligible cpu overhead
-    # compared to layer without debug tools initialized.
-
-    with_debug_tools = _run_cpu_overhead(True, layer, configs_dir, feature_dirs)
-    without_debug_tools = _run_cpu_overhead(False, layer, configs_dir, feature_dirs)
-
-    print(f"with_debug_tools: {with_debug_tools} s")
-    print(f"without_debug_tools: {without_debug_tools} s")
-
-    assert with_debug_tools < without_debug_tools * 1.25  # 25% overhead margin
+        debug_api.end_debug()
+        TEDebugState._reset()
