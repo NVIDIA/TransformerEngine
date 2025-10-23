@@ -11,10 +11,10 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ..tensor.utils import is_experimental
-from ..experimental.gemm import experimental_gemm
+from ..tensor.utils import is_custom
+from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
@@ -79,9 +79,9 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
-    # If A or B are experimental tensors -> dispatch to quantizers's qgemm implementation
-    if is_experimental(A) or is_experimental(B):
-        return experimental_gemm(
+    # If A or B are custom tensors -> dispatch to quantizers's qgemm implementation
+    if is_custom(A) or is_custom(B):
+        return custom_gemm(
             A,
             B,
             workspace,

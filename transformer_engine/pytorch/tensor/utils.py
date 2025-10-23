@@ -4,13 +4,13 @@
 
 """Helper functions for using fp8 tensors as weights"""
 
-import os
-from typing import Optional, List, Union
+from typing import Optional, Union, List
 import torch
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
-from .quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
+from ..quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
@@ -459,18 +459,13 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 
 
-def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
-    """Check if an environment or object is using experimental Kitchen middleware.
+def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
+    """Check if an object is custom.
 
     Returns False if x is a torch.Tensor.
     """
-    # Detect if the environment is experimental
-    if x is None:
-        return int(os.getenv("QAT_PARAMS", "0")) > 0
-
-    # Detect if the object is experimental
-    if isinstance(x, torch.Tensor):
+    if x is None or isinstance(x, torch.Tensor):
         return False
     if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
         raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")
-    return hasattr(x, "experimental") and x.experimental
+    return hasattr(x, "custom") and x.custom

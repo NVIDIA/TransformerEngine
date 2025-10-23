@@ -21,7 +21,7 @@ from ...module.base import (
     get_ub,
     get_workspace,
 )
-from ...tensor.quantized_tensor import Quantizer
+from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter

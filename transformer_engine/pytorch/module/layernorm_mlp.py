@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.tensor.utils import is_experimental
+from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_workspace,
@@ -70,7 +70,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ..tensor.quantized_tensor import (
+from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -268,13 +268,13 @@ class _LayerNormMLP(torch.autograd.Function):
         #                              high precision layernorm output and output of the linear are returned
         # for debug: : layernorm output = High precision to enable processing of this norm
 
-        experimental = is_experimental(fc1_input_quantizer)
+        custom = is_custom(fc1_input_quantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not experimental
+            and not custom
         )
 
         # Apply normalization
@@ -314,8 +314,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if fp8 or debug:
                     quantizer = fc1_input_quantizer
-                    # experimental recipe doesn't need to support quantized AG
-                    if not with_quantized_norm and not experimental:
+                    # custom recipe doesn't need to support quantized AG
+                    if not with_quantized_norm and not custom:
                         ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
