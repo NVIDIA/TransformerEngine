@@ -103,7 +103,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         self,
         aux_dict: Dict,
         quantized_tensor: QuantizedTensor,
-        quantizer: Quantizer,
+        quantizer: Quantizer,  # pylint: disable=unused-argument
         original_tensor: torch.Tensor,
     ):
         """

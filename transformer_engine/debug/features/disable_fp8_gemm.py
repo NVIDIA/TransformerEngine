@@ -45,5 +45,3 @@ class DisableFP8GEMM(DisableQuantizationGEMM):
                     enabled: True
                     gemms: [dgrad, wgrad]
     """
-
-    pass  # Inherits all functionality from DisableQuantizationGEMM

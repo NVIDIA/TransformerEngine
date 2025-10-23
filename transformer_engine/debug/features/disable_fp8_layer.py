@@ -34,5 +34,3 @@ class DisableFP8Layer(DisableQuantizationLayer):
                 DisableFP8Layer:  # Deprecated: use DisableQuantizationLayer
                     enabled: True
     """
-
-    pass  # Inherits all functionality from DisableQuantizationLayer

@@ -9,12 +9,13 @@ from contextlib import contextmanager
 
 import torch
 import nvdlfw_inspect.api as debug_api
-
+import transformer_engine_torch as tex
 
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
+from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
@@ -23,8 +24,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
-import transformer_engine_torch as tex
-
 try:
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
@@ -32,8 +31,6 @@ try:
 except ImportError:
     _nvfp4_available = False
     NVFP4Quantizer = None
-
-from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
