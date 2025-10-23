@@ -19,6 +19,7 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
+
 @Registry.register_feature(namespace="transformer_engine")
 class LogNvfp4TensorStats(BaseLogTensorStats):
     """Logs statistics of NVFP4 quantized tensors.
