@@ -2948,7 +2948,7 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnStripedFwdPrimitive.outer_primitive
             else:
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
-
+    print(f"qkv_for_primitive: \n {qkv_for_primitive}")
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,

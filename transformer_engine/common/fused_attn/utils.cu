@@ -428,6 +428,14 @@ __device__ void cu_seqlens_padded_to_offsets_impl(
     OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   auto cu_seqlens_id = min(tid, actual_b);
+  if (tid == 0) {
+    printf("actual_b: %lld \n", (long long int)actual_b);
+    printf("max_b: %lld \n", (long long int)max_b);
+    printf("h: %lld \n", (long long int)h);
+    printf("hg: %lld \n", (long long int)hg);
+    printf("d_qk: %lld \n", (long long int)d_qk);
+    printf("d_v: %lld \n", (long long int)d_v);
+  }
   if (tid <= max_b) {
     if (offsets_s != nullptr) {
       offsets_s[tid] = h * cu_seqlens_q_padded[cu_seqlens_id];

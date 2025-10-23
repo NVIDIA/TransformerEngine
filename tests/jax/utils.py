@@ -1507,7 +1507,28 @@ def assert_allclose(
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
-
+    # KL test code
+    import sys
+    mismatch_counter = 0
+    has_nonzero = jnp.any(actual != 0)
+    print(f"has_nonzero: {has_nonzero}")
+    breakpoint()
+    with np.printoptions(threshold=sys.maxsize):
+        mismatch_mask = ~np.isclose(actual, desired, **tols) # True means mismatch
+        diff_indices = np.argwhere(mismatch_mask)
+        for idx in diff_indices:
+            idx_tuple = tuple(idx)
+            mismatch_counter += 1
+            if mismatch_counter < 1024:
+                print(f"Index {idx_tuple}: a={actual[idx_tuple]}, d={desired[idx_tuple]}")
+        # Batch 0 and head 0
+        # for seq_idx in range(actual.shape[1]):
+        #     #print("Mismatch at positions:\n", np.argwhere(mismatch_mask[0,:,0,:])) # Pick indices where mask is True
+        #     for d_idx in range(actual.shape[3]):
+        #         # print mismatches
+        #         #if mismatch_mask[0][seq_idx][0][d_idx] == True:
+        #         print(f"seq_idx: {seq_idx}, d_idx: {d_idx}, A: {actual[0][seq_idx][0][d_idx]}, D: {desired[0][seq_idx][0][d_idx]}")
+    print(f"mismatch_counter: {mismatch_counter}")
     # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 

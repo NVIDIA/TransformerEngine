@@ -536,12 +536,13 @@ def _segment_ids_pos_to_seqlens_offsets(
     # It does not need to involve SW for this mask's creation
 
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    if (attn_mask_type.is_causal() and window_size is None) or (
-        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
-    ):
-        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
-        )
+    #TODO: Un comment the fast path
+    # if (attn_mask_type.is_causal() and window_size is None) or (
+    #     window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    # ):
+    #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+    #     )
 
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
@@ -554,6 +555,7 @@ def _segment_ids_pos_to_seqlens_offsets(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    #jax.debug.breakpoint()
     # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
     attn_mask = segment_mask
     if attn_mask_type.is_bottom_right():
@@ -600,6 +602,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
         attn_mask_with_id, max_segments_per_seq
     )
+    #jax.debug.breakpoint()
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
@@ -679,6 +682,7 @@ class SequenceDescriptor:
                 window_size,
                 max_segments_per_seq,
             )
+            #jax.debug.breakpoint()
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,

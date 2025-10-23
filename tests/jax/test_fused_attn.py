@@ -464,6 +464,7 @@ class FusedAttnRunner:
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
+        breakpoint()
 
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
@@ -490,9 +491,25 @@ class FusedAttnRunner:
         else:
             pytest.fail(f"PyTest attempted to use an unrecognized bias_layout = {self.bias_shape}!")
 
-        self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
-        self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
-        self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
+        # self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
+        # self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
+        # self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
+        # KL test code
+        q_np = np.zeros(q_shape, self.dtype)
+        k_np = np.zeros(k_shape, self.dtype)
+        token_numbers_q = range(self.max_seqlen_q)
+        token_numbers_k = range(self.max_seqlen_kv)
+        for batch_idx in range(q_shape[0]):
+            for token_idx in token_numbers_q:
+                q_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * (token_idx + 1)
+            for token_idx in token_numbers_k:
+                k_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * np.sqrt(self.head_dim_qk)
+            v_np = np.ones(v_shape, self.dtype)
+            # Set cols at multiples
+            v_np[0,::4, 0, :] = np.arange(v_np.shape[3])
+            self.q = jnp.array(q_np)
+            self.k = jnp.array(k_np)
+            self.v = jnp.array(v_np)
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape._1HSS:
@@ -558,6 +575,8 @@ class FusedAttnRunner:
                     min_segment_size = 1
                     if min_segment_len is not None:
                         min_segment_size = min_segment_len[i][seg_id]
+                    #KL test code
+                    min_segment_size = 4
                     segment_size = rng.integers(min_segment_size, max_segment_size + 1)
                     if current_pos + segment_size > sequence_length:
                         break
@@ -613,6 +632,8 @@ class FusedAttnRunner:
             )
             self.segment_pos_q = self.segment_pos_kv = None
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
+        print(f"self.segment_ids_q: {self.segment_ids_q}, \n self.segment_pos_q: {self.segment_pos_q}, \n self.pad_q: {self.pad_q}, \n self.seqlens_q: {self.seqlens_q}, \n self.offsets_q: { self.offsets_q} \n")
+        print(f"self.segment_ids_kv: {self.segment_ids_kv}, \n self.segment_pos_kv: {self.segment_pos_kv}, \n self.pad_kv: {self.pad_kv}, \n self.seqlens_kv: {self.seqlens_kv}, \n self.offsets_kv: { self.offsets_kv} \n")
 
         # For reference code
         self.mask = make_mask(
@@ -623,6 +644,10 @@ class FusedAttnRunner:
             self.attn_mask_type,
             self.window_size,
         )
+        # KL tet code
+        import sys
+        with np.printoptions(threshold=sys.maxsize):
+            print(f"self.mask: \n {self.mask}")
 
         if self.cp_size > 1 and self.cp_load_balanced:
             if self.qkv_layout.is_thd():
@@ -671,6 +696,7 @@ class FusedAttnRunner:
                             self.cp_reorder_fn(self.segment_pos_kv),
                         ),
                     )
+                    breakpoint()
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
         else:
@@ -735,6 +761,7 @@ class FusedAttnRunner:
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
 
+        #jax.debug.breakpoint()
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
                 None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
@@ -1146,7 +1173,7 @@ class TestFusedAttn:
             pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
         ],
     )
-    def _test_forward(
+    def test_forward(
         b,
         s_q,
         s_kv,
