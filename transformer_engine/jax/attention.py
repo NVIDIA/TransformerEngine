@@ -1008,6 +1008,7 @@ def _fused_attn(
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
+    stripe_height: int = 0,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1028,6 +1029,7 @@ def _fused_attn(
         context_parallel_causal_load_balanced,
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_height=stripe_height,
     )
     return output
 
@@ -1051,6 +1053,7 @@ def _fused_attn_fwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_height,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -1070,6 +1073,7 @@ def _fused_attn_fwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_height=stripe_height
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1169,6 +1173,7 @@ def fused_attn(
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
     softmax_offset: Optional[jnp.ndarray] = None,
+    stripe_height: int = 0,
 ):
     """
     Perform cuDNN fused attention.
@@ -1206,6 +1211,10 @@ def fused_attn(
         softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
             [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
             If provided, this parameter will receive gradients during backpropagation.
+        stripe_height (int): 
+            Indicates the striping height to be used when using ReorderStrategy.Striped.
+            Currently, a stripe_height > 1 is only allowed for CP + THD + Striped + AG
+            0 indicates no striping strategy
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1283,5 +1292,6 @@ def fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_height=stripe_height,
     )
     return output

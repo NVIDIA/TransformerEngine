@@ -73,6 +73,7 @@ __all__ = [
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
+        "stripe_height",
     ],
 )
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ class _FusedAttnConfig:
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring + THD + SWA
+    stripe_height: int # Only for CP + Striped. For, Ring P2P , stripe_height=1 only.
 
 
 @dataclass(frozen=True)
@@ -527,7 +529,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             segment_ids=(_q_segment_ids, _kv_segment_ids),
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
-
+        breakpoint()
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
@@ -536,6 +538,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.max_segments_per_seq,
             )
         )
+        #jax.debug.breakpoint()
 
         if config.qkv_layout.is_thd():
 
@@ -1272,26 +1275,40 @@ class _FusedAttnCPWithAllGatherHelper:
         """Checks if the context parallel implementation is supported by the given arguments."""
         header = "Context parallel fused attention"
 
-        allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+        allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
         if self.config.qkv_layout not in allowed_layouts:
             raise ValueError(
                 f"{header} only supports layouts:"
                 f" {','.join(map(str, allowed_layouts))} got: {self.config.qkv_layout}"
             )
-
+    
+        if (not self.config.qkv_layout.is_thd() and self.config.stripe_height != 0) or (self.config.qkv_layout.is_thd() and self.config.stripe_height == 0):
+            raise ValueError(
+                f"{header} only supports Dual Chunk load balancing with BSHD layouts and Striped load balancing with THD layouts"
+            )
+    
         if self.config.attn_bias_type != AttnBiasType.NO_BIAS:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
-
+        
+        #TODO: Should AttnMaskType.PADDING_CAUSAL_MASK be allowed for CP + AG + THD + Striped ?
+        #TODO: Should Should AttnMaskType.NO_MASK be allowed for CP + AG + THD + Striped ?
         allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
+        if self.config.qkv_layout.is_thd():
+            allowed_masks.append(AttnMaskType.PADDING_CAUSAL_MASK)
         if self.config.attn_mask_type not in allowed_masks:
             raise ValueError(
                 f"{header} only supports masking types: "
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
-
-        if self.config.max_segments_per_seq != 1:
+        #TODO: For now do not all  CP + AG + THD + Striped with NO_MASK 
+        if self.config.attn_mask_type is AttnMaskType.NO_MASK and self.config.qkv_layout.is_thd():
             raise ValueError(
-                f"{header} only supports max_segments_per_seq == 1 got:"
+                f"{header} only supports CAUSAL_MASK for THD types"
+            )
+
+        if self.config.max_segments_per_seq != 1 and (not self.config.qkv_layout.is_thd):
+            raise ValueError(
+                f"{header} only supports max_segments_per_seq == 1 for BSHD layouts, got:"
                 f" {self.config.max_segments_per_seq}"
             )
 
@@ -1305,12 +1322,15 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
-        if self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK:
+        if self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK and not self.config.qkv_layout.is_thd(): # BSHD only ?
             return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
+        if self.config.attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK and self.config.qkv_layout.is_thd(): # THD only ?
+            return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
         return self.config.attn_mask_type
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        #TODO: Should the max_segments_per_seq be different ?
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
@@ -1324,6 +1344,7 @@ class _FusedAttnCPWithAllGatherHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_height=self.config.stripe_height,
         )
 
     def all_gather_kv(self, k, v):
@@ -1335,7 +1356,10 @@ class _FusedAttnCPWithAllGatherHelper:
             )
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
+                if self.config.qkv_layout.is_thd():
+                    x = reorder_causal_striped(x, cp_size, 1, True, self.config.stripe_height)
+                else:
+                    x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
             return x
 
         if self.config.qkv_layout.is_kvpacked():
@@ -1344,6 +1368,26 @@ class _FusedAttnCPWithAllGatherHelper:
             return ag(k), ag(v)
 
         return k, v  # fall through
+    
+    def all_gather_segment_ids_and_pos(self, kv_segment_ids, kv_segment_pos):
+        """Performs a all-gather of k and v over context parallel ranks."""
+
+        #TODO: Is the axis chosen right ?
+        kv_segment_ids = lax_paral_op(
+            kv_segment_ids, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        kv_segment_pos = lax_paral_op(
+            kv_segment_pos, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        #jax.debug.breakpoint()
+        if self.config.context_parallel_load_balanced:
+            cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+            if self.config.qkv_layout.is_thd():
+                kv_segment_ids_ag = reorder_causal_striped(kv_segment_ids, cp_size, 1, True, self.config.stripe_height)
+                kv_segment_pos_ag = reorder_causal_striped(kv_segment_pos, cp_size, 1, True, self.config.stripe_height)
+                return kv_segment_ids_ag, kv_segment_pos_ag
+            #TODO: Is the dual chunk case needed ?
+        return kv_segment_ids, kv_segment_pos # fall through
 
     def reduce_scatter_dkv(self, dk, dv):
         """Performs a reduce-scatter of dk and dv over context parallel ranks."""
@@ -1454,6 +1498,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        jax.debug.breakpoint()
 
         def impl(
             q,
@@ -1473,6 +1518,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+            breakpoint()
 
             # cuDNN does not support right-aligned masking with dynamic sequence length padding.
             # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
@@ -1492,6 +1538,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 )
 
                 results = []
+                breakpoint()
                 for sub_idx in range(2):
                     if config.attn_mask_type == AttnMaskType.NO_MASK:
                         k_unmasked, v_unmasked = k, v  # full kv used for unmasked
@@ -1501,7 +1548,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-
+                    breakpoint()
                     output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
@@ -1721,6 +1768,92 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
 
 register_primitive(FusedAttnCPWithAllGatherBwdPrimitive)
 
+class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
+    """
+    Fused Attention Forward with Context Parallelism and Striped Load Balancing Primitive
+
+    This context parallel implementation uses all-gather to collect KV inputs from context parallel ranks.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+
+        helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
+        helper.check_supported()
+
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[4] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        #jax.debug.breakpoint()
+
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+            #jax.debug.breakpoint()
+
+            # cuDNN does not support right-aligned masking with dynamic sequence length padding.
+            # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
+            # to select the appropriate computation. Each case generates a [..., SEQ/CP, ..] tensor
+            # meeting the expectation of the SPMD model.
+            # TODO(mgoldfarb-nvidia): When cuDNN supports we should be able to make use of a padding
+            # mask/sequence length tensor to avoid this unrolled loop.
+            def _cross_attn(idx, q, k, v, bias, kv_segment_ids_ag, kv_segment_pos_ag, seed):
+                output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                    q,
+                    k, #ag
+                    v, #ag
+                    bias,
+                    seed,
+                    q_seqlen,
+                    kv_seqlen,
+                    q_seq_offsets,
+                    k_seq_offsets,
+                    _q_segment_ids,
+                    kv_segment_ids_ag,
+                    _q_segment_pos,
+                    kv_segment_pos_ag,
+                    config=helper.get_step_config(),
+                )
+                return output, softmax_aux, rng_state
+
+            k_ag, v_ag = helper.all_gather_kv(k, v)
+            _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(_kv_segment_ids, _kv_segment_pos)
+
+            functions = [
+                partial(_cross_attn, idx, q, k_ag, v_ag, bias, _kv_segment_ids_ag, _kv_segment_pos_ag, seed)
+                for idx in range(cp_size)
+            ]
+
+            return lax.switch(cp_rank, functions)
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnCPStripedWithAllGatherFwdPrimitive)
 
 @dataclass(frozen=True)
 class _FusedAttnCPWithP2PHelper:
@@ -1811,6 +1944,7 @@ class _FusedAttnCPWithP2PHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_height=self.config.stripe_height,
         )
 
     def stack_kv(self, k, v):
@@ -2693,6 +2827,7 @@ def fused_attn_fwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    stripe_height: int = 0,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -2731,6 +2866,7 @@ def fused_attn_fwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        stripe_height (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -2796,12 +2932,16 @@ def fused_attn_fwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_height=stripe_height,
     )
 
     primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
+            if qkv_layout.is_thd():
+                primitive = FusedAttnCPStripedWithAllGatherFwdPrimitive.outer_primitive
+            else:
+                primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
         case CPStrategy.RING:
             # We must use stripe attention for THD-RING
             if qkv_layout.is_thd():
@@ -2818,6 +2958,7 @@ def fused_attn_fwd(
         *seq_desc_flatten,
         config=fused_config,
     )
+    breakpoint()
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
     return (output, softmax_aux, rng_state)
 
@@ -2941,6 +3082,7 @@ def fused_attn_bwd(
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
         ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
 
+    #TODO: stripe_height hardcoded for now as bwd is not being tests
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -2954,6 +3096,7 @@ def fused_attn_bwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_height=0,
     )
 
     primitive = None
