@@ -19,9 +19,9 @@
 
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-#include "curanddx.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/collective/builders/sm100_common.inl"
@@ -37,15 +37,6 @@
 namespace transformer_engine {
 namespace detail {
 namespace {
-
-// Define a cuRANDDx descriptor
-// Note curanddx::PhiloxRounds<4> means 4 rounds of philox4_32. If the operator is not specified, it will be default to 10.
-// curanddx::SM<800>() does NOT mean the code can only run on SM 800. The operator is used for do some internal checks, e.g.,
-// if shared memory, if needed, is enough for the described problem, usually not applicable.
-
-// curanddx doc: https://docs.nvidia.com/cuda/curanddx/index.html
-using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() + curanddx::SM<800>() + curanddx::Thread());
-
 
 using namespace cute;
 using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
@@ -501,8 +492,9 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         // Initialize RNG for tile
         const size_t rng_sequence
           = thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
-        RNG rng(rng_seed, rng_sequence, rng_offset);
-        curanddx::uniform_bits dist;
+
+        transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+        rng.init(rng_seed, rng_sequence, rng_offset);
         uint4 random_uint4 = uint4{0, 0, 0, 0};
 
         CUTLASS_PRAGMA_UNROLL
@@ -510,7 +502,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
           auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(acc_scales[v], cutlass::platform::numeric_limits<ElementAccumulator>::max());
           // auto acc_scale = acc_scales[v];
           if constexpr (kEnableStochasticRounding) {
-            random_uint4 = dist.generate4(rng);
+            random_uint4 = rng.generate4();
             output_frgs[v] = StochasticNumericConverter(
               cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
                 compute_frgs[v],
