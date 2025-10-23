@@ -2750,7 +2750,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         (
                             out_per_step[i],
                             [softmax_lse_per_step[i], rng_states[i]],
-                            max_score_per_step[i],
+                            *max_score_,
                         ) = fused_attn_fwd(
                             is_training,
                             max_seqlen_q,
@@ -2773,6 +2773,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             window_size=window_size_per_step[i],
                             return_max_score=return_max_score,
                         )
+                        if return_max_score:
+                            max_score_per_step[i] = *max_score_
                     else:
                         fa_forward_args_thd = get_fa_args(
                             True,
