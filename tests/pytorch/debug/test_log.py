@@ -286,11 +286,11 @@ def test_nvfp4_numeric(feature_dirs):
         pytest.skip(reason_for_no_nvfp4)
 
     log_nvfp4_config = LOG_NVFP4_CONFIG_BASE.format(stats="underflows%, mse")
-    
+
     with debug_session(log_nvfp4_config, feature_dirs) as log_dir:
         from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
         from transformer_engine.pytorch.quantization import RecipeState
-        
+
         recipe_state = RecipeState.create(
             recipe.NVFP4BlockScaling(),
             mode="forward",
@@ -302,7 +302,7 @@ def test_nvfp4_numeric(feature_dirs):
         tensor = torch.randn(128, 128, dtype=torch.bfloat16).cuda()
         # Add some small values that should underflow to zero in FP4
         tensor[0, :16] = 0.0001
-        
+
         quantizer = recipe_state.make_quantizers()[0]
         quantized_tensor = quantizer(tensor)
 
@@ -324,54 +324,56 @@ def test_nvfp4_numeric(feature_dirs):
     # Validate both stats are present
     assert "nvfp4_underflows%" in output, "underflows% stat missing"
     assert "nvfp4_mse" in output, "mse stat missing"
-    
+
     # Extract values and validate numerics
     underflows_value = None
     mse_value = None
-    
+
     for line in output.splitlines():
         if "nvfp4_underflows%" in line and "value=" in line:
             underflows_value = float(line.split("value=")[1].split()[0])
         if "nvfp4_mse" in line and "value=" in line:
             mse_value = float(line.split("value=")[1].split()[0])
-    
+
     # Validate underflows%
     assert underflows_value is not None, "Could not extract underflows% value"
     assert underflows_value >= 0, f"Underflows should be non-negative, got {underflows_value}"
     assert underflows_value <= 100, f"Underflows% should be <= 100, got {underflows_value}"
-    
+
     # Compute expected underflows: non-zero elements that became zero after quantization
-    orig_nonzero_mask = (tensor != 0)
-    dequant_zero_mask = (dequantized_tensor == 0)
-    expected_underflows = (orig_nonzero_mask & dequant_zero_mask).sum().float() / tensor.numel() * 100
-    
+    orig_nonzero_mask = tensor != 0
+    dequant_zero_mask = dequantized_tensor == 0
+    expected_underflows = (
+        (orig_nonzero_mask & dequant_zero_mask).sum().float() / tensor.numel() * 100
+    )
+
     # Allow some tolerance
-    assert abs(underflows_value - expected_underflows.item()) < 1.0, \
-        f"Underflows mismatch: got {underflows_value}, expected {expected_underflows.item()}"
-    
+    assert (
+        abs(underflows_value - expected_underflows.item()) < 1.0
+    ), f"Underflows mismatch: got {underflows_value}, expected {expected_underflows.item()}"
+
     # Validate MSE
     assert mse_value is not None, "Could not extract MSE value"
     assert mse_value >= 0, f"MSE should be non-negative, got {mse_value}"
-    
+
     # Compute expected MSE
     expected_mse = torch.nn.functional.mse_loss(
-        dequantized_tensor.float(), 
-        tensor.float(), 
-        reduction="mean"
+        dequantized_tensor.float(), tensor.float(), reduction="mean"
     )
-    
-    assert mse_value == pytest.approx(expected_mse.cpu().item(), abs=1e-4), \
-        f"MSE mismatch: got {mse_value}, expected {expected_mse.cpu().item()}"
+
+    assert mse_value == pytest.approx(
+        expected_mse.cpu().item(), abs=1e-4
+    ), f"MSE mismatch: got {mse_value}, expected {expected_mse.cpu().item()}"
 
 
 def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs):
     """Test that LogFp8TensorStats allows recipe-prefixed stats with NVFP4 for what-if analysis."""
     if not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
-    
+
     # Use recipe-prefixed stat with NVFP4 - should work (computes MXFP8 separately)
     log_fp8_config = LOG_QUANTIZED_CONFIG_BASE.format(stats="mxfp8_mse")
-    
+
     with debug_session(log_fp8_config, feature_dirs) as log_dir:
         model = te.Linear(128, 128, params_dtype=torch.bfloat16)
         inp = torch.randn(128, 128, dtype=torch.bfloat16).cuda()
@@ -383,7 +385,7 @@ def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs):
             loss = output.sum()
             loss.backward()
             debug_api.step()
-        
+
         output = read_log(log_dir)
         # Should have logged MXFP8 MSE stat (what-if scenario)
         assert "mxfp8_mse" in output

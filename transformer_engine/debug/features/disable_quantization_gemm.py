@@ -12,7 +12,7 @@ from transformer_engine.debug.features.api import TEConfigAPIMapper
 class DisableQuantizationGEMM(TEConfigAPIMapper):
     """
     Disables specific GEMM operations from using quantization, forcing high-precision execution.
-    
+
     Works with any quantization format (FP8, NVFP4, etc.).
 
     Parameters
@@ -44,7 +44,7 @@ class DisableQuantizationGEMM(TEConfigAPIMapper):
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for choice between high-precision and quantized GEMM execution.
-        
+
         Note: Method name kept as 'fp8_gemm_enabled' for backward compatibility with the debug API,
         but it applies to all quantization formats (FP8, NVFP4, etc.).
         """
@@ -57,4 +57,3 @@ class DisableQuantizationGEMM(TEConfigAPIMapper):
         # If not, then default behavior in TransformerEngineAPI
         # is that fp8_gemm() API call returns True.
         return False, iteration + 1
-

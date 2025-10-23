@@ -12,7 +12,7 @@ from nvdlfw_inspect.registry import Registry, api_method
 class DisableQuantizationLayer:
     """
     Disables all quantized GEMMs in the layer, forcing high-precision execution.
-    
+
     Works with any quantization format (FP8, NVFP4, etc.).
 
     Example
@@ -33,7 +33,7 @@ class DisableQuantizationLayer:
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for selecting between high-precision and quantized GEMM execution.
-        
+
         Note: Method name kept as 'fp8_gemm_enabled' for backward compatibility with the debug API,
         but it applies to all quantization formats (FP8, NVFP4, etc.).
         """
@@ -50,7 +50,7 @@ class DisableQuantizationLayer:
 
     def parse_config_and_api(self, config, **_kwargs):
         """Determines whether to run the API.
-        
+
         DisableQuantizationLayer is the only feature provided by the Transformer Engine
         which does not inherit from TEConfigAPIMapper - this mapper is primarily responsible for
         parsing gemms and tensors fields from the config, which are not needed for this feature.
@@ -59,4 +59,3 @@ class DisableQuantizationLayer:
         nvidia-dlframework-inspect documentation.
         """
         return config["enabled"], None
-

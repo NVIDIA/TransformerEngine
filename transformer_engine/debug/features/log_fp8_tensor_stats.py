@@ -25,6 +25,7 @@ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8Bloc
 
 try:
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
     _nvfp4_available = True
 except ImportError:
     _nvfp4_available = False
@@ -178,10 +179,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
         # But allow recipe-prefixed FP8 stats like "mxfp8_underflows%" even with NVFP4 quantizer
         if recipe_from_stat == "nvfp4":
             raise ValueError(
-                f"[NVTORCH INSPECT ERROR] Cannot compute NVFP4 stats '{stat}' in LogFp8TensorStats. "
-                f"FP8-specific statistics do not work with NVFP4. "
-                f"Use LogNvfp4TensorStats for NVFP4-specific stats, or use FP8 recipe-prefixed stats "
-                f"(e.g., 'mxfp8_underflows%', 'fp8_block_scaling_mse') for what-if FP8 comparisons."
+                f"[NVTORCH INSPECT ERROR] Cannot compute NVFP4 stats '{stat}' in LogFp8TensorStats."
+                " FP8-specific statistics do not work with NVFP4. Use LogNvfp4TensorStats for"
+                " NVFP4-specific stats, or use FP8 recipe-prefixed stats (e.g.,"
+                " 'mxfp8_underflows%', 'fp8_block_scaling_mse') for what-if FP8 comparisons."
             )
 
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
@@ -302,7 +303,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
         quantized_tensor = rowwise_quantized_tensor
-        
+
         assert isinstance(
             quantized_tensor, QuantizedTensor
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."

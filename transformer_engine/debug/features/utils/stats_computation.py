@@ -334,29 +334,29 @@ for _columnwise in [True, False]:
 
 def count_nonzero_nvfp4(fp4_data: torch.Tensor) -> torch.Tensor:
     """Count the number of non-zero elements in the FP4 data.
-    
+
     FP4 data is stored as 2 4-bit values per byte (uint8).
     We need to unpack and count non-zeros.
     """
     # Each byte contains two FP4 values
     # Value 0 in FP4 E2M1 format is represented as 0 (and also 8 for -0.0)
     zero_vals = torch.tensor([0, 8], device=fp4_data.device, dtype=torch.uint8)
-    
+
     # Extract first and second nibbles
     first_nibble = fp4_data % 16
     second_nibble = fp4_data // 16
-    
+
     # Count zeros
     first_zeros = torch.isin(first_nibble, zero_vals).sum()
     second_zeros = torch.isin(second_nibble, zero_vals).sum()
-    
+
     total_elements = fp4_data.numel() * 2
     return total_elements - first_zeros - second_zeros
 
 
 def add_nvfp4_underflows_stats():
     """Register underflow stats for NVFP4.
-    
+
     Computes underflows by counting zeros in packed FP4 data vs original tensor.
     """
     stat_num = "nvfp4_underflows_num"
@@ -373,8 +373,7 @@ def add_nvfp4_underflows_stats():
     )
     STATS[stat_pct] = (
         lambda x, aux_dict: (
-            x.count_nonzero()
-            - count_nonzero_nvfp4(aux_dict["nvfp4"]._rowwise_data)
+            x.count_nonzero() - count_nonzero_nvfp4(aux_dict["nvfp4"]._rowwise_data)
         )
         / aux_dict["nvfp4"].numel()
         * 100,
@@ -385,6 +384,7 @@ def add_nvfp4_underflows_stats():
 
     DEPENDENCIES[stat_num] = {stat_num}
     DEPENDENCIES[stat_pct] = {stat_num, "numel"}
+
 
 # Register NVFP4 stats
 add_nvfp4_underflows_stats()

@@ -16,7 +16,7 @@ from transformer_engine.debug.features.disable_quantization_gemm import DisableQ
 class DisableFP8GEMM(DisableQuantizationGEMM):
     """
     GEMM operations are executed in higher precision, even when FP8 autocast is enabled.
-    
+
     .. deprecated::
         Use :class:`DisableQuantizationGEMM` instead. This class is maintained for
         backward compatibility only. DisableQuantizationGEMM works with all quantization
@@ -45,4 +45,5 @@ class DisableFP8GEMM(DisableQuantizationGEMM):
                     enabled: True
                     gemms: [dgrad, wgrad]
     """
+
     pass  # Inherits all functionality from DisableQuantizationGEMM

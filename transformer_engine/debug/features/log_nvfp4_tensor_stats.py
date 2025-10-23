@@ -97,7 +97,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
                 f"Stat {stat} is not supported for NVFP4. Supported stats: {supported_stats}"
             )
         return True
-    
+
     def get_stat_with_prefix(self, stat: str) -> str:
         """Add nvfp4_ prefix to stat name for use in stats_computation."""
         return f"nvfp4_{stat}"
@@ -161,14 +161,14 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         ), "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats cannot be run without NVFP4 quantizer."
 
         quantized_tensor = rowwise_quantized_tensor
-        
+
         # Ensure we're working with NVFP4 tensors
         if not isinstance(quantizer, NVFP4Quantizer):
             raise ValueError(
-                f"[NVTORCH INSPECT ERROR] LogNvfp4TensorStats requires NVFP4Quantizer, "
+                "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats requires NVFP4Quantizer, "
                 f"but got {type(quantizer).__name__}"
             )
-        
+
         assert isinstance(
             quantized_tensor, QuantizedTensor
         ), "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats quantized_tensor must be a QuantizedTensor."
@@ -226,4 +226,3 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
             layer_name,
             extra_cachable_args=(tensor_name,),
         )
-

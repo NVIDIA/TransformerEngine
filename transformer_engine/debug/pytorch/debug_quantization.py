@@ -535,9 +535,7 @@ class DebugQuantizer(Quantizer):
         """
         Updates the usage of the parent quantizer.
         """
-        rowwise_gemm_quantize = (
-            self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_QUANTIZE
-        )
+        rowwise_gemm_quantize = self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_QUANTIZE
         columnwise_gemm_quantize = (
             self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_QUANTIZE
         )

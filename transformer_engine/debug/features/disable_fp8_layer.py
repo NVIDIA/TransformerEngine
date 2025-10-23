@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """DisableFP8Layer Feature support for nvidia-dlframework-inspect
- 
+
 DEPRECATED: This is a backward compatibility alias for DisableQuantizationLayer.
 New code should use DisableQuantizationLayer instead, which works with all quantization formats.
 """
@@ -16,7 +16,7 @@ from transformer_engine.debug.features.disable_quantization_layer import Disable
 class DisableFP8Layer(DisableQuantizationLayer):
     """
     Disables all FP8 GEMMs in the layer.
-    
+
     .. deprecated::
         Use :class:`DisableQuantizationLayer` instead. This class is maintained for
         backward compatibility only. DisableQuantizationLayer works with all quantization
@@ -34,4 +34,5 @@ class DisableFP8Layer(DisableQuantizationLayer):
                 DisableFP8Layer:  # Deprecated: use DisableQuantizationLayer
                     enabled: True
     """
+
     pass  # Inherits all functionality from DisableQuantizationLayer
