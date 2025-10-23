@@ -604,7 +604,7 @@ class TestDistributedContextParallelSelfAttn:
         "load_balanced",
         [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
     )
-    def test_context_parallel_alltoall_attn(
+    def test_context_parallel_alltoall_attn_shardy(
         self,
         device_count,
         mesh_shape,
