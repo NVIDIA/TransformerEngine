@@ -1523,7 +1523,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_enabled_in_this_iteration = debug
+        else:
+            # If this is the same iteration as previous invocation of the module,
+            # we use the debug value from the first invocation in the iteration.
+            debug = self.debug_enabled_in_this_iteration
+
         return debug
 
     def no_debug_features_active(self, quantizers):
