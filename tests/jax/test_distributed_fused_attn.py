@@ -637,7 +637,7 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced=load_balanced,
             cp_strategy=CPStrategy.ALL_TO_ALL,
-            use_shardy=False,
+            use_shardy=True,
         )
 
 
