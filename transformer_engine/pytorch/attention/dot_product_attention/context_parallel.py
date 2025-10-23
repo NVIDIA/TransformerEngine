@@ -2774,7 +2774,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             return_max_logit=return_max_logit,
                         )
                         if return_max_logit:
-                            max_logit_per_step[i] = *max_logit_
+                            max_logit_per_step[i] = max_logit_[0]
                     else:
                         fa_forward_args_thd = get_fa_args(
                             True,
