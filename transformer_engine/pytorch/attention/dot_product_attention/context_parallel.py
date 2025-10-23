@@ -2773,7 +2773,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             window_size=window_size_per_step[i],
                             return_max_logit=return_max_logit,
                         )
-                        if return_max_logit and *max_logit_ is not None:
+                        if return_max_logit:
                             max_logit_per_step[i] = *max_logit_
                     else:
                         fa_forward_args_thd = get_fa_args(
