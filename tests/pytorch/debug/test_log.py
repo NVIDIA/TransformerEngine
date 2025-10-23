@@ -335,11 +335,6 @@ def test_nvfp4_numeric(feature_dirs):
         if "nvfp4_mse" in line and "value=" in line:
             mse_value = float(line.split("value=")[1].split()[0])
 
-    # Validate underflows%
-    assert underflows_value is not None, "Could not extract underflows% value"
-    assert underflows_value >= 0, f"Underflows should be non-negative, got {underflows_value}"
-    assert underflows_value <= 100, f"Underflows% should be <= 100, got {underflows_value}"
-
     # Compute expected underflows: non-zero elements that became zero after quantization
     orig_nonzero_mask = tensor != 0
     dequant_zero_mask = dequantized_tensor == 0
@@ -348,22 +343,14 @@ def test_nvfp4_numeric(feature_dirs):
     )
 
     # Allow some tolerance
-    assert (
-        abs(underflows_value - expected_underflows.item()) < 1.0
-    ), f"Underflows mismatch: got {underflows_value}, expected {expected_underflows.item()}"
-
-    # Validate MSE
-    assert mse_value is not None, "Could not extract MSE value"
-    assert mse_value >= 0, f"MSE should be non-negative, got {mse_value}"
+    assert underflows_value == pytest.approx(expected_underflows.cpu().item(), abs=1e-4)
 
     # Compute expected MSE
     expected_mse = torch.nn.functional.mse_loss(
         dequantized_tensor.float(), tensor.float(), reduction="mean"
     )
 
-    assert mse_value == pytest.approx(
-        expected_mse.cpu().item(), abs=1e-4
-    ), f"MSE mismatch: got {mse_value}, expected {expected_mse.cpu().item()}"
+    assert mse_value == pytest.approx(expected_mse.cpu().item(), abs=1e-4)
 
 
 def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs):
