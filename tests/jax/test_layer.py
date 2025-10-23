@@ -311,7 +311,7 @@ class BaseRunner:
         variables = {"params": params, **others}
         output = model.apply(variables, *diff_xs, *no_diff_xs, rngs=self.apply_rng)
         return jnp.mean(output, dtype=jnp.float32).astype(output.dtype)
-    
+
     def _output_fn(self, params, others, model, diff_xs, no_diff_xs):
         variables = {"params": params, **others}
         return model.apply(variables, *diff_xs, *no_diff_xs, rngs=self.apply_rng)
