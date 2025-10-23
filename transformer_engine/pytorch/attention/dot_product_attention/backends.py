@@ -24,7 +24,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensorStorage,
     prepare_for_saving,
     restore_from_saved,

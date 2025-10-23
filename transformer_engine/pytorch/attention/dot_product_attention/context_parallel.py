@@ -21,7 +21,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.constants import (
     dist_group_type,
@@ -33,7 +33,7 @@ from transformer_engine.pytorch.distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
