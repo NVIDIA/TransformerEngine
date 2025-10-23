@@ -23,6 +23,8 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
+import transformer_engine_torch as tex
+
 try:
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
@@ -210,6 +212,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     def get_recipe_from_stat(self, stat: str, default_recipe: str = ""):
         """Returns the recipe name from the stat string."""
+
         columnwise_stat = stat.endswith("_columnwise")
         for recipe_name in ALL_RECIPE_NAMES:
             if recipe_name in stat:
@@ -234,7 +237,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         Yields the aux_dict.
         Needs to clean after usage, because it possibly change the usage of the quantized tensor.
         """
-        fp8_dtype = None
+        fp8_dtype = tex.DType.kFloat8E4M3
         if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
             assert isinstance(
                 quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)

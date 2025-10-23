@@ -17,16 +17,11 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
-
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 @Registry.register_feature(namespace="transformer_engine")
 class LogNvfp4TensorStats(BaseLogTensorStats):
-    """
-    Logs statistics of NVFP4 quantized tensors.
-
-    This feature is specifically designed for NVFP4 quantization and provides:
-    - underflows%: percentage of non-zero elements clipped to 0 after quantization (computed from packed FP4 data)
-    - mse: mean squared error between original and quantized-dequantized tensor
+    """Logs statistics of NVFP4 quantized tensors.
 
     In distributed runs each rank first computes its local statistics; the values
     are gathered the next time `debug_api.step()` is called.  Remember to call
@@ -170,7 +165,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
             )
 
         assert isinstance(
-            quantized_tensor, QuantizedTensor
+            quantized_tensor, NVFP4TensorStorage
         ), "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats quantized_tensor must be a QuantizedTensor."
 
         for stat in config["stats"]:

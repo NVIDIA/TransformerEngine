@@ -70,7 +70,7 @@ class MXFP8Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self, None)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
