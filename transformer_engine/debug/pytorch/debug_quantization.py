@@ -36,7 +36,7 @@ _tensor_to_gemm_names_map = {
 }
 
 API_CALL_MODIFY = "modify_tensor()"
-STANDARD_QUANTIZE = "Quantize"  # Generalized: works with FP8, NVFP4, etc.
+STANDARD_QUANTIZE = "Quantize"
 HIGH_PRECISION = "High Precision"
 
 
