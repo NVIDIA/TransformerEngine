@@ -267,11 +267,11 @@ def _load_cuda_library_from_python(lib_name: str):
     # PyPI packages provided by nvidia libs exist
     # in 3 possible direcories inside `nvidia`.
     if os.path.isdir(os.path.join(nvidia_dir, "cu13")):
-        so_paths = glob.glob(os.path.join(nvidia_dir, "cu13", f"lib/lib*.{ext}.*[0-9]"))
+        so_paths = glob.glob(os.path.join(nvidia_dir, "cu13", f"lib/lib*{ext}.*[0-9]"))
     if os.path.isdir(os.path.join(nvidia_dir, lib_name)):
-        so_paths = glob.glob(os.path.join(nvidia_dir, lib_name, f"lib/lib*.{ext}.*[0-9]"))
+        so_paths = glob.glob(os.path.join(nvidia_dir, lib_name, f"lib/lib*{ext}.*[0-9]"))
     else:
-        so_paths = glob.glob(os.path.join(nvidia_dir, f"cuda_{lib_name}", f"lib/lib*.{ext}.*[0-9]"))
+        so_paths = glob.glob(os.path.join(nvidia_dir, f"cuda_{lib_name}", f"lib/lib*{ext}.*[0-9]"))
 
     path_found = len(so_paths) > 0
     ctypes_handles = []
@@ -303,14 +303,14 @@ def _load_cuda_library_from_system(lib_name: str):
     for path in paths:
         if path is None:
             continue
-        libs = glob.glob(f"{path}/**/lib{lib_name}.{_get_sys_extension()}*", recursive=True)
+        libs = glob.glob(f"{path}/**/lib{lib_name}{_get_sys_extension()}*", recursive=True)
         libs.sort(reverse=True, key=os.path.basename)
         if libs:
             return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
 
     # Search in LD_LIBRARY_PATH.
     try:
-        _lib_handle = ctypes.CDLL(f"lib{lib_name}.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
+        _lib_handle = ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
         return True, _lib_handle
     except OSError:
         return False, None
