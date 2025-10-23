@@ -343,7 +343,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
-  uint4 random_uint4 = uint4{0, 0, 0, 0};
+  uint4 random_uint4 = kApplyStochasticRounding ? rng.generate4() : uint4{0, 0, 0, 0};
 
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
