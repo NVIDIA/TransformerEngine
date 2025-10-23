@@ -16,7 +16,6 @@ Transformer Engine provides a set of precision debug tools which allow you to ea
 - run selected GEMMs in higher precision,
 - run current scaling - with one scaling factor per tensor - for particular GEMMs,
 - test new precisions and integrate them with quantized training (FP8, NVFP4, etc.),
-- monitor quantization errors and underflows for different precision formats,
 - ... and many more.
 
 There are 4 things one needs to do to use Transformer Engine debug features:
