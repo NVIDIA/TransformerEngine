@@ -470,29 +470,6 @@ class GemmPrimitive(BasePrimitive):
                 f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
             )
 
-        lhs_axis_boundary = get_lhs_axis_boundary(lhs_contracting_dims, lhs_is_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs.shape[lhs_axis_boundary:])
-            if lhs_is_transposed
-            else reduce(operator.mul, lhs.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            "LHS",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_contracting_dims, rhs_is_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs.shape[:rhs_axis_boundary])
-            if rhs_is_transposed
-            else reduce(operator.mul, rhs.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            "RHS",
-        )
-
         # Determine output shape and dtype
         assert (
             dtypes.canonicalize_dtype(out_dtype).itemsize > 1
@@ -599,6 +576,29 @@ class GemmPrimitive(BasePrimitive):
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
+        )
+
+        lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
+        lhs_contracting_size = (
+            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
+            if lhs_transposed
+            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            lhs_contracting_size,
+            "LHS",
+        )
+        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
+        rhs_contracting_size = (
+            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
+            if rhs_transposed
+            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            rhs_contracting_size,
+            "RHS",
         )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
