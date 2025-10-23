@@ -1050,7 +1050,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
