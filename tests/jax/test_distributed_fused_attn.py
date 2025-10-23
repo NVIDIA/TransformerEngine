@@ -327,7 +327,8 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 ]
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
-    # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
+    # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
+    #TODO: Change the id to CPx2
     pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
 ]
@@ -353,8 +354,8 @@ class TestDistributedContextParallelSelfAttn:
         window_size=None,
     ):
         if qkv_layout.is_thd():
-            if cp_strategy == CPStrategy.ALL_GATHER:
-                pytest.skip("THD doesn't support all gather context parallelism.")
+            # if cp_strategy == CPStrategy.ALL_GATHER:
+            #     pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and cp_strategy == CPStrategy.RING:
                 pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
@@ -383,6 +384,9 @@ class TestDistributedContextParallelSelfAttn:
 
         num_kv_heads = num_head // kv_groups
 
+        # KL code For AG case only
+        stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
+
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -407,6 +411,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
+            stripe_height=stripe_height
         )
 
         def check_has_backend_for_mask(mask_type):
