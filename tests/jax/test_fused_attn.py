@@ -438,6 +438,7 @@ class FusedAttnRunner:
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
+        breakpoint()
 
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
@@ -702,6 +703,7 @@ class FusedAttnRunner:
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
 
+        #jax.debug.breakpoint()
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
                 None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
@@ -1079,7 +1081,7 @@ class TestFusedAttn:
             pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
         ],
     )
-    def _test_forward(
+    def test_forward(
         b,
         s_q,
         s_kv,
