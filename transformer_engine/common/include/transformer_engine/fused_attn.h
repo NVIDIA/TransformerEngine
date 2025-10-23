@@ -206,14 +206,14 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     head_dim_v          The head dimension of V.
  *  \param[in]     window_size_left    Sliding window size (the left half).
  *  \param[in]     window_size_right   Sliding window size (the right half).
- *  \param[in]     return_max_score    Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit    Whether to produce Max and Sum_Exp, or Stats.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_score);
+    int64_t window_size_right, bool return_max_logit);
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
@@ -256,7 +256,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     max_seqlen               Max sequence length used for computing,
  *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
  *  \param[in]     is_training              Whether this is in training mode or inference.
- *  \param[in]     return_max_score         Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit         Whether to produce Max and Sum_Exp, or Stats.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensor's layout.
@@ -272,7 +272,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                                    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
                                    const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
-                                   size_t max_seqlen, bool is_training, bool return_max_score,
+                                   size_t max_seqlen, bool is_training, bool return_max_logit,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                                    NVTE_Softmax_Type softmax_type, int64_t window_size_left,
@@ -386,7 +386,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for KV.
  *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training               Whether this is in training mode or inference.
- *  \param[in]     return_max_score          Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit          Whether to produce Max and Sum_Exp, or Stats.
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensor's layout.
@@ -405,7 +405,7 @@ void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
     const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
     const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
-    size_t max_seqlen_kv, bool is_training, bool return_max_score, float attn_scale, float dropout,
+    size_t max_seqlen_kv, bool is_training, bool return_max_logit, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
     NVTETensor workspace, cudaStream_t stream);
@@ -526,7 +526,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
  *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training               Whether this is in training mode or inference.
- *  \param[in]     return_max_score          Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit          Whether to produce Max and Sum_Exp, or Stats.
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
@@ -544,7 +544,7 @@ void nvte_fused_attn_fwd(
     const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_score,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
     int64_t window_size_right, NVTETensor workspace, cudaStream_t stream);

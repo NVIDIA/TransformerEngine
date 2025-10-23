@@ -203,7 +203,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
         softmax_type: str = "vanilla",
-        return_max_score: Optional[bool] = False,
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -212,7 +212,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
         self.softmax_type = softmax_type
-        self.return_max_score = return_max_score
+        self.return_max_logit = return_max_logit
 
         def mask_func(x, y):
             return (
@@ -456,13 +456,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
 
         # max attention score
-        max_score = None
-        if self.return_max_score:
-            # matmul_result [b, np, sq, dk], max_score [np]
-            max_score = matmul_result
+        max_logit = None
+        if self.return_max_logit:
+            # matmul_result [b, np, sq, dk], max_logit [np]
+            max_logit = matmul_result
             if attn_mask_type != "no_mask":
-                max_score = self.mask_func(matmul_result, attention_mask)
-            max_score = torch.amax(max_score, dim=(0, 2, 3))
+                max_logit = self.mask_func(matmul_result, attention_mask)
+            max_logit = torch.amax(max_logit, dim=(0, 2, 3))
 
         # add attention sink to the last column: [b, np, sq, sk+1]
         if self.softmax_type != "vanilla":
@@ -566,8 +566,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if fp8_output:
                 context_layer = O_quantizer(context_layer)
 
-        if self.return_max_score:
-            return context_layer, max_score
+        if self.return_max_logit:
+            return context_layer, max_logit
 
         return context_layer
 
@@ -1107,7 +1107,7 @@ class FusedAttnFunc(torch.autograd.Function):
         softmax_offset,
         fp8_output,
         layer_number,
-        return_max_score,
+        return_max_logit,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1143,7 +1143,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attention:       torch.float16 or torch.bfloat16
         out_nominal_dtype = q.dtype
 
-        max_score = None
+        max_logit = None
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
 
@@ -1247,7 +1247,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors, *max_score = fused_attn_fwd(
+            out_, aux_ctx_tensors, *max_logit = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1275,7 +1275,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
                 softmax_offset,
-                return_max_score,
+                return_max_logit,
             )
             out = out_
             out_ret = out_
@@ -1370,8 +1370,8 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        if return_max_score:
-            return out_ret, *max_score
+        if return_max_logit:
+            return out_ret, *max_logit
         return out_ret
 
     @staticmethod
@@ -1660,7 +1660,7 @@ class FusedAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         deterministic: bool = False,
         softmax_type: str = "vanilla",
-        return_max_score: Optional[bool] = False,
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -1674,7 +1674,7 @@ class FusedAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.softmax_type = softmax_type
-        self.return_max_score = return_max_score
+        self.return_max_logit = return_max_logit
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1894,7 +1894,7 @@ class FusedAttention(torch.nn.Module):
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
-                    return_max_score=self.return_max_score,
+                    return_max_logit=self.return_max_logit,
                 )
         else:
             with self.attention_dropout_ctx():
@@ -1930,10 +1930,10 @@ class FusedAttention(torch.nn.Module):
                     softmax_offset,
                     fp8_output,
                     self.layer_number,
-                    self.return_max_score,
+                    self.return_max_logit,
                 )
 
-        if self.return_max_score:
+        if self.return_max_logit:
             # ...hd -> ...(hd)
             return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)

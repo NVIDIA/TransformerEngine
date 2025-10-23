@@ -137,8 +137,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_score=True),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_score=True),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA

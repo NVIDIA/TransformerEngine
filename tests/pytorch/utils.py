@@ -205,7 +205,7 @@ class ModelConfig:
         window_size: Tuple[int, int] = (-1, -1),
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
-        return_max_score=False,
+        return_max_logit=False,
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,
@@ -234,7 +234,7 @@ class ModelConfig:
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
-        self.return_max_score = return_max_score
+        self.return_max_logit = return_max_logit
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
         self.num_layers = num_layers
@@ -320,7 +320,7 @@ def get_available_attention_backends(
             is_training=is_training,
             inference_params=inference_params,
             softmax_type=config.softmax_type,
-            return_max_score=config.return_max_score,
+            return_max_logit=config.return_max_logit,
         )
         (
             use_flash_attention,

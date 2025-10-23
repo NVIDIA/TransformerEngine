@@ -53,7 +53,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     int64_t max_b, int64_t max_t_q, int64_t max_t_kv, int64_t num_pages_k, int64_t num_pages_v,
     int64_t page_size_k, int64_t page_size_v, int64_t max_pages_per_seq_k,
     int64_t max_pages_per_seq_v, int64_t bias_b, int64_t bias_h, bool is_training,
-    bool return_max_score, float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
+    bool return_max_logit, float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, void *devPtrQ, void *devPtrK,
     void *devPtrV, void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2,
@@ -102,7 +102,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   }
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  bool generate_stats = !return_max_score;
+  bool generate_stats = !return_max_logit;
   try {
     FADescriptor_v1 descriptor{
         b,
@@ -134,7 +134,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
-        return_max_score,
+        return_max_logit,
     };
 
     namespace fe = cudnn_frontend;
@@ -332,7 +332,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                   .set_stride({1, 1, 1, 1})
                                   .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       }
-      if (return_max_score) {
+      if (return_max_logit) {
         Max = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Max")
                                     .set_dim({b, h, s_q, 1})
@@ -367,7 +367,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         O->set_ragged_offset(offset_o);
       }
 
-      if (!return_max_score) {
+      if (!return_max_logit) {
         Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
         if (is_ragged_q && cudnn_runtime_version >= 90600) {
           Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
@@ -452,7 +452,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         {Q, devPtrQ}, {K, devPtrK},  {V, devPtrV}, {attn_scale, &scaling_factor},
         {O, devPtrO}, {S1, devPtrS1}};
 
-    if (return_max_score) {
+    if (return_max_logit) {
       variant_pack[S2] = devPtrS2;
     }
 
@@ -1039,7 +1039,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 using namespace transformer_engine::fused_attn;
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, size_t num_tokens,
-    bool is_training, bool return_max_score, float attn_scale, float p_dropout,
+    bool is_training, bool return_max_logit, float attn_scale, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
     const Tensor *input_QKV, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
@@ -1091,7 +1091,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
       if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
@@ -1140,7 +1140,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
 
     Aux_CTX_Tensors->size = i;
   } else if (Aux_CTX_Tensors->size >= 2) {
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       devPtrS1 = output_Max->data.dptr;
       Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1172,7 +1172,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   fused_attn_arbitrary_seqlen_fwd_impl(
       batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim, head_dim,
       max_batch_size, max_tokens, max_tokens, 0, 0, 0, 0, 0, 0, bias_b, bias_h, is_training,
-      return_max_score, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
+      return_max_logit, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
       window_size_left, window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias,
       devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
       devPtrCuSeqlens, devPtrCuSeqlens, nullptr, nullptr, devPtrSeqOffsets, devPtrSeqOffsets,
@@ -1288,7 +1288,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim, size_t num_tokens_q, size_t num_tokens_kv,
     size_t num_pages_k, size_t num_pages_v, size_t page_size_k, size_t page_size_v,
-    size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training, bool return_max_score,
+    size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training, bool return_max_logit,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
     int64_t window_size_right, const Tensor *input_Q, const Tensor *input_KV,
@@ -1354,7 +1354,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
@@ -1403,7 +1403,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 
     Aux_CTX_Tensors->size = i;
   } else if (Aux_CTX_Tensors->size >= 2) {
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       devPtrS1 = output_Max->data.dptr;
       Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1436,7 +1436,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, head_dim,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
-      return_max_score, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
+      return_max_logit, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
       window_size_left, window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias,
       devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
       devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ,
@@ -1568,7 +1568,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q,
     size_t num_tokens_kv, size_t num_pages_k, size_t num_pages_v, size_t page_size_k,
     size_t page_size_v, size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training,
-    bool return_max_score, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+    bool return_max_logit, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, const Tensor *input_Q,
     const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
@@ -1623,7 +1623,7 @@ void fused_attn_arbitrary_seqlen_fwd(
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
@@ -1672,7 +1672,7 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     Aux_CTX_Tensors->size = i;
   } else if (Aux_CTX_Tensors->size >= 2) {
-    if (return_max_score) {
+    if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       devPtrS1 = output_Max->data.dptr;
       Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1705,7 +1705,7 @@ void fused_attn_arbitrary_seqlen_fwd(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
-      return_max_score, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
+      return_max_logit, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
       window_size_left, window_size_right, devPtrQ, devPtrK, devPtrV, devPtrBias,
       devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
       devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ,

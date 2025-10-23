@@ -138,7 +138,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_score) {
+    int64_t window_size_right, bool return_max_logit) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   const int device_id = cuda::current_device();
@@ -187,7 +187,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
       !requires_64bit_ragged_offset && (softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) &&
       // 9.10.0: known bugs with SDPA FP8
-      (cudnn_runtime_version != 91000) && !return_max_score) {
+      (cudnn_runtime_version != 91000) && !return_max_logit) {
     if (cudnn_runtime_version >= 8900) {
       backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
     } else {
@@ -216,7 +216,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)) &&
         ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0)) &&
         !requires_64bit_ragged_offset &&
-        (softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) && !return_max_score) {
+        (softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) && !return_max_logit) {
       flag_m512 = true;
     }
     if (
@@ -418,7 +418,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                                    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
                                    const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
-                                   size_t max_seqlen, bool is_training, bool return_max_score,
+                                   size_t max_seqlen, bool is_training, bool return_max_logit,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                                    NVTE_Softmax_Type softmax_type, int64_t window_size_left,
@@ -460,7 +460,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
-      h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_score);
+      h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_logit);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -474,7 +474,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd_qkvpacked(
-        b, h, max_seqlen, d, t, is_training, return_max_score, attn_scale, dropout, qkv_layout,
+        b, h, max_seqlen, d, t, is_training, return_max_logit, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right, input_QKV,
         input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens,
         input_cu_seqlens_padded, input_rng_state, wkspace, stream, handle);
@@ -602,7 +602,7 @@ void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
     const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
     const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
-    size_t max_seqlen_kv, bool is_training, bool return_max_score, float attn_scale, float dropout,
+    size_t max_seqlen_kv, bool is_training, bool return_max_logit, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
     NVTETensor workspace, cudaStream_t stream) {
@@ -681,7 +681,7 @@ void nvte_fused_attn_fwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right,
-      return_max_score);
+      return_max_logit);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -697,7 +697,7 @@ void nvte_fused_attn_fwd_kvpacked(
     fused_attn_arbitrary_seqlen_fwd_kvpacked(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
-        return_max_score, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
+        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
         window_size_left, window_size_right, input_Q, input_KV, input_Bias, input_SoftmaxOffset,
         output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k,
@@ -839,7 +839,7 @@ void nvte_fused_attn_fwd(
     const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_score,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
     int64_t window_size_right, NVTETensor workspace, cudaStream_t stream) {
@@ -913,7 +913,7 @@ void nvte_fused_attn_fwd(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_score);
+      return_max_logit);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -929,7 +929,7 @@ void nvte_fused_attn_fwd(
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
-        return_max_score, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
+        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
         window_size_left, window_size_right, input_Q, input_K, input_V, input_Bias,
         input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k,
