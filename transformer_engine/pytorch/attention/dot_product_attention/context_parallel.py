@@ -2773,7 +2773,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             window_size=window_size_per_step[i],
                             return_max_score=return_max_score,
                         )
-                        if return_max_score:
+                        if return_max_score and *max_score_ is not None:
                             max_score_per_step[i] = *max_score_
                     else:
                         fa_forward_args_thd = get_fa_args(
