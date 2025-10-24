@@ -977,11 +977,13 @@ def layernorm_fwd(
     if not NormFwdPrimitive.enabled():
         output, mu, rsigma = _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon)
         if quantizer is not None:
-            output = quantize(output, quantizer,
-                              flatten_axis=-1,
-                              amax_scope=amax_scope,
-                              transpose_batch_sequence=transpose_batch_sequence,
-                              )
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-1,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
         return (output, mu, rsigma)
 
     # TE/common does not support normalization with colwise only quantization yet
@@ -1226,11 +1228,13 @@ def rmsnorm_fwd(
     if not NormFwdPrimitive.enabled():
         output, rsigma = _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon)
         if quantizer is not None:
-            output = quantize(output, quantizer,
-                              flatten_axis=-1,
-                              amax_scope=amax_scope,
-                              transpose_batch_sequence=transpose_batch_sequence,
-                              )
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-1,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
         return (output, rsigma)
 
     # TE/common does not support normalization with colwise only quantization yet
