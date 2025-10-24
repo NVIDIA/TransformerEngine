@@ -6,34 +6,44 @@ import argparse
 import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
-import pathlib
 
 from transformer_engine.pytorch.module import GroupedLinear
-from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.common.recipe import (
+    Float8BlockScaling,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
+)
+from transformer_engine.pytorch.quantization import autocast, FP8GlobalStateManager
 from contextlib import nullcontext
 
 """
 # Profile BF16 recipe with Nsight Systems
 nsys profile \
-    --output=./benchmarks/linear/b200_mkn_4096_4096_4096_numgemm_8_bf16 \
+    --output=./benchmarks/linear/b200_numgemm_8_bf16 \
     --force-overwrite true \
     --trace=cuda,nvtx,cudnn,cublas \
     python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe bf16
 
 # Profile FP8 sub-channel recipe with Nsight Systems
 nsys profile \
-    --output=./benchmarks/linear/h100hbm_mkn_4096_4096_4096_numgemm_8_fp8_sub_channel \
+    --output=./benchmarks/linear/h100hbm_numgemm_8_fp8_sub_channel \
     --force-overwrite true \
     --trace=cuda,nvtx,cudnn,cublas \
     python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe fp8_sub_channel
 
 # Profile MXFP8 recipe with Nsight Systems
 nsys profile \
-    --output=./benchmarks/linear/b200_mkn_4096_4096_4096_numgemm_8_mxfp8 \
+    --output=./benchmarks/linear/b200_numgemm_8_mxfp8 \
     --force-overwrite true \
     --trace=cuda,nvtx,cudnn,cublas \
     python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe mxfp8
+
+# Profile NVFP4 recipe with Nsight Systems
+nsys profile \
+    --output=./benchmarks/linear/b200_numgemm_8_nvfp4 \
+    --force-overwrite true \
+    --trace=cuda,nvtx,cudnn,cublas \
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4
 
 """
 
@@ -41,23 +51,24 @@ RECIPES = {
     "bf16": None,
     "fp8_sub_channel": Float8BlockScaling(),
     "mxfp8": MXFP8BlockScaling(),
+    "nvfp4": NVFP4BlockScaling(),
 }
 
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
+nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available()
 
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
-    fp8_context = (
-        fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
+    quantization_context = (
+        autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
     )
-    # print(f"fp8_context: {fp8_context} and is it nullcontext? {isinstance(fp8_context, nullcontext)}")
 
     if mode == "fwd_only":
-        with torch.no_grad(), fp8_context:
+        with torch.no_grad(), quantization_context:
             for i in range(run_num_steps):
                 y_q = layer.forward(
                     x,
@@ -70,7 +81,7 @@ def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=
         layer.zero_grad()
         x.grad = None
 
-        with fp8_context:
+        with quantization_context:
             for i in range(run_num_steps):
                 label = f"step_{i}"
                 torch.cuda.nvtx.range_push(label)
@@ -145,7 +156,7 @@ def benchmark_linear(
             "recipe": recipe,
         },
         num_threads=1,
-    ).blocked_autorange(min_run_time=5)
+    ).blocked_autorange(min_run_time=10)
     print(f"{recipe_name}: {timing} \n")
     timing_ms = timing.median * 1000 / num_microbatches
 
@@ -228,30 +239,44 @@ if __name__ == "__main__":
 
     use_bias = False
     # Set the MKN values to benchmark
+    # Deepseek V3 EP64, SEQ_LEN=8192, topK8
+    # 256 expert => 4 local experts
+    # Avg M per expert: AvgM = SEQ_LEN * topK / localExperts = 16384
+    # M = AvgM * localExperts = 65536
+    # K = 7168
+    # N = 2048
+
+    # Deepseek V3 EP32, SEQ_LEN=8192, topK8
+    # 256 expert => 8 local experts
+    # Avg M per expert: AvgM = SEQ_LEN * topK / localExperts = 8192
+    # M = AvgM * localExperts = 65536
+    # K = 7168
+    # N = 2048
+
+    # 4 or 8local experts per rank
+    num_gemms_list = [4, 8]
+
+    # MKN for group linear
     mkns = []
-    for m in [8192]:
-        # for m in [4096, 8192, 16384]:
-        # for n in [1024, 2048, 4096, 8192, 16384]:
-        for n in [8192]:
-            for k in [4096]:
+    for m in [65536]:
+        for k in [7168]:
+            for n in [2048]:
                 mkns.append((m, k, n))
 
     # default recipes to run if not specified
     recipe_list = ["bf16"]
 
     if args.recipe == "all":
-        recipe_list = ["bf16", "fp8_sub_channel", "mxfp8"]
+        recipe_list = ["bf16", "fp8_sub_channel", "mxfp8", "nvfp4"]
     else:
         recipe_list = [args.recipe]
 
-    num_gemms_list = [8]
-
     if args.profile:
-        mkns = [(4096 * 8, 4096, 4096)]
+        mkns = [(8192 * 8, 7168, 2048)]
         # in profile mode, only run one recipe specified in args.recipe
         assert args.recipe != "all", (
             "In profile mode, only one recipe can be specified, please specify the recipe as"
-            " fp8_sub_channel, mxfp8, or bf16"
+            " fp8_sub_channel, mxfp8, nvfp4, or bf16"
         )
         recipe_list = [args.recipe]
         num_gemms_list = [8]
@@ -268,12 +293,16 @@ if __name__ == "__main__":
                 "bf16",
                 "fp8_sub_channel",
                 "mxfp8",
-            ], "Recipe must be one of bf16, fp8_sub_channel, or mxfp8"
+                "nvfp4",
+            ], "Recipe must be one of bf16, fp8_sub_channel, mxfp8, or nvfp4"
             if recipe_name == "mxfp8" and not mxfp8_available:
                 print(f"MXFP8 is not available, skipping {recipe_name}")
                 continue
             if recipe_name == "fp8_sub_channel" and not fp8_block_scaling_available:
                 print(f"FP8 block scaling is not available, skipping {recipe_name}")
+                continue
+            if recipe_name == "nvfp4" and not nvfp4_available:
+                print(f"NVFP4 is not available, skipping {recipe_name}")
                 continue
 
             df = run_benchmark_linear(

@@ -4,20 +4,16 @@
 
 import pytest
 import torch
-import transformer_engine as te
+import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import NVFP4Quantizer
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.nvfp4_tensor import (
-    NVFP4Quantizer,
-)
-from transformer_engine.pytorch.experimental.quantization_microblock_ref import NVFP4QuantizerRef
-from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp4_te_dtype
 
 
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:

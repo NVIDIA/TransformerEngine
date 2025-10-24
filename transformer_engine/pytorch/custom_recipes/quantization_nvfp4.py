@@ -2,18 +2,49 @@
 #
 # See LICENSE for license information.
 
-"""NVFP4 implementations for experimental middleware between Transformer Engine and Kitchen."""
+"""NVFP4 recipe reference implementation."""
 
-from typing import Optional, Tuple
+import dataclasses
+from typing import Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.experimental import quantization
-from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.experimental.quantization import (
-    ExperimentalQuantizedTensor,
-    ExperimentalQuantizer,
-)
+from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+
+
+def nvfp4_ref_rht_2d_quantizer_factory(role):
+    """
+    Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
+
+    Usage with CustomRecipe and fp8_autocast:
+        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+        with fp8_autocast(fp8_recipe=custom_recipe):
+            output = model(input)
+    """
+    if role == "linear_input":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
+    if role == "linear_weight":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(16, 16),
+            pow_2_scales=False,
+            with_rht=False,
+        )
+    if role == "linear_grad_output":
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
+    return None
 
 
 def cast_to_fp4x2(x):
@@ -156,8 +187,89 @@ def high_precision_gemm_ref(
     return y_ref
 
 
-class NVFP4TensorRef(ExperimentalQuantizedTensor):
-    """NVFP4 tensor for middleware between Transformer Engine and Kitchen"""
+@dataclasses.dataclass
+class NVFP4TensorRef(QuantizedTensorStorage):
+    """NVFP4 tensor for middleware between Transformer Engine and Kitchen.
+
+    Custom container to hold quantization result, including quantized tensor, optional
+    transposed quantized tensor, and corresponding decoding scales.
+
+    data: torch.Tensor
+        the quantized tensor.
+    scale: torch.Tensor
+        the decoding scale for the quantized tensor. Shape depends on the scaling granularity.
+        - if scaling type is PER_TENSOR, it should be a 1D scalar tensor.
+    data_t: torch.Tensor
+        the transposed quantized tensor (computed lazily if needed).
+    scale_t: torch.Tensor
+        the decoding scale for the transposed quantized tensor.
+    dtype: torch.dtype
+        nominal tensor datatype.
+    device: torch.device
+        device of the tensor.
+    quant_dtype: Union[utils.Fp4Formats, torch.dtype]
+        low precision tensor datatype.
+    original_shape: Tuple[int, ...]
+        original shape of the tensor.
+    _quantizer: Quantizer
+        Builder class for quantized tensor.
+    """
+
+    data: Optional[torch.Tensor] = None
+    scale: Optional[torch.Tensor] = None
+    data_t: Optional[torch.Tensor] = None
+    scale_t: Optional[torch.Tensor] = None
+    global_amax_row: Optional[torch.Tensor] = None
+    global_amax_col: Optional[torch.Tensor] = None
+
+    dtype: Optional[torch.dtype] = None
+    device: Optional[torch.device] = None
+    quant_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
+    original_shape: Optional[Tuple[int, ...]] = None
+    _quantizer: Optional[Quantizer] = None
+
+    @property
+    def custom(self) -> bool:
+        """Flag to indicate this quantized tensor is custom."""
+        return True
+
+    def prepare_for_saving(
+        self,
+    ) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
+        """Prepare the quantization result for saving for backward"""
+        tensors = [self.data, self.data_t, self.scale, self.scale_t]
+        self.data = None
+        self.data_t = None
+        self.scale = None
+        self.scale_t = None
+        return tensors, self
+
+    def restore_from_saved(
+        self, tensors: list[Optional[torch.Tensor]]
+    ) -> list[Optional[torch.Tensor]]:
+        """Restore the quantization result from the saved tensors"""
+        self.data = tensors[0]
+        self.data_t = tensors[1]
+        self.scale = tensors[2]
+        self.scale_t = tensors[3]
+        return tensors[4:]
+
+    # Compatibility
+    @property
+    def _data(self):
+        return self.data
+
+    @_data.setter
+    def _data(self, value):
+        self.data = value
+
+    @property
+    def _scale_inv(self):
+        return self.scale
+
+    @_scale_inv.setter
+    def _scale_inv(self, value):
+        self.scale = value
 
     def __repr__(self):
         return (
@@ -165,46 +277,9 @@ class NVFP4TensorRef(ExperimentalQuantizedTensor):
             f"dtype={self.dtype}, "
             f"device={self.device}, "
             f"quant_dtype={self.quant_dtype}, "
-            f"data={self.dequantize(dtype=self.dtype)}, "
             f"original_shape={self.original_shape}"
             ")"
         )
-
-    def quantize_(
-        self,
-        tensor: torch.Tensor,
-        *,
-        noop_flag: Optional[torch.Tensor] = None,
-    ) -> ExperimentalQuantizedTensor:
-        """In-place update of quantized data
-
-        Parameters
-        ----------
-        tensor: torch.Tensor
-            Tensor to copy from
-        noop_flag: torch.Tensor, optional
-            float32 flag indicating whether to avoid performing update
-
-        """
-        if isinstance(tensor, ExperimentalQuantizedTensor):
-            return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
-        self.get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
-
-    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """
-        Construct plain PyTorch tensor from quantized tensor
-        """
-        if dtype is None:
-            dtype = self.dtype
-
-        # Ignore data_t for now
-        assert self.data is not None, "QuantizedTensor has no valid tensor data"
-        assert self.scale is not None, "QuantizedTensor has no valid scale"
-        tensor_data = self.data
-        tensor_scale = self.scale
-        # Dispatch to the quantizer
-        return self.get_quantizer().dequantize(tensor_data, tensor_scale, dtype=dtype)
 
     def update_usage(
         self,
@@ -224,10 +299,10 @@ class NVFP4TensorRef(ExperimentalQuantizedTensor):
 
         # Generate data that is required
         if needs_data and not has_data:
-            raise RuntimeError("Cannot generate FP8 data, even from FP8 data transpose")
+            raise RuntimeError("Cannot generate FP4 data, even from FP4 data transpose")
         if needs_data_transpose and not has_data_transpose:
             if not has_data:
-                raise RuntimeError("FP8 data is required to generate FP8 data transpose")
+                raise RuntimeError("FP4 data is required to generate FP4 data transpose")
             self._create_transpose()
 
         # Delete data that is not required
@@ -262,7 +337,7 @@ def get_wgrad_sign_vector() -> torch.Tensor:
     )
 
 
-class NVFP4QuantizerRef(ExperimentalQuantizer):
+class NVFP4QuantizerRef(Quantizer):
     """NVFP4 quantizer for middleware between Transformer Engine and Kitchen"""
 
     def __init__(
@@ -277,12 +352,19 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         with_random_sign_mask: bool = True,
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
+        self.internal = True
+
         self.dtype = dtype
         self.pow_2_scales = pow_2_scales
         self.eps = eps
         self.quant_tile_shape = quant_tile_shape
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
+
+    @property
+    def custom(self) -> bool:
+        """Flag to indicate this quantizer is custom."""
+        return True
 
     @staticmethod
     def _build_hadamard_matrix(
@@ -500,7 +582,7 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
             - sx: scale tensor for qx (if rowwise_usage), None otherwise
             - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
             - sx_t: scale tensor for qx_t (if columnwise_usage), None otherwise
-            - global_amax: global amax tensor
+            - global_amax_row, global_amax_col: global amax tensors
         """
         if self.pow_2_scales:
             assert self.quant_tile_shape == (
@@ -607,25 +689,25 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
             dtype=tensor.dtype,
             device=tensor.device,
             quant_dtype=self.dtype,
-            quantizer=self,
+            _quantizer=self,
             original_shape=original_shape,
         )
 
     def update_quantized(
         self,
         src: torch.Tensor,
-        dst: ExperimentalQuantizedTensor,
+        dst: QuantizedTensorStorage,
         *,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> ExperimentalQuantizedTensor:
+    ) -> QuantizedTensorStorage:
         """Update the quantized tensor with the given tensor in-place
 
         Parameters
         ----------
         src: torch.Tensor
             Source tensor to copy from
-        dst: ExperimentalQuantizedTensor
-            Destination ExperimentalQuantizedTensor to update
+        dst: QuantizedTensorStorage
+            Destination QuantizedTensorStorage to update
         noop_flag: torch.Tensor, optional
             float32 flag indicating whether to avoid performing update
         """
@@ -642,14 +724,15 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         if src.ndim > 2:
             src = src.view(-1, src.shape[-1])
 
-        qx, sx, qx_t, sx_t, global_amax = self._quantize(src)
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(src)
 
         # Update the destination with new data
         dst.data = qx
         dst.scale = sx
         dst.data_t = qx_t
         dst.scale_t = sx_t
-        dst.global_amax = global_amax
+        dst.global_amax_row = global_amax_row
+        dst.global_amax_col = global_amax_col
         dst.dtype = src.dtype
         dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
@@ -665,9 +748,7 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         """
         return False
 
-    def transpose_qresult(
-        self, qresult: quantization.ExperimentalQuantizedTensor
-    ) -> quantization.ExperimentalQuantizedTensor:
+    def transpose_qresult(self, qresult: QuantizedTensorStorage) -> QuantizedTensorStorage:
         """Convert row-wise data to column-wise data (?)
 
         TODO(etsykunov): Confirm docstring is correct.
@@ -687,17 +768,11 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         """
         raise NotImplementedError("Not implemented yet")
 
-    def dequantize(
-        self, tensor: torch.Tensor, scale: torch.Tensor, dtype: Optional[torch.dtype] = None
-    ) -> torch.Tensor:
-        """Dequantize the quantized tensor"""
-        raise NotImplementedError("Not implemented yet")
-
     def qgemm(
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,
+        m_params: quantization.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
@@ -705,9 +780,10 @@ class NVFP4QuantizerRef(ExperimentalQuantizer):
         out: torch.Tensor | None = None,
         accumulate: bool = False,
         gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
-        qresult_x: quantization.ExperimentalQuantizedTensor | None = None,
-        qresult_w: quantization.ExperimentalQuantizedTensor | None = None,
+        qresult_x: QuantizedTensorStorage | None = None,
+        qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
+        """Python implementation of microblock FP4 GEMM."""
         assert bias is None, "Bias is implemented for FP4 GEMM."
 
         high_precision_x = cast_from_fp4x2(qx, out_dtype)

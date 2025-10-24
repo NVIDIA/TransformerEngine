@@ -5,23 +5,65 @@
 import pytest
 import torch
 
-import transformer_engine as te
+import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.fp8 import check_fp8_support, fp8_autocast
-from transformer_engine.pytorch import Linear
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.module.layernorm_linear import LayerNormLinear
-from transformer_engine.pytorch.module.layernorm_mlp import LayerNormMLP
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
+    autocast,
+    Linear,
+    LayerNormLinear,
+    LayerNormMLP,
+    GroupedLinear,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
+    nvfp4_ref_rht_2d_quantizer_factory,
+)
+
+
+@pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
+def test_custom_recipe_sanity_modules_nvfp4(module_type):
+    """Test modules with NVFP4 custom recipe support"""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+
+    torch.manual_seed(0)
+
+    # Simple linear layer with dims divisible by 16
+    in_features = 64
+    out_features = 64
+    batch = 32
+
+    if module_type == "Linear":
+        model = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+    elif module_type == "LayerNormLinear":
+        model = LayerNormLinear(
+            in_features, out_features, params_dtype=torch.bfloat16, bias=False
+        ).cuda()
+    else:  # OpsLinear
+        model = te_ops.Linear(
+            in_features, out_features, device="cuda", dtype=torch.bfloat16, bias=False
+        )
+    inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    # Use NVFP4 quantizer factory
+    custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+
+    # Execute with custom recipe
+    with autocast(enabled=True, recipe=custom_recipe):
+        out = model(inp)
+    loss = out.float().sum()
+    loss.backward()
+
+    # Basic sanity: gradients exist
+    assert inp.grad is not None
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear", "LayerNormMLP"])
 def test_custom_recipe_sanity(module_type):
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -57,7 +99,7 @@ def test_custom_recipe_sanity(module_type):
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     # Execute with custom recipe
-    with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
+    with autocast(enabled=True, recipe=custom_recipe):
         out = model(inp)
     loss = out.float().sum()
     loss.backward()
@@ -67,7 +109,7 @@ def test_custom_recipe_sanity(module_type):
 
 
 def test_custom_recipe_grouped_linear_sanity():
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -93,7 +135,7 @@ def test_custom_recipe_grouped_linear_sanity():
 
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
-    with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
+    with autocast(enabled=True, recipe=custom_recipe):
         out = model(inp, m_splits)
     loss = out.float().sum()
     loss.backward()
@@ -102,7 +144,7 @@ def test_custom_recipe_grouped_linear_sanity():
 
 
 def test_custom_recipe_matches_current_scaling():
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -124,7 +166,7 @@ def test_custom_recipe_matches_current_scaling():
 
     # Reference: use Float8CurrentScaling recipe
     ref_recipe = recipe.Float8CurrentScaling()
-    with fp8_autocast(enabled=True, fp8_recipe=ref_recipe):
+    with autocast(enabled=True, recipe=ref_recipe):
         out_ref = model_ref(inp_ref)
     # Assert dtypes for reference quantizers: HYBRID = E4M3 (fwd), E5M2 (bwd)
     ref_fwd_in = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
@@ -155,7 +197,7 @@ def test_custom_recipe_matches_current_scaling():
 
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
-    with fp8_autocast(enabled=True, fp8_recipe=custom_recipe):
+    with autocast(enabled=True, recipe=custom_recipe):
         out_custom = model_custom(inp_custom)
     # Assert dtypes for custom quantizers match reference mapping
     cus_fwd_in = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
@@ -189,7 +231,7 @@ def test_custom_recipe_matches_current_scaling():
 
 
 def test_custom_recipe_ops_linear_2_1_layout():
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -212,7 +254,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
-    with fp8_autocast(enabled=True, fp8_recipe=custom):
+    with autocast(enabled=True, recipe=custom):
         out = op(inp)
     loss = out.float().sum()
     loss.backward()
@@ -221,7 +263,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
 
 def test_custom_recipe_factory_invocation_counts_and_cycling():
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
@@ -256,7 +298,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
     # Run fwd+bwd once; for a single GEMM, expect forward to build 3 quantizers (cycled from 1 factory),
     # and backward to build 2 quantizers (cycled from 1 factory).
-    with fp8_autocast(enabled=True, fp8_recipe=custom):
+    with autocast(enabled=True, recipe=custom):
         out = op(inp)
     loss = out.float().sum()
     loss.backward()
@@ -270,7 +312,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
 
 def test_factories_return_distinct_instances_and_buffers():
-    available, reason = check_fp8_support()
+    available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 

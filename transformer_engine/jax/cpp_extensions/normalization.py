@@ -28,7 +28,10 @@ from .misc import (
     get_cudnn_version,
 )
 from .quantization import _quantize_dbias_impl, AmaxScope
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp_tpsp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp_tpsp,
+)
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
@@ -1031,7 +1034,10 @@ def layernorm_fwd(
         )
         return out, mu, rsigma
 
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+    if (
+        quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+        or quantizer.scaling_mode.is_nvfp4_scaling
+    ):
         # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
         out, mu, rsigma = layernorm_fwd(
             x=x,
@@ -1276,7 +1282,10 @@ def rmsnorm_fwd(
         )
         return out, rsigma
 
-    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+    if (
+        quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+        or quantizer.scaling_mode.is_nvfp4_scaling
+    ):
         # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
         out, rsigma = rmsnorm_fwd(
             x=x,

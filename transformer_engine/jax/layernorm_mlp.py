@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
-from .cpp_extensions.quantization import AmaxScope
+from .cpp_extensions.amax import AmaxScope
 from .layernorm import canonicalize_norm_type
 from .quantize import (
     with_sharding_constraint_by_logical_axes,

@@ -16,23 +16,24 @@ import sys
 import pytest
 import torch
 
+from typing import Optional, Iterable
+
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import (
+from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    QuantizedTensor,
+    Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.utils import is_bf16_compatible
+
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -40,8 +41,8 @@ sys.path.append(str(_current_file.parent.parent))
 from utils import dtype_tols, make_recipe, str_to_dtype
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
@@ -301,7 +302,7 @@ def _test_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
-    with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
+    with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
         ops = []
         linear_op = None
         bias_op = None
@@ -351,7 +352,7 @@ def _test_linear(
             bias_op.bias.copy_(b_test)
         del w_test
         del b_test
-    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+    with te.autocast(enabled=quantized_compute, recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 

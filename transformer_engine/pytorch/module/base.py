@@ -23,7 +23,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
-from ..fp8 import (
+from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
@@ -39,7 +39,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -1547,7 +1547,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_enabled_in_this_iteration = debug
+        else:
+            # If this is the same iteration as previous invocation of the module,
+            # we use the debug value from the first invocation in the iteration.
+            debug = self.debug_enabled_in_this_iteration
+
         return debug
 
     def no_debug_features_active(self, quantizers):
@@ -1598,8 +1604,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         - MXFP8BlockScaling → MXFP8Tensor
         - Float8BlockScaling → Float8BlockTensor
 
-        Example case to check: recipe is DelayedScaling (DelayedScaling is set in fp8_autocast()),
-        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in fp8_model_init()).
+        Example case to check: recipe is DelayedScaling (DelayedScaling is set in autocast()),
+        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in quantized_model_init()).
         """
         if not self.fp8 and not self.fp8_calibration:
             return
@@ -1620,6 +1626,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError(
                         f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe"
                         f" {compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}."
-                        " Please check the recipes assigned during fp8_model_init() and"
-                        " fp8_autocast() calls."
+                        " Please check the recipes assigned during quantized_model_init() and"
+                        " autocast() calls."
                     )

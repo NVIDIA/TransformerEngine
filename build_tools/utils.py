@@ -12,10 +12,29 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -238,11 +257,9 @@ def cuda_archs() -> str:
     if archs is None:
         version = cuda_version()
         if version >= (13, 0):
-            archs = "75;80;89;90;100;100a;103a;120"
-        elif version >= (12, 9):
-            archs = "70;80;89;90;100;100a;103a;120"
+            archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
-            archs = "70;80;89;90;100;100a;120"
+            archs = "70;80;89;90;100;120"
         else:
             archs = "70;80;89;90"
     return archs

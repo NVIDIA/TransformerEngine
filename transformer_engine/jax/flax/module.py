@@ -15,7 +15,6 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from transformer_engine.common import recipe
 
 from ..dense import dense
 
@@ -35,10 +34,9 @@ from ..cpp_extensions import (
 from ..quantize import (
     QuantizerFactory,
     get_quantize_config,
-    QuantizeMeta,
     QuantizeMetaSet,
-    ScalingMode,
     TensorSource,
+    get_quantize_config_with_recipe,
 )
 
 PRNGKey = Any
@@ -353,40 +351,32 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         Generate a set of FP8 meta for a GEMM.
         """
 
-        def generate_quantize_meta(quantizer_name: str):
-            collection_name = (
-                variable_collection
-                if variable_collection is not None
-                else get_quantize_config().COLLECTION_NAME
-            )
-            scale = self.variable(
-                collection_name,
-                f"{quantizer_name}{postfix}_scale",
-                jnp.ones,
-                (1,),
-                jnp.float32,
-            ).value
-            amax_history = self.variable(
-                collection_name,
-                f"{quantizer_name}{postfix}_amax_history",
-                jnp.zeros,
-                (get_quantize_config().AMAX_HISTORY_LEN,),
-                jnp.float32,
-            ).value
-            return QuantizeMeta(scale=scale, amax_history=amax_history)
+        collection_name = (
+            variable_collection
+            if variable_collection is not None
+            else get_quantize_config().COLLECTION_NAME
+        )
 
-        if get_quantize_config().get_scaling_mode(
-            TensorSource.X
-        ) == ScalingMode.DELAYED_TENSOR_SCALING or isinstance(fp8_recipe, recipe.DelayedScaling):
-            x_meta = generate_quantize_meta("x")
-            kernel_meta = generate_quantize_meta("kernel")
-            grad_meta = generate_quantize_meta("grad")
-            quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
-            kwargs = {"quantize_meta_set": quantize_meta_set}
+        if fp8_recipe is None:
+            quantize_config = get_quantize_config()
         else:
-            kwargs = {}
+            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
 
-        quantizer_set = QuantizerFactory.create_set(fp8_recipe=fp8_recipe, **kwargs)
+        x_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.X, "x"
+        )
+        kernel_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.KERNEL, "kernel"
+        )
+        grad_meta = quantize_config.get_quantize_flax_meta(
+            self, collection_name, postfix, TensorSource.DGRAD, "grad"
+        )
+
+        quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
+
+        quantizer_set = QuantizerFactory.create_set(
+            fp8_recipe=fp8_recipe, quantize_meta_set=quantize_meta_set
+        )
         return quantizer_set
 
 

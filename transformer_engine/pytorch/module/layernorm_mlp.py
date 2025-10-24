@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.tensor.utils import is_experimental
+from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_workspace,
@@ -28,7 +28,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -70,8 +70,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ..tensor.quantized_tensor import (
-    QuantizedTensor,
+from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -269,13 +268,13 @@ class _LayerNormMLP(torch.autograd.Function):
         #                              high precision layernorm output and output of the linear are returned
         # for debug: : layernorm output = High precision to enable processing of this norm
 
-        experimental = is_experimental(fc1_input_quantizer)
+        custom = is_custom(fc1_input_quantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not experimental
+            and not custom
         )
 
         # Apply normalization
@@ -315,8 +314,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if fp8 or debug:
                     quantizer = fc1_input_quantizer
-                    # experimental recipe doesn't need to support quantized AG
-                    if not with_quantized_norm and not experimental:
+                    # custom recipe doesn't need to support quantized AG
+                    if not with_quantized_norm and not custom:
                         ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
@@ -957,7 +956,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(fc1_weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
@@ -1198,7 +1201,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(fc2_weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
@@ -1493,7 +1500,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
