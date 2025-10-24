@@ -4,7 +4,7 @@
 
 import random
 import torch
-from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
 

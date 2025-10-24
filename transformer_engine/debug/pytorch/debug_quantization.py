@@ -15,10 +15,10 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -574,7 +574,7 @@ class DebugQuantizer(Quantizer):
         return output
 
 
-class DebugQuantizedTensor(QuantizedTensorBase):
+class DebugQuantizedTensor(QuantizedTensorStorage):
     """
     Class containing quantized tensors after debug. Depending on configuration
     it can contain one or two different objects. These objects can be accessed by the method

@@ -3,9 +3,11 @@
 # See LICENSE for license information.
 
 
-pip3 install onnxruntime==1.20.1
-pip3 install onnxruntime_extensions==0.13.0
+pip3 install onnxruntime
+pip3 install onnxruntime_extensions
 
 : ${TE_PATH:=/opt/transformerengine}
+: ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
 
-python3 -m pytest --tb=auto  $TE_PATH/tests/pytorch/test_onnx_export.py
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/test_onnx_export.xml $TE_PATH/tests/pytorch/test_onnx_export.py

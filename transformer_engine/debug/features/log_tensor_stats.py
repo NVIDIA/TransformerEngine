@@ -15,8 +15,8 @@ import nvdlfw_inspect.api as debug_api
 from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
-from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import next_enabled_iter, get_reduction_params
 
@@ -123,17 +123,23 @@ class LogTensorStats(BaseLogTensorStats):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
-            type(tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
+            type(tensor) not in [Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage]
             and tensor.dtype != torch.uint8
         ), (
             f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be in high precision when using"
             " log_tensor_stats. Use log_fp8_tensor_stats for FP8 tensors."
         )
 
+        start_step = config.get("start_step", None)
+        end_step = config.get("end_step", None)
+        start_end_list = config.get("start_end_list", None)
+        if start_end_list is not None:
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
+
         options = (
-            config.get("start_step", None),
-            config.get("end_step", None),
-            config.get("start_end_list", None),
+            start_step,
+            end_step,
+            start_end_list,
         )
 
         skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
