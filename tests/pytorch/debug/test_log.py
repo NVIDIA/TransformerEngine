@@ -210,7 +210,7 @@ def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
 
 
-LOG_HIGH_PRECISION_CONFIG_BASE = """
+LOG_HIGH_PRECISION_CONFIG = """
 log:
   layers:
     layer_name_regex_pattern: .*
@@ -234,10 +234,15 @@ log:
 """
 
 
-def test_log_stats_numerics(feature_dirs):
-    """Check corectness of dynamic range and max blockwise dynamic range stats"""
-    stats = ["dynamic_range", "max_blockwise_4_dynamic_range"]
-    log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG_BASE.format(stats=", ".join(stats))
+@pytest.mark.parametrize("tensor_name", ["activation", "weight", "gradient"])
+def test_log_stats_numerics(feature_dirs, tensor_name):
+    """Check correctness of dynamic range and max blockwise dynamic range stats.
+    
+    Tests different tensor types:
+    - activation/weight: use both orientations (rowwise + columnwise), takes max
+    - gradient/dgrad: use single orientation (rowwise only)
+    """
+    log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG
 
     with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
         # There is 1024 x 1024 tensor with very small epsilon values in almost all elements,
@@ -251,7 +256,7 @@ def test_log_stats_numerics(feature_dirs):
 
         debug_api.transformer_engine.inspect_tensor(
             layer_name="layer_name",
-            tensor_name="activation",
+            tensor_name=tensor_name,
             iteration=0,
             tp_group=None,
             tensor=tensor,
@@ -263,20 +268,26 @@ def test_log_stats_numerics(feature_dirs):
 
         output = read_log(log_dir)
 
+    both_orientations = tensor_name in ["activation", "weight"]
+
     for line in output.splitlines():
-        if "max_blockwise_dynamic_range_block_size_4_dims_1" in line:
+        if f"max_blockwise_dynamic_range_block_size_4_dims_1_both_orientations_{both_orientations}" in line:
             max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
-            expected = 0
+            if both_orientations:
+                expected = math.log2(A) - math.log2(B)
+            else:
+                expected = 0
             assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(
                 expected, abs=1e-4
             )
-        elif "max_blockwise_dynamic_range_block_size_4_dims_2" in line:
+        elif f"max_blockwise_dynamic_range_block_size_4_dims_2_both_orientations_{both_orientations}" in line:
             max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
+
             expected = math.log2(A) - math.log2(B)
             assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
                 expected, abs=1e-4
             )
-        elif "dynamic_range" in line:
+        elif "dynamic_range" in line and "max_blockwise" not in line:
             dynamic_range = float(line.split("value=")[1])
             expected = math.log2(A) - math.log2(epsilon)
             assert dynamic_range == pytest.approx(expected, abs=1e-4)

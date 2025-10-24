@@ -48,7 +48,9 @@ class LogTensorStats(BaseLogTensorStats):
             - l2_norm
             - cur_amax – maximal absolute value of a tensor,
             - dynamic_range – equal to `torch.log2(amax) - torch.log2(nonzero_amin)`
-            - max_blockwise_dynamic_range – Computes the maximum dynamic range `log2(amax) - log2(nonzero_amin)` across all blocks of size block_size within the tensor, where block_size is an integer specifying the block size. For `dim=1` there are block_size consecutive elements in the block, for `dim=2` the block is block_size x block_size elements tile.
+            - max_blockwise_dynamic_range – Computes the maximum dynamic range `log2(amax) - log2(nonzero_amin)` across all blocks of size block_size within the tensor.
+                  If tensor and its transpose is needed in training, this stat is computed for both orientations and the maximum is returned.
+                  For `dim=1` there are block_size consecutive elements in the block, for `dim=2` the block is block_size x block_size elements tile.
 
                 - block_size: int, default = 32
                 - dims: int, default = 1, allowed values are 1 and 2
@@ -121,21 +123,23 @@ class LogTensorStats(BaseLogTensorStats):
             "dynamic_range",
         }
 
-    def _parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict]) -> List[str]:
+    def _parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict], tensor_name: str) -> List[str]:
         """
         Adds all max_blockwise_dynamic_range stats to the stat computation logic.
         Changes the types of the stats from Dict to str, for other stats nothing is changed.
         For example, if the stats is [{"max_blockwise_dynamic_range": {"block_size": 32, "dims": 1}}],
-        it will be changed to ["max_blockwise_dynamic_range_block_size_32_dims_1"].
+        it will be changed to ["max_blockwise_dynamic_range_block_size_32_dims_1_both_orientations_True"]
+        or ["max_blockwise_dynamic_range_block_size_32_dims_1_both_orientations_False"] depending on tensor_name.
         """
+        both_orientations = tensor_name in ["activation", "weight"]
         parsed_stats = []
         for stat in stats:
             if isinstance(stat, dict):
                 block_size = stat["max_blockwise_dynamic_range"].get("block_size", 32)
                 dims = stat["max_blockwise_dynamic_range"].get("dims", 1)
-                add_max_blockwise_dynamic_range_stats(block_size, dims)
+                add_max_blockwise_dynamic_range_stats(block_size, dims, both_orientations)
                 parsed_stats.append(
-                    f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"
+                    f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}_both_orientations_{both_orientations}"
                 )
             else:
                 parsed_stats.append(stat)
@@ -204,7 +208,7 @@ class LogTensorStats(BaseLogTensorStats):
                 stat
             ), f"[NVTORCH INSPECT ERROR] Statistic {stat} is not supported."
 
-        stats = self._parse_max_blockwise_dynamic_range_stats(config["stats"])
+        stats = self._parse_max_blockwise_dynamic_range_stats(config["stats"], tensor_name)
 
         STATS_BUFFERS.try_add_buffer(
             layer_name=layer_name,

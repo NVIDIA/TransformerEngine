@@ -38,51 +38,67 @@ def _compute_dynamic_range_bottom(tensor):
     return torch.log2(amin)
 
 
-@torch.compile
-def compute_max_blockwise_dynamic_range(tensor, block_size, dims):
+#@torch.compile
+def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientations: bool = False):
     """
-    Max blockwise dynamic range (log2 max/min_nonzero).
+    Max blockwise dynamic range (log2 max/min_nonzero) across both tensor orientations.
+    
+    Flattens tensor to 2D and computes dynamic range for both rowwise and columnwise
+    orientations, returning the maximum. This ensures the metric captures the worst-case
+    scenario regardless of how the tensor is used in GEMM operations.
+    
     Returns 0 if all blocks are zeros.
     Otherwise computes dynamic range over non-zero blocks.
 
     For dims = 1 blocks contain block_size consecutive elements,
     for dims = 2 blocks contain block_size x block_size elements.
     """
-    total_numel = tensor.numel()
-    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
 
-    # torch.compile friendly code - standard ** power does not work with jit
-    total_block_size = block_size * block_size if dims == 2 else block_size
-    assert (
-        total_numel % total_block_size == 0
-    ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+    def _compute_for_one_orientation(tensor):
+        total_numel = tensor.numel()
+        assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
 
-    tensor = tensor.abs().float()
-    if dims == 1:
-        tensor = tensor.reshape(-1, block_size)
-        per_block_amax = tensor.amax(dim=1)
-        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
-    else:
-        # We want to have tensor of shape [nr_blocks, block_size, block_size],
-        # where each block is a block_size x block_size tile of the original tensor.
-        dim_x = tensor.shape[-2] // block_size
-        dim_y = tensor.shape[-1] // block_size
-        tensor = (
-            tensor.reshape(-1, dim_x, block_size, dim_y, block_size)
-            .permute(0, 1, 3, 2, 4)
-            .reshape(-1, block_size, block_size)
+        # torch.compile friendly code - standard ** power does not work with jit
+        total_block_size = block_size * block_size if dims == 2 else block_size
+        assert (
+            total_numel % total_block_size == 0
+        ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+
+        tensor = tensor.abs().float()
+        if dims == 1:
+            tensor = tensor.reshape(-1, block_size)
+            per_block_amax = tensor.amax(dim=1)
+            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
+        else:
+            # We want to have tensor of shape [nr_blocks, block_size, block_size],
+            # where each block is a block_size x block_size tile of the original tensor.
+            dim_y = tensor.shape[-1] // block_size
+            tensor = (
+                tensor.reshape(-1, block_size, dim_y, block_size)
+                .permute(0, 2, 1, 3)
+                .reshape(-1, block_size, block_size)
+            )
+            per_block_amax = tensor.amax(dim=(1, 2))
+            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
+
+        # Identify blocks that contain any non-zero element
+        nonzero_blocks = per_block_amax != 0
+        dynamic_range_per_block = torch.where(
+            nonzero_blocks,
+            torch.log2(per_block_amax) - torch.log2(per_block_amin),
+            torch.zeros_like(per_block_amax, dtype=torch.float32),
         )
-        per_block_amax = tensor.amax(dim=(1, 2))
-        per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
-
-    # Identify blocks that contain any non-zero element
-    nonzero_blocks = per_block_amax != 0
-    dynamic_range_per_block = torch.where(
-        nonzero_blocks,
-        torch.log2(per_block_amax) - torch.log2(per_block_amin),
-        torch.zeros_like(per_block_amax, dtype=torch.float32),
-    )
-    return dynamic_range_per_block.max()
+        return dynamic_range_per_block.max()
+    
+    # Flatten to 2D: [batch, seq, hidden, ...] -> [batch*seq*..., hidden]
+    tensor_2d = tensor.reshape(-1, tensor.shape[-1])
+    if both_orientations:
+        return max(
+            _compute_for_one_orientation(tensor_2d),                    # Rowwise orientation
+            _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
+        )
+    else:
+        return _compute_for_one_orientation(tensor_2d)
 
 
 @torch.compile
@@ -366,9 +382,9 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
 
-def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int):
+def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int, both_orientations: bool = False):
     """Register max_blockwise_X_dynamic_range stats for the recipe."""
-    stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}"
+    stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}_both_orientations_{both_orientations}"
     if stat_name in stats_to_num:
         return  # already registered
     assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
@@ -376,9 +392,8 @@ def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int):
     DEPENDENCIES[stat_name] = {stat_name}
 
     STATS[stat_name] = (
-        lambda x, aux_dict, _block_size=block_size, _dims=dims: compute_max_blockwise_dynamic_range(
-            x, _block_size, _dims
-        ),
+        lambda x, aux_dict, _block_size=block_size, _dims=dims, _both_orientations=both_orientations: \
+            compute_max_blockwise_dynamic_range(x, _block_size, _dims, _both_orientations),
         lambda buffers: max(_get(buffers, stat_name)),
     )
 
