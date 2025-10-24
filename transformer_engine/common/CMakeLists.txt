@@ -168,7 +168,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      gemm/cutlass_grouped_gemm.cu
-     util/cast.cu
+     cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
      activation/swiglu.cu
