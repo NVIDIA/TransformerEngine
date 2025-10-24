@@ -97,8 +97,7 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientati
             _compute_for_one_orientation(tensor_2d),  # Rowwise orientation
             _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
         )
-    else:
-        return _compute_for_one_orientation(tensor_2d)
+    return _compute_for_one_orientation(tensor_2d)
 
 
 @torch.compile
