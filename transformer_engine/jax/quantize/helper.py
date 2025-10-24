@@ -631,10 +631,8 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         )
         sr_jax_rng = jax.jit(jax.random.fold_in)(sr_jax_rng, quantizer_hash)
 
-        # Generate 4 random uint32 values from the JAX PRNG key
-        shape = (4,)
-        if get_num_devices_in_mesh() > 1:
-            shape = (get_num_devices_in_mesh(), 4)
+        # Generate 4 random uint32 values per device from the JAX PRNG key
+        shape = (get_num_devices_in_mesh(), 4)
         sr_jax_rng_state = jax.random.randint(
             sr_jax_rng, shape, 0, jnp.iinfo(jnp.int32).max, dtype=jnp.int32
         ).view(jnp.uint32)

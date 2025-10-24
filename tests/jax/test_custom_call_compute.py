@@ -876,7 +876,7 @@ class TestStochasticRounding:
         for i in range(num_samples):
             iter_key = jax.random.fold_in(key, i)
             sr_rng_state = jax.random.randint(
-                iter_key, (4,), minval=0, maxval=2**30 - 1, dtype=jnp.uint32
+                iter_key, (1, 4), minval=0, maxval=2**30 - 1, dtype=jnp.uint32
             )
             quantizer = QuantizerFactory.create(
                 q_dtype=q_dtype,
