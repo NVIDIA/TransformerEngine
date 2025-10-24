@@ -1197,22 +1197,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
-<<<<<<< HEAD
             if ctx.use_bias:
-=======
-            if (
-                isinstance(
-                    grad_output_.get_tensor(True),
-                    (
-                        QuantizedTensor,
-                        Float8TensorStorage,
-                        MXFP8TensorStorage,
-                        Float8BlockwiseQTensorStorage,
-                    ),
-                )
-                and ctx.use_bias
-            ):
->>>>>>> upstream/main
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias = None
