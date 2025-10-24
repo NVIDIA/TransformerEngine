@@ -140,6 +140,10 @@ def git_check_submodules() -> None:
     being silently used by developers.
     """
 
+    # Provide an option to skip these checks for development.
+    if bool(int(os.getenv("NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD", "0"))):
+        return
+
     # Require git executable.
     if shutil.which("git") is None:
         return
@@ -164,8 +168,9 @@ def git_check_submodules() -> None:
             ), (
                 "Submodules are initialized incorrectly. If this isn't intended,"
                 " run `git submodule update --init --recursive` to checkout the "
-                "correct submodule commits. Otherwise, any changes to submodules"
-                " must first be committed to git before build."
+                "correct submodule commits. Otherwise, the environment variable "
+                "`NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD` must be set to a non-zero"
+                "value to skip these checks during development."
             )
 
         subprocess.check_call(
