@@ -457,13 +457,18 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
 
-       attn_mask_type       mask/sequence_descriptor       SWA          softmax type
-       --------------------------------------------------------------------------------------------
-       no_mask              None                           None         SCALED
-       causal               None                           None         SCALED_UPPER_TRIANG_MASKED
-       causal               None                           Yes          SCALED_MASKED
-       padding              Required                       Yes/No       SCALED_MASKED
-       padding_causal       Required                       Yes/No       SCALED_MASKED
+        .. table::
+            :widths: auto
+
+            ===================== ============================ ========== =================================
+            attn_mask_type        mask/sequence_descriptor     SWA        softmax type
+            ===================== ============================ ========== =================================
+            no_mask               None                         None       SCALED
+            causal                None                         None       SCALED_UPPER_TRIANG_MASKED
+            causal                None                         Yes        SCALED_MASKED
+            padding               Required                     Yes/No     SCALED_MASKED
+            padding_causal        Required                     Yes/No     SCALED_MASKED
+            ===================== ============================ ========== =================================
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.

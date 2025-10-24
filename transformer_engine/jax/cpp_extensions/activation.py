@@ -15,7 +15,7 @@ from jax.sharding import PartitionSpec
 
 import numpy as np
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Activation_Type
+from transformer_engine_jax import NVTE_Activation_Type, QuantizeLayout
 from .base import BasePrimitive, register_primitive
 from .misc import (
     jax_dtype_to_te_dtype,
@@ -32,7 +32,6 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_a
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
 )

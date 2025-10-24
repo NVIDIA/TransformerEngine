@@ -25,7 +25,7 @@ jobs:
         run: |
           doxygen docs/Doxyfile
           cd docs
-          make html
+          make html SPHINXOPTS="-W"
       - name: 'Upload docs'
         uses: actions/upload-artifact@v4
         with:

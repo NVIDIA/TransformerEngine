@@ -36,7 +36,6 @@ from .helper import (
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
 __all__ = [
-    "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
     "CurrentScaleQuantizer",

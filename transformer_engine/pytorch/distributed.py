@@ -29,7 +29,7 @@ except ImportError:
 
 import transformer_engine_torch as tex
 
-from . import torch_version
+from .utils import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,

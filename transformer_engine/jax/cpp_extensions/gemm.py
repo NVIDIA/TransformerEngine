@@ -24,6 +24,7 @@ from transformer_engine_jax import (
     get_device_compute_capability,
     initialize_cgemm_communicator,
     get_cgemm_num_max_streams,
+    QuantizeLayout,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -40,7 +41,6 @@ from ..quantize import (
     GroupedQuantizer,
     get_quantize_config,
     QuantizerSet,
-    QuantizeLayout,
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,

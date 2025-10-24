@@ -4,6 +4,7 @@
 """Randomized Hadamard Transform (RHT) utilities for JAX."""
 import jax.numpy as jnp
 
+from transformer_engine_jax import QuantizeLayout
 from .scaling_modes import ScalingMode
 
 
@@ -18,9 +19,6 @@ def should_use_rht(scaling_mode, is_colwise=None, q_layout=None) -> bool:
     Returns:
         bool: True if RHT should be used, False otherwise.
     """
-    # Delayed import to avoid circular dependencies
-    from .quantizer import QuantizeLayout
-
     assert (is_colwise is None) != (
         q_layout is None
     ), "Exactly one of is_colwise or q_layout must be provided."

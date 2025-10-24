@@ -10,13 +10,18 @@ import os
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
+from packaging.version import Version as PkgVersion
 
-from . import torch_version
 from .tensor.quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
 __all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
