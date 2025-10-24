@@ -28,6 +28,7 @@ from ..utils import (
     clear_tensor_data,
     init_method_constant,
     requires_grad,
+    should_set_cuda_device_every_batch,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -769,7 +770,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
-        if is_first_microbatch is None or is_first_microbatch:
+        if should_set_cuda_device_every_batch():
             device_ctx = torch.cuda.device(
                 getattr(self, list(self.named_parameters())[0][0]).device
             )

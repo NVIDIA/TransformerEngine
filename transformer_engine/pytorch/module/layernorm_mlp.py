@@ -46,6 +46,7 @@ from ..utils import (
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
+    should_set_cuda_device_every_batch,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -1807,7 +1808,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        if is_first_microbatch is None or is_first_microbatch:
+        if should_set_cuda_device_every_batch():
             device_ctx = torch.cuda.device(
                 getattr(self, list(self.named_parameters())[0][0]).device
             )

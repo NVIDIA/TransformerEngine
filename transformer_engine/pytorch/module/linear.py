@@ -39,6 +39,7 @@ from ..utils import (
     assert_dim_for_all_gather,
     nvtx_range_pop,
     nvtx_range_push,
+    should_set_cuda_device_every_batch,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -1420,7 +1421,7 @@ class Linear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        if is_first_microbatch is None or is_first_microbatch:
+        if should_set_cuda_device_every_batch():
             device_ctx = torch.cuda.device(
                 getattr(self, list(self.named_parameters())[0][0]).device
             )

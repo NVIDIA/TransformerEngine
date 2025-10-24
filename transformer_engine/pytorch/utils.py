@@ -507,6 +507,33 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     return (major, minor, patch)
 
 
+_env_var = os.environ.get("NVTE_SET_CUDA_DEVICE")
+if _env_var is not None:
+    _set_cuda_device_every_batch = _env_var.strip() == "1"
+else:
+    _set_cuda_device_every_batch = True
+
+
+def set_cuda_device_every_batch(enabled: bool = True) -> None:
+    """
+    Controls whether the module forward methods set CUDA device context for every batch.
+    By default, this behavior is enabled, unless overridden with the
+    NVTE_SET_CUDA_DEVICE environment variable.
+    If enabled, the relevant modules will wrap each forward pass in `torch.cuda.device(...)`
+    using the module's first parameter's device.
+    """
+    global _set_cuda_device_every_batch
+    _set_cuda_device_every_batch = enabled
+
+
+def should_set_cuda_device_every_batch() -> bool:
+    """
+    Returns True if the system is configured to set CUDA device context every batch,
+    otherwise False.
+    """
+    return _set_cuda_device_every_batch
+
+
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     """Canonicalize PyTorch device
 
