@@ -453,22 +453,32 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         * causal_padding / padding_causal: A combination of both causal and padding masks.
           Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
 
+        |
+
         .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
 
+        |
+
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+
+        |
 
         .. table::
             :widths: auto
 
-            ===================== ============================ ========== =================================
-            attn_mask_type        mask/sequence_descriptor     SWA        softmax type
-            ===================== ============================ ========== =================================
-            no_mask               None                         None       SCALED
-            causal                None                         None       SCALED_UPPER_TRIANG_MASKED
-            causal                None                         Yes        SCALED_MASKED
-            padding               Required                     Yes/No     SCALED_MASKED
-            padding_causal        Required                     Yes/No     SCALED_MASKED
-            ===================== ============================ ========== =================================
+            ================== ============ ========== ==============================
+            attn_mask_type     mask/sd      SWA        softmax type
+            ================== ============ ========== ==============================
+            no_mask            None         None       SCALED
+            causal             None         None       SCALED_UPPER_TRIANG_MASKED
+            causal             None         Yes        SCALED_MASKED
+            padding            Required     Yes/No     SCALED_MASKED
+            padding_causal     Required     Yes/No     SCALED_MASKED
+            ================== ============ ========== ==============================
+
+        where sd stands for sequence_descriptor.
+
+
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
@@ -513,11 +523,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Sliding window size. The default value is no sliding window.
     max_segments_per_seq: Optional[int], default = 1
         The maximum number of segments per sequence, also used for THD format (sequence packing).
-    context_parallel_causal_load_balanced (bool):
-            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
-    context_parallel_axis (str): The name of the context parallel axis.
-    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
-    context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
+    context_parallel_causal_load_balanced: bool
+        Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+    context_parallel_axis: str
+        The name of the context parallel axis.
+    context_parallel_strategy: CPStrategy
+        The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
+    context_checkpoint_name: str
+        The name of the context checkpoint in the forward pass of fused attention.
 
     Optimization parameters
     -----------------------

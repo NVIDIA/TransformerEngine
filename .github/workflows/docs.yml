@@ -21,8 +21,8 @@ jobs:
           pip install breathe==4.35.0 sphinx-autoapi==3.3.2
           sudo apt-get install -y pandoc graphviz doxygen
           export GIT_SHA=$(git show-ref --hash HEAD)
-      - name: 'Build docs'
-        run: |
+      - name: 'Build docs' 
+        run: | # SPHINXOPTS="-W" errors out on warnings
           doxygen docs/Doxyfile
           cd docs
           make html SPHINXOPTS="-W"
