@@ -166,11 +166,11 @@ def git_check_submodules() -> None:
                 " ",
                 "-",
             ), (
-                "Submodules are initialized incorrectly. If this isn't intended,"
-                " run `git submodule update --init --recursive` to checkout the "
-                "correct submodule commits. Otherwise, the environment variable "
-                "`NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD` must be set to a non-zero"
-                "value to skip these checks during development."
+                "Submodules are initialized incorrectly. If this is intended, set the "
+                "environment variable `NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD` to a "
+                "non-zero value to skip these checks during development. Otherwise, "
+                "run `git submodule update --init --recursive` to checkout the correct"
+                " submodule commits."
             )
 
         subprocess.check_call(
