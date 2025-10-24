@@ -37,8 +37,8 @@ namespace quantization_and_transposition_SF {
 #if FP4_TYPE_SUPPORTED
 // Used in transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ nvfp4_scale_t
-compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
+__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
+                                                                         const float S_enc) {
   // constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
@@ -51,7 +51,7 @@ compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 }
 #else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_and_transposition_SF
 
@@ -59,8 +59,8 @@ namespace quantization_SF {
 #if FP4_TYPE_SUPPORTED
 // Used in non-transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ fp8e4m3
-compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
+__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
+                                                                   const float S_enc) {
   constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
@@ -68,7 +68,7 @@ compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
 }
 #else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_SF
 
@@ -82,8 +82,7 @@ using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::Phi
 using namespace ptx;
 
 // Compute the global encode scale factor for a given global amax
-__device__ __forceinline__ float
-compute_global_encode_scaling_factor_FP4(const float global_amax) {
+__device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
@@ -97,8 +96,7 @@ compute_global_encode_scaling_factor_FP4(const float global_amax) {
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     curanddx::uniform_bits dist;
@@ -110,9 +108,8 @@ get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
   return rbits;
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(const uint64_t in_4x, const float2 scale,
-                                                const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
+    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
@@ -144,14 +141,16 @@ mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(const uint64_t in_4x, const floa
         : "=h"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
+                                                                    const float2 scale,
+                                                                    const uint32_t rbits) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
   if constexpr (is_blackwell) {
@@ -188,15 +187,17 @@ mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x, const float2 scale, const u
         : "=r"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
   } else {
-    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x,
+                                                            const float2 scale,
+                                                            const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(in_4x, scale, rbits);
   } else {
@@ -204,9 +205,8 @@ mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x, const float2 scale, const uint32_t 
   }
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(const float2 in01, const float2 in23,
-                                                const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+    const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
@@ -233,15 +233,17 @@ mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(const float2 in01, const float2 
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01, const float2 in23, const float2 scale,
-                               const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+                                                                    const float2 in23,
+                                                                    const float2 scale,
+                                                                    const uint32_t rbits) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
   if constexpr (is_blackwell) {
@@ -273,16 +275,17 @@ mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01, const float2 in23, const float
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)));
   } else {
-    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
-                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4
-mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23, const float2 scale,
-                       const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
+                                                            const float2 scale,
+                                                            const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, scale, rbits);
   } else {
