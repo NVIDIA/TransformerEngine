@@ -111,7 +111,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
 
-            When collecting stats for the weight tensor with FP8 model parameters enabled, only "scale_inv_min" and "scale_inv_max" are available. All other statistics require access to the high precision tensor.
+            When collecting stats for the weight tensor with FP8 model parameters enabled, 
+            only "scale_inv_min" and "scale_inv_max" are available. 
+            All other statistics require access to the high precision tensor.
 
         tensors/tensors_struct: List[str]
             list of tensors to log
