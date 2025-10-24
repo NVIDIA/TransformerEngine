@@ -37,7 +37,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -1522,7 +1522,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_enabled_in_this_iteration = debug
+        else:
+            # If this is the same iteration as previous invocation of the module,
+            # we use the debug value from the first invocation in the iteration.
+            debug = self.debug_enabled_in_this_iteration
+
         return debug
 
     def no_debug_features_active(self, quantizers):

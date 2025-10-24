@@ -118,3 +118,14 @@ def get_quantization_recipe_from_name_string(name: str):
             return recipe.NVFP4BlockScaling()
         case _:
             raise ValueError(f"Invalid quantization_recipe, got {name}")
+
+
+def hf_login_if_available():
+    """Login to HF hub if available"""
+    try:
+        from huggingface_hub import login
+
+        login()
+    except Exception as e:
+        print(e)
+        pass

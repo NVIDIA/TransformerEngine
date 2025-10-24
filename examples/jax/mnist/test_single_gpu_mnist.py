@@ -22,7 +22,13 @@ from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMo
 
 DIR = str(Path(__file__).resolve().parents[1])
 sys.path.append(str(DIR))
-from encoder.common import is_bf16_supported, get_quantization_recipe_from_name_string
+from encoder.common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    hf_login_if_available,
+)
+
+hf_login_if_available()
 
 IMAGE_H = 28
 IMAGE_W = 28

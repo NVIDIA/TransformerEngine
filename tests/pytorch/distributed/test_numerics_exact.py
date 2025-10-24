@@ -14,7 +14,7 @@ import transformer_engine.pytorch as te
     Distributed numerics tests
 
     This numerical test aims for zero tolerance test for absolute confidence in numerics.
-    In the case of NVFP4, with the experimental NVFP4 quantization, we matched bitwise
+    In the case of NVFP4, with the custom NVFP4 quantization, we matched bitwise
     result with the native silicon. For distrbuted test cases, we can do the same by thing
     by comparing BF16 AG results with the low precision AG results at layer level.
 """
