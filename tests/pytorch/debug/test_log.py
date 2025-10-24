@@ -18,7 +18,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import RecipeState
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-
+import math
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
@@ -154,7 +154,7 @@ fp8_recipes = [
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-def test_numerics(fp8_recipe, feature_dirs):
+def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if not mxfp8_available and fp8_recipe == recipe.MXFP8BlockScaling():
@@ -208,6 +208,95 @@ def test_numerics(fp8_recipe, feature_dirs):
                 (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
             )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
+
+
+LOG_HIGH_PRECISION_CONFIG = """
+log:
+  layers:
+    layer_name_regex_pattern: .*
+  enabled:
+    True
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      stats:
+        - dynamic_range
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 1
+        - max_blockwise_dynamic_range:
+            block_size: 4
+            dims: 2
+      tensors: [activation, gradient, weight]
+      freq: 2
+      start_step: 0
+      end_step: 10
+"""
+
+
+@pytest.mark.parametrize("tensor_name", ["activation", "weight", "gradient"])
+def test_log_stats_numerics(feature_dirs, tensor_name):
+    """Check correctness of dynamic range and max blockwise dynamic range stats.
+
+    Tests different tensor types:
+    - activation/weight: use both orientations (rowwise + columnwise), takes max
+    - gradient/dgrad: use single orientation (rowwise only)
+    """
+    log_only_bare_stats_config = LOG_HIGH_PRECISION_CONFIG
+
+    with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
+        # There is 1024 x 1024 tensor with very small epsilon values in almost all elements,
+        # one row of large value A and three rows of large value B.
+        epsilon = 1e-10
+        A = 1000
+        B = 50
+        tensor = torch.zeros(1024, 1024).cuda() + epsilon
+        tensor[0, :] = A
+        tensor[1:4, :] = B
+
+        debug_api.transformer_engine.inspect_tensor(
+            layer_name="layer_name",
+            tensor_name=tensor_name,
+            iteration=0,
+            tp_group=None,
+            tensor=tensor,
+            quantizer=None,
+            rowwise_quantized_tensor=None,
+            columnwise_quantized_tensor=None,
+        )
+        debug_api.step()
+
+        output = read_log(log_dir)
+
+    both_orientations = tensor_name in ["activation", "weight"]
+
+    for line in output.splitlines():
+        if (
+            f"max_blockwise_dynamic_range_block_size_4_dims_1_both_orientations_{both_orientations}"
+            in line
+        ):
+            max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
+            if both_orientations:
+                expected = math.log2(A) - math.log2(B)
+            else:
+                expected = 0
+            assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(
+                expected, abs=1e-4
+            )
+        elif (
+            f"max_blockwise_dynamic_range_block_size_4_dims_2_both_orientations_{both_orientations}"
+            in line
+        ):
+            max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
+
+            expected = math.log2(A) - math.log2(B)
+            assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
+                expected, abs=1e-4
+            )
+        elif "dynamic_range" in line and "max_blockwise" not in line:
+            dynamic_range = float(line.split("value=")[1])
+            expected = math.log2(A) - math.log2(epsilon)
+            assert dynamic_range == pytest.approx(expected, abs=1e-4)
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
