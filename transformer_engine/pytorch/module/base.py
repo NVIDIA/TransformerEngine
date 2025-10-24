@@ -1244,10 +1244,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         metedata used in deferred initialization.
         """
         super().register_parameter(name, param)
-        # Initialize param_init_meta exactly once during the init. FSDP2 can call 
+        # Initialize param_init_meta exactly once during the init. FSDP2 can call
         # register parameter again to change parameters to DTensors. And it calls
         # it without custom fp8 specific kwargs that we need. And so we dont want
-        # our fp8 init attributes. 
+        # our fp8 init attributes.
         if hasattr(self, "param_init_meta") and name not in self.param_init_meta:
             self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
@@ -1346,7 +1346,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param._high_precision_init_val = high_precision_init_val
                 param.get_high_precision_init_val = MethodType(get, param)
                 param.clear_high_precision_init_val = MethodType(clear, param)
-                        # Update the parameter based on its type
+                # Update the parameter based on its type
 
             setattr(self, name, param) if not is_dtensor else setattr(self, name, dtensor_param)
 

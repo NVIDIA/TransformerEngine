@@ -208,7 +208,6 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 inputmats = [None] * num_gemms
 
-
             if cpu_offloading:
                 ctx.grad_added_to_main_grad = hasattr(weights[0], "grad_added_to_main_grad")
 

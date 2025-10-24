@@ -592,7 +592,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 data_transpose=out_transpose,
                 quantizer=tensor._quantizer,
             )
-    
+
         if func in [aten.slice.Tensor, aten.select.int]:
             tensor = args[0]
             data = tensor._data
@@ -733,11 +733,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             pass
         return super().__torch_dispatch__(func, types, args, kwargs)
 
-    def fsdp_pre_all_gather(self, mesh,
-        orig_size,
-        contiguous_orig_stride,
-        module,
-        mp_policy):
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
         """Functions FSDP2 calls before all-gather of the
         weights for both forward and backward passes.
         Args:
@@ -793,10 +789,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             used by the Float8Tensor that was being computed after allgather.
         """
 
-        (data, ) = all_gather_outputs
+        (data,) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, quantizer) = metadata
         orig_shape = data.size()
-        
+
         # Quantizer has only columnwise usage set for backward pass
         # with pre-hopper architectures.
         if quantizer.columnwise_usage:
@@ -805,7 +801,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             data = None
         else:
             transpose = None
-            
+
         if out is not None:
             out._data = data
             out._transpose = transpose
@@ -816,16 +812,17 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             )
             return
 
-        fp8_args = {"shape": orig_shape,
-                  "dtype": param_dtype,
-                  "fp8_scale_inv": fp8_scale_inv,
-                  "fp8_dtype": fp8_dtype,
-                  "quantizer": quantizer,
-                  "requires_grad": False,
-                  "data": data,
-                  "data_transpose": transpose,
-                  }
-        return Float8Tensor(**fp8_args), (data if quantizer.rowwise_usage else transpose, )
+        fp8_args = {
+            "shape": orig_shape,
+            "dtype": param_dtype,
+            "fp8_scale_inv": fp8_scale_inv,
+            "fp8_dtype": fp8_dtype,
+            "quantizer": quantizer,
+            "requires_grad": False,
+            "data": data,
+            "data_transpose": transpose,
+        }
+        return Float8Tensor(**fp8_args), (data if quantizer.rowwise_usage else transpose,)
 
     @classmethod
     def _make_in_reduce_ex(
