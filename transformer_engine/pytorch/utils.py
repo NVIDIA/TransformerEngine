@@ -18,6 +18,7 @@ from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 __all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
 
+
 @functools.lru_cache(maxsize=None)
 def torch_version() -> tuple[int, ...]:
     """Get PyTorch version"""
