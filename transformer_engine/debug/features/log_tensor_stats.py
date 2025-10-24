@@ -123,7 +123,9 @@ class LogTensorStats(BaseLogTensorStats):
             "dynamic_range",
         }
 
-    def _parse_max_blockwise_dynamic_range_stats(self, stats: List[str | Dict], tensor_name: str) -> List[str]:
+    def _parse_max_blockwise_dynamic_range_stats(
+        self, stats: List[str | Dict], tensor_name: str
+    ) -> List[str]:
         """
         Adds all max_blockwise_dynamic_range stats to the stat computation logic.
         Changes the types of the stats from Dict to str, for other stats nothing is changed.

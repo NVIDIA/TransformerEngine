@@ -237,7 +237,7 @@ log:
 @pytest.mark.parametrize("tensor_name", ["activation", "weight", "gradient"])
 def test_log_stats_numerics(feature_dirs, tensor_name):
     """Check correctness of dynamic range and max blockwise dynamic range stats.
-    
+
     Tests different tensor types:
     - activation/weight: use both orientations (rowwise + columnwise), takes max
     - gradient/dgrad: use single orientation (rowwise only)
@@ -271,7 +271,10 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
     both_orientations = tensor_name in ["activation", "weight"]
 
     for line in output.splitlines():
-        if f"max_blockwise_dynamic_range_block_size_4_dims_1_both_orientations_{both_orientations}" in line:
+        if (
+            f"max_blockwise_dynamic_range_block_size_4_dims_1_both_orientations_{both_orientations}"
+            in line
+        ):
             max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
             if both_orientations:
                 expected = math.log2(A) - math.log2(B)
@@ -280,7 +283,10 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
             assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(
                 expected, abs=1e-4
             )
-        elif f"max_blockwise_dynamic_range_block_size_4_dims_2_both_orientations_{both_orientations}" in line:
+        elif (
+            f"max_blockwise_dynamic_range_block_size_4_dims_2_both_orientations_{both_orientations}"
+            in line
+        ):
             max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
 
             expected = math.log2(A) - math.log2(B)

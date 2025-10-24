@@ -38,15 +38,15 @@ def _compute_dynamic_range_bottom(tensor):
     return torch.log2(amin)
 
 
-#@torch.compile
+# @torch.compile
 def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientations: bool = False):
     """
     Max blockwise dynamic range (log2 max/min_nonzero) across both tensor orientations.
-    
+
     Flattens tensor to 2D and computes dynamic range for both rowwise and columnwise
     orientations, returning the maximum. This ensures the metric captures the worst-case
     scenario regardless of how the tensor is used in GEMM operations.
-    
+
     Returns 0 if all blocks are zeros.
     Otherwise computes dynamic range over non-zero blocks.
 
@@ -89,12 +89,12 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientati
             torch.zeros_like(per_block_amax, dtype=torch.float32),
         )
         return dynamic_range_per_block.max()
-    
+
     # Flatten to 2D: [batch, seq, hidden, ...] -> [batch*seq*..., hidden]
     tensor_2d = tensor.reshape(-1, tensor.shape[-1])
     if both_orientations:
         return max(
-            _compute_for_one_orientation(tensor_2d),                    # Rowwise orientation
+            _compute_for_one_orientation(tensor_2d),  # Rowwise orientation
             _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
         )
     else:
@@ -382,7 +382,9 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
 
-def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int, both_orientations: bool = False):
+def add_max_blockwise_dynamic_range_stats(
+    block_size: int, dims: int, both_orientations: bool = False
+):
     """Register max_blockwise_X_dynamic_range stats for the recipe."""
     stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}_both_orientations_{both_orientations}"
     if stat_name in stats_to_num:
@@ -392,8 +394,9 @@ def add_max_blockwise_dynamic_range_stats(block_size: int, dims: int, both_orien
     DEPENDENCIES[stat_name] = {stat_name}
 
     STATS[stat_name] = (
-        lambda x, aux_dict, _block_size=block_size, _dims=dims, _both_orientations=both_orientations: \
-            compute_max_blockwise_dynamic_range(x, _block_size, _dims, _both_orientations),
+        lambda x, aux_dict, _block_size=block_size, _dims=dims, _both_orientations=both_orientations: compute_max_blockwise_dynamic_range(
+            x, _block_size, _dims, _both_orientations
+        ),
         lambda buffers: max(_get(buffers, stat_name)),
     )
 
