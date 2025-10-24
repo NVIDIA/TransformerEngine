@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 API
-============
+===
 
 .. toctree::
    :caption: Precision debug tools API
