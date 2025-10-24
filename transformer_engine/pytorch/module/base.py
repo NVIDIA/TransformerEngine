@@ -1528,7 +1528,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # If this is the same iteration as previous invocation of the module,
             # we use the debug value from the first invocation in the iteration.
             debug = self.debug_enabled_in_this_iteration
-        
+
         self.debug_last_iteration = TEDebugState.get_iteration()
 
         if self.wgrad_store is not None:
