@@ -19,7 +19,6 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
 from ..quantization import (
@@ -149,23 +148,23 @@ def initialize_ub(
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when `use_fp8 = False`
     ub_cfgs: dict = None
-             Configuration dictionary with the structure
-             ```
-             {
-                <gemm_name> : {
-                    "method": <"ring_exchange" or "pipeline">,
-                    "is_reduce_scatter": bool,
-                    "num_sm": int,
-                    "cga_size": int,
-                    "set_sm_margin": bool,
-                    "num_splits": int,
-                    "aggregate": bool,
-                    "atomic_gemm": bool,
-                    "use_ce": bool,
-                    "fp8_buf": bool,
-                }
-             }
-             ```
+             Configuration dictionary with the structure::
+
+                 {
+                    <gemm_name> : {
+                        "method": <"ring_exchange" or "pipeline">,
+                        "is_reduce_scatter": bool,
+                        "num_sm": int,
+                        "cga_size": int,
+                        "set_sm_margin": bool,
+                        "num_splits": int,
+                        "aggregate": bool,
+                        "atomic_gemm": bool,
+                        "use_ce": bool,
+                        "fp8_buf": bool,
+                    }
+                 }
+
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]`.

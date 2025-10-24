@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Debug features
-==========
+==============
 
 .. autoapiclass:: transformer_engine.debug.features.log_tensor_stats.LogTensorStats
 .. autoapiclass:: transformer_engine.debug.features.log_fp8_tensor_stats.LogFp8TensorStats

@@ -37,7 +37,6 @@ from .device_utils import is_fp8_gemm_with_all_layouts_supported
 from ..sharding import get_num_devices_in_mesh
 
 __all__ = [
-    "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
     "CurrentScaleQuantizer",

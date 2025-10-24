@@ -10,7 +10,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.utils import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
@@ -175,8 +175,9 @@ class TransformerLayer(torch.nn.Module):
           if set to `False`, the transformer layer will not learn any additive biases.
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
-          Options are: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                       'silu', and 'swiglu'.
+
+          Options: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``,
+          ``'srelu'``, ``'sreglu'``, ``'silu'``, and ``'swiglu'``.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -559,16 +560,17 @@ class TransformerLayer(torch.nn.Module):
                    cuda stream for context parallel execution.
         cp_comm_type : str, default = `p2p`
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a", or "a2a+p2p".
-                      "p2p": Exchange KV chunks with P2P communications in ring topology.
-                             P2P is async and can be overlapped with attention compute.
-                      "all_gather": All-gather to get full sequence of KV before attention.
-                                    The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                             group, and gather to get full sequence of QKV.
-                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                      p2p between sub-groups (e.g., via IBLink).
+                      Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                      - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                        P2P is async and can be overlapped with attention compute.
+                      - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                        The all-gather is not async, and cannot be overlapped.
+                      - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                        group, and gather to get full sequence of QKV.
+                      - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                        across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                        p2p between sub-groups (e.g., via IBLink).
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):

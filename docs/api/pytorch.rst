@@ -37,15 +37,21 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
-.. autoapifunction:: transformer_engine.pytorch.fp8_autocast
-
-.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.autocast
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
+
+
+.. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
+
+.. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
+
+
+Recipe availability
+------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.is_fp8_available
 
@@ -63,9 +69,8 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.get_default_recipe
 
-.. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
-
-.. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
+Mixture of Experts (MoE) functions
+------------------------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
@@ -79,9 +84,22 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
+
+GEMM Comm overlap
+---------------------
+
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
 
 .. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
   :members: FP8, NONE
+
+
+Deprecated functions
+---------------------
+
+
+.. autoapifunction:: transformer_engine.pytorch.fp8_autocast
+
+.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
