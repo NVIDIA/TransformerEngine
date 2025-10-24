@@ -22,9 +22,10 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "curanddx.hpp"
-#if CUDA_VERSION >= 12080
+
+#if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif  // CUDA_VERSION >= 12080
+#endif  // FP4_TYPE_SUPPORTED
 
 namespace transformer_engine {
 namespace dispatch {
@@ -33,12 +34,11 @@ namespace nvfp4 {
 using nvfp4_scale_t = fp8e4m3;
 
 namespace quantization_and_transposition_SF {
+#if FP4_TYPE_SUPPORTED
 // Used in transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
-                                                                         const float S_enc) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-#if CUDA_VERSION >= 12080
+__device__ __forceinline__ nvfp4_scale_t
+compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
   // constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
@@ -49,40 +49,32 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   const float S_dec_b = block_amax / fp4_max * S_enc;
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
+}
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // CUDA_VERSION >= 12080
-#else
-  NVTE_ERROR("sm_100 or higher is required.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
+#endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_and_transposition_SF
 
 namespace quantization_SF {
+#if FP4_TYPE_SUPPORTED
 // Used in non-transpose variant
 // Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
-                                                                   const float S_enc) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-#if CUDA_VERSION >= 12080
+__device__ __forceinline__ fp8e4m3
+compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
   constexpr float rcp_6f = 1.0f / 6.0f;
   // const float S_dec_b = block_amax * rcp_6f;
   // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
   // return S_dec_b_fp8;
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
+}
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // CUDA_VERSION >= 12080
-#else
-  NVTE_ERROR("sm_100 or higher is required.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
+#endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_SF
 
 namespace core {
 
-#if CUDA_VERSION >= 12080
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if FP4_TYPE_SUPPORTED
 
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
                      curanddx::SM<800>() + curanddx::Thread());
@@ -90,7 +82,8 @@ using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::Phi
 using namespace ptx;
 
 // Compute the global encode scale factor for a given global amax
-__device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
+__device__ __forceinline__ float
+compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
@@ -104,7 +97,8 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ uint32_t
+get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     curanddx::uniform_bits dist;
@@ -116,94 +110,93 @@ __device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int
   return rbits;
 }
 
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
-    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(const uint64_t in_4x, const float2 scale,
+                                                const uint32_t rbits) {
   uint16_t out_4x = 0;
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b16 v0_bf16; \n\t"
-      ".reg.b16 v1_bf16; \n\t"
-      ".reg.b16 v2_bf16; \n\t"
-      ".reg.b16 v3_bf16; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-      "cvt.f32.bf16 v0, v0_bf16; \n\t"
-      "cvt.f32.bf16 v1, v1_bf16; \n\t"
-      "cvt.f32.bf16 v2, v2_bf16; \n\t"
-      "cvt.f32.bf16 v3, v3_bf16; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
-      "}"
-      : "=h"(out_4x)
-      : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b16 v0_bf16; \n\t"
+        ".reg.b16 v1_bf16; \n\t"
+        ".reg.b16 v2_bf16; \n\t"
+        ".reg.b16 v3_bf16; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
+        "cvt.f32.bf16 v0, v0_bf16; \n\t"
+        "cvt.f32.bf16 v1, v1_bf16; \n\t"
+        "cvt.f32.bf16 v2, v2_bf16; \n\t"
+        "cvt.f32.bf16 v3, v3_bf16; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
+        "}"
+        : "=h"(out_4x)
+        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
+  } else {
+    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
+                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  // NOTE: rbits unused for rn.
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b16 v0_bf16; \n\t"
-      ".reg.b16 v1_bf16; \n\t"
-      ".reg.b16 v2_bf16; \n\t"
-      ".reg.b16 v3_bf16; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      ".reg.b8 f0; \n\t"
-      ".reg.b8 f1; \n\t"
-      "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-      "cvt.f32.bf16 v0, v0_bf16; \n\t"
-      "cvt.f32.bf16 v1, v1_bf16; \n\t"
-      "cvt.f32.bf16 v2, v2_bf16; \n\t"
-      "cvt.f32.bf16 v3, v3_bf16; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-      "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-      "}"
-      : "=r"(out_4x)
-      : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  if constexpr (is_blackwell) {
+    // NOTE: rbits unused for rn.
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b16 v0_bf16; \n\t"
+        ".reg.b16 v1_bf16; \n\t"
+        ".reg.b16 v2_bf16; \n\t"
+        ".reg.b16 v3_bf16; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
+        "cvt.f32.bf16 v0, v0_bf16; \n\t"
+        "cvt.f32.bf16 v1, v1_bf16; \n\t"
+        "cvt.f32.bf16 v2, v2_bf16; \n\t"
+        "cvt.f32.bf16 v3, v3_bf16; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
+  } else {
+    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
+                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(in_4x, scale, rbits);
   } else {
@@ -211,85 +204,85 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x
   }
 }
 
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
-    const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(const float2 in01, const float2 in23,
+                                                const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      "mov.b64 {v0, v1} , %1; \n\t"
-      "mov.b64 {v2, v3} , %2; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
-      "}"
-      : "=h"(out_4x)
-      : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        "mov.b64 {v0, v1} , %1; \n\t"
+        "mov.b64 {v2, v3} , %2; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
+        "}"
+        : "=h"(out_4x)
+        : "l"(reinterpret_cast<const uint64_t &>(in01)),
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
+  } else {
+    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
+                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
-                                                                    const float2 in23,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  // NOTE: rbits unused for rn.
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01, const float2 in23, const float2 scale,
+                               const uint32_t rbits) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      ".reg.b8 f0; \n\t"
-      ".reg.b8 f1; \n\t"
-      "mov.b64 {v0, v1} , %1; \n\t"
-      "mov.b64 {v2, v3} , %2; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-      "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-      "}"
-      : "=r"(out_4x)
-      : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  if constexpr (is_blackwell) {
+    // NOTE: rbits unused for rn.
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "mov.b64 {v0, v1} , %1; \n\t"
+        "mov.b64 {v2, v3} , %2; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "l"(reinterpret_cast<const uint64_t &>(in01)),
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)));
+  } else {
+    NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
+                      "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
+__device__ __forceinline__ fp4e2m1x4
+mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23, const float2 scale,
+                       const uint32_t rbits) {
   if constexpr (USE_STOCHASTIC_ROUNDING) {
     return mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, scale, rbits);
   } else {
@@ -297,8 +290,7 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
   }
 }
 
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-#endif  // CUDA_VERSION >= 12080
+#endif  // FP4_TYPE_SUPPORTED
 
 }  // namespace core
 }  // namespace nvfp4

@@ -337,7 +337,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu
-                                          util/cast.cu)
+                                          cast/cast.cu)
 endif()
 
 foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
