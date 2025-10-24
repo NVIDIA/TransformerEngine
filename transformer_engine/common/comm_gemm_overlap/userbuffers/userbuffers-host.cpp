@@ -670,9 +670,36 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
                      reinterpret_cast<void *>(&memhndl), sizeof(cudaIpcMemHandle_t),
                      comm->comm_intra);
 
+    // Check for NVLINK support before attempting IPC operations
+    if (comm->nvsize > 1) {
+      int current_device;
+      NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+      cudaDeviceProp deviceProp;
+      NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
+      bool peer_access_available = false;
+      for (int i = 0; i < comm->nvsize; i++) {
+        if (i != comm->nvrank) {
+          int can_access_peer;
+          cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
+          if (peer_result == cudaSuccess && can_access_peer) {
+            peer_access_available = true;
+            break;
+          }
+        }
+      }
+      if (!peer_access_available) {
+        free(tmp);
+        NVTE_ERROR(
+            "No peer-to-peer access available between GPUs. This platform does not support the "
+            "GPU-to-GPU "
+            "communication required for multi-GPU userbuffers. Consider using single-GPU mode.");
+        return 1;
+      }
+    }
+
     for (int i = 0; i < comm->nvsize; i++) {
       if (i != comm->nvrank) {
-        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
+        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
                                              cudaIpcMemLazyEnablePeerAccess));
       }
     }
@@ -693,4 +720,5 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_ptr[hndl] = *gpubuff;
 
   return comm->free_region++;
+  printf("***** Returning *****\n");
 }

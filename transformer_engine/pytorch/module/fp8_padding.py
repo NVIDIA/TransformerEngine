@@ -10,7 +10,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
 
 
@@ -78,7 +78,7 @@ class Fp8Padding(torch.nn.Module):
                 number of GEMMs to be performed simultaneously.
     align_size : int, optional
                  the alignment size for the input tensor. If not provided, the alignment size will
-                 be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
+                 be determined by the FP8/FP4 recipe (32 for MXFP8/NVFP4 and 16 for others) in the first
                  forward pass.
     """
 
@@ -111,7 +111,14 @@ class Fp8Padding(torch.nn.Module):
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
         if self.align_size is None:
-            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
+            self.align_size = (
+                32
+                if (
+                    FP8GlobalStateManager.get_fp8_recipe().mxfp8()
+                    or FP8GlobalStateManager.get_fp8_recipe().nvfp4()
+                )
+                else 16
+            )
 
         # FP8 padding calculate
         padded_m_splits = [

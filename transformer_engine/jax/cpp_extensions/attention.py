@@ -8,11 +8,10 @@ import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
 from typing import Optional, Tuple
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
@@ -47,12 +46,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -1827,7 +1820,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
@@ -2313,7 +2306,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
