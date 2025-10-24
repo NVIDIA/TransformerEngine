@@ -113,7 +113,8 @@ class Quantizer {
 
   /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
-                        const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
+                        const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                        const bool pdl_sync = false, const bool pdl_trigger = false) = 0;
 
   virtual ~Quantizer() = default;
 
@@ -144,7 +145,8 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -172,7 +174,8 @@ class Float8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -206,7 +209,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   /*! @brief Quantize to FP8, skipping local amax computation
    *
@@ -257,7 +261,8 @@ class Float8BlockQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -278,7 +283,8 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -320,7 +326,8 @@ class NVFP4Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                const bool pdl_sync = false, const bool pdl_trigger = false) override;
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *

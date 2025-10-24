@@ -28,7 +28,8 @@ void quantize_transpose_square_blockwise(const SimpleTensor &input, SimpleTensor
                                          SimpleTensor &scale_inv_t, SimpleTensor &output,
                                          SimpleTensor &output_t, const float epsilon,
                                          const bool return_transpose, const bool pow_2_scale,
-                                         const SimpleTensor &noop_tensor, cudaStream_t stream);
+                                         const SimpleTensor &noop_tensor, const bool pdl_sync,
+                                         const bool pdl_trigger, cudaStream_t stream);
 
 // enum class for rowwise usage
 enum class FP8BlockwiseRowwiseOption {
@@ -61,6 +62,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor
                                          FP8BlockwiseRowwiseOption rowwise_option,
                                          FP8BlockwiseColumnwiseOption columnwise_option,
                                          const bool pow_2_scale, const SimpleTensor &noop_tensor,
+                                         const bool pdl_sync, const bool pdl_trigger,
                                          cudaStream_t stream);
 
 void quantize_transpose_vector_blockwise_fp4(
