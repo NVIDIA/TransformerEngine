@@ -10,6 +10,7 @@ import os
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
+from packaging.version import Version as PkgVersion
 
 from . import torch_version
 from .tensor.quantized_tensor import Quantizer
@@ -773,3 +774,9 @@ def make_weak_ref(x):
     if x is None:
         return None
     raise TypeError(f"Invalid type {type(x)} to make weak ref")
+
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
