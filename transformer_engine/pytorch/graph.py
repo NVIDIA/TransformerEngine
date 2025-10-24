@@ -832,7 +832,10 @@ def _make_graphed_callables(
             ret.append(graphed)
 
         # Attach backward_dw as an attribute to the graphed callable.
-        def backward_dw(need_backward_dw=need_bwd_dw_graph[i], bwd_dw_graph=bwd_dw_graphs[i]):
+        def backward_dw(
+            need_backward_dw=need_bwd_dw_graph.get(i, False),
+            bwd_dw_graph=bwd_dw_graphs[i],
+        ):
             if need_backward_dw:
                 bwd_dw_graph.replay()
 
