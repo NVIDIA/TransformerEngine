@@ -148,6 +148,7 @@ void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  *  \param[in]  global_size  Global dimension.
  */
 int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size);
+>>>>>>> upstream/main
 
 #ifdef __cplusplus
 }  // extern "C"
