@@ -23,7 +23,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel nvidia-mathdx==25.1.1
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
