@@ -302,6 +302,7 @@ def _permute_kernel(
     scale_ptr,
     permuted_probs_ptr,
     permuted_scale_ptr,
+    pad_offsets_ptr,
     # sizes
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
@@ -323,6 +324,7 @@ def _permute_kernel(
     # metas
     PERMUTE_PROBS: tl.constexpr,
     PERMUTE_SCALE: tl.constexpr,
+    FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
@@ -345,6 +347,14 @@ def _permute_kernel(
         dst_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
+        if FUSION_PAD:
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            dst_row = dst_row + pad_off
         output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
         if PERMUTE_SCALE:
             permuted_scale_off = (
@@ -394,6 +404,7 @@ def permute_with_mask_map(
     row_id_map: torch.Tensor,
     probs: torch.Tensor,
     scale: torch.Tensor,
+    pad_offsets: torch.Tensor,
     num_tokens: int,
     num_experts: int,
     num_out_tokens: int,
@@ -424,16 +435,28 @@ def permute_with_mask_map(
     scale_hidden_dim: int
         Hidden size of the scale tensor.
     """
-    output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if pad_offsets is not None:
+        output = torch.zeros((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+
     if probs is not None:
-        permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        if pad_offsets is not None:
+            permuted_probs = torch.zeros((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        else:
+            permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
     else:
         permuted_probs = None
 
     if scale is not None:
-        permuted_scale = torch.empty(
-            (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
-        )
+        if pad_offsets is not None:
+            permuted_scale = torch.zeros(
+                (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
+            )
+        else:
+            permuted_scale = torch.empty(
+                (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
+            )
     else:
         permuted_scale = None
     # pylint: disable=unnecessary-lambda-assignment
@@ -446,6 +469,7 @@ def permute_with_mask_map(
         scale,
         permuted_probs,
         permuted_scale,
+        pad_offsets,
         num_experts,
         hidden_size,
         scale_hidden_dim,
@@ -464,6 +488,7 @@ def permute_with_mask_map(
         permuted_scale.stride(1) if permuted_scale is not None else None,
         PERMUTE_PROBS=probs is not None,
         PERMUTE_SCALE=scale is not None,
+        FUSION_PAD=pad_offsets is not None,
     )
     return output, permuted_scale, permuted_probs
 
@@ -477,6 +502,7 @@ def _unpermute_kernel(
     merging_probs_ptr,
     permuted_probs_ptr,
     unpermuted_probs_ptr,
+    pad_offsets_ptr,
     # sizes
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
@@ -496,6 +522,7 @@ def _unpermute_kernel(
     PROBS_LOAD_WIDTH: tl.constexpr,
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
+    FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = input_ptr.dtype.element_ty
@@ -526,6 +553,14 @@ def _unpermute_kernel(
         src_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
+        if FUSION_UNPAD:
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            src_row = src_row + pad_off
         input_off = src_row * stride_input_token + current_offset * stride_input_hidden
         inp = tl.load(input_ptr + input_off, mask=mask)
         inp = inp.to(compute_type)
@@ -583,6 +618,7 @@ def unpermute_with_mask_map(
     row_id_map: torch.Tensor,
     merging_probs: Union[torch.Tensor, None],
     permuted_probs: Union[torch.Tensor, None],
+    pad_offsets: Union[torch.Tensor, None],
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
@@ -624,6 +660,7 @@ def unpermute_with_mask_map(
         merging_probs,
         permuted_probs,
         unpermuted_probs,
+        pad_offsets,
         num_experts,
         hidden_size,
         row_id_map.stride(0),
@@ -640,6 +677,7 @@ def unpermute_with_mask_map(
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
+        FUSION_UNPAD=pad_offsets is not None,
     )
     return output, unpermuted_probs
 
