@@ -12,3 +12,4 @@ Precision debug tools
    debug/2_config_file_structure.rst
    debug/api
    debug/4_distributed.rst
+   debug/5_custom_feature_tutorial.ipynb
