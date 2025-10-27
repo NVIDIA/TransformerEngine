@@ -581,11 +581,12 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 
         # Cast master weight to FP8
         end_offset = start_offset + master_weight.numel()
-        rowwise_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
-        colwise_fragment = model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
         if use_fsdp_shard_model_weights:
             rowwise_fragment = model_weight_fragment[0]
             colwise_fragment = model_weight_fragment[1]
+        else:
+            rowwise_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
+            colwise_fragment = model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
         tex.mxfp8_scaling_partial_cast(
