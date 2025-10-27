@@ -19,7 +19,7 @@ from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantize
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 
 
-def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
+def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor, new_transpose_data: torch.Tensor = None):
     r"""Change a quantized tensor's data buffer while preserving values
 
     This function modifies only the address space of the underlying
@@ -43,7 +43,17 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         tensor._rowwise_data = new_raw_data
         del old_raw_data
     elif isinstance(tensor, MXFP8Tensor):
-        raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
+        old_raw_data = tensor._rowwise_data
+        assert old_raw_data.dtype == new_raw_data.dtype, "The data types of raw data don't match"
+        new_raw_data.detach().copy_(old_raw_data)
+        tensor._rowwise_data = new_raw_data
+        del old_raw_data
+        assert new_transpose_data is not None, "new_transpose_data should not be None"
+        old_transpose_data = tensor._columnwise_data
+        assert old_transpose_data.dtype == new_transpose_data.dtype, "The data types of transpose data don't match"
+        new_transpose_data.detach().copy_(old_transpose_data)
+        tensor._columnwise_data = new_transpose_data
+        del old_transpose_data
     else:
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
 
