@@ -82,7 +82,7 @@ from ..cpp_extensions import (
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.debug_state import TEDebugState
 
-__all__ = ["LayerNormMLP"]
+__all__ = ["SelectiveLayerNormMLP"]
 
 
 def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
@@ -151,7 +151,7 @@ def _act_func(activation: str, recipe: Optional[Recipe] = None):
     return funcs[activation]
 
 
-class _LayerNormMLP(torch.autograd.Function):
+class _SelectiveLayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
     Calls custom cuda extensions.
     """
@@ -1416,7 +1416,7 @@ class _LayerNormMLP(torch.autograd.Function):
         )
 
 
-class LayerNormMLP(TransformerEngineBaseModule):
+class SelectiveLayerNormMLP(TransformerEngineBaseModule):
     r"""
     Applies layer normalization on the input followed by the MLP module, consisting of
     2 successive linear transformations, separated by the activation function.
@@ -1851,10 +1851,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.bias_gelu_nvfusion = False
 
             if torch.is_grad_enabled():
-                fwd_fn = _LayerNormMLP.apply
+                fwd_fn = _SelectiveLayerNormMLP.apply
                 args = []
             else:
-                fwd_fn = _LayerNormMLP.forward
+                fwd_fn = _SelectiveLayerNormMLP.forward
                 args = [None]
             args += (
                 inp,

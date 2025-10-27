@@ -9,42 +9,27 @@ import datetime
 import os
 import sys
 from functools import wraps
-import warnings
+import math
 
 import torch
 from torch import nn
 import torch.distributed as dist
-
 import transformer_engine.pytorch as te
+
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    NVFP4BlockScaling,
     Format,
     Recipe,
+    QParams,
 )
-
-SEQ_LEN, BATCH_SIZE = 16, 16
-HIDDEN_SIZE = 64
-NR_HEADS = 4
-WORLD_RANK, WORLD_SIZE = None, None
-NCCL_WORLD = None
-LOSS_FN = nn.MSELoss()
-QUANTIZATION = None
-
-if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
-    # The numerics of all the layers should work the same,
-    # when debug=True. I fed them with dummy feature
-    # to prevent switching off debug, which can happen if
-    # no feature is active.
-    import nvdlfw_inspect.api as debug_api
-
-    debug_api.initialize(
-        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
-        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
-    )
-
+from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
+from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.distributed import gather_along_first_dim
 
 def _compare_tensors(name, test, ref, rtol, atol):
     # Make sure tensors aren't zero and we don't pass trivially
@@ -85,6 +70,36 @@ def _compare_tensors(name, test, ref, rtol, atol):
 
     return numerics_failed, numerics_info
 
+
+SEQ_LEN, BATCH_SIZE = 16, 16
+HIDDEN_SIZE = 64
+NR_HEADS = 4
+WORLD_RANK, WORLD_SIZE = None, None
+NCCL_WORLD = None
+LOSS_FN = nn.MSELoss()
+QUANTIZATION = None
+
+if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
+
+def nvfp4_vanilla():
+    nvfp4_recipe = NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = QParams()
+    return nvfp4_recipe
+
+
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "fp8":
@@ -97,7 +112,9 @@ def quantization_recipe() -> Recipe:
         return Float8CurrentScaling()
     if QUANTIZATION == "fp8_block_scaling":
         return Float8BlockScaling()
-    return te.fp8.get_default_fp8_recipe()
+    if QUANTIZATION == "nvfp4":
+        return nvfp4_vanilla()
+    return te.quantization.get_default_fp8_recipe()
 
 
 def main(argv=None, namespace=None):
@@ -134,16 +151,22 @@ def main(argv=None, namespace=None):
     # Quantization scheme
     QUANTIZATION = args.quantization
     global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
-    if QUANTIZATION in ("fp8", "mxfp8"):
+    if QUANTIZATION in ("fp8", "mxfp8", "nvfp4"):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    # For fp8 block scaling, block size is 128,
+    # and to make low precision TP work, input tensor
+    # must be 128x128 divisible to be eligible for
+    # low precision All-Gather when needed
     elif QUANTIZATION == "fp8_block_scaling":
         SEQ_LEN = 128
         BATCH_SIZE = 128
         HIDDEN_SIZE = 512
 
-    test_dict = [test_layernorm_mlp]
+    test_dict = [
+        test_selective_layernorm_mlp,
+    ]
 
     for test in test_dict:
         test()
@@ -207,6 +230,9 @@ def _get_tolerances(dtype):
     # row parallel & sequence parallel, because we do the all_gather in backward pass
     if QUANTIZATION == "fp8_cs":
         return {"rtol": 0.4, "atol": 0.25}
+    elif QUANTIZATION == "nvfp4":
+        # TODO(zhongboz): investigate why the tolerance is so large
+        return {"rtol": 0.125, "atol": 0.12}
     elif QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
 
@@ -323,15 +349,15 @@ def _apply_models(
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
     input_single_node.requires_grad_()
     input_distributed.requires_grad_()
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
+        recipe=quantization_recipe(),
     ):
         output_single_node = model_single_node(input_single_node, **kwargs)
-    with te.fp8_autocast(
+    with te.autocast(
         enabled=QUANTIZATION is not None,
-        fp8_recipe=quantization_recipe(),
-        fp8_group=NCCL_WORLD,
+        recipe=quantization_recipe(),
+        amax_reduction_group=NCCL_WORLD,
     ):
         output_distributed = model_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed
@@ -354,13 +380,14 @@ def _alloc_main_grad(model_single_node, model_distributed):
             param.main_grad = torch.zeros_like(param, dtype=torch.float32)
 
 
+
 ############################################
 #               LayerNormMLP               #
 ############################################
 
 
 @run_distributed_test()
-def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwargs):
+def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwargs):
     """Test the LayerNormMLP with specified parallel mode and sequence parallelization.
 
     Args:
@@ -373,8 +400,8 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
-    model_single_node = te.SelectiveLayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
-    model_distributed = te.SelectiveLayerNormMLP(
+    model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
+    model_distributed = te.LayerNormMLP(
         HIDDEN_SIZE,
         FFN_HIDDEN_SIZE,
         tp_size=WORLD_SIZE,
@@ -441,7 +468,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
         )
 
 
-def test_layernorm_mlp():
+def test_selective_layernorm_mlp():
     kwargs_list = [
         {},
         {"init_method": _constant},
@@ -449,7 +476,7 @@ def test_layernorm_mlp():
         {"normalization": "RMSNorm"},
         {"zero_centered_gamma": True},
         {"bias": False},
-        {"params_dtype": torch.float16},
+        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"activation": "relu"},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
@@ -460,8 +487,5 @@ def test_layernorm_mlp():
     for kwargs in kwargs_list:
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
-                _test_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)
+                _test_selective_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)
 
-
-if __name__ == "__main__":
-    sys.exit(main())

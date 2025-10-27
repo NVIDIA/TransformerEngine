@@ -1,3 +1,6 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
 
 from typing import Iterable, List, Union
 import pytest
@@ -5,30 +8,81 @@ import pytest
 import torch
 from transformer_engine.pytorch import (
     SelectiveLayerNormMLP,
-    fp8_autocast,
-    fp8_model_init,
+    autocast,
+    quantized_model_init,
     make_graphed_callables,
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_mxfp8_available,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available = is_fp8_available()
+fp8_block_scaling_available = is_fp8_block_scaling_available()
+mxfp8_available = is_mxfp8_available()
 
 # Reset RNG states.
 reset_rng_states()
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32),
+    "small": ModelConfig(2, 32, 2, 32),
 }
+
+
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
+
+
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
+
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
+
 
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -37,11 +91,15 @@ if fp8_available:
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
 
-# Supported modules
-_test_cuda_graphs_modules: List[str] = ["layernorm_mlp"]
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Check that two lists of tensors match exactly."""
@@ -106,6 +164,15 @@ class _Sequential(torch.nn.Sequential):
             x = module(x, **kwargs)
         return x
 
+
+# Supported modules
+_test_cuda_graphs_modules: List[str] = [
+    # Put linear first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
+    "selective_layernorm_mlp",
+]
+
+
 def _test_cuda_graphs(
     *,
     graph_mode: str,
@@ -127,16 +194,72 @@ def _test_cuda_graphs(
         fp8_weight_caching = False
 
     # Create modules.
-    with fp8_model_init(enabled=fp8_params, recipe=fp8_recipe):
-
-        modules = [
-            SelectiveLayerNormMLP(
-                model_config.hidden_size,
-                model_config.hidden_size,
-                params_dtype=dtype,
-            )
-            for _ in range(num_layers)
-        ]
+    with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
+        if module == "transformer":
+            modules = [
+                TransformerLayer(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    model_config.num_heads,
+                    hidden_dropout=0.0,
+                    attention_dropout=0.0,
+                    fuse_qkv_params=True,
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "selective_layernorm_mlp":
+            modules = [
+                SelectiveLayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "layernorm_linear":
+            modules = [
+                LayerNormLinear(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "mha":
+            modules = [
+                MultiheadAttention(
+                    model_config.hidden_size,
+                    model_config.num_heads,
+                    attention_dropout=0.0,
+                    params_dtype=dtype,
+                    fuse_qkv_params=True,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "linear":
+            modules = [
+                Linear(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    device="cuda",
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "linear_op":
+            modules = [
+                te_ops.Sequential(
+                    te_ops.Linear(
+                        model_config.hidden_size,
+                        model_config.hidden_size,
+                        dtype=dtype,
+                    ),
+                )
+                for _ in range(num_layers)
+            ]
+        else:
+            raise ValueError(f"Unknown module type ({module})")
 
         # Initialize gradient buffers.
         for module in modules:
@@ -151,9 +274,9 @@ def _test_cuda_graphs(
                 model,
                 (generate_data(model_config, dtype, warmup=True),),
                 num_warmup_iters=10,
-                fp8_enabled=fp8,
-                fp8_weight_caching=fp8_weight_caching,
-                fp8_recipe=fp8_recipe,
+                enabled=fp8,
+                cache_quantized_params=fp8_weight_caching,
+                recipe=fp8_recipe,
             )
         elif graph_mode == "individual":
             # Graph individual modules.
@@ -162,9 +285,9 @@ def _test_cuda_graphs(
                     module,
                     (generate_data(model_config, dtype, warmup=True),),
                     num_warmup_iters=10,
-                    fp8_enabled=fp8,
-                    fp8_weight_caching=fp8_weight_caching,
-                    fp8_recipe=fp8_recipe,
+                    enabled=fp8,
+                    cache_quantized_params=fp8_weight_caching,
+                    recipe=fp8_recipe,
                 )
                 for module in modules
             ]
@@ -181,7 +304,7 @@ def _test_cuda_graphs(
         for grad_accumulation_step in range(2):
             input_ = generate_data(model_config, dtype)
             grad_output = generate_data(model_config, dtype, requires_grad=False)
-            with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
+            with autocast(enabled=fp8, recipe=fp8_recipe):
                 kwargs = {}
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0
@@ -191,10 +314,11 @@ def _test_cuda_graphs(
 
     return get_outputs(model, output)
 
+
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
 def test_make_graphed_callables(
     *,
     module: str,
@@ -211,8 +335,18 @@ def test_make_graphed_callables(
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if fp8 and fp8_recipe.float8_block_scaling() and module == "linear_op":
-        pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
+    if fp8 and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()) and module == "linear_op":
+        pytest.skip(
+            f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
+        )
+    if fp8 and fp8_recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {fp8_recipe.__class__.__name__}"
+            )
+        if fp8_params:
+            pytest.skip("NVFP4 params not supported")
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -237,28 +371,30 @@ def test_make_graphed_callables(
     assert_all_equal(outputs, graph_outputs_mode2)
 
 
-_test_make_graphed_callables_with_fp8_weight_caching_modules = ["layernorm_mlp"]
+_test_make_graphed_callables_with_fp8_weight_caching_modules = [
+    "selective_layernorm_mlp",
+]
+
 
 @pytest.mark.parametrize(
     "module",
     _test_make_graphed_callables_with_fp8_weight_caching_modules,
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
+    dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
 ) -> None:
     test_make_graphed_callables(
         module=module,
-        dtype=torch.float32,
+        dtype=dtype,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,
     )
-
-
-
 

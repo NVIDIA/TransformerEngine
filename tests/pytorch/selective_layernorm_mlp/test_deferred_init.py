@@ -1,18 +1,25 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
 
 import pytest
 import torch
-import torch.distributed as dist
-import gc
+
 import transformer_engine.pytorch as te
 
-_core_modules = [te.SelectiveLayerNormMLP]
-_composed_modules = []
+_core_modules = [
+    te.SelectiveLayerNormMLP,
+]
+
+_composed_modules = [
+]
 
 batch_size = 32
 seq_length = 2048
 num_heads = 16
 head_dim = 64
 dtype = torch.bfloat16
+
 
 class TestDeferredInit:
 
@@ -21,11 +28,20 @@ class TestDeferredInit:
         hidden_size = num_heads * head_dim
         args = (hidden_size,)
         kwargs = {"params_dtype": dtype, "device": "meta"}
-        ffn_hidden_size = 2 * hidden_size
-        args += (ffn_hidden_size,)
-        kwargs["bias"] = True
-        if module == te.LayerNormMLP:
+        if module in [te.Linear, te.LayerNormLinear, te.SelectiveLayerNormMLP, te.LayerNormMLP]:
+            ffn_hidden_size = 2 * hidden_size
+            args += (ffn_hidden_size,)
+            kwargs["bias"] = True
+            if module == te.LayerNormMLP:
+                kwargs["seq_length"] = seq_length
+        elif module == te.MultiheadAttention:
+            args += (num_heads,)
+            kwargs["fuse_qkv_params"] = True
+        elif module == te.TransformerLayer:
+            args += (3 * hidden_size, num_heads)
+            kwargs["fuse_qkv_params"] = True
             kwargs["seq_length"] = seq_length
+
         return args, kwargs
 
     @pytest.mark.parametrize("module_type", _core_modules + _composed_modules)
@@ -33,21 +49,13 @@ class TestDeferredInit:
         self,
         module_type: torch.nn.Module,
     ) -> None:
-        """Test deferred initialization via device='meta'. 
-        rewrote this so that it tests difference in mem, not zero mem, since this might not be the first test"""
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
-        before = torch.cuda.memory_allocated(0)
-
+        """Test deferred initialization via device='meta'."""
+        # This should not allocate any memory on CUDA device until we call reset_parameters() later.
         args, kwargs = TestDeferredInit.get_module_args(module_type)
-        module = module_type(*args, **kwargs)  # device='meta'
-
-        torch.cuda.synchronize()
-        after = torch.cuda.memory_allocated(0)
-        assert after == before, (
-            f"{module_type.__name__} init changed allocated CUDA memory: "
-            f"before={before}, after={after}"
+        module = module_type(*args, **kwargs)
+        assert torch.cuda.memory_allocated(device=0) == 0.0, (
+            f"Initializing {module_type.__name__} with device='meta' prematurely allocated "
+            "memory on CUDA device"
         )
         del module
 

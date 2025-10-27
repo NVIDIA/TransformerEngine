@@ -1,33 +1,75 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+from typing import Optional
 
 import torch
 import pytest
 import os
 
-import transformer_engine.pytorch
-from transformer_engine.pytorch import SelectiveLayerNormMLP
-from transformer_engine.pytorch.fp8 import (
-    fp8_autocast,
-    FP8GlobalStateManager,
-)
-from utils import ModelConfig
-from transformer_engine.common import recipe
+import transformer_engine
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
-
-# ----------------------------------------------------------------------------------------------------------------------
+from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
+    SelectiveLayerNormMLP,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+    MXFP8Tensor,
+    checkpoint,
+    QuantizedTensor,
+    is_bf16_available,
+)
+from transformer_engine.common import recipe
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from utils import ModelConfig
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
+
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
+
+
+if NVTE_TEST_NVINSPECT_ENABLED:
+    # The sanity tests should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
+
+def is_fp8_supported(config: ModelConfig):
+    if (
+        config.max_seqlen_q * config.batch_size % 16
+        or config.max_seqlen_kv * config.batch_size % 16
+    ):
+        return False
+    if config.hidden_size % 16 or config.hidden_size_kv % 16:
+        return False
+    return True
+
 
 model_configs = {
     "126m": ModelConfig(2, 2048, 12, 64, num_layers=12),
@@ -36,9 +78,19 @@ model_configs = {
     "large": ModelConfig(2, 128, 4, 128, num_layers=1),
 }
 
+
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -47,25 +99,37 @@ if fp8_available:
 fp8_recipes.append(None)
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
 batch_sizes_with_zero = [0, 1, 2]
-batch_sizes = [1, 2]
 
-
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu", "qgelu", "qgeglu"]
+all_activations = [
+    "gelu",
+    "geglu",
+    "qgelu",
+    "qgeglu",
+    "relu",
+    "reglu",
+    "srelu",
+    "sreglu",
+    "silu",
+    "swiglu",
+]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
-# ----------------------------------------------------------------------------------------------------------------------
-
-# tests from test_sanity.py
 
 def _disable_wgrads(block):
     for p in block.parameters():
         p.requires_grad = False
-        
+
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
 def _test_sanity_common(
     block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching=True
 ):
@@ -83,7 +147,7 @@ def _test_sanity_common(
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         if not microbatching:
             te_out = block(te_inp)
         else:
@@ -95,15 +159,7 @@ def _test_sanity_common(
     loss.backward()
     torch.cuda.synchronize()
 
-def is_fp8_supported(config: ModelConfig):
-    if (
-        config.max_seqlen_q * config.batch_size % 16
-        or config.max_seqlen_kv * config.batch_size % 16
-    ):
-        return False
-    if config.hidden_size % 16 or config.hidden_size_kv % 16:
-        return False
-    return True
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
@@ -130,6 +186,8 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)

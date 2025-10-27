@@ -1,18 +1,10 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
 
-from typing import Dict, List, Tuple
-import pytest
-
-# ----
-# numeric tests fail with tf32, turn it off
-# these do not work, because have to import torch first
-
-# torch.backends.cuda.matmul.allow_tf32 = False
-# torch.backends.cudnn.allow_tf32 = False
-# torch.set_float32_matmul_precision('highest')  # PyTorch 2.x
-
-# have to set the env vars before torch import for all libraries to not use tf32
-
+import math
 import os
+
 os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
 os.environ.setdefault("TORCH_ALLOW_TF32_CUBLAS", "0")
 os.environ.setdefault("TORCH_ALLOW_TF32_CUDNN", "0")
@@ -20,26 +12,49 @@ os.environ.setdefault("PYTORCH_CUDA_MATMUL_ALLOW_TF32", "0")
 os.environ.setdefault("PYTORCH_CUDNN_ALLOW_TF32", "0")
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+from typing import Dict, List, Tuple, Optional
+import pytest
+import random
+
 import torch
-
-
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    fp8_autocast,
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import (
+    init_method_normal,
+    scaled_init_method_normal,
+    attention_mask_func,
 )
-from transformer_engine.pytorch.utils import is_bf16_compatible
-from transformer_engine.pytorch import SelectiveLayerNormMLP
-from transformer_engine.pytorch.utils import get_device_compute_capability
+from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
+    SelectiveLayerNormMLP,
+    Fp8Padding,
+    Fp8Unpadding,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    get_device_compute_capability,
+    is_fp8_available,
+    is_mxfp8_available,
+    is_fp8_block_scaling_available,
+    is_bf16_available,
+    is_nvfp4_available,
+)
+from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
+import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
 
+
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available = is_fp8_block_scaling_available()
+nvfp4_available = is_nvfp4_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -62,48 +77,79 @@ module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
+all_activations = [
+    "gelu",
+    "geglu",
+    "qgelu",
+    "qgeglu",
+    "relu",
+    "reglu",
+    "srelu",
+    "sreglu",
+    "silu",
+    "swiglu",
+]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
-fp8_recipes = []
-if mxfp8_available:
-    fp8_recipes.append(recipe.MXFP8BlockScaling())
-if fp8_block_scaling_available:
-    fp8_recipes.append(recipe.Float8BlockScaling())
-if fp8_available:
-    fp8_recipes.append(recipe.Float8CurrentScaling())
-    fp8_recipes.append(recipe.DelayedScaling())
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
+
+if NVTE_TEST_NVINSPECT_ENABLED:
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
 
 
-# tests from pytest_test_numerics.py (fails on float32 unless disable tf32 matmuls, did above)
+def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False, recipe=None):
+    reset_rng_states()
+    fp8 = recipe is not None
+    if fp8:
+        FP8GlobalStateManager.reset()
 
-class TorchQuickGELU(nn.Module):
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return input * torch.sigmoid(1.702 * input)
+    inp_hidden_states = torch.randn(
+        (config.max_seqlen_q, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
 
-class TorchSquaredRELU(nn.Module):
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return (input > 0) * input * input
+    with autocast(enabled=fp8, recipe=recipe):
+        out = block(inp_hidden_states)
+        if isinstance(out, (List, Tuple)):
+            out = out[0]
+    loss = out.sum()
+    loss.backward()
+    if delay_wgrad_compute:
+        block.backward_dw()
 
-_supported_act = {
-    "geglu": nn.GELU(approximate="tanh"),
-    "gelu": nn.GELU(approximate="tanh"),
-    "reglu": nn.ReLU(),
-    "relu": nn.ReLU(),
-    "swiglu": nn.SiLU(),
-    "qgelu": TorchQuickGELU(),
-    "srelu": TorchSquaredRELU(),
-}
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            if getattr(p, "main_grad", None) is not None:
+                outputs.append(p.main_grad)
+                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+            else:
+                outputs.append(p.grad)
+    return outputs
+
 
 class TorchLayerNorm(nn.Module):
     def __init__(self, in_features: int, eps: float, zero_centered_gamma: bool):
@@ -127,6 +173,7 @@ class TorchLayerNorm(nn.Module):
             inp, (self.in_features,), weight=w, bias=b, eps=self.eps
         )
         return out.to(x.dtype)
+
 
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
@@ -154,6 +201,18 @@ class TorchRMSNorm(nn.Module):
             w = 1 + w
         return (w * x_normed).to(x.dtype)
 
+
+
+class TorchQuickGELU(nn.Module):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input * torch.sigmoid(1.702 * input)
+
+
+class TorchSquaredRELU(nn.Module):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return (input > 0) * input * input
+
+
 class TorchGLU(nn.Module):
     def __init__(self, activation: str):
         super().__init__()
@@ -165,6 +224,21 @@ class TorchGLU(nn.Module):
         b = x[..., (shape // 2) :]
         a = self.act(a)
         return a * b
+
+
+_supported_act = {
+    "gelu": nn.GELU(approximate="tanh"),
+    "geglu": nn.GELU(approximate="tanh"),
+    "qgelu": TorchQuickGELU(),
+    "qgeglu": TorchQuickGELU(),
+    "relu": nn.ReLU(),
+    "reglu": nn.ReLU(),
+    "srelu": TorchSquaredRELU(),
+    "sreglu": TorchSquaredRELU(),
+    "silu": nn.SiLU(),
+    "swiglu": nn.SiLU(),
+}
+
 
 class TorchLayerNormMLP(nn.Module):
     def __init__(
@@ -197,6 +271,66 @@ class TorchLayerNormMLP(nn.Module):
         t = self.gelu(self.fc1(self.ln(x)))
         return self.fc2(t)
 
+
+
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
+
+
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
+
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
+
+
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+if fp8_block_scaling_available:
+    fp8_recipes.append(recipe.Float8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
+if nvfp4_available:
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+
+use_cutlass_grouped_gemm = [False]
+# Only enable cutlass grouped gemm on Hopper
+if torch.cuda.get_device_capability() == (9, 0):
+    use_cutlass_grouped_gemm.append(True)
+
+
+def get_causal_attn_mask(sq: int) -> torch.Tensor:
+    return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
+
+
 class TestReturnBiasModule(nn.Module):
     def __init__(self, mod, **kwargs):
         super().__init__()
@@ -212,39 +346,6 @@ class TestReturnBiasModule(nn.Module):
             return out
         return self.te_module(x)
 
-def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False, recipe=None):
-    reset_rng_states()
-    fp8 = recipe is not None
-    if fp8:
-        FP8GlobalStateManager.reset()
-
-    inp_hidden_states = torch.randn(
-        (config.max_seqlen_q, bs, config.hidden_size),
-        dtype=dtype,
-        device="cuda",
-        requires_grad=True,
-    )
-    inp_hidden_states.retain_grad()
-
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
-        out = block(inp_hidden_states)
-        if isinstance(out, (List, Tuple)):
-            out = out[0]
-    loss = out.sum()
-    loss.backward()
-    if delay_wgrad_compute:
-        block.backward_dw()
-
-    torch.cuda.synchronize()
-    outputs = [out, inp_hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            if getattr(p, "main_grad", None) is not None:
-                outputs.append(p.main_grad)
-                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
-            else:
-                outputs.append(p.grad)
-    return outputs
 
 def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
     """Estimated numerical error for a datatype
@@ -259,6 +360,7 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
     if dtype == torch.bfloat16:
         return dict(rtol=1.6e-2, atol=1e-5)
     raise ValueError(f"Unsuppored dtype ({dtype})")
+
 
 def assert_allclose(
     l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float = None, rtol: float = None
@@ -290,6 +392,12 @@ def assert_allclose(
             raise AssertionError(msg)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
@@ -297,7 +405,7 @@ def assert_allclose(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
+def test_selective_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(
@@ -371,7 +479,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-def test_layernorm_mlp_accuracy_delay_wgrad_compute(
+def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
     dtype, bs, model, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
@@ -422,21 +530,3 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-# tests from pytest_test_cuda_graphs.py
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-# tests from test_fusible_ops.py
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-# tests from test_cpu_offloading.py
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-# distributed tests
-
-# ----------------------------------------------------------------------------------------------------------------------

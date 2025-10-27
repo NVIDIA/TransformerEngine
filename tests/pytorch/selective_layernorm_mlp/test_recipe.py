@@ -2,25 +2,39 @@
 #
 # See LICENSE for license information.
 
+from typing import Optional
+
 import pytest
 import torch
+import warnings
 
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    fp8_model_init,
+import transformer_engine.common.recipe
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch import (
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    Float8Quantizer,
+    NVFP4Quantizer,
+    quantized_model_init,
+    SelectiveLayerNormMLP,
 )
-from transformer_engine.pytorch import SelectiveLayerNormMLP
-from transformer_engine.pytorch.distributed import fp8_autocast
-from transformer_engine.common.recipe import DelayedScaling
+
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    _amax_and_scale_update,
+)
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
+import transformer_engine_torch as tex
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
 )
+fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
 
 
 # FP8 per tensor delayed scaling
@@ -34,19 +48,25 @@ class TestFP8Recipe:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-    @pytest.mark.parametrize("module_class", [SelectiveLayerNormMLP])
+
+    @pytest.mark.parametrize(
+        "module_class",
+        [
+            SelectiveLayerNormMLP
+        ],
+    )
     def test_quantizer_update(self, module_class):
         in_features = 32
         out_features = 32
         batch_size = 32
 
         recipe = DelayedScaling(amax_history_len=1024)
-        with fp8_model_init(recipe=recipe):
+        with quantized_model_init(recipe=recipe):
             module = module_class(in_features, out_features).cuda()
 
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+        with te.autocast(enabled=True, recipe=recipe):
             warn_msg = "Quantizer is being updated, this may affect model behavior"
             with pytest.warns(UserWarning, match=warn_msg):
                 y = module(x)
