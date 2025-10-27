@@ -85,7 +85,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                               DType in_dtype, DType out_dtype,
+                                               DType in_dtype, DType out_dtype, DType scale_dtype,
                                                JAXX_Scaling_Mode scaling_mode,
                                                QuantizeLayout q_layout);
 
@@ -137,6 +137,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+
+// Amax
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);

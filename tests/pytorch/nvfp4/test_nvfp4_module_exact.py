@@ -2,16 +2,15 @@
 #
 # See LICENSE for license information.
 
-import os
 import pytest
 import torch
-import transformer_engine as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.distributed import fp8_autocast
+import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import utils
 
 
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_nvfp4_available()
+recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
 class GetRecipes:
@@ -65,20 +64,54 @@ class GetRecipes:
             return GetRecipes.nvfp4_vanilla()
 
 
-def setup_environment_for_reference(with_rht: bool = False, with_2d_quantization: bool = False):
-    if with_rht and with_2d_quantization:
-        os.environ["QAT_PARAMS"] = "9003"
-    elif with_rht:
-        os.environ["QAT_PARAMS"] = "960109"
-    elif with_2d_quantization:
-        os.environ["QAT_PARAMS"] = "9002"
-    else:
-        os.environ["QAT_PARAMS"] = "6010"
+def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bool = False):
+    """
+    Create a quantizer factory for NVFP4 reference implementation.
 
+    This factory returns NVFP4QuantizerRef instances based on the role and configuration.
+    Used with CustomRecipe to create reference quantizers.
 
-def cleanup_environment():
-    if "QAT_PARAMS" in os.environ:
-        del os.environ["QAT_PARAMS"]
+    Args:
+        with_rht: Whether to enable random Hadamard transform
+        with_2d_quantization: Whether to use 2D quantization (16x16 tiles for weights)
+
+    Returns:
+        A factory function that takes a role string and returns a quantizer instance
+    """
+
+    def factory(role):
+        if role == "linear_input":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=with_rht,
+            )
+        elif role == "linear_weight":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
+                pow_2_scales=False,
+                with_rht=False,
+            )
+        elif role == "linear_output":
+            # Output quantization not used
+            return None
+        elif role == "linear_grad_output":
+            return quantization_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=with_rht,
+            )
+        elif role == "linear_grad_input":
+            # Grad input quantization not used
+            return None
+        else:
+            # For any other roles, return None
+            return None
+
+    return factory
 
 
 def reset_rng_states():
@@ -113,21 +146,20 @@ def check_nvfp4_module_versus_reference(
     seq_len = 128
 
     # Create both modules with identical initialization
-    cleanup_environment()
     reset_rng_states()
 
     # Create native module
     print("\nCreate native module")
-    if module_class == te.pytorch.Linear:
-        native_module = te.pytorch.Linear(
+    if module_class == te.Linear:
+        native_module = te.Linear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
             device=device,
             params_dtype=x_dtype,
         )
-    elif module_class == te.pytorch.LayerNormLinear:
-        native_module = te.pytorch.LayerNormLinear(
+    elif module_class == te.LayerNormLinear:
+        native_module = te.LayerNormLinear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
@@ -138,21 +170,20 @@ def check_nvfp4_module_versus_reference(
         raise ValueError(f"Unsupported module class: {module_class}")
 
     # Create reference module with same weights
-    setup_environment_for_reference(with_rht, with_2d_quantization)
     reset_rng_states()
 
     # Create reference module
     print("Create reference module")
-    if module_class == te.pytorch.Linear:
-        ref_module = te.pytorch.Linear(
+    if module_class == te.Linear:
+        ref_module = te.Linear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
             device=device,
             params_dtype=x_dtype,
         )
-    elif module_class == te.pytorch.LayerNormLinear:
-        ref_module = te.pytorch.LayerNormLinear(
+    elif module_class == te.LayerNormLinear:
+        ref_module = te.LayerNormLinear(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
@@ -174,7 +205,10 @@ def check_nvfp4_module_versus_reference(
         if hasattr(native_module, "layer_norm_bias") and hasattr(ref_module, "layer_norm_bias"):
             ref_module.layer_norm_bias.copy_(native_module.layer_norm_bias)
 
+    # Create recipes for native and reference implementations
     nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(with_rht, with_2d_quantization)
+    nvfp4_ref_factory = get_nvfp4_quantizer_factory(with_rht, with_2d_quantization)
+    nvfp4_ref_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_factory)
 
     # Training loop comparison
     native_outputs = []
@@ -196,17 +230,13 @@ def check_nvfp4_module_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         # Native forward/backward
-        cleanup_environment()
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             # enable weight cache by giving is_first_microbatch
             y_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
-        setup_environment_for_reference(with_rht, with_2d_quantization)
-        with fp8_autocast(
-            enabled=True, fp8_recipe=nvfp4_recipe
-        ):  # Exact recipe does not play a role here
+        with te.autocast(enabled=True, recipe=nvfp4_ref_recipe):
             y_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
 
@@ -295,9 +325,6 @@ def check_nvfp4_module_versus_reference(
                 msg=f"Bias gradient mismatch at step {step}",
             )
 
-    # Clean up
-    cleanup_environment()
-
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
@@ -332,7 +359,7 @@ def test_nvfp4_linear_versus_reference(
         pytest.skip("RHT is only supported for bfloat16 input")
 
     check_nvfp4_module_versus_reference(
-        module_class=te.pytorch.Linear,
+        module_class=te.Linear,
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -362,11 +389,10 @@ def check_nvfp4_layernorm_linear_versus_reference(
     seq_len = 128
 
     # Create both modules with identical initialization
-    cleanup_environment()
     reset_rng_states()
 
     # Native module
-    native_module = te.pytorch.LayerNormLinear(
+    native_module = te.LayerNormLinear(
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -377,9 +403,8 @@ def check_nvfp4_layernorm_linear_versus_reference(
     )
 
     # Reference module
-    setup_environment_for_reference(with_rht, with_2d_quantization)
     reset_rng_states()
-    ref_module = te.pytorch.LayerNormLinear(
+    ref_module = te.LayerNormLinear(
         in_features=in_features,
         out_features=out_features,
         bias=bias,
@@ -405,7 +430,10 @@ def check_nvfp4_layernorm_linear_versus_reference(
             if native_module.layer_norm_bias is not None and ref_module.layer_norm_bias is not None:
                 ref_module.layer_norm_bias.copy_(native_module.layer_norm_bias)
 
+    # Create recipes for native and reference implementations
     nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(with_rht, with_2d_quantization)
+    nvfp4_ref_factory = get_nvfp4_quantizer_factory(with_rht, with_2d_quantization)
+    nvfp4_ref_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_factory)
 
     native_outputs = []
     ref_outputs = []
@@ -426,14 +454,12 @@ def check_nvfp4_layernorm_linear_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         # Native forward/backward
-        cleanup_environment()
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_native, ln_out_native = native_module(x_native, is_first_microbatch=(step == 0))
         y_native.backward(grad_output)
 
         # Reference forward/backward
-        setup_environment_for_reference(with_rht, with_2d_quantization)
-        with fp8_autocast(enabled=True, fp8_recipe=nvfp4_recipe):
+        with te.autocast(enabled=True, recipe=nvfp4_ref_recipe):
             y_ref, ln_out_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
 
@@ -514,8 +540,6 @@ def check_nvfp4_layernorm_linear_versus_reference(
                 rtol=1e-6,
                 msg=f"Bias gradient mismatch at step {step}",
             )
-
-    cleanup_environment()
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

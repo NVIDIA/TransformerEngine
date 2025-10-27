@@ -10,7 +10,7 @@ import logging
 
 import pytest
 import torch
-from transformer_engine.pytorch.utils import (
+from transformer_engine.pytorch import (
     get_device_compute_capability,
     get_cudnn_version,
 )
@@ -137,8 +137,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
@@ -183,7 +183,7 @@ dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_2_0", "cp_2_2", "cp_3_2", "cp_4_2"]
+    configs = ["cp_1_0", "cp_1_1", "cp_2_0", "cp_2_2", "cp_3_2", "cp_4_2"]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]

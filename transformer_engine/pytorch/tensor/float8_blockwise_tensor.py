@@ -14,11 +14,8 @@ from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from .quantized_tensor import (
-    QuantizedTensor,
-    Quantizer,
-    _IdentityFunc,
-)
+from ..quantized_tensor import QuantizedTensor, Quantizer
+from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
@@ -403,6 +400,21 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
+    def untyped_storage(self) -> torch.UntypedStorage:
+        """Return the underlying UntypedStorage of the FP8 data.
+
+        Note that FP8 block-scaled tensor may involve multiple
+        buffers: row-wise FP8 data, row-wise scales, column-wise FP8
+        data, column-wise scales. The UntypedStorage of the row-wise
+        FP8 data is returned if it exists, and otherwise the
+        UntypedStorage of the column-wise FP8 data.
+
+        """
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None:
+            return data.untyped_storage()
+        return torch.UntypedStorage(0, device=self.device)
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -426,6 +438,19 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                     " (scales and columnwise data untouched)."
                 )
             return Float8BlockwiseQTensor.make_like(tensor)
+
+        # record stream op
+        if func == torch.ops.aten.record_stream.default:
+            qt, stream = args
+            for t in (
+                qt._rowwise_data,
+                qt._columnwise_data,
+                qt._rowwise_scale_inv,
+                qt._columnwise_scale_inv,
+            ):
+                if t is not None and t.is_cuda:
+                    t.record_stream(stream)
+            return None
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

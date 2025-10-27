@@ -2,23 +2,23 @@
 #
 # See LICENSE for license information.
 
-"""GEMM API for experimental middleware between Transformer Engine and Kitchen."""
+"""GEMM API that enables custom GEMM logic for custom quantization recipes."""
 
 from typing import Iterable, Optional
 
 import torch
 
-from transformer_engine.pytorch.experimental.quantization import (
+from transformer_engine.pytorch.custom_recipes.quantization import (
     MMParams,
     GEMMType,
-    ExperimentalQuantizedTensor,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+from transformer_engine.pytorch.tensor.utils import is_custom
 
 
-def experimental_gemm(
-    A: ExperimentalQuantizedTensor,
-    B: ExperimentalQuantizedTensor,
+def custom_gemm(
+    A: QuantizedTensorStorage,
+    B: QuantizedTensorStorage,
     workspace: torch.Tensor,  # pylint: disable=unused-argument
     out_dtype: Optional[torch.dtype] = None,
     quantization_params: Optional[Quantizer] = None,  # pylint: disable=unused-argument
@@ -32,9 +32,7 @@ def experimental_gemm(
     grad: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
     """Dispatch GEMM to quantizer's qgemm method."""
-    assert isinstance(A, ExperimentalQuantizedTensor) and isinstance(
-        B, ExperimentalQuantizedTensor
-    ), "A and B must be ExperimentalQuantizedTensor instances"
+    assert is_custom(A) and is_custom(B), "A and B must be custom tensors"
 
     A, B = B, A
 
@@ -51,14 +49,14 @@ def experimental_gemm(
             gemm_type = GEMMType.FPROP
 
     # Extract quantizer from QuantizedTensor to get qgemm logic
-    # TODO(etsykunov): make it more flexible, what if we might want to use gemm logic from B.quantizer?
+    # TODO(etsykunov): make it more flexible, what if we might want to use gemm logic from B._quantizer?
     quantizer = None
-    if hasattr(A, "quantizer") and A.quantizer is not None:
-        quantizer = A.quantizer
-    elif hasattr(B, "quantizer") and B.quantizer is not None:
-        quantizer = B.quantizer
+    if hasattr(A, "_quantizer") and A._quantizer is not None:
+        quantizer = A._quantizer
+    elif hasattr(B, "_quantizer") and B._quantizer is not None:
+        quantizer = B._quantizer
     else:
-        raise ValueError("No quantizer found in QuantizedETensor objects")
+        raise ValueError("No quantizer found in QuantizedTensor objects")
 
     # Create MMParams
     m_params = MMParams(

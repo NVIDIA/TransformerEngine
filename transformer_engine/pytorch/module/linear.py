@@ -25,8 +25,8 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, WeightGradStore, get_module_quantizers
-from ..fp8 import FP8GlobalStateManager
+from ._common import noop_cat, WeightGradStore
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -57,7 +57,7 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.quantized_tensor import (
+from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
@@ -66,7 +66,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.utils import is_experimental
+from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
@@ -153,8 +153,8 @@ class _Linear(torch.autograd.Function):
             ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.AG
 
-        # experimental recipe check
-        experimental = is_experimental(input_quantizer) or is_experimental(weight_quantizer)
+        # custom recipe check
+        custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
 
         # ------------------------------------------------------
         # Prepare input tensor
@@ -178,7 +178,7 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                if not isinstance(inputmat, QuantizedTensorStorage) and not experimental:
+                if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
                     own_quantized_input = True
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                     if isinstance(
@@ -448,7 +448,7 @@ class _Linear(torch.autograd.Function):
                     ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
-            ctx.experimental = experimental
+            ctx.custom = custom
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
@@ -616,7 +616,7 @@ class _Linear(torch.autograd.Function):
                     if isinstance(inputmat, QuantizedTensorStorage):
                         # Input tensor is already quantized
                         pass
-                    elif ctx.debug or ctx.experimental:
+                    elif ctx.debug or ctx.custom:
                         # Debug quantizer will be applied immediately before wgrad GEMM
                         pass
                     else:
@@ -843,7 +843,11 @@ class _Linear(torch.autograd.Function):
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
-                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "accumulate": (
+                        accumulate_wgrad_into_param_main_grad
+                        if not getattr(weight, "overwrite_main_grad", False)
+                        else False
+                    ),
                     "layout": "NT",
                     "out": main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
@@ -1061,7 +1065,9 @@ class Linear(TransformerEngineBaseModule):
                              the weight gradient. When enabled, it is assumed that the weights
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
-                             size to accumulate gradients in.
+                             size to accumulate gradients in. This argument along with
+                             weight tensor having attribute 'overwrite_main_grad' set to True
+                             will overwrite `main_grad` instead of accumulating.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
@@ -1422,7 +1428,11 @@ class Linear(TransformerEngineBaseModule):
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            quantizers = get_module_quantizers(self, fp8_output, fp8_grad, debug)
+            quantizers = (
+                self._get_quantizers(fp8_output, fp8_grad)
+                if not debug
+                else self._get_debug_quantizers(fp8_output, fp8_grad)
+            )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False

@@ -14,14 +14,14 @@ from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
-from ...fp8 import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
     get_workspace,
     _2X_ACC_FPROP,
 )
-from ...tensor.quantized_tensor import Quantizer
+from ...quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_dequantize, is_quantized_tensor
