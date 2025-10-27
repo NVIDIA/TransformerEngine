@@ -1550,14 +1550,6 @@ def dtype_tols(
         atol = 0.05
         rtol = 0.1
 
-    # Manually set tols for float8 as we expect enhanced precision with additional scaling factors
-    if dtype == jnp.float8_e4m3fn:
-        atol = 0.01
-        rtol = 0.01
-    if dtype == jnp.float8_e5m2:
-        atol = 0.01
-        rtol = 0.01
-
     return {"rtol": rtol, "atol": atol}
 
 

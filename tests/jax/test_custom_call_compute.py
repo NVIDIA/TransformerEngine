@@ -46,7 +46,6 @@ from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.common import recipe
-import numpy as np
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -102,7 +101,7 @@ def assert_bitwise_scaled_tensors(
         if a.scaling_mode.is_tensor_scaling():
             # Assert in dq_dtype as some unfused codepaths have an intermediate cast
             # to an input dtype which reduces precision compared to everything in fp32
-            assert_allclose(a.scale_inv, b.scale_inv, dtype=jnp.float32)
+            assert_allclose(a.scale_inv, b.scale_inv, dtype=a.dq_dtype)
         elif a.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Compare MXFP8 scales as uint8
             assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
@@ -118,13 +117,6 @@ def assert_bitwise_scaled_tensors(
                 return
         else:
             raise ValueError(f"Unsupported scaling mode {a.scaling_mode}")
-        mismatch = a.data != b.data
-        mismatch_fraction = jnp.mean(mismatch.astype(jnp.float32))
-        if mismatch_fraction > 0.0:
-            np.set_printoptions(threshold=np.inf)
-            print("Mismatched values in a.data and b.data:")
-            print("a.data:", a.data[mismatch])
-            print("b.data:", b.data[mismatch])
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
@@ -305,12 +297,12 @@ class TestActivation:
     @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
-    @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn])
+    @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper(
-        "q_layout", [QuantizeLayout.ROWWISE]
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
     @pytest_parametrize_wrapper(
-        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING]
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
     )
     def test_act_forward_with_tensor_scaling_fp8(
         self, random_inputs, activation_type, output_type, q_layout, scaling_mode
@@ -352,12 +344,10 @@ class TestActivation:
     ):
         x = random_inputs
         x = jnp.repeat(x, len(activation_type), axis=-2)
+        self.activation_type = activation_type
 
-        te_quantizer, jax_quantizer = QuantizerFactory.create(
-            n_quantizers=2,
-            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
-            q_dtype=output_type,
-            q_layout=q_layout,
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
         act_args = (
             {"limit": 0.75, "alpha": 1.702}
@@ -369,9 +359,9 @@ class TestActivation:
             if activation_type == ("clamped_silu", "clamped_linear")
             else None
         )
-        te_output = tex.act_lu(x, activation_type, te_quantizer, act_params)
-        jax_output = _jax_act_lu(x, activation_type, jax_quantizer, act_params)
-        assert_bitwise_scaled_tensors(te_output, jax_output)
+        output = tex.act_lu(x, activation_type, quantizer, act_params)
+        ref_out = self.ref_act(x, activation_type, act_params)
+        assert_dequantized_scaled_tensor(output, ref_out)
 
 
 NORM_OUTPUT_DTYPES = {
@@ -700,86 +690,86 @@ class TestQuantize:
             pytest.skip(f"Quantize dtype {q_dtype} is not supported by {scaling_mode}")
             return
 
-    # def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
-    #     self._skip_unsupported_dtypes(q_dtype, scaling_mode)
+    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
+        self._skip_unsupported_dtypes(q_dtype, scaling_mode)
 
-    #     key = jax.random.PRNGKey(0)
+        key = jax.random.PRNGKey(0)
 
-    #     # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
-    #     quantizer = QuantizerFactory.create(
-    #         scaling_mode=scaling_mode,
-    #         q_dtype=q_dtype,
-    #         q_layout=q_layout,
-    #     )
+        # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
+        quantizer = QuantizerFactory.create(
+            scaling_mode=scaling_mode,
+            q_dtype=q_dtype,
+            q_layout=q_layout,
+        )
 
-    #     if scaling_mode.is_nvfp4_scaling:
-    #         if in_dtype != jnp.bfloat16:
-    #             pytest.skip("NVFP4 scaling only supported with bfloat16 input dtype currently")
-    #             return
-    #         q_func = _jax_quantize
-    #         # For NVFP4 scaling, the maximum possible error for a single value can be high between the dequantized and original tensors. To ensure quantization and dequantization is operating correctly without requiring a very high tolerance for all values, we instead test that quantizing the dequantized tensor is bitwise identical to the original quantized tensor.
-    #         x = jax.random.uniform(key, input_shape, in_dtype) * 10
-    #         q1 = q_func(x, quantizer=quantizer, flatten_axis=flatten_axis)
+        if scaling_mode.is_nvfp4_scaling:
+            if in_dtype != jnp.bfloat16:
+                pytest.skip("NVFP4 scaling only supported with bfloat16 input dtype currently")
+                return
+            q_func = _jax_quantize
+            # For NVFP4 scaling, the maximum possible error for a single value can be high between the dequantized and original tensors. To ensure quantization and dequantization is operating correctly without requiring a very high tolerance for all values, we instead test that quantizing the dequantized tensor is bitwise identical to the original quantized tensor.
+            x = jax.random.uniform(key, input_shape, in_dtype) * 10
+            q1 = q_func(x, quantizer=quantizer, flatten_axis=flatten_axis)
 
-    #         dq_rowwise = None
-    #         dq_colwise = None
-    #         if isinstance(q1, ScaledTensor1x):
-    #             dq = q1.dequantize()
-    #             if q1.is_colwise:
-    #                 dq_colwise = dq
-    #             else:
-    #                 dq_rowwise = dq
-    #         elif isinstance(q1, ScaledTensor2x):
-    #             dq_rowwise = q1.rowwise_tensor.dequantize()
-    #             dq_colwise = q1.colwise_tensor.dequantize()
-    #         else:
-    #             raise ValueError(f"Unsupported output type {type(q1)}")
+            dq_rowwise = None
+            dq_colwise = None
+            if isinstance(q1, ScaledTensor1x):
+                dq = q1.dequantize()
+                if q1.is_colwise:
+                    dq_colwise = dq
+                else:
+                    dq_rowwise = dq
+            elif isinstance(q1, ScaledTensor2x):
+                dq_rowwise = q1.rowwise_tensor.dequantize()
+                dq_colwise = q1.colwise_tensor.dequantize()
+            else:
+                raise ValueError(f"Unsupported output type {type(q1)}")
 
-    #         # We only compare Q-DQ for the same quantization layout. If we for example QDQ rowwise, then re-quantize colwise, the error will be larger and may not be bitwise identical to the original colwise quantization.
-    #         if dq_rowwise is not None:
-    #             assert (
-    #                 dq_rowwise.shape == x.shape
-    #             ), f"dq_rowwise shape {dq_rowwise.shape} != x shape {x.shape}"
-    #             q2_rowwise = q_func(dq_rowwise, quantizer=quantizer, flatten_axis=flatten_axis)
-    #             q2_rowwise = (
-    #                 q2_rowwise
-    #                 if isinstance(q2_rowwise, ScaledTensor1x)
-    #                 else q2_rowwise.rowwise_tensor
-    #             )
-    #             q1_rowwise = q1 if isinstance(q1, ScaledTensor1x) else q1.rowwise_tensor
-    #             assert_bitwise_scaled_tensors(q1_rowwise, q2_rowwise)
+            # We only compare Q-DQ for the same quantization layout. If we for example QDQ rowwise, then re-quantize colwise, the error will be larger and may not be bitwise identical to the original colwise quantization.
+            if dq_rowwise is not None:
+                assert (
+                    dq_rowwise.shape == x.shape
+                ), f"dq_rowwise shape {dq_rowwise.shape} != x shape {x.shape}"
+                q2_rowwise = q_func(dq_rowwise, quantizer=quantizer, flatten_axis=flatten_axis)
+                q2_rowwise = (
+                    q2_rowwise
+                    if isinstance(q2_rowwise, ScaledTensor1x)
+                    else q2_rowwise.rowwise_tensor
+                )
+                q1_rowwise = q1 if isinstance(q1, ScaledTensor1x) else q1.rowwise_tensor
+                assert_bitwise_scaled_tensors(q1_rowwise, q2_rowwise)
 
-    #         if dq_colwise is not None:
-    #             # Since this is for NVFP4, we are assuming colwise has T layout and we do a transpose here to get back to original shape
-    #             flatten_axis = flatten_axis + len(input_shape) if flatten_axis < 0 else flatten_axis
-    #             colwise_flatten_axis = len(input_shape) - flatten_axis
-    #             dq_colwise = jnp.transpose(
-    #                 dq_colwise,
-    #                 (*range(colwise_flatten_axis, dq_colwise.ndim), *range(colwise_flatten_axis)),
-    #             )
-    #             assert (
-    #                 dq_colwise.shape == x.shape
-    #             ), f"dq_colwise shape {dq_colwise.shape} != x shape {x.shape}"
-    #             q2_colwise = q_func(dq_colwise, quantizer=quantizer, flatten_axis=flatten_axis)
-    #             q2_colwise = (
-    #                 q2_colwise
-    #                 if isinstance(q2_colwise, ScaledTensor1x)
-    #                 else q2_colwise.colwise_tensor
-    #             )
-    #             q1_colwise = q1 if isinstance(q1, ScaledTensor1x) else q1.colwise_tensor
-    #             assert_bitwise_scaled_tensors(q1_colwise, q2_colwise)
+            if dq_colwise is not None:
+                # Since this is for NVFP4, we are assuming colwise has T layout and we do a transpose here to get back to original shape
+                flatten_axis = flatten_axis + len(input_shape) if flatten_axis < 0 else flatten_axis
+                colwise_flatten_axis = len(input_shape) - flatten_axis
+                dq_colwise = jnp.transpose(
+                    dq_colwise,
+                    (*range(colwise_flatten_axis, dq_colwise.ndim), *range(colwise_flatten_axis)),
+                )
+                assert (
+                    dq_colwise.shape == x.shape
+                ), f"dq_colwise shape {dq_colwise.shape} != x shape {x.shape}"
+                q2_colwise = q_func(dq_colwise, quantizer=quantizer, flatten_axis=flatten_axis)
+                q2_colwise = (
+                    q2_colwise
+                    if isinstance(q2_colwise, ScaledTensor1x)
+                    else q2_colwise.colwise_tensor
+                )
+                q1_colwise = q1 if isinstance(q1, ScaledTensor1x) else q1.colwise_tensor
+                assert_bitwise_scaled_tensors(q1_colwise, q2_colwise)
 
-    #         assert (
-    #             dq_rowwise is not None or dq_colwise is not None
-    #         ), "At least one of rowwise or colwise dq must be not None"
-    #         return
+            assert (
+                dq_rowwise is not None or dq_colwise is not None
+            ), "At least one of rowwise or colwise dq must be not None"
+            return
 
-    #     n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
-    #     for _ in range(n_iterations):
-    #         x = jax.random.uniform(key, input_shape, in_dtype)
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
+        for _ in range(n_iterations):
+            x = jax.random.uniform(key, input_shape, in_dtype)
 
-    #         scaled_tensor = quantizer.quantize(x, flatten_axis=flatten_axis)
-    #         assert_dequantized_scaled_tensor(scaled_tensor, x)
+            scaled_tensor = quantizer.quantize(x, flatten_axis=flatten_axis)
+            assert_dequantized_scaled_tensor(scaled_tensor, x)
 
     def _should_use_precise_comparison(
         self, in_dtype, scaling_mode, quantizer, input_shape, flatten_axis
