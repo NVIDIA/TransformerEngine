@@ -1531,7 +1531,7 @@ def dtype_tols(
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
-    eps_relaxed = math.pow(finfo.eps, 2 / 3)
+    eps_relaxed = float(finfo.eps)
     with jax.default_device(jax.devices("cpu")[0]):
         if isinstance(reference_value, (float, int)):
             reference_value = jnp.array(reference_value, dtype=dtype)
@@ -1539,16 +1539,24 @@ def dtype_tols(
             reference_value = reference_value.astype(dtype)
         spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
         spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
-        ulp = max(spacing_high.item(), spacing_low.item())
+        ulp = float(max(spacing_high.item(), spacing_low.item()))
     if rtol is None:
         rtol = eps_relaxed
     if atol is None:
         atol = max(ulp, eps_relaxed)
 
-    # Manually set tols for nvfp4
+    # Manually set tols for nvfp4 as we expect enhanced precision with additional scaling factors
     if dtype == jnp.float4_e2m1fn:
         atol = 0.05
         rtol = 0.1
+
+    # Manually set tols for float8 as we expect enhanced precision with additional scaling factors
+    if dtype == jnp.float8_e4m3fn:
+        atol = 0.01
+        rtol = 0.01
+    if dtype == jnp.float8_e5m2:
+        atol = 0.01
+        rtol = 0.01
 
     return {"rtol": rtol, "atol": atol}
 
