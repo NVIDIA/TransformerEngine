@@ -202,7 +202,8 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
 }
 
 __device__ __forceinline__ uint32_t
-get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>& rng,
+get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>&
+              rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
           uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
