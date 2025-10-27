@@ -83,7 +83,9 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install torch pybind11[global] einops onnxscript
+        run: |
+          pip install pybind11[global] einops onnxscript
+          pip install torch --index-url https://download.pytorch.org/whl/cu130
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
