@@ -27,6 +27,7 @@ load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
+from transformer_engine.pytorch.module import SelectiveLayerNormMLP
 from transformer_engine.pytorch.module import LayerNorm
 from transformer_engine.pytorch.module import RMSNorm
 from transformer_engine.pytorch.module import GroupedLinear
