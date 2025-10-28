@@ -1308,8 +1308,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer.internal = False
                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
                     device_mesh = dtensor_param.device_mesh
-                    amax_reduction_group = device_mesh.get_group(mesh_dim="shard")\
-                        if device_mesh.ndim > 1 else device_mesh.get_group()
+                    amax_reduction_group = (
+                        device_mesh.get_group(mesh_dim="shard")
+                        if device_mesh.ndim > 1
+                        else device_mesh.get_group()
+                    )
                     quantizer.amax_reduction_group = amax_reduction_group
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
