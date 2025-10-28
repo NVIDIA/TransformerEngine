@@ -168,6 +168,7 @@ class _Sequential(torch.nn.Sequential):
 # Supported modules
 _test_cuda_graphs_modules: List[str] = ["selective_layernorm_mlp"]
 
+
 def _test_cuda_graphs(
     *,
     graph_mode: str,
@@ -200,7 +201,7 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        
+
         else:
             raise ValueError(f"Unknown module type ({module})")
 
