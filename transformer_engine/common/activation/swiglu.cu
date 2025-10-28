@@ -43,9 +43,9 @@ void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit,
   gated_act_fn<fp32, ClampedSwiGLUParam, clamped_silu<fp32, fp32>>(input, output, param, stream);
 }
 
-void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+void nvte_dclamped_swiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                           float limit, float alpha, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_clamped_dswiglu);
+  NVTE_API_CALL(nvte_dclamped_swiglu);
   using namespace transformer_engine;
   ClampedSwiGLUParam param = {limit, alpha};
   dgated_act_fn<fp32, ClampedSwiGLUParam, clamped_silu<fp32, fp32>, clamped_dsilu<fp32, fp32>>(

@@ -437,7 +437,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
         nvte_dsreglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::CLAMPED_SWIGLU:
-        nvte_clamped_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+        nvte_dclamped_swiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
                              swiglu_limit, swiglu_alpha, stream);
         break;
       default:

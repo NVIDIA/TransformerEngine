@@ -268,7 +268,7 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
  *  \param[in]     alpha     Scaling factor for the sigmoid function used in the activation.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+void nvte_dclamped_swiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                           float limit, float alpha, cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation gradient.
