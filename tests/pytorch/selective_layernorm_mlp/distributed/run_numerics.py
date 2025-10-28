@@ -388,7 +388,7 @@ def _alloc_main_grad(model_single_node, model_distributed):
 
 @run_distributed_test()
 def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwargs):
-    """Test the LayerNormMLP with specified parallel mode and sequence parallelization.
+    """Test the SelectiveLayerNormMLP with specified parallel mode and sequence parallelization.
 
     Args:
         set_parallel_mode (bool): Enable parallel mode.
