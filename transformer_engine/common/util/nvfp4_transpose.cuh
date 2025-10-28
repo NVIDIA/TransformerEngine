@@ -32,9 +32,6 @@ namespace transformer_engine {
 #if FP4_TYPE_SUPPORTED
 namespace nvfp4_transpose {
 
-using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
-                     curanddx::SM<800>() + curanddx::Thread());
-
 using namespace ptx;
 using nvfp4_scale_t = fp8e4m3;
 
@@ -139,12 +136,15 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ uint32_t
+get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>
+              &rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
+          uint4 &random_uint4, int &rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
-    curanddx::uniform_bits dist;
-    random_uint4 = dist.generate4(rng);
+    random_uint4 = rng.generate4();
   }
+
   // Treat uint4 as an array of 4x uint32_t elements for indexing
   const uint32_t *const rbits_arr = reinterpret_cast<uint32_t *>(&random_uint4);
   const uint32_t rbits = rbits_arr[rnd_idx++];
@@ -363,9 +363,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
+
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
+
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
@@ -874,9 +876,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
+
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
+
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
