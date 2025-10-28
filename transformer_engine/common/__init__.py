@@ -268,7 +268,7 @@ def _load_cuda_library_from_python(lib_name: str):
     # in 3 possible direcories inside `nvidia`.
     if os.path.isdir(os.path.join(nvidia_dir, "cu13")):
         so_paths = glob.glob(os.path.join(nvidia_dir, "cu13", f"lib/lib*{ext}.*[0-9]"))
-    if os.path.isdir(os.path.join(nvidia_dir, lib_name)):
+    elif os.path.isdir(os.path.join(nvidia_dir, lib_name)):
         so_paths = glob.glob(os.path.join(nvidia_dir, lib_name, f"lib/lib*{ext}.*[0-9]"))
     else:
         so_paths = glob.glob(os.path.join(nvidia_dir, f"cuda_{lib_name}", f"lib/lib*{ext}.*[0-9]"))
@@ -316,7 +316,6 @@ def _load_cuda_library_from_system(lib_name: str):
         return False, None
 
 
-@functools.lru_cache(maxsize=None)
 @functools.lru_cache(maxsize=None)
 def _load_cuda_library(lib_name: str):
     """
