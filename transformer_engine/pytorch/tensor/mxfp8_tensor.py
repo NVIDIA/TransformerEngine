@@ -547,12 +547,17 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if reshard_after_forward:
             # When module is wrapped with torch no_grad, the training state
             # will be IDLE even in forward pass.
-            is_forward_pass = fsdp_state._training_state == TrainingState.FORWARD \
+            is_forward_pass = (
+                fsdp_state._training_state == TrainingState.FORWARD
                 or fsdp_state._training_state == TrainingState.IDLE
+            )
             # Allgather only the necessary tensors based on forward/backward pass
             quantizer.set_usage(rowwise=is_forward_pass, columnwise=not is_forward_pass)
-            sharded_tensors = sharded_tensors if is_forward_pass \
+            sharded_tensors = (
+                sharded_tensors
+                if is_forward_pass
                 else (self._columnwise_data, self._columnwise_scale_inv)
+            )
         metadata = (self._fp8_dtype, quantizer, reshard_after_forward)
         return sharded_tensors, metadata
 
@@ -598,7 +603,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             rowwise_scale_inv = mxfp8_tensor._rowwise_scale_inv
             columnwise_data = mxfp8_tensor._columnwise_data
             columnwise_scale_inv = mxfp8_tensor._columnwise_scale_inv
-            
+
         if out is not None:
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv

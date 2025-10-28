@@ -22,7 +22,7 @@ def _run_test(fp_init, sharding_dims, recipe):
 
     if fp_init:
         test_cmd += ["--fp8-init"]
-    
+
     if len(sharding_dims) == 1:
         test_cmd += ["--sharding-dims", str(sharding_dims[0])]
     elif len(sharding_dims) == 2:

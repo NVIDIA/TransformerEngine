@@ -29,7 +29,7 @@ from contextlib import nullcontext
 
 LOCAL_RANK = None
 
-    
+
 def dist_print(msg):
     if LOCAL_RANK == 0:
         print(msg)
@@ -54,7 +54,7 @@ def _parse_args(argv=None, namespace=None):
         choices=["Linear", "LayerNormLinear", "LayerNormMLP", "MultiheadAttention", "TransformerLayer"],
         help="Transformer Engine layer type",
     )
-    parser.add_argument( 
+    parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
     )
     parser.add_argument("--device", type=str, default="meta", help="Device to run the model on.",
@@ -150,7 +150,7 @@ def get_device_mesh(world_size, sharding_dims):
         assert False
     return mesh
 
-    
+
 def shard_model_with_fsdp2(model, mesh):
     # fully_shard has compatibilty issue with TransformerLayer at the moment.
     # If we wrap the TransformerLayer as well as its submodule, there seems to be
@@ -197,7 +197,7 @@ def restore_custom_attrs(module, custom_attrs):
 
 @torch.no_grad()
 def test_fp8_fsdp2_allgather(model):
-    # Do manual allgather in fp32 and match against fp8 allgather done 
+    # Do manual allgather in fp32 and match against fp8 allgather done
     # with fsdp2
     # FP32 manual weight allgather
     fp32_allgathered_params = {}
