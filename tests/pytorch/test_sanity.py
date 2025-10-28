@@ -548,7 +548,7 @@ def test_sanity_layernorm_mlp(
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-    activation_params = {} if activation != "clamped_swiglu" else {"limit": 7.0, "alpha": 1.702}
+    activation_params = None if activation != "clamped_swiglu" else {"limit": 7.0, "alpha": 1.702}
     block = LayerNormMLP(
         config.hidden_size,
         4 * config.hidden_size,
