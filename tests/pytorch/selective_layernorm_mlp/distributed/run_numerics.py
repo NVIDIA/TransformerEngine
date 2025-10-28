@@ -9,6 +9,7 @@ import datetime
 import os
 import sys
 from functools import wraps
+import warnings
 
 import torch
 from torch import nn
@@ -377,7 +378,7 @@ def _alloc_main_grad(model_single_node, model_distributed):
 
 
 ############################################
-#               LayerNormMLP               #
+#          SelectiveLayerNormMLP          #
 ############################################
 
 

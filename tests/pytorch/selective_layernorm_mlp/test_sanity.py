@@ -157,7 +157,7 @@ def _test_sanity_common(
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("microbatching", all_boolean)
-def test_sanity_layernorm_mlp(
+def test_sanity_selective_layernorm_mlp(
     dtype,
     fp8_recipe,
     model,

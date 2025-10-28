@@ -4,6 +4,7 @@
 
 import os
 
+# disable tf32 for numerics test
 os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
 os.environ.setdefault("TORCH_ALLOW_TF32_CUBLAS", "0")
 os.environ.setdefault("TORCH_ALLOW_TF32_CUDNN", "0")

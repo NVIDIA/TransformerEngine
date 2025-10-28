@@ -30,8 +30,7 @@ class TestDeferredInit:
             ffn_hidden_size = 2 * hidden_size
             args += (ffn_hidden_size,)
             kwargs["bias"] = True
-            if module == te.SelectiveLayerNormMLP:
-                kwargs["seq_length"] = seq_length
+            kwargs["seq_length"] = seq_length
 
         return args, kwargs
 
