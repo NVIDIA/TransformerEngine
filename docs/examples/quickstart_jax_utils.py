@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import jax
 import jax.numpy as jnp
 import time
@@ -35,7 +39,7 @@ def speedometer(
     for _ in range(warmup_iters):
         key, step_key = jax.random.split(key)
         loss, (param_grads, other_grads) = train_step_fn(
-            variables, input, output_grad, step_key, key
+            variables, input, output_grad, step_key
         )
 
     # Timing runs
@@ -43,7 +47,7 @@ def speedometer(
     for _ in range(timing_iters):
         key, step_key = jax.random.split(key)
         loss, (param_grads, other_grads) = train_step_fn(
-            variables, input, output_grad, step_key, key
+            variables, input, output_grad, step_key
         )
     end = time.time()
 
@@ -98,7 +102,7 @@ def create_train_step_fn_vjp(
     def train_step_fn(variables: Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key):
         """Compute forward pass and VJP in one step"""
 
-        # Define forward function that closes over grad_target and dropout_key
+        # Define forward function that closes over dropout_key
         def forward_fn(variables: Any, inp: jnp.ndarray):
             """Pure forward function for VJP computation"""
             rngs = {"dropout": dropout_key}
