@@ -45,20 +45,36 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
     )
-    parser.add_argument("--recipe", type=str, default="mx_fp8_block_scaling", help="Quantizer type.",
-                        choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"])
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default="mx_fp8_block_scaling",
+        help="Quantizer type.",
+        choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
+    )
     parser.add_argument(
         "--layer-type",
         type=str,
         default="TransformerLayer",
-        choices=["Linear", "LayerNormLinear", "LayerNormMLP", "MultiheadAttention", "TransformerLayer"],
+        choices=[
+            "Linear",
+            "LayerNormLinear",
+            "LayerNormMLP",
+            "MultiheadAttention",
+            "TransformerLayer",
+        ],
         help="Transformer Engine layer type",
     )
     parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
     )
-    parser.add_argument("--device", type=str, default="meta", help="Device to run the model on.",
-                        choices=["cuda", "meta"])
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="meta",
+        help="Device to run the model on.",
+        choices=["cuda", "meta"],
+    )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     # Adding hsdp_dim as a list argument, comma-separated
     parser.add_argument(
@@ -71,7 +87,6 @@ def _parse_args(argv=None, namespace=None):
     if args.sharding_dims:
         assert len(args.sharding_dims) <= 2
     return args
-
 
 
 ## Methods to help initialize the TE model in an FSDP2 setting
@@ -93,6 +108,7 @@ def get_te_layer_from_string(layer_name):
         )
     return te_layer_map[layer_name.lower()]
 
+
 def get_recipe_from_string(recipe, fp8_format=Format.HYBRID):
     if recipe == "delayed_scaling":
         return DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
@@ -102,6 +118,7 @@ def get_recipe_from_string(recipe, fp8_format=Format.HYBRID):
         return MXFP8BlockScaling(fp8_format=fp8_format)
     else:
         raise ValueError(f"Unknown quantizer type: {recipe}")
+
 
 def init_te_model(config):
     hidden_size = config.num_heads * config.head_dim
@@ -130,6 +147,7 @@ def init_te_model(config):
     kwargs["device"] = config.device
     model = layer_type(*args, **kwargs)
     return model, inp_shape, out_shape
+
 
 def get_device_mesh(world_size, sharding_dims):
     dist_print(f"sharding-dims:{sharding_dims}")
@@ -174,6 +192,7 @@ def shard_model_with_fsdp2(model, mesh):
 
     return model
 
+
 #### Methods to save the custom attributes of QuantizedTensors before sharding
 #### them with FSDP2, and restore them after sharding.
 def save_custom_attrs(module):
@@ -189,11 +208,13 @@ def save_custom_attrs(module):
         custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
     return custom_attrs
 
+
 def restore_custom_attrs(module, custom_attrs):
     for name, param in module.named_parameters():
         if name in custom_attrs:
             for attr_name, attr_value in custom_attrs[name].items():
                 setattr(param, attr_name, attr_value)
+
 
 @torch.no_grad()
 def test_fp8_fsdp2_allgather(model):
@@ -202,7 +223,7 @@ def test_fp8_fsdp2_allgather(model):
     # FP32 manual weight allgather
     fp32_allgathered_params = {}
     for name, param in model.named_parameters():
-        assert(isinstance(param, DTensor))
+        assert isinstance(param, DTensor)
         local_tensor = param._local_tensor
         # assert(isinstance(local_tensor, QuantizedTensor))
         device_mesh = param.device_mesh
@@ -216,7 +237,9 @@ def test_fp8_fsdp2_allgather(model):
             dist_group = device_mesh.get_group(mesh_dim=shard_dim)
         # Perform manual allgather on local_tensor. zeros_like will create hp tensor since torch_dispatch
         # for local_tensor will go down the dequantization route.
-        gathered_tensor = [torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))]
+        gathered_tensor = [
+            torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))
+        ]
         dist.all_gather(gathered_tensor, local_tensor.dequantize(), group=dist_group)
         full_tensor = torch.cat(gathered_tensor, dim=0)
         fp32_allgathered_params[name] = full_tensor
@@ -224,14 +247,14 @@ def test_fp8_fsdp2_allgather(model):
     for module in model.modules():
         # In case of Transformerlayer, just root module is sharded
         # at the moment.
-        if hasattr(module, 'unshard'):
+        if hasattr(module, "unshard"):
             module.unshard()
     # Make sure allgathered parameters match exactly
     for name, param in model.named_parameters():
-        assert(torch.allclose(param.dequantize(), fp32_allgathered_params[name]))
+        assert torch.allclose(param.dequantize(), fp32_allgathered_params[name])
     # Revert model to original sharded state
     for module in model.modules():
-        if hasattr(module, 'reshard'):
+        if hasattr(module, "reshard"):
             module.reshard()
 
 
@@ -279,7 +302,10 @@ def _train(args):
     # Create the model on the meta/cuda device as per args
     with build_model_context(**build_model_context_args):
         model, inp_shape, out_shape = init_te_model(args)
-    dist_print(f"Memory after model init on device {args.device}: {torch.cuda.memory_allocated(device)/1e6} MB")
+    dist_print(
+        f"Memory after model init on device {args.device}:"
+        f" {torch.cuda.memory_allocated(device)/1e6} MB"
+    )
 
     # Creating a DeviceMesh for fully_shard
     world_size = int(WORLD_SIZE)
@@ -294,12 +320,14 @@ def _train(args):
         # After FSDP2 has been applied, materialize and initialize the sharded parameters
         # TE base.py's reset_parameters() handles DTensors with FP8 initialization
         for module in model.modules():
-            if hasattr(module, 'reset_parameters'):
+            if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
         dist_print(f" Sharded parameters materialized and initialized on cuda device.")
     if args.fp8_init:
         test_fp8_fsdp2_allgather(model)
-    dist_print(f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB")
+    dist_print(
+        f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB"
+    )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
