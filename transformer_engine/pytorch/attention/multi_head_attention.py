@@ -1000,7 +1000,7 @@ class MultiheadAttention(torch.nn.Module):
         # Output. [sq, b, h]
         # ===================
         projection_output = self.proj(
-            context_layer.contiguous(),
+            context_layer,
             is_first_microbatch=is_first_microbatch,
             fp8_grad=proj_fp8_grad,
         )

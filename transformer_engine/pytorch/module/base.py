@@ -1255,7 +1255,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
         """
         Reset all module parameters to initial values. Unless deferred initialization
-        is specified, all parameters on a 'meta' device are also param_to_update on a real cuda
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
         device before the values are reset to initial.
         """
         if defer_init:
@@ -1308,8 +1308,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer.internal = False
                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
                     device_mesh = dtensor_param.device_mesh
-                    shard_dim = device_mesh.ndim - 1  # To handle 2D mesh (HSDP)
-                    amax_reduction_group = device_mesh.get_group(mesh_dim=shard_dim)
+                    amax_reduction_group = device_mesh.get_group(mesh_dim="shard")\
+                        if device_mesh.ndim > 1 else device_mesh.get_group()
                     quantizer.amax_reduction_group = amax_reduction_group
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
