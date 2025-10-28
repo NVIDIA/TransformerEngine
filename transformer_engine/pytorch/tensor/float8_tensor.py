@@ -773,7 +773,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
             # When module is wrapped with torch no_grad, the training state
             # will be IDLE even in forward pass
-            is_forward_pass = fsdp_state._training_state in (TrainingState.FORWARD, TrainingState.IDLE)
+            is_forward_pass = fsdp_state._training_state in (
+                TrainingState.FORWARD,
+                TrainingState.IDLE,
+            )
             transpose_needed = tensor_has_transpose and not is_forward_pass
             quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)

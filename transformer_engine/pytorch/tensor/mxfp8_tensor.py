@@ -553,7 +553,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if reshard_after_forward:
             # When module is wrapped with torch no_grad, the training state
             # will be IDLE even in forward pass.
-            is_forward_pass = fsdp_state._training_state in (TrainingState.FORWARD, TrainingState.IDLE)
+            is_forward_pass = fsdp_state._training_state in (
+                TrainingState.FORWARD,
+                TrainingState.IDLE,
+            )
             # Allgather only the necessary tensors based on forward/backward pass
             quantizer.set_usage(rowwise=is_forward_pass, columnwise=not is_forward_pass)
             sharded_tensors = (
