@@ -141,7 +141,7 @@ class TorchLayerNorm(nn.Module):
         self.in_features = in_features
         self.zero_centered_gamma = zero_centered_gamma
 
-        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        initial_value = torch.zeros(in_features) if zero_centered_gamma else torch.ones(in_features)
         self.weight = nn.Parameter(initial_value)
         self.bias = nn.Parameter(torch.zeros(in_features))
         self.register_parameter("weight", self.weight)
@@ -167,7 +167,7 @@ class TorchRMSNorm(nn.Module):
         self.in_features = in_features
         self.zero_centered_gamma = zero_centered_gamma
 
-        initial_value = torch.ones(in_features) if zero_centered_gamma else torch.zeros(in_features)
+        initial_value = torch.zeros(in_features) if zero_centered_gamma else torch.ones(in_features)
         self.weight = nn.Parameter(initial_value)
         self.register_parameter("weight", self.weight)
 
