@@ -281,13 +281,6 @@ void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   using namespace kernel;
   checkCuDriverContext(stream);
 
-  if (output->has_data()) {
-    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-  }
-  if (output->has_columnwise_data()) {
-    NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-  }
-
   NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
@@ -305,7 +298,7 @@ void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       gated_input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->dtype(), OType,
 
           alignas(64) CUtensorMap tensor_map_grad{};
