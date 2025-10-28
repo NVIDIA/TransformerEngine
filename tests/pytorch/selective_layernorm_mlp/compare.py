@@ -1,7 +1,7 @@
 import time
-
 import torch
 from transformer_engine.pytorch import SelectiveLayerNormMLP, LayerNormMLP
+from collections import defaultdict
 
 torch.manual_seed(1234)
 device = torch.device("cuda")
@@ -35,12 +35,12 @@ class ModelConfig:
             ln = LayerNormMLP(self._hidden_size, self._ffn_hidden_size).to(device)
             sln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size).to(device)
             with torch.no_grad():
-                ln.layer_norm_weight = torch.nn.Parameter(sln.layer_norm_weight.clone())
-                ln.layer_norm_bias = torch.nn.Parameter(sln.layer_norm_bias.clone())
-                ln.fc1_weight = torch.nn.Parameter(sln.fc1_weight.clone())
-                ln.fc2_weight = torch.nn.Parameter(sln.fc2_weight.clone())
-                ln.fc1_bias = torch.nn.Parameter(sln.fc1_bias.clone())
-                ln.fc2_bias = torch.nn.Parameter(sln.fc2_bias.clone())
+                sln.layer_norm_weight = torch.nn.Parameter(ln.layer_norm_weight.clone())
+                sln.layer_norm_bias = torch.nn.Parameter(ln.layer_norm_bias.clone())
+                sln.fc1_weight = torch.nn.Parameter(ln.fc1_weight.clone())
+                sln.fc2_weight = torch.nn.Parameter(ln.fc2_weight.clone())
+                sln.fc1_bias = torch.nn.Parameter(ln.fc1_bias.clone())
+                sln.fc2_bias = torch.nn.Parameter(ln.fc2_bias.clone())
             ln_list.append(ln)
             sln_list.append(sln)
 
@@ -51,93 +51,90 @@ class ModelConfig:
 
 
 config = {
-    # "small": ModelConfig(128, 512, 12),
-    # "medium": ModelConfig(512, 2048, 12),
-    # "large": ModelConfig(1024, 4096, 12),
+    "small": ModelConfig(128, 512, 12),
+    "medium": ModelConfig(512, 2048, 12),
+    "large": ModelConfig(1024, 4096, 12),
     "huge": ModelConfig(2048, 8192, 12),
 }
 
-data_sizes = [2**7, 2**10, 2**14, 2**16]  # 2**18]
-
+seq_sizes = [2**7, 2**10, 2**14, 2**16]
 
 class Profiler:
     def __init__(self):
-        self.stats = {
-            "ln_stats": {
-                "fwd_stats": {
-                    "mem": [],
-                    "time": [],
+        self.stats = defaultdict(
+            lambda: {
+                "ln_stats": {
+                    "fwd_stats": {
+                        "mem": 0,
+                        "time": 0,
+                    },
+                    "bwd_stats": {
+                        "mem": 0,
+                        "time": 0,
+                    },
                 },
-                "bwd_stats": {
-                    "mem": [],
-                    "time": [],
+                "sln_stats": {
+                    "fwd_stats": {
+                        "mem": 0,
+                        "time": 0,
+                    },
+                    "bwd_stats": {
+                        "mem": 0,
+                        "time": 0,
+                    },
                 },
-            },
-            "sln_stats": {
-                "fwd_stats": {
-                    "mem": [],
-                    "time": [],
+                "diff": {
+                    "out": 0,
+                    "layer_norm_weight": 0,
+                    "layer_norm_bias": 0,
+                    "fc1_weight": 0,
+                    "fc1_bias": 0,
+                    "fc2_weight": 0,
+                    "fc2_bias": 0,
                 },
-                "bwd_stats": {
-                    "mem": [],
-                    "time": [],
-                },
-            },
-            "diff": {
-                "out": [],
-                "layer_norm_weight": [],
-                "layer_norm_bias": [],
-                "fc1_weight": [],
-                "fc1_bias": [],
-                "fc2_weight": [],
-                "fc2_bias": [],
-            },
-        }
+            }
+        )
 
-    def compare(self, ln_model, sln_model, data):
-
-        use_cuda = device.type == "cuda" and torch.cuda.is_available()
+    def compare(self, desc, ln_model, sln_model, data):
 
         def _warmup(model, tensor):
-            for i in range(3):
+            for _ in range(10):
                 model(tensor).sum().backward()
 
         def _run_fwd(model, tensor):
 
-            if use_cuda:
-                torch.cuda.reset_peak_memory_stats(device)
-                torch.cuda.synchronize()
-                start_mem = torch.cuda.memory_allocated(device)
-            start = time.perf_counter()
+            torch.cuda.reset_peak_memory_stats(device)
+            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+            torch.cuda.synchronize()
+            start_mem = torch.cuda.memory_allocated(device)
+            start_time.record()
             out = model(tensor)
-            if use_cuda:
-                torch.cuda.synchronize()
-            elapsed = time.perf_counter() - start
-            mem = 0.0
-            if use_cuda:
-                peak_mem = torch.cuda.max_memory_allocated(device)
-                mem = max(0.0, float(peak_mem - start_mem))
+            end_time.record()
+            end_time.synchronize()
+            elapsed = start_time.elapsed_time(end_time)
+            peak_mem = torch.cuda.max_memory_allocated(device)
+            mem = float(peak_mem - start_mem)
+
             return out, elapsed, mem
 
         def _run_bwd(model, out):
 
             model.zero_grad(set_to_none=False)
-
             loss = out.sum()
 
-            if use_cuda:
-                torch.cuda.reset_peak_memory_stats(device)
-                torch.cuda.synchronize()
-                start_mem = torch.cuda.memory_allocated(device)
-            start = time.perf_counter()
+            torch.cuda.reset_peak_memory_stats(device)
+            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+            torch.cuda.synchronize()
+            start_mem = torch.cuda.memory_allocated(device)
+            start_time.record()
             loss.backward()
-            if use_cuda:
-                torch.cuda.synchronize()
-            elapsed = time.perf_counter() - start
-            mem = 0.0
-            if use_cuda:
-                peak_mem = torch.cuda.max_memory_allocated(device)
-                mem = max(0.0, float(peak_mem - start_mem))
+            end_time.record()
+            end_time.synchronize()
+            elapsed = start_time.elapsed_time(end_time)
+            peak_mem = torch.cuda.max_memory_allocated(device)
+            mem = float(peak_mem - start_mem)
 
             param_grads = self._collect_param_grads(model)
             return param_grads, elapsed, mem
@@ -150,18 +147,18 @@ class Profiler:
         sln_fwd_out, sln_fwd_time, sln_fwd_mem = _run_fwd(sln_model, data.clone())
         sln_grads, sln_bwd_time, sln_bwd_mem = _run_bwd(sln_model, sln_fwd_out)
 
-        self.stats["ln_stats"]["fwd_stats"]["time"].append(ln_fwd_time)
-        self.stats["ln_stats"]["fwd_stats"]["mem"].append(ln_fwd_mem)
-        self.stats["sln_stats"]["fwd_stats"]["time"].append(sln_fwd_time)
-        self.stats["sln_stats"]["fwd_stats"]["mem"].append(sln_fwd_mem)
+        self.stats[desc]["ln_stats"]["fwd_stats"]["time"] = ln_fwd_time
+        self.stats[desc]["ln_stats"]["fwd_stats"]["mem"] = ln_fwd_mem
+        self.stats[desc]["sln_stats"]["fwd_stats"]["time"] = sln_fwd_time
+        self.stats[desc]["sln_stats"]["fwd_stats"]["mem"] = sln_fwd_mem
 
         # Track maximum absolute difference between outputs as a convergence metric.
-        self.stats["diff"]["out"].append(self._max_diff(ln_fwd_out, sln_fwd_out))
+        self.stats[desc]["diff"]["out"] = self._max_diff(ln_fwd_out, sln_fwd_out)
 
-        self.stats["ln_stats"]["bwd_stats"]["time"].append(ln_bwd_time)
-        self.stats["ln_stats"]["bwd_stats"]["mem"].append(ln_bwd_mem)
-        self.stats["sln_stats"]["bwd_stats"]["time"].append(sln_bwd_time)
-        self.stats["sln_stats"]["bwd_stats"]["mem"].append(sln_bwd_mem)
+        self.stats[desc]["ln_stats"]["bwd_stats"]["time"] = ln_bwd_time
+        self.stats[desc]["ln_stats"]["bwd_stats"]["mem"] = ln_bwd_mem
+        self.stats[desc]["sln_stats"]["bwd_stats"]["time"] = sln_bwd_time
+        self.stats[desc]["sln_stats"]["bwd_stats"]["mem"] = sln_bwd_mem
 
         for key in [
             "layer_norm_weight",
@@ -171,58 +168,46 @@ class Profiler:
             "fc2_weight",
             "fc2_bias",
         ]:
-            self.stats["diff"][key].append(self._max_diff(ln_grads[key], sln_grads[key]))
+            self.stats[desc]["diff"][key] = self._max_diff(ln_grads[key], sln_grads[key])
 
     def summarize(self):
-        """Print a concise summary of collected statistics."""
+        _modules = [("ln_stats", "LayerNormMLP"), ("sln_stats", "SelectiveLayerNormMLP")]
+        _metric_map = {"time": (1, "ms"), "mem": (1e-6, "MB")}
 
-        def _summarize(values):
-            if not values:
-                return {"avg": 0.0, "min": 0.0, "max": 0.0}
-            return {
-                "avg": sum(values) / len(values),
-                "min": min(values),
-                "max": max(values),
-            }
+        left_w  = 18  # "fwd time" / "bwd mem" label
+        col1_w  = max(len(name) for _, name in _modules) + 2
+        col2_w  = col1_w
+        val_w   = 16  # number width
 
-        for name in ["ln_stats", "sln_stats"]:
-            fwd_stats = self.stats[name]["fwd_stats"]
-            bwd_stats = self.stats[name]["bwd_stats"]
-            print(f"{name.upper()}")
-            fwd_time = _summarize(fwd_stats["time"])
-            fwd_mem = _summarize(fwd_stats["mem"])
-            print(
-                f"  Forward - time(ms): {fwd_time['avg']*1000:.3f} "
-                f"[{fwd_time['min']*1000:.3f}, {fwd_time['max']*1000:.3f}] "
-                f"mem(MB): {fwd_mem['avg']/1e6:.3f} "
-            )
+        def header(metric, unit):
+            title = f"{metric.upper()} ({unit})"
+            print(title)
+            print(f"{'':<{left_w}}{_modules[0][1]:>{col1_w}}{_modules[1][1]:>{col2_w}}")
+            print(f"{'-'*left_w}{'-'*col1_w}{'-'*col2_w}")
 
-            bwd_time = _summarize(bwd_stats["time"])
-            bwd_mem = _summarize(bwd_stats["mem"])
-            print(
-                f"  Backward - time(ms): {bwd_time['avg']*1000:.3f} "
-                f"[{bwd_time['min']*1000:.3f}, {bwd_time['max']*1000:.3f}] "
-                f"mem(MB): {bwd_mem['avg']/1e6:.3f}"
-            )
+        for desc in self.stats:
+            print("#" * 80 + "\n")
+            print(desc + "\n")
+
+            for metric in ["time", "mem"]:
+                scale, unit = _metric_map[metric]
+                header(metric, unit)
+                for stage in ["fwd", "bwd"]:
+                    v1 = self.stats[desc][_modules[0][0]][f"{stage}_stats"][metric] * scale
+                    v2 = self.stats[desc][_modules[1][0]][f"{stage}_stats"][metric] * scale
+                    # format with thousands separators and 3 decimals, aligned
+                    s1 = f"{v1:>{val_w},.3f}"
+                    s2 = f"{v2:>{val_w},.3f}"
+                    print(f"{(stage+' ' + metric + ':'):<{left_w}}{s1:>{col1_w}}{s2:>{col2_w}}")
+                print()  # blank line after each metric table
+
+            # Errors block
+            print("MAX ABSOLUTE ERRORS")
+            print(f"{'output:':<30}{self.stats[desc]['diff']['out']:>14.3e}")
+            for key in ["layer_norm_weight","layer_norm_bias","fc1_weight","fc1_bias","fc2_weight","fc2_bias"]:
+                label = f"{key}.grad:"
+                print(f"{label:<30}{self.stats[desc]['diff'][key]:>14.3e}")
             print()
-
-        diff_stats = self.stats["diff"]
-        fwd_diffs = diff_stats["out"]
-        summary = sum(fwd_diffs) / len(fwd_diffs)
-        print(f"Forward output max diff avg: {summary:.3e}")
-
-        print("Gradient max diff averages:")
-        for key in [
-            "layer_norm_weight",
-            "layer_norm_bias",
-            "fc1_weight",
-            "fc1_bias",
-            "fc2_weight",
-            "fc2_bias",
-        ]:
-            summary = sum(diff_stats[key]) / len(diff_stats[key])
-            print(f"  {key}: {summary:.3e}")
-        print()
 
     def _max_diff(self, ref, other):
         """Return max absolute difference between two tensors or collections."""
@@ -249,23 +234,21 @@ class Profiler:
 
 def main():
 
+    profiler = Profiler()
+
     for size in config:
 
         ln_model, sln_model = config[size].build()
 
-        for seq_len in data_sizes:
-
-            profiler = Profiler()
+        for seq_len in seq_sizes:
 
             dummy_data = torch.randn((seq_len, config[size]._hidden_size), device=device)
 
-            profiler.compare(ln_model, sln_model, dummy_data)
+            desc = f"seq={seq_len}, hidden={config[size]._hidden_size}, ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
+            profiler.compare(desc, ln_model, sln_model, dummy_data)
 
-            print(
-                f"summarizing comparison for seq={seq_len}, hidden={config[size]._hidden_size},"
-                f" ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
-            )
-            profiler.summarize()
+
+    profiler.summarize()
 
 
 if __name__ == "__main__":
