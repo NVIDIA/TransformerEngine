@@ -2,10 +2,12 @@ import jax
 import jax.numpy as jnp
 import time
 import math
+import copy
 
 from typing import Callable, Any, Dict, Optional, Tuple
 from flax import linen as nn
 import transformer_engine.jax as te
+
 
 def speedometer(
     model_apply_fn: Callable,
@@ -17,35 +19,39 @@ def speedometer(
     forward_kwargs: dict = {},
     fp8_autocast_kwargs: Optional[dict] = None,
     timing_iters: int = 50,
-    warmup_iters: int = 50
+    warmup_iters: int = 50,
 ) -> None:
-    """ Measure average runtime for a JAX module
+    """Measure average runtime for a JAX module
     Perform forward and backward passes .
     """
     if fp8_autocast_kwargs is None:
         fp8_autocast_kwargs = {"enabled": False}
         model_init_fn = None
 
-    train_step_fn = create_train_step_fn(model_apply_fn, model_init_fn, fp8_autocast_kwargs, forward_kwargs)
+    train_step_fn = create_train_step_fn(model_apply_fn, fp8_autocast_kwargs, forward_kwargs)
 
     # Warm up runs
     key = dropout_key
     for _ in range(warmup_iters):
         key, step_key = jax.random.split(key)
-        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_key, key)
+        loss, (param_grads, other_grads) = train_step_fn(
+            variables, input, output_grad, step_key, key
+        )
 
     # Timing runs
     start = time.time()
     for _ in range(timing_iters):
         key, step_key = jax.random.split(key)
-        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_key, key)
+        loss, (param_grads, other_grads) = train_step_fn(
+            variables, input, output_grad, step_key, key
+        )
     end = time.time()
 
     print(f"Mean time: {(end - start) * 1000 / timing_iters} ms")
 
+
 def create_train_step_fn(
-    model_apply_fn: Callable, # Function to apply the Flax/TE model (e.g., model.apply)
-    model_init_fn: Callable,
+    model_apply_fn: Callable,
     fp8_autocast_kwargs: Dict[str, Any],
     forward_kwargs: Dict[str, Any] = None,
 ) -> Callable:
@@ -56,11 +62,11 @@ def create_train_step_fn(
     if forward_kwargs is None:
         forward_kwargs = {}
 
-    def loss_fn(variables : Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key, key):
-        rngs = {'dropout': dropout_key}
+    def loss_fn(variables: Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key):
+        rngs = {"dropout": dropout_key}
         with te.fp8_autocast(**fp8_autocast_kwargs):
             # Forward Pass: Apply the model using current parameters and variables
-            call_kwargs = {**forward_kwargs, 'rngs': rngs}
+            call_kwargs = {**forward_kwargs, "rngs": rngs}
             out = model_apply_fn(variables, inp, **call_kwargs)
 
         # grad_target = derivative of L (loss fn) over y (output) = signma(L)/sigma(y)
@@ -75,33 +81,43 @@ def create_train_step_fn(
     # JIT-compile the fwd_bwd_fn
     return jax.jit(fwd_bwd_fn)
 
+
 def create_train_step_fn_vjp(
     model_apply_fn: Callable,
     fp8_autocast_kwargs: Dict[str, Any],
+    forward_kwargs: Dict[str, Any] = None,
 ) -> Callable:
     """
     Alternative implementation using JAX's vjp directly instead of jnp.vdot + jax.grad.
     This is more explicit about computing the Vector-Jacobian Product.
     """
 
-    def forward_fn(params: Any, other_vars: Any, inp: jnp.ndarray):
-        """Pure forward function for VJP computation"""
-        with te.fp8_autocast(**fp8_autocast_kwargs):
-            return model_apply_fn({'params': params, **other_vars}, inp)
+    if forward_kwargs is None:
+        forward_kwargs = {}
 
-    def train_step_fn(params: Any, other_vars: Any, inp: jnp.ndarray, grad_target: jnp.ndarray):
+    def train_step_fn(variables: Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key):
         """Compute forward pass and VJP in one step"""
-        # Compute forward pass and get VJP function
-        output, vjp_fn = jax.vjp(forward_fn, params, other_vars, inp)
 
-        # Compute gradients using VJP
-        param_grads, other_grads = vjp_fn(grad_target)
-        
+        # Define forward function that closes over grad_target and dropout_key
+        def forward_fn(variables: Any, inp: jnp.ndarray):
+            """Pure forward function for VJP computation"""
+            rngs = {"dropout": dropout_key}
+            with te.fp8_autocast(**fp8_autocast_kwargs):
+                call_kwargs = {**forward_kwargs, "rngs": rngs}
+                return model_apply_fn(variables, inp, **call_kwargs)
+
+        # Compute forward pass and get VJP function (w.r.t. variables and inp)
+        output, vjp_fn = jax.vjp(forward_fn, variables, inp)
+
+        # Compute gradients using VJP - returns gradients w.r.t. variables and inp
+        var_grads, inp_grads = vjp_fn(grad_target)
+
         # Return loss value and gradients
-        loss_value = jnp.vdot(output, grad_target)  # Same "loss" as the other method
-        return loss_value, (param_grads, other_grads)
+        loss_value = jnp.vdot(output, grad_target)
+        return loss_value, (var_grads, inp_grads)
 
     return jax.jit(train_step_fn)
+
 
 class DotProductAttention(nn.Module):
     """Attention operation in Transformer layer
@@ -146,7 +162,7 @@ class DotProductAttention(nn.Module):
 
         # Batch matrix multiplication: b = b * np, q = sq, k = sk, n = hn
         # getting QK^T per head/batch / sqrt(d_k). with output shape (batch * num head, query seq length, key seq length)
-        bmm1 = jnp.einsum('qbn,kbn->bqk', query, key) / self.norm_factor
+        bmm1 = jnp.einsum("qbn,kbn->bqk", query, key) / self.norm_factor
 
         # change view to [b, np, sq, sk]
         # separate num heads and batch
@@ -166,7 +182,7 @@ class DotProductAttention(nn.Module):
         attention_probs = attention_probs.reshape(b * np, sq, -1)
 
         # matmul: [b * np, sq, hn]
-        context = jnp.einsum('bqk,kbn->bqn', attention_probs, value)
+        context = jnp.einsum("bqk,kbn->bqn", attention_probs, value)
 
         # change view [b, np, sq, hn]
         context = context.reshape(b, np, sq, hn)
@@ -195,12 +211,13 @@ class BasicMLP(nn.Module):
         x = nn.Dense(features=self.hidden_size, use_bias=True)(x)
         return x
 
+
 def share_parameters_with_basic_te_model(basic_model_params, te_params_template):
     """Initialize parameters for a TE Transformer layer using basic JAX modules.
     Parameter values are copied from another JAX-based model.
     """
 
-    new_te_params = te_params_template.copy()
+    new_te_params = copy.deepcopy(te_params_template)
     '''
         # Basic parameter shapes: {
         #    'BasicMLP_0': {
@@ -247,33 +264,41 @@ def share_parameters_with_basic_te_model(basic_model_params, te_params_template)
         #     'scale': LogicallyPartitioned(value=(4096,), names=('embed',), mesh=None, rules=None)
         # }
     #}
-    '''
+    """
 
-   # Layer Norms
-    new_te_params['LayerNorm_0']['scale'] = basic_model_params['LayerNorm_0']['scale']
-    new_te_params['LayerNorm_0']['ln_bias'] = basic_model_params['LayerNorm_0']['bias']
+    # Layer Norms
+    new_te_params["LayerNorm_0"]["scale"] = basic_model_params["LayerNorm_0"]["scale"]
+    new_te_params["LayerNorm_0"]["ln_bias"] = basic_model_params["LayerNorm_0"]["bias"]
 
     # QKV and Projection
-    new_te_params['DenseGeneral_0']['kernel'] = basic_model_params['Dense_0']['kernel']
-    new_te_params['DenseGeneral_0']['bias'] = basic_model_params['Dense_0']['bias']
-    
+    new_te_params["DenseGeneral_0"]["kernel"] = basic_model_params["Dense_0"]["kernel"]
+    new_te_params["DenseGeneral_0"]["bias"] = basic_model_params["Dense_0"]["bias"]
+
     # Output Projection
-    new_te_params['DenseGeneral_1']['kernel'] = basic_model_params['Dense_1']['kernel']
-    new_te_params['DenseGeneral_1']['bias'] = basic_model_params['Dense_1']['bias']
-    
+    new_te_params["DenseGeneral_1"]["kernel"] = basic_model_params["Dense_1"]["kernel"]
+    new_te_params["DenseGeneral_1"]["bias"] = basic_model_params["Dense_1"]["bias"]
+
     # Final Layer Norm and MLP
-    new_te_params['LayerNorm_1']['scale'] = basic_model_params['LayerNorm_1']['scale']
-    new_te_params['LayerNorm_1']['ln_bias'] = basic_model_params['LayerNorm_1']['bias']
-    new_te_params['BasicTEMLP_0']['DenseGeneral_0']['kernel'] = basic_model_params['BasicMLP_0']['Dense_0']['kernel']
-    new_te_params['BasicTEMLP_0']['DenseGeneral_0']['bias'] = basic_model_params['BasicMLP_0']['Dense_0']['bias']
-    new_te_params['BasicTEMLP_0']['DenseGeneral_1']['kernel'] = basic_model_params['BasicMLP_0']['Dense_1']['kernel']
-    new_te_params['BasicTEMLP_0']['DenseGeneral_1']['bias'] = basic_model_params['BasicMLP_0']['Dense_1']['bias']
+    new_te_params["LayerNorm_1"]["scale"] = basic_model_params["LayerNorm_1"]["scale"]
+    new_te_params["LayerNorm_1"]["ln_bias"] = basic_model_params["LayerNorm_1"]["bias"]
+    new_te_params["BasicTEMLP_0"]["DenseGeneral_0"]["kernel"] = basic_model_params["BasicMLP_0"][
+        "Dense_0"
+    ]["kernel"]
+    new_te_params["BasicTEMLP_0"]["DenseGeneral_0"]["bias"] = basic_model_params["BasicMLP_0"][
+        "Dense_0"
+    ]["bias"]
+    new_te_params["BasicTEMLP_0"]["DenseGeneral_1"]["kernel"] = basic_model_params["BasicMLP_0"][
+        "Dense_1"
+    ]["kernel"]
+    new_te_params["BasicTEMLP_0"]["DenseGeneral_1"]["bias"] = basic_model_params["BasicMLP_0"][
+        "Dense_1"
+    ]["bias"]
 
     return new_te_params
 
 
 def share_fused_parameters_with_basic_te_model(basic_model_params, te_params_template):
-    '''
+    """
     Fused TE parameter shapes: {
         'DenseGeneral_0': {
             'bias': LogicallyPartitioned(value=(4096,), names=(), mesh=None, rules=None),
@@ -295,32 +320,37 @@ def share_fused_parameters_with_basic_te_model(basic_model_params, te_params_tem
         }
     }
     '''
-    new_te_params = te_params_template.copy()
+    new_te_params = copy.deepcopy(te_params_template)
     # Layer Norms
-    new_te_params['LayerNormDenseGeneral_0']['scale'] = basic_model_params['LayerNorm_0']['scale']
-    new_te_params['LayerNormDenseGeneral_0']['ln_bias'] = basic_model_params['LayerNorm_0']['bias']
+    new_te_params["LayerNormDenseGeneral_0"]["scale"] = basic_model_params["LayerNorm_0"]["scale"]
+    new_te_params["LayerNormDenseGeneral_0"]["ln_bias"] = basic_model_params["LayerNorm_0"]["bias"]
 
     # QKV and Projection
-    new_te_params['LayerNormDenseGeneral_0']['kernel'] = basic_model_params['Dense_0']['kernel']
-    new_te_params['LayerNormDenseGeneral_0']['bias'] = basic_model_params['Dense_0']['bias']
-    
+    new_te_params["LayerNormDenseGeneral_0"]["kernel"] = basic_model_params["Dense_0"]["kernel"]
+    new_te_params["LayerNormDenseGeneral_0"]["bias"] = basic_model_params["Dense_0"]["bias"]
+
     # Output Projection
-    new_te_params['DenseGeneral_0']['kernel'] = basic_model_params['Dense_1']['kernel']
-    new_te_params['DenseGeneral_0']['bias'] = basic_model_params['Dense_1']['bias']
-    
+    new_te_params["DenseGeneral_0"]["kernel"] = basic_model_params["Dense_1"]["kernel"]
+    new_te_params["DenseGeneral_0"]["bias"] = basic_model_params["Dense_1"]["bias"]
+
     # Final Layer Norm and MLP
-    new_te_params['LayerNormMLP_0']['scale'] = basic_model_params['LayerNorm_1']['scale']
-    new_te_params['LayerNormMLP_0']['ln_bias'] = basic_model_params['LayerNorm_1']['bias']
-    new_te_params['LayerNormMLP_0']['wi_kernel'] = basic_model_params['BasicMLP_0']['Dense_0']['kernel'].reshape((4096, 1, 16384))
-    new_te_params['LayerNormMLP_0']['wi_bias'] = basic_model_params['BasicMLP_0']['Dense_0']['bias'].reshape((1, 16384))
-    new_te_params['LayerNormMLP_0']['wo_kernel'] = basic_model_params['BasicMLP_0']['Dense_1']['kernel']
-    new_te_params['LayerNormMLP_0']['wo_bias'] = basic_model_params['BasicMLP_0']['Dense_1']['bias']
+    new_te_params["LayerNormMLP_0"]["scale"] = basic_model_params["LayerNorm_1"]["scale"]
+    new_te_params["LayerNormMLP_0"]["ln_bias"] = basic_model_params["LayerNorm_1"]["bias"]
+    new_te_params["LayerNormMLP_0"]["wi_kernel"] = basic_model_params["BasicMLP_0"]["Dense_0"][
+        "kernel"
+    ].reshape((4096, 1, 16384))
+    new_te_params["LayerNormMLP_0"]["wi_bias"] = basic_model_params["BasicMLP_0"]["Dense_0"][
+        "bias"
+    ].reshape((1, 16384))
+    new_te_params["LayerNormMLP_0"]["wo_kernel"] = basic_model_params["BasicMLP_0"]["Dense_1"][
+        "kernel"
+    ]
+    new_te_params["LayerNormMLP_0"]["wo_bias"] = basic_model_params["BasicMLP_0"]["Dense_1"]["bias"]
     return new_te_params
 
 
 def share_parameters_with_transformerlayer_te_model(basic_model_params, te_params_template):
-
-    '''
+    """
     TE TransformerLayer vars: {
         'fp8_metas': {
             'attention': {
@@ -371,29 +401,39 @@ def share_parameters_with_transformerlayer_te_model(basic_model_params, te_param
             }
         }
     }
-    '''
+    """
 
-    new_te_params = te_params_template.copy()
+    new_te_params = copy.deepcopy(te_params_template)
 
     # Layer Norms
-    new_te_params['attention']['qkv']['scale'] = basic_model_params['LayerNorm_0']['scale']
-    new_te_params['attention']['qkv']['ln_bias'] = basic_model_params['LayerNorm_0']['bias']
-    
+    new_te_params["attention"]["qkv"]["scale"] = basic_model_params["LayerNorm_0"]["scale"]
+    new_te_params["attention"]["qkv"]["ln_bias"] = basic_model_params["LayerNorm_0"]["bias"]
+
     # Attention QKV and Output Projection
-    new_te_params['attention']['qkv']['kernel'] = basic_model_params['Dense_0']['kernel'].reshape((4096, 3, 4096))
-    new_te_params['attention']['qkv']['bias'] = basic_model_params['Dense_0']['bias'].reshape((3, 4096))
-    new_te_params['attention']['out']['kernel'] = basic_model_params['Dense_1']['kernel']
-    new_te_params['attention']['out']['bias'] = basic_model_params['Dense_1']['bias']
-    
+    new_te_params["attention"]["qkv"]["kernel"] = basic_model_params["Dense_0"]["kernel"].reshape(
+        (4096, 3, 4096)
+    )
+    new_te_params["attention"]["qkv"]["bias"] = basic_model_params["Dense_0"]["bias"].reshape(
+        (3, 4096)
+    )
+    new_te_params["attention"]["out"]["kernel"] = basic_model_params["Dense_1"]["kernel"]
+    new_te_params["attention"]["out"]["bias"] = basic_model_params["Dense_1"]["bias"]
+
     # MLP
-    new_te_params['mlp']['scale'] = basic_model_params['LayerNorm_1']['scale']
-    new_te_params['mlp']['ln_bias'] = basic_model_params['LayerNorm_1']['bias']
-    new_te_params['mlp']['wi_kernel'] = basic_model_params['BasicMLP_0']['Dense_0']['kernel'].reshape((4096, 1, 16384))
-    new_te_params['mlp']['wi_bias'] = basic_model_params['BasicMLP_0']['Dense_0']['bias'].reshape((1, 16384))
-    new_te_params['mlp']['wo_kernel'] = basic_model_params['BasicMLP_0']['Dense_1']['kernel']
-    new_te_params['mlp']['wo_bias'] = basic_model_params['BasicMLP_0']['Dense_1']['bias']
-    
+    new_te_params["mlp"]["scale"] = basic_model_params["LayerNorm_1"]["scale"]
+    new_te_params["mlp"]["ln_bias"] = basic_model_params["LayerNorm_1"]["bias"]
+    new_te_params["mlp"]["wi_kernel"] = basic_model_params["BasicMLP_0"]["Dense_0"][
+        "kernel"
+    ].reshape((4096, 1, 16384))
+    new_te_params["mlp"]["wi_bias"] = basic_model_params["BasicMLP_0"]["Dense_0"]["bias"].reshape(
+        (1, 16384)
+    )
+    new_te_params["mlp"]["wo_kernel"] = basic_model_params["BasicMLP_0"]["Dense_1"]["kernel"]
+    new_te_params["mlp"]["wo_bias"] = basic_model_params["BasicMLP_0"]["Dense_1"]["bias"]
+
     # Relative Positional Bias
-    new_te_params['relpos_bias']['rel_embedding'] = te_params_template['relpos_bias']['rel_embedding']
+    new_te_params["relpos_bias"]["rel_embedding"] = te_params_template["relpos_bias"][
+        "rel_embedding"
+    ]
 
     return new_te_params
