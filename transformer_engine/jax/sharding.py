@@ -80,6 +80,11 @@ def get_sharding_map_logic_axis_to_mesh_axis():
         # If no mesh is defined, return an empty dict and do not require a MeshResource context to be present
         return {}
 
+    abstract_mesh = get_abstract_mesh()
+    if abstract_mesh is None or sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
+        # If all mesh axes are manual axes, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
     gsr = global_mesh_resource()
 
     is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
