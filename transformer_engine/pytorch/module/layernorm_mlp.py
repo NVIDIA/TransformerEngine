@@ -1449,7 +1449,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
           Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
                    'silu', 'swiglu', and 'clamped_swiglu'.
     activation_params : dict, default = `None`
-                        additional parameters for the activation function.
+                        Additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which
                         supports 'limit' and 'alpha' parameters.
     init_method : Callable, default = `None`
