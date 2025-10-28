@@ -303,8 +303,8 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         tp_world_size = get_distributed_world_size(tp_group)
-        backwards_needs_fc1_input = (
-            fc1_weight.requires_grad and (is_recomputation or (is_grad_enabled and not checkpoint))
+        backwards_needs_fc1_input = fc1_weight.requires_grad and (
+            is_recomputation or (is_grad_enabled and not checkpoint)
         )
         device = inp.device
 
@@ -552,9 +552,11 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             # so we must be in the fwd
             # is_grad_enabled can be true or false
             # if false, can safely delete
-            # if true, we can only delete if checkpoint is true, since we will recompute anyways, 
+            # if true, we can only delete if checkpoint is true, since we will recompute anyways,
             # otherwise, checkpoint is false, so cant delete
-            if checkpoint or not is_grad_enabled: # we can safely get rid of these if this is the case
+            if (
+                checkpoint or not is_grad_enabled
+            ):  # we can safely get rid of these if this is the case
                 clear_tensor_data(fc1_out)
 
             if not fp8 and fp8_calibration:
@@ -593,7 +595,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             # ------------------------------------------------------
 
             # Deallocate tensors if no longer needed, again, can safely deallocate
-            if checkpoint or not is_grad_enabled: # we can safely get rid of these if this is the case
+            if (
+                checkpoint or not is_grad_enabled
+            ):  # we can safely get rid of these if this is the case
                 clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
 
             # Prepare output tensor
@@ -633,9 +637,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 clear_tensor_data(act_out)
                 act_out = None
 
-            if not checkpoint: # regular path, no selective activation checkpointing
+            if not checkpoint:  # regular path, no selective activation checkpointing
 
-                if cpu_offloading: # cpu offloading only relevant when have activations to offload
+                if cpu_offloading:  # cpu offloading only relevant when have activations to offload
                     mark_activation_offload(
                         inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
                     )
@@ -645,17 +649,26 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 #       shards/unshards the base weights so we don't do it ourselves
                 ctx.fsdp_group = fsdp_group
 
-                ctx.fsdp_shapes = _fsdp_scatter_tensors( # again, ony relevant if we have activations to save
-                    fsdp_group,
-                    mu,
-                    rsigma,
-                    ln_out,
-                    fc1_out_without_bias if bias_gelu_fusion else fc1_out,
-                    act_out,
-                    fc1_weight_final if fp8 and not isinstance(fc1_weight, Float8Tensor) else None,
-                    fc2_weight_final if fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
+                ctx.fsdp_shapes = (
+                    _fsdp_scatter_tensors(  # again, ony relevant if we have activations to save
+                        fsdp_group,
+                        mu,
+                        rsigma,
+                        ln_out,
+                        fc1_out_without_bias if bias_gelu_fusion else fc1_out,
+                        act_out,
+                        (
+                            fc1_weight_final
+                            if fp8 and not isinstance(fc1_weight, Float8Tensor)
+                            else None
+                        ),
+                        (
+                            fc2_weight_final
+                            if fp8 and not isinstance(fc2_weight, Float8Tensor)
+                            else None
+                        ),
+                    )
                 )
-
 
                 tensors_to_save, tensor_objects = prepare_for_saving(
                     inputmat,
@@ -750,7 +763,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
             ctx.wgrad_store = wgrad_store
-            if is_recomputation: # return the recomputed tensors
+            if is_recomputation:  # return the recomputed tensors
                 return (
                     ctx,
                     inputmat,
@@ -776,7 +789,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 return fc2_out, ln_out_return.view(shape)
             return fc2_out, ln_out_return.view(inp_shape)
         return fc2_out
-    
+
     @staticmethod
     def forward(
         ctx,
@@ -904,9 +917,11 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
         # by the `restore_from_saved` method to construct back the actual tensors.
         ctx.tensor_objects = None
 
-        if ctx.checkpoint: # do recomputation from the original args
-            return _SelectiveLayerNormMLP._forward(ctx, *tensors, *ctx.other_args, recompute_for_bwd=True)
-        else: # load from saved (return ctx is just because the other branch does too)
+        if ctx.checkpoint:  # do recomputation from the original args
+            return _SelectiveLayerNormMLP._forward(
+                ctx, *tensors, *ctx.other_args, recompute_for_bwd=True
+            )
+        else:  # load from saved (return ctx is just because the other branch does too)
             return [ctx] + tensors
 
     @staticmethod
@@ -916,7 +931,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
-           
+
             (  # pylint: disable=unbalanced-tuple-unpacking
                 ctx,
                 inputmat,
