@@ -18,10 +18,10 @@
 #include <limits>
 
 #include "../../common.h"
-#include "../../utils.cuh"
+#include "../../util/curanddx.hpp"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
-#include "../../util/curanddx.hpp"
+#include "../../utils.cuh"
 
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
@@ -88,7 +88,7 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t 
+__device__ __forceinline__ uint32_t
 get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10> &rng,
           // philox4x32_native_state<10>: 10 rounds of philox4_32
           uint4 &random_uint4, int &rnd_idx) {

@@ -357,8 +357,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
-                                                                      rbits);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
@@ -936,8 +936,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
-                                                                      rbits);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);

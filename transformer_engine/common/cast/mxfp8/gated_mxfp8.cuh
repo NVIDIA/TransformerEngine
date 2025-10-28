@@ -672,8 +672,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
-                    ParamOP &p, cudaStream_t stream) {
+void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+                    cudaStream_t stream) {
   using namespace gated_kernel;
   checkCuDriverContext(stream);
 
@@ -801,8 +801,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
             }
             case ScalingType::COLWISE: {
               auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
-                                              false, true, THREADS_PER_CHUNK_COLWISE>;
+                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType, false,
+                                              true, THREADS_PER_CHUNK_COLWISE>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 

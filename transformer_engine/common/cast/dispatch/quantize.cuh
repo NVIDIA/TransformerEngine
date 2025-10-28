@@ -108,8 +108,8 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       int32_t rows = input_tensor->flat_first_dim();
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0)
-                                  && (cols % 32 == 0) && output_tensor->has_data();
+      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
+                                  (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {

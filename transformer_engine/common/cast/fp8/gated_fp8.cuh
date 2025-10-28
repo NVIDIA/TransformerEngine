@@ -276,8 +276,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output,
-                    ParamOP &p, cudaStream_t stream) {
+void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+                    cudaStream_t stream) {
   using namespace kernel;
   checkCuDriverContext(stream);
 
