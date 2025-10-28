@@ -427,4 +427,4 @@ class ClampedSwiGLU(_ActivationOperation):
         return tex.clamped_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.dclamped_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
+        return tex.clamped_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
