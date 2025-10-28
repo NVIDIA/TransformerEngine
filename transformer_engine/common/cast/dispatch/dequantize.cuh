@@ -27,6 +27,9 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 
   switch (input.scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+      NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
+      NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
+      NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
       fp8::dequantize(input, output, stream);
       break;
     }

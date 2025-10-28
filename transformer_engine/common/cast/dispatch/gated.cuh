@@ -28,63 +28,54 @@ void quantize_gated_helper(const NVTETensor nvte_input, NVTETensor nvte_output, 
   const Tensor input = *convertNVTETensorCheck(nvte_input);
   Tensor *output = convertNVTETensorCheck(nvte_output);
 
-  const auto scaling_mode = output->scaling_mode;
-  if ((scaling_mode != NVTE_DELAYED_TENSOR_SCALING) && !is_supported_by_CC_100()) {
-    NVTE_ERROR("Not supported by the Arch < 10.0");
-  }
-
-  constexpr bool allow_empty = false;
   CheckInputTensor(input, "input");
-  CheckOutputTensor(*output, "output", allow_empty);
-
-  NVTE_CHECK(input.flat_last_dim() % 2 == 0, "Number of columns must be even.");
+  CheckOutputTensor(*output, "output", /*allow_empty=*/false);
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim() / 2;
 
+  NVTE_CHECK(input.flat_last_dim() % 2 == 0,
+             "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
+             input.flat_first_dim(), ", ", input.flat_last_dim(), "].");
+  NVTE_CHECK(output->flat_last_dim() == cols,
+             "Wrong output shape. Expected (after flattening) [*, ", cols,
+             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
+
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
              "Either rowwise or columnwise output data need to be allocated.");
 
-  bool is_fp8_rowwise_output = true;
-  bool is_fp8_colwise_output = true;
-  if (output->has_data()) {
-    is_fp8_rowwise_output = is_fp8_dtype(output->data.dtype);
-    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->flat_last_dim() == cols, "Wrong dimension of the output.");
-  }
-  if (output->has_columnwise_data()) {
-    is_fp8_colwise_output = is_fp8_dtype(output->columnwise_data.dtype);
-    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->flat_last_dim() == cols, "Wrong dimension of the output.");
-  }
-
-  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && (cols % 32 == 0) &&
-                               is_supported_by_CC_100();
-
-  switch (scaling_mode) {
+  switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
         Tensor dummy_tensor;  // grad
-        fp8::cast_gated_dgated_tma<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p,
-                                                                   stream);
+        fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output,
+                                                                       p, stream);
       } else {
-        fp8::cast_gated<ParamOP, ActOP>(input, output, p, stream);
+        fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
       }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      if (use_tma_kernels) {
-        Tensor dummy_tensor;  // grad
-        mxfp8::quantize_gated_dgated<false, ParamOP, ActOP, nullptr>(dummy_tensor, input, output, p,
-                                                                     stream);
-      } else {
-        NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                   "by 32, got input of shape ", input.data.shape);
+      NVTE_CHECK(cols % 32 == 0, "Invalid input shape. Expected the last dimension to be "
+                 "divisible by 32, but got ", cols, ".");
+      if (output->has_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->data.dtype),
+                   "The type of the output tensor should be FP8.");
       }
+      if (output->has_columnwise_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
+                   "The type of the columnwise output tensor should be FP8.");
+      }
+      NVTE_CHECK(is_supported_by_CC_100(),
+                 "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+      Tensor dummy_tensor;  // grad
+      mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>
+        (dummy_tensor, input, output, p, stream);
       break;
     }
     default:
-      NVTE_ERROR("Not supported scaling mode: " + to_string(scaling_mode) + ".");
+      NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 
@@ -97,68 +88,70 @@ void quantize_dgated_helper(const NVTETensor nvte_grad, const NVTETensor nvte_ga
   const Tensor gated_input = *convertNVTETensorCheck(nvte_gated_input);
   Tensor *output = convertNVTETensorCheck(nvte_output);
 
-  const auto scaling_mode = output->scaling_mode;
-  if ((scaling_mode != NVTE_DELAYED_TENSOR_SCALING) && !is_supported_by_CC_100()) {
-    NVTE_ERROR("Not supported by the Arch < 10.0");
-  }
-
-  constexpr bool allow_empty = false;
+  CheckInputTensor(grad, "grad");
   CheckInputTensor(gated_input, "gated_input");
-  CheckOutputTensor(*output, "output", allow_empty);
+  CheckOutputTensor(*output, "output", /*allow_empty=*/false);
 
-  NVTE_CHECK(gated_input.flat_last_dim() % 2 == 0, "Number of columns must be even.");
+  NVTE_CHECK(gated_input.flat_last_dim() % 2 == 0, "Number of columns must be even, but got ",
+             gated_input.flat_last_dim(), ".");
 
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
-  const size_t output_cols = 2 * cols;
 
-  CheckInputTensor(grad, "grad");
   NVTE_CHECK(!is_fp8_dtype(grad.data.dtype), "Grad input must be in higher precision.");
   NVTE_CHECK(grad.data.dtype == gated_input.data.dtype, "Types of both inputs must match.");
-  NVTE_CHECK(grad.flat_first_dim() == rows, "Wrong dimension of the grad input.");
-  NVTE_CHECK(grad.flat_last_dim() == cols, "Wrong dimension of the grad input.");
+
+  NVTE_CHECK(grad.flat_first_dim() == rows,
+             "Wrong Grad shape. Expected first dimension (after flattening) [", rows, 
+             ", *], got [", grad.flat_first_dim(), ", ", grad.flat_last_dim(), "].");
+  NVTE_CHECK(grad.flat_last_dim() == cols,
+             "Wrong Grad shape. Expected last dimension (after flattening) [", cols, 
+             ", *], got [", grad.flat_first_dim(), ", ", grad.flat_last_dim(), "].");
 
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
              "Either rowwise or columnwise output data need to be allocated.");
 
-  bool is_fp8_rowwise_output = true;
-  bool is_fp8_colwise_output = true;
-  if (output->has_data()) {
-    is_fp8_rowwise_output = is_fp8_dtype(output->data.dtype);
-    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
-  }
-  if (output->has_columnwise_data()) {
-    is_fp8_colwise_output = is_fp8_dtype(output->columnwise_data.dtype);
-    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
-  }
-
-  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && (cols % 32 == 0) &&
-                               is_supported_by_CC_100();
-
-  switch (scaling_mode) {
+  NVTE_CHECK(output->flat_first_dim() == rows,
+             "Wrong output shape. Expected (after flattening) [", rows,
+             ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
+  NVTE_CHECK(output->flat_last_dim() == cols * 2,
+             "Wrong output shape. Expected (after flattening) [*, ", cols * 2,
+             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
+  NVTE_CHECK(gated_input.data.shape == output->data.shape,
+             "Gated input and output shapes must match. Input shape: ", gated_input.data.shape,
+             ", output shape: ", output->data.shape, ".");
+           
+  switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
-        fp8::cast_gated_dgated_tma<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
-                                                                 stream);
+        fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
+                                                                     stream);
       } else {
-        fp8::cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
+        fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream);
       }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      if (use_tma_kernels) {
-        mxfp8::quantize_gated_dgated<true, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
-                                                                   stream);
-      } else {
-        NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                   "by 32, got input of shape ", gated_input.data.shape);
+      NVTE_CHECK(cols % 32 == 0, "Invalid input shape. Expected the last dimension to be "
+                 "divisible by 32, but got ", cols, ".");
+      if (output->has_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->data.dtype),
+                   "The type of the output tensor should be FP8.");
       }
+      if (output->has_columnwise_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
+                   "The type of the columnwise output tensor should be FP8.");
+      }
+      NVTE_CHECK(is_supported_by_CC_100(),
+                 "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+      
+      mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>
+        (grad, gated_input, output, p, stream);
       break;
     }
     default:
-      NVTE_ERROR("Not supported scaling mode: " + to_string(scaling_mode) + ".");
+      NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 }  // namespace dispatch

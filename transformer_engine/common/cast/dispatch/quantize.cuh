@@ -66,6 +66,9 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                "Stochastic rounding is only supported for NVFP4 quantization.");
   }
 
+  NVTE_CHECK(output_tensor->has_data() || output_tensor->has_columnwise_data(),
+             "Either rowwise or columnwise output data need to be allocated.");
+
   // Dispatch to quantization kernel depending on data format
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -105,8 +108,8 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       int32_t rows = input_tensor->flat_first_dim();
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
-      bool use_optimized_kernel = dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0 &&
-                                  output_tensor->has_data();
+      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0)
+                                  && (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {

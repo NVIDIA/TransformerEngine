@@ -26,7 +26,6 @@ namespace transformer_engine {
 namespace dispatch {
 namespace fp8 {
 namespace kernel {
-__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -43,7 +42,7 @@ constexpr size_t BUFFER_STAGES_NUM = BUFFER_DIM_Y / THREADS_PER_CHUNK_Y;  //  8 
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                 //  4 = 128 / 32
 static_assert(ITERATIONS >= 1);
 
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     cast_fp8_gated_kernel(const __grid_constant__ CUtensorMap tensor_map_grad,
@@ -82,7 +81,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
-  constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
+  constexpr size_t grad_mem = IS_BWD ? buff_size_aligned_in : 0;
 
   constexpr size_t in_act_mem = buff_size_aligned_in;
   constexpr size_t in_gate_mem = buff_size_aligned_in;
@@ -116,7 +115,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   // Prefetch data of the first stage
 
-  if constexpr (IS_DGATED) {
+  if constexpr (IS_BWD) {
     copy_2d_to_sharedx3(in_grad_sh, TMAP_grad_in, chunk_offset_X, chunk_offset_Y, in_act_sh,
                         TMAP_in_act, chunk_offset_X, chunk_offset_Y, in_gate_sh, TMAP_in_gate,
                         chunk_offset_X, chunk_offset_Y, in_transaction_size, &mbar[0],
@@ -135,7 +134,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t next_buff = next_it % BUFFERS_NUM;
       const size_t chunk_it_offset_y = chunk_offset_Y + next_it * BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
-      if constexpr (IS_DGATED) {
+      if constexpr (IS_BWD) {
         copy_2d_to_sharedx3(
             &in_grad_sh[next_buff * buff_elems], TMAP_grad_in, chunk_it_offset_x, chunk_it_offset_y,
             &in_act_sh[next_buff * buff_elems], TMAP_in_act, chunk_it_offset_x, chunk_it_offset_y,
@@ -175,7 +174,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1;
       }
 
-      if constexpr (IS_DGATED) {
+      if constexpr (IS_BWD) {
         float grad_elt = static_cast<float>(in_grad_sh_curr[shmem_idx]);
 
         const float x = act_elt;
@@ -230,7 +229,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                                     chunk_it_offset_y,
                                                     reinterpret_cast<uint64_t *>(out_act_sh_curr));
 
-      if constexpr (IS_DGATED) {
+      if constexpr (IS_BWD) {
         // dGate
         ptx::cp_async_bulk_tensor_2d_shared_to_global(
             TMAP_output_gate, chunk_it_offset_x, chunk_it_offset_y,
@@ -275,10 +274,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 }
 }  // namespace kernel
 
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output,
-                           ParamOP &p, cudaStream_t stream) {
+void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+                    ParamOP &p, cudaStream_t stream) {
   using namespace kernel;
   checkCuDriverContext(stream);
 
@@ -292,7 +291,7 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
   NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
-  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
+  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
@@ -315,7 +314,7 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
           alignas(64) CUtensorMap tensor_map_output_act{};
           alignas(64) CUtensorMap tensor_map_output_gate{};
 
-          if constexpr (IS_DGATED) {
+          if constexpr (IS_BWD) {
             create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X,
                                  cols, 0, typeToNumBits(gated_input.dtype()));
           }
@@ -337,7 +336,7 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
               DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
           const size_t buff_size_aligned_out =
               DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
-          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
+          const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
           const size_t in_act_mem = buff_size_aligned_in;
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
@@ -346,7 +345,7 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
           const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
-          auto kernel = cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>;
+          auto kernel = cast_fp8_gated_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>;
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                shmem_size));
 
@@ -358,16 +357,7 @@ void cast_gated_dgated_tma(const Tensor &grad, const Tensor &gated_input, Tensor
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
-void cast_gated(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t stream) {
-  CheckInputTensor(input, "gated_act_input");
-  CheckOutputTensor(*output, "gated_act_output");
-  NVTE_CHECK(input.flat_last_dim() % 2 == 0,
-             "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
-             input.flat_first_dim(), ", ", input.flat_last_dim(), "].");
-  NVTE_CHECK(output->flat_last_dim() == input.flat_last_dim() / 2,
-             "Wrong output shape. Expected (after flattening) [*, ", input.flat_last_dim() / 2,
-             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
-
+void cast_gated_fwd(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
@@ -386,21 +376,8 @@ void cast_gated(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t st
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP &p,
-                 cudaStream_t stream) {
-  CheckInputTensor(grad, "dgated_act_grad");
-  CheckInputTensor(input, "dgated_act_input");
-  CheckOutputTensor(*output, "dgated_act_output");
-  NVTE_CHECK(output->flat_first_dim() == grad.flat_first_dim(),
-             "Wrong output shape. Expected (after flattening) [", grad.flat_first_dim(),
-             ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
-  NVTE_CHECK(output->flat_last_dim() == grad.flat_last_dim() * 2,
-             "Wrong output shape. Expected (after flattening) [*, ", grad.flat_last_dim() * 2,
-             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
-  NVTE_CHECK(input.data.shape == output->data.shape,
-             "Input and output shapes must match. Input shape: ", input.data.shape,
-             ", output shape: ", output->data.shape, ".");
-
+void cast_gated_bwd(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP &p,
+                    cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(

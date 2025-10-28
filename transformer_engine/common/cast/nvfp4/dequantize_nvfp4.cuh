@@ -21,15 +21,15 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 
-#if CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif  // CUDA_VERSION >= 12080
+#endif  // FP4_TYPE_SUPPORTED
 
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 namespace dequantize_kernel {
-#if CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
 template <typename OType>
 __global__ void __launch_bounds__(512)
     dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
@@ -71,7 +71,7 @@ __global__ void __launch_bounds__(512)
 }  // namespace dequantize_kernel
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
-#if CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
   using namespace dequantize_kernel;
   CheckInputTensor(input, "input");
   CheckOutputTensor(*output, "output");
@@ -102,7 +102,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
-#endif  // CUDA_VERSION >= 12080
+#endif  // FP4_TYPE_SUPPORTED
 }
 }  // namespace nvfp4
 }  // namespace dispatch

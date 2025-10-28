@@ -33,10 +33,6 @@ __device__ inline float dequantize_func(float value, const DequantizeParam &para
 }
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
-  NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
-
   const size_t N = product(input.data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.data.dtype, IType,

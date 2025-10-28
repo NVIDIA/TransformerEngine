@@ -134,11 +134,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
-  int rnd_idx =
-      0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
+  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
+  int rnd_idx = 0;
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS;
 
@@ -357,12 +357,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
                                                                       rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                 in01, in23, block_scale_inverse_2x, rbits);
           }
         }
@@ -541,17 +541,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
             IType2 in23;
             if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else if constexpr (IS_CACHED_ACT_OP) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else {
               const int j = w * PACK_SIZE + 4 * e;
               const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
               const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
-              out.data.elt[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   in01, in23, block_scale_inverse_2x, rbits);
             }
           }
@@ -646,9 +646,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
@@ -936,12 +936,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
                                                                       rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                 in01, in23, block_scale_inverse_2x, rbits);
           }
         }
@@ -1074,17 +1074,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
             IType2 in23;
             if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else if constexpr (IS_CACHED_ACT_OP) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else {
               const int j = w * PACK_SIZE + 4 * e;
               const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
               const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
-              out.data.elt[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   in01, in23, block_scale_inverse_2x, rbits);
             }
           }
