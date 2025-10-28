@@ -1447,7 +1447,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     activation : str, default = 'gelu'
           activation function used.
           Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                   'silu', and 'swiglu', 'clamped_swiglu'.
+                   'silu', 'swiglu', and 'clamped_swiglu'.
     activation_params : dict, default = `None`
                         additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which
@@ -2043,6 +2043,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
         act_params = self.activation_params or {}
+        # Default params for clamped_swiglu in Transformer Engine
         clamped_swiglu_limit, clamped_swiglu_alpha =\
             act_params.get("limit", 7.0), act_params.get("alpha", 1.702)
 
