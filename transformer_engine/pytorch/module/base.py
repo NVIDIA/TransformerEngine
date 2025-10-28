@@ -1277,7 +1277,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         shape=dtensor_param.size(),
                         stride=dtensor_param.stride(),
                     )
-
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
@@ -1306,7 +1305,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-
+                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    device_mesh = dtensor_param.device_mesh
+                    shard_dim = device_mesh.ndim - 1 # To handle 2D mesh (HSDP)
+                    amax_reduction_group = device_mesh.get_group(mesh_dim=shard_dim)
+                    quantizer.amax_reduction_group = amax_reduction_group
+                    quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
 

@@ -750,23 +750,30 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
-        # sharded tensors should still have both data and transpose
-        # if needed(Hopp). Only the allgathered tensors need exactly one usage to be set.
-        # Hence need to create a copy of quantizer for the allgathered tensor
-        # which will be set in the maxfp8 tensor post-allgather.
-        quantizer = self._quantizer.copy()
-        if isinstance(quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
+        if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
             # updated with same scale inverse. Setting the state below in the quantizer will make
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
-            quantizer.amax_reduction_group = mesh.get_group()
-            quantizer.with_amax_reduction = True
-        # Transpose is needed at all for Blackwell+
-        tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
-        is_forward_pass = module._get_fsdp_state()._training_state == TrainingState.FORWARD
-        transpose_needed = tensor_has_transpose and not is_forward_pass
-        quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
+            self._quantizer.amax_reduction_group = mesh.get_group()
+            self._quantizer.with_amax_reduction = True
+        # Allgathered weights might only need one of data or transpose based on
+        # L40/Hopper based on forward or backward pass in fsdp state.
+        quantizer = self._quantizer.copy() # quantizer to be used for allgathered weights
+        fsdp_state = module._get_fsdp_state()
+        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        # If weights are resharded after forward pass, then its enough to set the quantizer usages
+        # based on whether its forward or backward pass. If weights are not resharded after forward pass,
+        # weights allgathered in forward are used in backward and pre/post allgather methods wont be called.
+        if reshard_after_forward:
+            # Transpose is not needed at all for Blackwell+
+            tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
+            # When module is wrapped with torch no_grad, the training state
+            # will be IDLE even in forward pass
+            is_forward_pass = fsdp_state._training_state == TrainingState.FORWARD or\
+                fsdp_state._training_state == TrainingState.IDLE
+            transpose_needed = tensor_has_transpose and not is_forward_pass
+            quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, quantizer)
         return sharded_tensors, metadata
@@ -796,26 +803,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         (data, ) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, quantizer) = metadata
         orig_shape = data.size()
-        
         # Quantizer has only columnwise usage set for backward pass
-        # with pre-hopper architectures.
-        if quantizer.columnwise_usage:
-            permute_dims = [data.dim() - 1] + list(range(data.dim() - 1))
-            transpose = data.permute(*permute_dims).contiguous()
-            data = None
-        else:
-            transpose = None
-            
+        # with pre-hopper architectures if weights are resharded after forward pass.
         if out is not None:
-            out._data = data
-            out._transpose = transpose
-            out._transpose_invalid = not quantizer.columnwise_usage
             out.update_usage(
                 rowwise_usage=quantizer.rowwise_usage,
                 columnwise_usage=quantizer.columnwise_usage,
             )
             return
-
         fp8_args = {"shape": orig_shape,
                   "dtype": param_dtype,
                   "fp8_scale_inv": fp8_scale_inv,
@@ -823,9 +818,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                   "quantizer": quantizer,
                   "requires_grad": False,
                   "data": data,
-                  "data_transpose": transpose,
                   }
-        return Float8Tensor(**fp8_args), (data if quantizer.rowwise_usage else transpose, )
+        out = Float8Tensor(**fp8_args)
+        out.update_usage(
+            rowwise_usage=quantizer.rowwise_usage,
+            columnwise_usage=quantizer.columnwise_usage,
+        )
+        return out, (data, )
 
     @classmethod
     def _make_in_reduce_ex(
