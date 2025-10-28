@@ -258,8 +258,7 @@ def main():
 
             desc = (
                 f"seq={seq_len}, hidden={config[size]._hidden_size},"
-                f" ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
-            )
+                f" ffn_hidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
             profiler.compare(desc, ln_model, sln_model, dummy_data)
 
     profiler.summarize()
