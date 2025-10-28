@@ -178,7 +178,7 @@ class TransformerLayer(torch.nn.Module):
           Options are: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
                        'silu', 'swiglu', and 'clamped_swiglu'.
     activation_params : Optional[dict], default = `None`
-                        additional parameters for the activation function.
+                        Additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which
                         supports 'limit' and 'alpha' parameters. You can set these as
                         `activation_params={'limit': 7.0, 'alpha': 1.702}`.
