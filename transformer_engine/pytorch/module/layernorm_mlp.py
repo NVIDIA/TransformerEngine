@@ -356,7 +356,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             else:
                 fc2_weight_quantizer = fc2_weight._quantizer
-            
+
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -2212,7 +2212,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        if not self.need_backward_dw():
             return
         with torch.cuda.nvtx.range("_LayerNormMLP_wgrad"):
             (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()

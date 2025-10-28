@@ -592,7 +592,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 data_transpose=out_transpose,
                 quantizer=tensor._quantizer,
             )
-    
+
         if func in [aten.slice.Tensor, aten.select.int]:
             tensor = args[0]
             data = tensor._data
@@ -733,11 +733,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             pass
         return super().__torch_dispatch__(func, types, args, kwargs)
 
-    def fsdp_pre_all_gather(self, mesh,
-        orig_size,
-        contiguous_orig_stride,
-        module,
-        mp_policy):
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
         """Functions FSDP2 calls before all-gather of the
         weights for both forward and backward passes.
         Args:
@@ -800,7 +796,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             used by the Float8Tensor that was being computed after allgather.
         """
 
-        (data, ) = all_gather_outputs
+        (data,) = all_gather_outputs
         (fp8_scale_inv, fp8_dtype, quantizer) = metadata
         orig_shape = data.size()
         # Quantizer has only columnwise usage set for backward pass
