@@ -9,14 +9,12 @@ import datetime
 import os
 import sys
 from functools import wraps
-import math
 
 import torch
 from torch import nn
 import torch.distributed as dist
 import transformer_engine.pytorch as te
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
@@ -27,9 +25,6 @@ from transformer_engine.common.recipe import (
     Recipe,
     QParams,
 )
-from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
-from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.distributed import gather_along_first_dim
 
 
 def _compare_tensors(name, test, ref, rtol, atol):

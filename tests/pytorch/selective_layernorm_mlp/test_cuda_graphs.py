@@ -166,12 +166,7 @@ class _Sequential(torch.nn.Sequential):
 
 
 # Supported modules
-_test_cuda_graphs_modules: List[str] = [
-    # Put linear first to test the case where the cuda context might not be set in
-    # creating TMA descriptor for MXFP8 quantization.
-    "selective_layernorm_mlp",
-]
-
+_test_cuda_graphs_modules: List[str] = ["selective_layernorm_mlp"]
 
 def _test_cuda_graphs(
     *,
@@ -195,20 +190,8 @@ def _test_cuda_graphs(
 
     # Create modules.
     with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
-        if module == "transformer":
-            modules = [
-                TransformerLayer(
-                    model_config.hidden_size,
-                    model_config.hidden_size,
-                    model_config.num_heads,
-                    hidden_dropout=0.0,
-                    attention_dropout=0.0,
-                    fuse_qkv_params=True,
-                    params_dtype=dtype,
-                )
-                for _ in range(num_layers)
-            ]
-        elif module == "selective_layernorm_mlp":
+
+        if module == "selective_layernorm_mlp":
             modules = [
                 SelectiveLayerNormMLP(
                     model_config.hidden_size,
@@ -217,47 +200,7 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif module == "layernorm_linear":
-            modules = [
-                LayerNormLinear(
-                    model_config.hidden_size,
-                    model_config.hidden_size,
-                    params_dtype=dtype,
-                )
-                for _ in range(num_layers)
-            ]
-        elif module == "mha":
-            modules = [
-                MultiheadAttention(
-                    model_config.hidden_size,
-                    model_config.num_heads,
-                    attention_dropout=0.0,
-                    params_dtype=dtype,
-                    fuse_qkv_params=True,
-                )
-                for _ in range(num_layers)
-            ]
-        elif module == "linear":
-            modules = [
-                Linear(
-                    model_config.hidden_size,
-                    model_config.hidden_size,
-                    device="cuda",
-                    params_dtype=dtype,
-                )
-                for _ in range(num_layers)
-            ]
-        elif module == "linear_op":
-            modules = [
-                te_ops.Sequential(
-                    te_ops.Linear(
-                        model_config.hidden_size,
-                        model_config.hidden_size,
-                        dtype=dtype,
-                    ),
-                )
-                for _ in range(num_layers)
-            ]
+        
         else:
             raise ValueError(f"Unknown module type ({module})")
 

@@ -2,8 +2,6 @@
 #
 # See LICENSE for license information.
 
-from typing import Optional
-
 import torch
 import pytest
 import os
@@ -17,21 +15,10 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch import (
     autocast,
-    quantized_model_init,
     SelectiveLayerNormMLP,
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-    MXFP8Tensor,
-    checkpoint,
-    QuantizedTensor,
     is_bf16_available,
 )
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module.base import get_workspace
-from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig
 
 # Only run FP8 tests on supported devices.

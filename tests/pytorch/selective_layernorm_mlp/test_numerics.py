@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-import math
 import os
 
 os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
@@ -12,29 +11,17 @@ os.environ.setdefault("PYTORCH_CUDA_MATMUL_ALLOW_TF32", "0")
 os.environ.setdefault("PYTORCH_CUDNN_ALLOW_TF32", "0")
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 import pytest
-import random
 
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-    attention_mask_func,
-)
 from transformer_engine.pytorch import (
     autocast,
-    quantized_model_init,
     SelectiveLayerNormMLP,
-    Fp8Padding,
-    Fp8Unpadding,
-    Float8Quantizer,
-    Float8CurrentScalingQuantizer,
-    MXFP8Quantizer,
     get_device_compute_capability,
     is_fp8_available,
     is_mxfp8_available,
@@ -42,11 +29,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
     is_nvfp4_available,
 )
-from transformer_engine.pytorch import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
 
 

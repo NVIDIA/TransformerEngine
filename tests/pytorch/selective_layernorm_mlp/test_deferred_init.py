@@ -7,10 +7,7 @@ import torch
 
 import transformer_engine.pytorch as te
 
-_core_modules = [
-    te.SelectiveLayerNormMLP,
-]
-
+_core_modules = [te.SelectiveLayerNormMLP,]
 _composed_modules = []
 
 batch_size = 32
@@ -18,7 +15,6 @@ seq_length = 2048
 num_heads = 16
 head_dim = 64
 dtype = torch.bfloat16
-
 
 class TestDeferredInit:
 

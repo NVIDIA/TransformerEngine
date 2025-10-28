@@ -2,30 +2,16 @@
 #
 # See LICENSE for license information.
 
-from typing import Optional
-
 import pytest
 import torch
-import warnings
 
-import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
-    Float8BlockQuantizer,
-    MXFP8Quantizer,
-    Float8Quantizer,
-    NVFP4Quantizer,
     quantized_model_init,
     SelectiveLayerNormMLP,
 )
 
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.quantization import (
-    FP8GlobalStateManager,
-    _amax_and_scale_update,
-)
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
+from transformer_engine.common.recipe import DelayedScaling
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
