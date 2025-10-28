@@ -59,6 +59,7 @@ config = {
 
 seq_sizes = [2**7, 2**10, 2**14, 2**16]
 
+
 class Profiler:
     def __init__(self):
         self.stats = defaultdict(
@@ -104,7 +105,9 @@ class Profiler:
         def _run_fwd(model, tensor):
 
             torch.cuda.reset_peak_memory_stats(device)
-            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+                enable_timing=True
+            )
 
             torch.cuda.synchronize()
             start_mem = torch.cuda.memory_allocated(device)
@@ -124,7 +127,9 @@ class Profiler:
             loss = out.sum()
 
             torch.cuda.reset_peak_memory_stats(device)
-            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+                enable_timing=True
+            )
 
             torch.cuda.synchronize()
             start_mem = torch.cuda.memory_allocated(device)
@@ -174,10 +179,10 @@ class Profiler:
         _modules = [("ln_stats", "LayerNormMLP"), ("sln_stats", "SelectiveLayerNormMLP")]
         _metric_map = {"time": (1, "ms"), "mem": (1e-6, "MB")}
 
-        left_w  = 18  # "fwd time" / "bwd mem" label
-        col1_w  = max(len(name) for _, name in _modules) + 2
-        col2_w  = col1_w
-        val_w   = 16  # number width
+        left_w = 18  # "fwd time" / "bwd mem" label
+        col1_w = max(len(name) for _, name in _modules) + 2
+        col2_w = col1_w
+        val_w = 16  # number width
 
         def header(metric, unit):
             title = f"{metric.upper()} ({unit})"
@@ -204,7 +209,14 @@ class Profiler:
             # Errors block
             print("MAX ABSOLUTE ERRORS")
             print(f"{'output:':<30}{self.stats[desc]['diff']['out']:>14.3e}")
-            for key in ["layer_norm_weight","layer_norm_bias","fc1_weight","fc1_bias","fc2_weight","fc2_bias"]:
+            for key in [
+                "layer_norm_weight",
+                "layer_norm_bias",
+                "fc1_weight",
+                "fc1_bias",
+                "fc2_weight",
+                "fc2_bias",
+            ]:
                 label = f"{key}.grad:"
                 print(f"{label:<30}{self.stats[desc]['diff'][key]:>14.3e}")
             print()
@@ -244,9 +256,11 @@ def main():
 
             dummy_data = torch.randn((seq_len, config[size]._hidden_size), device=device)
 
-            desc = f"seq={seq_len}, hidden={config[size]._hidden_size}, ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
+            desc = (
+                f"seq={seq_len}, hidden={config[size]._hidden_size},"
+                f" ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
+            )
             profiler.compare(desc, ln_model, sln_model, dummy_data)
-
 
     profiler.summarize()
 
