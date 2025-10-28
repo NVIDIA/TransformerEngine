@@ -31,7 +31,7 @@ class TestDeferredInit:
             ffn_hidden_size = 2 * hidden_size
             args += (ffn_hidden_size,)
             kwargs["bias"] = True
-            if module == te.LayerNormMLP:
+            if module in [te.LayerNormMLP, te.SelectiveLayerNormMLP]:
                 kwargs["seq_length"] = seq_length
         elif module == te.MultiheadAttention:
             args += (num_heads,)

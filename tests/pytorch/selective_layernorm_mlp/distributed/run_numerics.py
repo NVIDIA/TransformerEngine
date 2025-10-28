@@ -400,8 +400,8 @@ def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=Fals
     FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
-    model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
-    model_distributed = te.LayerNormMLP(
+    model_single_node = te.SelectiveLayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
+    model_distributed = te.SelectiveLayerNormMLP(
         HIDDEN_SIZE,
         FFN_HIDDEN_SIZE,
         tp_size=WORLD_SIZE,
