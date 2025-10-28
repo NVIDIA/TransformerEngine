@@ -1034,7 +1034,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
                 )[2]
                 fc1_bias_grad, dact = dbias_dact_quantize_func(
-                    fc2_dgrad, fc1_out.to(ctx.activation_dtype), ctx.fc1_grad_output_quantizer, **act_params
+                    fc2_dgrad,
+                    fc1_out.to(ctx.activation_dtype),
+                    ctx.fc1_grad_output_quantizer,
+                    **act_params,
                 )  # quantize bgrad gelu fused
             else:
                 # Fusion: gemm + gelu,
