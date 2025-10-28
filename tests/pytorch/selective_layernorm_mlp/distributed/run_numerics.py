@@ -31,6 +31,7 @@ from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quant
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
 
+
 def _compare_tensors(name, test, ref, rtol, atol):
     # Make sure tensors aren't zero and we don't pass trivially
     if test.count_nonzero() == 0:
@@ -380,7 +381,6 @@ def _alloc_main_grad(model_single_node, model_distributed):
             param.main_grad = torch.zeros_like(param, dtype=torch.float32)
 
 
-
 ############################################
 #               LayerNormMLP               #
 ############################################
@@ -488,4 +488,3 @@ def test_selective_layernorm_mlp():
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
                 _test_selective_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)
-

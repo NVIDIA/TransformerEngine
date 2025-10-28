@@ -11,8 +11,7 @@ _core_modules = [
     te.SelectiveLayerNormMLP,
 ]
 
-_composed_modules = [
-]
+_composed_modules = []
 
 batch_size = 32
 seq_length = 2048

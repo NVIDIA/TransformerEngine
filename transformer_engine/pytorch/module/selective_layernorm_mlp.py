@@ -275,7 +275,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 module,
                 skip_fp8_weight_update,
                 symmetric_ar_type,
-                debug,                
+                debug,
             ]
 
         # Make sure input dimensions are compatible
@@ -297,7 +297,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         tp_world_size = get_distributed_world_size(tp_group)
-        backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad and recompute_for_bwd
+        backwards_needs_fc1_input = (
+            is_grad_enabled and fc1_weight.requires_grad and recompute_for_bwd
+        )
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -410,7 +412,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = (is_first_microbatch is None or is_first_microbatch) and not recompute_for_bwd
+            update_workspace = (
+                is_first_microbatch is None or is_first_microbatch
+            ) and not recompute_for_bwd
             fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
@@ -575,7 +579,6 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-
 
             if fuse_wgrad_accumulation:
                 # This check is needed to ensure that main_grad is not created
@@ -850,7 +853,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             debug,
             recompute_for_bwd=False,
         )
-    
+
     @staticmethod
     def _recompute(ctx):
         # pylint: disable=missing-function-docstring

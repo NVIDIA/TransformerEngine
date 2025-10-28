@@ -1,4 +1,3 @@
-
 import time
 
 import torch
@@ -6,6 +5,7 @@ from transformer_engine.pytorch import SelectiveLayerNormMLP, LayerNormMLP
 
 torch.manual_seed(1234)
 device = torch.device("cuda")
+
 
 class _Sequential(torch.nn.Sequential):
     """Sequential model that forwards keyword arguments to modules"""
@@ -16,10 +16,11 @@ class _Sequential(torch.nn.Sequential):
             x = module(x, **kwargs)
         return x
 
+
 class ModelConfig:
     def __init__(
-        self, 
-        hidden_size: int = 128, 
+        self,
+        hidden_size: int = 128,
         ffn_hidden_size: int = 512,
         layers: int = 1,
     ):
@@ -48,6 +49,7 @@ class ModelConfig:
 
         return ln_model, sln_model
 
+
 config = {
     # "small": ModelConfig(128, 512, 12),
     # "medium": ModelConfig(512, 2048, 12),
@@ -55,7 +57,8 @@ config = {
     "huge": ModelConfig(2048, 8192, 12),
 }
 
-data_sizes = [2**7, 2**10, 2**14, 2**16]#2**18]
+data_sizes = [2**7, 2**10, 2**14, 2**16]  # 2**18]
+
 
 class Profiler:
     def __init__(self):
@@ -68,7 +71,7 @@ class Profiler:
                 "bwd_stats": {
                     "mem": [],
                     "time": [],
-                }
+                },
             },
             "sln_stats": {
                 "fwd_stats": {
@@ -78,7 +81,7 @@ class Profiler:
                 "bwd_stats": {
                     "mem": [],
                     "time": [],
-                }
+                },
             },
             "diff": {
                 "out": [],
@@ -88,8 +91,7 @@ class Profiler:
                 "fc1_bias": [],
                 "fc2_weight": [],
                 "fc2_bias": [],
-            }
-
+            },
         }
 
     def compare(self, ln_model, sln_model, data):
@@ -161,11 +163,19 @@ class Profiler:
         self.stats["sln_stats"]["bwd_stats"]["time"].append(sln_bwd_time)
         self.stats["sln_stats"]["bwd_stats"]["mem"].append(sln_bwd_mem)
 
-        for key in ["layer_norm_weight", "layer_norm_bias", "fc1_weight", "fc1_bias", "fc2_weight", "fc2_bias"]:
+        for key in [
+            "layer_norm_weight",
+            "layer_norm_bias",
+            "fc1_weight",
+            "fc1_bias",
+            "fc2_weight",
+            "fc2_bias",
+        ]:
             self.stats["diff"][key].append(self._max_diff(ln_grads[key], sln_grads[key]))
 
     def summarize(self):
         """Print a concise summary of collected statistics."""
+
         def _summarize(values):
             if not values:
                 return {"avg": 0.0, "min": 0.0, "max": 0.0}
@@ -202,7 +212,14 @@ class Profiler:
         print(f"Forward output max diff avg: {summary:.3e}")
 
         print("Gradient max diff averages:")
-        for key in ["layer_norm_weight", "layer_norm_bias", "fc1_weight", "fc1_bias", "fc2_weight", "fc2_bias"]:
+        for key in [
+            "layer_norm_weight",
+            "layer_norm_bias",
+            "fc1_weight",
+            "fc1_bias",
+            "fc2_weight",
+            "fc2_bias",
+        ]:
             summary = sum(diff_stats[key]) / len(diff_stats[key])
             print(f"  {key}: {summary:.3e}")
         print()
@@ -229,6 +246,7 @@ class Profiler:
     def _param_key(self, name):
         return name.split(".")[-1]
 
+
 def main():
 
     for size in config:
@@ -243,8 +261,12 @@ def main():
 
             profiler.compare(ln_model, sln_model, dummy_data)
 
-            print(f"summarizing comparison for seq={seq_len}, hidden={config[size]._hidden_size}, ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n")
+            print(
+                f"summarizing comparison for seq={seq_len}, hidden={config[size]._hidden_size},"
+                f" ffn_fidden={config[size]._ffn_hidden_size}, layers={config[size]._layers}\n"
+            )
             profiler.summarize()
+
 
 if __name__ == "__main__":
     main()

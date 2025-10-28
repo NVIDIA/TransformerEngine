@@ -397,4 +397,3 @@ def test_make_graphed_callables_with_fp8_weight_caching(
         fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,
     )
-

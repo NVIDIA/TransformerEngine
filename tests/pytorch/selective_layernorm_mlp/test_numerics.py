@@ -202,7 +202,6 @@ class TorchRMSNorm(nn.Module):
         return (w * x_normed).to(x.dtype)
 
 
-
 class TorchQuickGELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return input * torch.sigmoid(1.702 * input)
@@ -270,7 +269,6 @@ class TorchLayerNormMLP(nn.Module):
     def forward(self, x):
         t = self.gelu(self.fc1(self.ln(x)))
         return self.fc2(t)
-
 
 
 def nvfp4_rht_and_2d_quantization():
@@ -405,7 +403,9 @@ def reset_global_fp8_state():
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-def test_selective_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
+def test_selective_layernorm_mlp_accuracy(
+    dtype, bs, model, activation, normalization, return_bias, bias
+):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(
@@ -529,4 +529,3 @@ def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-

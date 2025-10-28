@@ -48,12 +48,9 @@ class TestFP8Recipe:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-
     @pytest.mark.parametrize(
         "module_class",
-        [
-            SelectiveLayerNormMLP
-        ],
+        [SelectiveLayerNormMLP],
     )
     def test_quantizer_update(self, module_class):
         in_features = 32

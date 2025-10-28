@@ -130,6 +130,7 @@ def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
 
+
 def _test_sanity_common(
     block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching=True
 ):
@@ -158,7 +159,6 @@ def _test_sanity_common(
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
-
 
 
 @pytest.mark.parametrize("dtype", param_types)
