@@ -739,6 +739,12 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Args:
             mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
             to shard the weights.
+            orig_size (torch.Size): Original size of the weight tensor.(For us same as self.shape)
+            contiguous_orig_stride (Tuple[int]): Original stride of the weight tensor
+            (For us same as self.stride())
+            module (FSDPModule): FSDP module. FSDP wrapped module wrapped using fully_shard
+            that contains this FP8 tensor.
+            mp_policy (MixedPrecisionPolicy): Mixed precision policy used by FSDP2.
 
         Returns:
             shareded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
@@ -746,6 +752,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
+        # pylint: disable=unused-argument
         if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
@@ -766,10 +773,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
             # When module is wrapped with torch no_grad, the training state
             # will be IDLE even in forward pass
-            is_forward_pass = (
-                fsdp_state._training_state == TrainingState.FORWARD
-                or fsdp_state._training_state == TrainingState.IDLE
-            )
+            is_forward_pass = fsdp_state._training_state in (TrainingState.FORWARD, TrainingState.IDLE)
             transpose_needed = tensor_has_transpose and not is_forward_pass
             quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
@@ -808,21 +812,21 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 rowwise_usage=quantizer.rowwise_usage,
                 columnwise_usage=quantizer.columnwise_usage,
             )
-            return
-        fp8_args = {
-            "shape": orig_shape,
-            "dtype": param_dtype,
-            "fp8_scale_inv": fp8_scale_inv,
-            "fp8_dtype": fp8_dtype,
-            "quantizer": quantizer,
-            "requires_grad": False,
-            "data": data,
-        }
-        out = Float8Tensor(**fp8_args)
-        out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage,
-        )
+        else:
+            fp8_args = {
+                "shape": orig_shape,
+                "dtype": param_dtype,
+                "fp8_scale_inv": fp8_scale_inv,
+                "fp8_dtype": fp8_dtype,
+                "quantizer": quantizer,
+                "requires_grad": False,
+                "data": data,
+            }
+            out = Float8Tensor(**fp8_args)
+            out.update_usage(
+                rowwise_usage=quantizer.rowwise_usage,
+                columnwise_usage=quantizer.columnwise_usage,
+            )
         return out, (data,)
 
     @classmethod

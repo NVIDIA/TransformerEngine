@@ -529,14 +529,20 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         Args:
             mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
             to shard the weights.
+            orig_size (torch.Size): Original size of the weight tensor.(For us same as self.shape)
+            contiguous_orig_stride (Tuple[int]): Original stride of the weight tensor
+            (For us same as self.stride())
+            module (FSDPModule): FSDP module. FSDP wrapped module wrapped using fully_shard
+            that contains this MXFP8 tensor.
+            mp_policy (MixedPrecisionPolicy): Mixed precision policy used by FSDP2.
 
         Returns:
-            shareded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
+            sharded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
             that need to be all-gathered.
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             MXFP8Tensor after all-gather.
         """
-
+        # pylint: disable=unused-argument
         fsdp_state = module._get_fsdp_state()
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         quantizer = self._quantizer.copy()
@@ -547,10 +553,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if reshard_after_forward:
             # When module is wrapped with torch no_grad, the training state
             # will be IDLE even in forward pass.
-            is_forward_pass = (
-                fsdp_state._training_state == TrainingState.FORWARD
-                or fsdp_state._training_state == TrainingState.IDLE
-            )
+            is_forward_pass = fsdp_state._training_state in (TrainingState.FORWARD, TrainingState.IDLE)
             # Allgather only the necessary tensors based on forward/backward pass
             quantizer.set_usage(rowwise=is_forward_pass, columnwise=not is_forward_pass)
             sharded_tensors = (
@@ -569,6 +572,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
+        """Functions FSDP2 calls after all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
+            are all-gathered and received here as a tuple.
+            metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the MXFP8Tensor.
+            param_dtype (torch.dtype):
+            out (Optional[torch.Tensor], optional): _description_. Defaults to None.
+        Returns:
+            Tuple[MXFP8Tensor, Tuple[torch.Tensor, ...]]: Allgathered MXFP8Tensor and tuple of internal tensors
+            used by the MXFP8Tensor that was being computed after allgather.
+        """
         data, scale_inv = all_gather_outputs
         fp8_dtype, quantizer, reshard_after_forward = metadata
         if not reshard_after_forward:
@@ -610,7 +625,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             out._columnwise_data = columnwise_data
             out._columnwise_scale_inv = columnwise_scale_inv
             out._quantizer = quantizer
-            return
 
         return mxfp8_tensor, all_gather_outputs
 
