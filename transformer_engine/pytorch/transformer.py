@@ -180,7 +180,8 @@ class TransformerLayer(torch.nn.Module):
     activation_params : Optional[dict], default = `None`
                         additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which
-                        supports 'limit' and 'alpha' parameters.
+                        supports 'limit' and 'alpha' parameters. You can set these as
+                        `activation_params={'limit': 7.0, 'alpha': 1.702}`.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the

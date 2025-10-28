@@ -2039,6 +2039,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
 
         fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
+        act_params = self.activation_params or {}
+        clamped_swiglu_limit, clamped_swiglu_alpha =\
+            act_params.get("limit", 7.0), act_params.get("alpha", 1.702)
+
+        def _clamped_swiglu(x, limit, alpha):
+            x_glu, x_linear = x.chunk(2, dim=-1)
+            x_glu = x_glu.clamp(min=None, max=limit)
+            x_linear = x_linear.clamp(min=-limit, max=limit)
+            out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+            y = out_glu * (x_linear + 1)
+            return y
 
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
@@ -2053,6 +2064,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             * x.chunk(2, -1)[1],
             "silu": torch.nn.functional.silu,
             "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "clamped_swiglu": lambda x: _clamped_swiglu(x, clamped_swiglu_limit, clamped_swiglu_alpha),
         }
         if self.activation not in activation_map:
             raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
