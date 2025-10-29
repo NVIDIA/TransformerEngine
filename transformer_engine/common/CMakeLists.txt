@@ -168,6 +168,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      gemm/cutlass_grouped_gemm.cu
+     gemm/cutlass_device_grouped_gemm.cu
      util/cast.cu
      activation/gelu.cu
      activation/relu.cu
@@ -232,6 +233,11 @@ set_property(
   APPEND
   PROPERTY
   COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
+set_property(
+  SOURCE gemm/cutlass_device_grouped_gemm.cu
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "--generate-code=arch=compute_100a,code=sm_100a;-g0")
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC

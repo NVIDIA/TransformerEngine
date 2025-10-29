@@ -251,6 +251,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer_list"));
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
+  m.def("te_general_device_initiated_grouped_gemm", &transformer_engine::pytorch::te_general_device_initiated_grouped_gemm,
+        "Device-initiated Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());

@@ -15,6 +15,8 @@
 			transformer_engine::nvte_cublas_handle_init*;
 			transformer_engine::typeToSize*;
 			transformer_engine::is_fp8_dtype*;
+			transformer_engine::to_string*;
+			transformer_engine::convertNVTETensor*;
 			*transformer_engine::CommOverlapBase*;
 			*transformer_engine::CommOverlapP2PBase*;
 			*transformer_engine::CommOverlapCore*;

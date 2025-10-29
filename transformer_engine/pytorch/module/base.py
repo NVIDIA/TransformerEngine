@@ -57,6 +57,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _multi_stream_cublas_workspace = []
+_cutlass_grouped_gemm_workspace = []
 _dummy_wgrads = {}
 _cublas_workspace = None
 _ub_communicators = None
@@ -81,6 +82,8 @@ def get_cublas_workspace_size_bytes() -> None:
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
 
+def get_cutlass_grouped_gemm_workspace_size_bytes() -> None:
+    return 16_777_216
 
 def get_workspace() -> torch.Tensor:
     """Returns workspace for cublas."""
@@ -101,6 +104,21 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
     return _multi_stream_cublas_workspace
+
+
+def get_cutlass_grouped_gemm_workspace() -> List[torch.Tensor]:
+    """Returns workspace for cutlass grouped gemm."""
+    global _cutlass_grouped_gemm_workspace
+    if not _cutlass_grouped_gemm_workspace:
+        _cutlass_grouped_gemm_workspace = [
+            # Device buffer for cutlass arguments and kernel
+            torch.empty(get_cutlass_grouped_gemm_workspace_size_bytes(), dtype=torch.uint8, device="cuda"),
+            # TODO: Only allocate pinned buffer when cuda graph is enabled
+            # Host pinned buffer for the source of H2D copy of cutlass arguments
+            # CUDA Graph capture does not support .pinned_memory(), a global workspace is needed.
+            torch.empty(int(os.getenv("NVTE_CUTLASS_HOST_PINNED_U64_CAPACITY", "4194304")), dtype=torch.uint64, device="cpu", pin_memory=True),
+        ]        
+    return _cutlass_grouped_gemm_workspace
 
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:

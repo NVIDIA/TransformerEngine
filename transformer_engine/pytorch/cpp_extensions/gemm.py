@@ -13,6 +13,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -161,10 +162,13 @@ def general_grouped_gemm(
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
     layout: str = "TN",
-    m_splits: Optional[List[int]] = None,
+    m_splits: Optional[torch.Tensor] = None,
+    m_splits_on_devie: bool = False,
     gelu: bool = False,
     grad=False,
+    wgrad=False,
     accumulate: bool = False,
+    accumulate_mask: Optional[torch.Tensor] = None,
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
@@ -174,8 +178,12 @@ def general_grouped_gemm(
     """
     TN layout Grouped GEMM with fp8 inputs.
     """
-    num_gemms = len(A)
-
+    # print("===========general_grouped_gemm===========")
+    # print("accumulate:", accumulate)
+    # print(f"layout: {layout}")
+    if isinstance(m_splits, list):
+        m_splits = torch.tensor(m_splits)
+    num_gemms = m_splits.size(0)
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
@@ -205,24 +213,55 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    bias = tex.te_general_grouped_gemm(
-        A,
-        transa,
-        B,
-        transb,
-        out,
-        out_dtype,
-        m_splits,
-        grad_bias if grad else bias,
-        bias_dtype,
-        single_output,
-        gelu_input,  # this is pre_gelu_out
-        grad,  # grad
-        workspaces,
-        workspaces[0].shape[0],
-        accumulate,
-        use_split_accumulator,
-        sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
-    )
+    # print("===========call tex.te_general_grouped_gemm===========")
+    # print("A[0]:",  A[0].get_metadata_debug())
+    # print("B[0]:",  B[0].get_metadata_debug())
+    if not m_splits_on_devie:
+        bias = tex.te_general_grouped_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            out,
+            out_dtype,
+            m_splits,
+            grad_bias if grad else bias,
+            bias_dtype,
+            single_output,
+            gelu_input,  # this is pre_gelu_out
+            grad,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+            sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        )
+    else:
+        assert isinstance(A[0], MXFP8TensorStorage) and isinstance(B[0], MXFP8TensorStorage), "Only MXFP8 A and B are supported when m_splits is on device"
+        assert out[0].dtype == torch.bfloat16 or out[0].dtype == torch.float16 or (wgrad and out[0].dtype == torch.float32), "Only BF16, FP16 or FP32(only for wgrad accumulation) output is supported when m_splits is on device"
+        assert not use_bias, "Bias is not supported when m_splits is on device"
+        assert not gelu, "GELU is not supported when m_splits is on device"
+        assert TE_DType[out[0].dtype] == out_dtype, "Output dtype mismatch: out[0].dtype=" + str(out[0].dtype) + ", out_dtype=" + str(out_dtype)
+        bias = tex.te_general_device_initiated_grouped_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            out,
+            out_dtype,
+            m_splits,
+            grad_bias if grad else bias,
+            bias_dtype,
+            single_output,
+            gelu_input,  # this is pre_gelu_out
+            grad,  # grad
+            wgrad, # wgrad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            accumulate_mask,
+            use_split_accumulator,
+            sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        )
 
     return out, bias, gelu_input
