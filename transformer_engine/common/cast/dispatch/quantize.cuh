@@ -26,7 +26,7 @@ namespace transformer_engine {
 namespace dispatch {
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void quantize_fwd_helper(const NVTETensor input, NVTETensor output, 
+void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   using namespace detail;
 
@@ -73,8 +73,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
         }
       } else if (output_tensor->has_data()) {
         fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor,
-            dummy_dbias_tensor, dummy_workspace_tensor, stream);
+            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+            dummy_workspace_tensor, stream);
       }
       break;
     }
@@ -83,8 +83,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
       mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor,
-          dummy_dbias_tensor, dummy_workspace_tensor, stream);
+          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+          dummy_workspace_tensor, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -172,7 +172,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
   }
 }
 
-
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                          NVTETensor dbias, NVTETensor workspace,
@@ -218,20 +217,19 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           cast_transpose(*grad_tensor, *noop_tensor, output_tensor, stream);
         } else {
           cast_transpose_fused<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, float, ParamOP, OP>(
-              *grad_tensor, input_tensor, output_tensor, dbias_tensor, workspace_tensor,
-              stream);
+              *grad_tensor, input_tensor, output_tensor, dbias_tensor, workspace_tensor, stream);
         }
       } else if (output_tensor->has_data()) {
         fp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-            *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor,
-            workspace_tensor, stream);
+            *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+            stream);
       }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+          stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {

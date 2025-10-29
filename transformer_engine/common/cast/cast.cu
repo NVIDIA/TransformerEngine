@@ -154,8 +154,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 
   for (int i = 0; i < num_tensors; i++) {
     dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(
-        inputs[i], outputs[i], nullptr,
-        detail::get_compute_stream(i % num_streams));
+        inputs[i], outputs[i], nullptr, detail::get_compute_stream(i % num_streams));
   }
 
   // record events on compute streams

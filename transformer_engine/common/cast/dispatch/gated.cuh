@@ -48,8 +48,8 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
-        fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor, output,
-                                                                       p, stream);
+        fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
+                                                                       output, p, stream);
       } else {
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
       }
@@ -71,8 +71,8 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
       Tensor dummy_grad_tensor;
-      mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor, output,
-                                                                       p, stream);
+      mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
+                                                                       output, p, stream);
       break;
     }
     default:

@@ -40,8 +40,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           output->data.dtype, OType,
 
           constexpr int nvec = 32 / sizeof(OType);
-          DequantizeParam p;
-          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
+          DequantizeParam p; p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
           VectorizedUnaryKernelLauncher<nvec, DequantizeParam, dequantize_func>(
               reinterpret_cast<const IType *>(input.data.dptr), nullptr,
               reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,

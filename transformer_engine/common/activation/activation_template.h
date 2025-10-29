@@ -36,8 +36,8 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
 
-  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, OP>(grad, input, output, dbias,
-                                                              workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, OP>(grad, input, output, dbias, workspace,
+                                                              nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>
