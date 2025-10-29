@@ -2741,7 +2741,7 @@ def fused_attn_bwd(
 
     # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
     # sm100+
-    compute_capabilities = get_all_device_compute_capability();
+    compute_capabilities = get_all_device_compute_capability()
     if any(x >= 100 for x in compute_capabilities):
         assert not (
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
