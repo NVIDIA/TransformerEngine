@@ -295,7 +295,7 @@ def test_make_graphed_callables(
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
     if checkpoint:
-        pytest.skip("CUDA graphs for SelectiveLayerNorm with checkpointing not supported yet")
+        pytest.skip("CUDA graphs for LayerNormMLP with checkpointing not supported yet")
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
