@@ -216,14 +216,22 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
-        # save the initial state for recomputation by bwd
-        # would be better to do prep stuff and save that in the beginning
-        # but want to get a working version first
-        if not recompute_for_bwd:
+        # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
+        if is_grad_enabled and not recompute_for_bwd:
             ctx.checkpoint = checkpoint
+
+        # few helper flags for simpler logic
+
+        # whether to save activations regularly, or save inputs for recomputation in bwd
         save_for_checkpoint = checkpoint and is_grad_enabled and not recompute_for_bwd
+
+        # whether we are in the forward stage, or recomputing in the bwd stage (false if not checkpointing)
         is_recomputation = checkpoint and is_grad_enabled and recompute_for_bwd
+
+        # save the initial state for recomputation by bwd
         if save_for_checkpoint:
+
+            # save tensors
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inp,
                 ln_weight,
@@ -235,6 +243,8 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
+
+            # save other arguments to _forward
             ctx.other_args = [
                 eps,
                 is_first_microbatch,
@@ -303,9 +313,14 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         tp_world_size = get_distributed_world_size(tp_group)
+
+        # bwd needs fc1 input when grad is enabled, fc1 needs grad, and either
+        # 1) no checkpointing
+        # or 2) doing the recomputation with checkpointing 
         backwards_needs_fc1_input = fc1_weight.requires_grad and (
             is_recomputation or (is_grad_enabled and not checkpoint)
         )
+        
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -363,6 +378,8 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             zero_centered_gamma,
         )
         ln_out_return = None
+
+        # do not return layernorm output unless 1) no checkpointing or 2) checkpointing but not recomputing
         if (return_layernorm_output or return_layernorm_output_gathered) and not is_recomputation:
             ln_out_return = ln_out
 
@@ -371,6 +388,8 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
         ln_out_total = None
         ub_obj_lnout = None
         if sequence_parallel:
+
+            # do not return ln output if checkpointing and in recomputation, not necessary
             if return_layernorm_output_gathered and not is_recomputation:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
@@ -420,7 +439,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             # FP8 cast to workspace buffer
             update_workspace = (
                 is_first_microbatch is None or is_first_microbatch
-            ) and not is_recomputation
+            ) and not is_recomputation # only update workspace if not checkpointing or checkpointing with no recomp, otherwise cache workspace
             fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
@@ -508,6 +527,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
         # ------------------------------------------------------
 
         # Deallocate FC1 GEMM input tensor if no longer needed
+        # first part of if statement means that we only clear ln_out_total if 
+        # 1) checkpointing and not recomputing (in the forward stage, not bwd recompute stage)
+        # 2) not checkpointing
         if (not is_recomputation and checkpoint) and (ln_out_total is not ln_out_return):
             clear_tensor_data(ln_out_total)
 
@@ -545,15 +567,16 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 else:
                     act_out = activation_func(fc1_out, fc2_input_quantizer)
 
+        # we want to skip fc2 computation if we are checkpointing and recomputing,
+        # otherwise we compute fc2
         if not (is_recomputation and checkpoint):
 
-            # if we get to this point,
-            # we know this is not bwd recomputation, bc would have returned above block
+            # if we get to this point, we know this is not bwd recomputation
             # so we must be in the fwd
-            # is_grad_enabled can be true or false
-            # if false, can safely delete
-            # if true, we can only delete if checkpoint is true, since we will recompute anyways,
-            # otherwise, checkpoint is false, so cant delete
+            # now is_grad_enabled can be true or false
+                # if false, can safely delete
+                # if true, we can only delete if checkpoint is true, since we will recompute anyways,
+                # otherwise, checkpoint is false, so cant delete
             if (
                 checkpoint or not is_grad_enabled
             ):  # we can safely get rid of these if this is the case
@@ -595,9 +618,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
             # ------------------------------------------------------
 
             # Deallocate tensors if no longer needed, again, can safely deallocate
-            if (
+            if ( # same logic as lasy clear_tensor_data block
                 checkpoint or not is_grad_enabled
-            ):  # we can safely get rid of these if this is the case
+            ):
                 clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
 
             # Prepare output tensor
@@ -618,6 +641,9 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                 fc2_out = gemm_out
             fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
+        # now saving stuff for bwd: 
+        # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
+        # if we are not checkpointing, then we must save this if grad is enabled
         if is_grad_enabled and not save_for_checkpoint:
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -782,6 +808,7 @@ class _SelectiveLayerNormMLP(torch.autograd.Function):
                     rsigma,
                 )
 
+        # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
@@ -1775,7 +1802,7 @@ class SelectiveLayerNormMLP(TransformerEngineBaseModule):
     checkpoint: bool, default = False
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
-                for memory. default is false, in which activations are saved in fwd.
+                for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
     """
 
     def __init__(
@@ -1810,7 +1837,7 @@ class SelectiveLayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        checkpoint: Optional[bool] = True,
+        checkpoint: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
