@@ -530,12 +530,8 @@ class _LayerNormMLP(torch.autograd.Function):
         # first part of if statement means that we only clear ln_out_total if
         # 1) checkpointing and not recomputing (in the forward stage, not bwd recompute stage)
         # 2) not checkpointing and grad disabled
-        if (
-            (
-                (checkpoint and not is_recomputation) 
-                or not is_grad_enabled
-            )
-            and (ln_out_total is not ln_out_return)
+        if ((checkpoint and not is_recomputation) or not is_grad_enabled) and (
+            ln_out_total is not ln_out_return
         ):
             clear_tensor_data(ln_out_total)
 
@@ -949,9 +945,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx.tensor_objects = None
 
         if ctx.checkpoint:  # do recomputation from the original args
-            return _LayerNormMLP._forward(
-                ctx, *tensors, *ctx.other_args, recompute_for_bwd=True
-            )
+            return _LayerNormMLP._forward(ctx, *tensors, *ctx.other_args, recompute_for_bwd=True)
         else:  # load from saved (return ctx is just because the other branch does too)
             return [ctx] + tensors
 
