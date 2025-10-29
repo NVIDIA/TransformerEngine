@@ -24,15 +24,8 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   NVTE_API_CALL(nvte_quantize);
   using namespace transformer_engine;
 
-  constexpr bool IS_DBIAS = false;
-  constexpr bool IS_DACT = false;
   constexpr bool IS_ACT = false;
-  constexpr NVTETensor dbias = nullptr;
-  constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor grad = nullptr;
-
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(input, grad, output, dbias,
-                                                                       workspace, nullptr, stream);
+  dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -52,15 +45,8 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   NVTE_API_CALL(nvte_quantize_v2);
   using namespace transformer_engine;
 
-  constexpr bool IS_DBIAS = false;
-  constexpr bool IS_DACT = false;
   constexpr bool IS_ACT = false;
-  constexpr NVTETensor dbias = nullptr;
-  constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor grad = nullptr;
-
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-      input, grad, output, dbias, workspace, quant_config, stream);
+  dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
@@ -70,11 +56,10 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = false;
-  constexpr bool IS_ACT = false;
   constexpr const NVTETensor activation_input = nullptr;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activation_input,
@@ -85,10 +70,9 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activati
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
-  constexpr bool IS_ACT = false;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dgelu<fp32, fp32>>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dgelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activation_input,
@@ -99,10 +83,9 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activati
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
-  constexpr bool IS_ACT = false;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dsilu<fp32, fp32>>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor activation_input,
@@ -113,10 +96,9 @@ void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor activati
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
-  constexpr bool IS_ACT = false;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, drelu<fp32, fp32>>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, drelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor activation_input,
@@ -127,10 +109,9 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor activat
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
-  constexpr bool IS_ACT = false;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dqgelu<fp32, fp32>>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dqgelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activation_input,
@@ -141,10 +122,9 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activat
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
-  constexpr bool IS_ACT = false;
 
-  dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dsrelu<fp32, fp32>>(
-      activation_input, input, output, dbias, workspace, nullptr, stream);
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsrelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
@@ -160,12 +140,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
 
-  constexpr bool IS_DBIAS = false;
-  constexpr bool IS_DACT = false;
   constexpr bool IS_ACT = false;
-  constexpr NVTETensor dbias = nullptr;
-  constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor grad = nullptr;
 
   const size_t num_streams = nvte_get_num_compute_streams();
 
@@ -178,8 +153,8 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   }
 
   for (int i = 0; i < num_tensors; i++) {
-    dispatch::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-        inputs[i], grad, outputs[i], dbias, workspace, nullptr,
+    dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(
+        inputs[i], outputs[i], nullptr,
         detail::get_compute_stream(i % num_streams));
   }
 

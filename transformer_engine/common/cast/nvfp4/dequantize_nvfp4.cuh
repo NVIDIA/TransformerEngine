@@ -67,7 +67,7 @@ __global__ void __launch_bounds__(512)
     output_vec[my_output_index + i] = out;
   }
 }
-#endif  // CUDA_VERSION
+#endif  // FP4_TYPE_SUPPORTED
 }  // namespace dequantize_kernel
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {

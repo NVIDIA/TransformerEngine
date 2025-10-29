@@ -672,7 +672,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *output, ParamOP &p,
                     cudaStream_t stream) {
   using namespace gated_kernel;
   checkCuDriverContext(stream);

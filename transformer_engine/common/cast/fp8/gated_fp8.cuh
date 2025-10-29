@@ -276,7 +276,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_gated_tma(const Tensor &grad, const Tensor &gated_input, Tensor *output, ParamOP &p,
+void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *output, ParamOP &p,
                     cudaStream_t stream) {
   using namespace kernel;
   checkCuDriverContext(stream);
@@ -369,7 +369,7 @@ void cast_gated_fwd(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
-void cast_gated_bwd(const Tensor &grad, const Tensor &input, Tensor *output, ParamOP &p,
+void cast_gated_bwd(const Tensor &input, const Tensor &grad, Tensor *output, ParamOP &p,
                     cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype(), IType,
