@@ -222,7 +222,7 @@ def share_parameters_with_basic_te_model(basic_model_params, te_params_template)
     """
 
     new_te_params = copy.deepcopy(te_params_template)
-    '''
+    """
         # Basic parameter shapes: {
         #    'BasicMLP_0': {
         #        'Dense_0': {
@@ -323,7 +323,7 @@ def share_fused_parameters_with_basic_te_model(basic_model_params, te_params_tem
             'wo_kernel': LogicallyPartitioned(value=(16384, 4096), names=('mlp', 'embed'), mesh=None, rules=None)
         }
     }
-    '''
+    """
     new_te_params = copy.deepcopy(te_params_template)
     # Layer Norms
     new_te_params["LayerNormDenseGeneral_0"]["scale"] = basic_model_params["LayerNorm_0"]["scale"]
