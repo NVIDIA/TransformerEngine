@@ -439,7 +439,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # FP8 cast to workspace buffer
             update_workspace = (
                 is_first_microbatch is None or is_first_microbatch
-            ) and not is_recomputation  # only update workspace if not checkpointing or checkpointing with no recomp, otherwise cache workspace
+            ) #and not is_recomputation  # only update workspace if not checkpointing or checkpointing with no recomp, otherwise cache workspace
             fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
@@ -790,7 +790,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors
-                return (
+                return [
                     ctx,
                     inputmat,
                     ln_weight,
@@ -806,7 +806,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_bias,
                     mu,
                     rsigma,
-                )
+                ]
 
         # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
         if return_layernorm_output:
