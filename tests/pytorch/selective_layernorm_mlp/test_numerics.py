@@ -459,6 +459,7 @@ def test_selective_layernorm_mlp_accuracy(
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("model", ["small"])

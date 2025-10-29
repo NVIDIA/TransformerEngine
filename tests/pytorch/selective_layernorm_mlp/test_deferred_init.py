@@ -37,11 +37,7 @@ class TestDeferredInit:
 
     @pytest.mark.parametrize("module_type", _core_modules + _composed_modules)
     @pytest.mark.parametrize("checkpoint", (True, False))
-    def test_zero_memory_init(
-        self,
-        module_type: torch.nn.Module,
-        checkpoint: bool
-    ) -> None:
+    def test_zero_memory_init(self, module_type: torch.nn.Module, checkpoint: bool) -> None:
         """Test deferred initialization via device='meta'."""
         # This should not allocate any memory on CUDA device until we call reset_parameters() later.
         args, kwargs = TestDeferredInit.get_module_args(module_type, checkpoint)
@@ -54,11 +50,7 @@ class TestDeferredInit:
 
     @pytest.mark.parametrize("module_type", _core_modules)
     @pytest.mark.parametrize("checkpoint", (True, False))
-    def test_reset_parameters(
-        self,
-        module_type: torch.nn.Module,
-        checkpoint: bool
-    ) -> None:
+    def test_reset_parameters(self, module_type: torch.nn.Module, checkpoint: bool) -> None:
         """Test parameter reset for core modules that have been initialized with device='meta'."""
         # Core modules own their own parameters so calling reset_parameters() here should
         # materialize them on CUDA device.

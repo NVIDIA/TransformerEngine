@@ -297,7 +297,6 @@ def test_make_graphed_callables(
     if checkpoint:
         pytest.skip("CUDA graphs for SelectiveLayerNorm with checkpointing not supported yet")
 
-
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
     kwargs = dict(

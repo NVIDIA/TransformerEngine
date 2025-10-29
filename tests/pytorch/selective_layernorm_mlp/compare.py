@@ -32,8 +32,12 @@ class ModelConfig:
 
         ln_list, sln_list = [], []
         for _ in range(self._layers):
-            ln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size, checkpoint=False).to(device)
-            sln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size, checkpoint=True).to(device)
+            ln = SelectiveLayerNormMLP(
+                self._hidden_size, self._ffn_hidden_size, checkpoint=False
+            ).to(device)
+            sln = SelectiveLayerNormMLP(
+                self._hidden_size, self._ffn_hidden_size, checkpoint=True
+            ).to(device)
             with torch.no_grad():
                 sln.layer_norm_weight = torch.nn.Parameter(ln.layer_norm_weight.clone())
                 sln.layer_norm_bias = torch.nn.Parameter(ln.layer_norm_bias.clone())
