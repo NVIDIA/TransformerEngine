@@ -1,6 +1,6 @@
 import time
 import torch
-from transformer_engine.pytorch import SelectiveLayerNormMLP, LayerNormMLP
+from transformer_engine.pytorch import SelectiveLayerNormMLP
 from collections import defaultdict
 
 torch.manual_seed(1234)
@@ -32,8 +32,8 @@ class ModelConfig:
 
         ln_list, sln_list = [], []
         for _ in range(self._layers):
-            ln = LayerNormMLP(self._hidden_size, self._ffn_hidden_size).to(device)
-            sln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size).to(device)
+            ln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size, checkpoint=False).to(device)
+            sln = SelectiveLayerNormMLP(self._hidden_size, self._ffn_hidden_size, checkpoint=True).to(device)
             with torch.no_grad():
                 sln.layer_norm_weight = torch.nn.Parameter(ln.layer_norm_weight.clone())
                 sln.layer_norm_bias = torch.nn.Parameter(ln.layer_norm_bias.clone())

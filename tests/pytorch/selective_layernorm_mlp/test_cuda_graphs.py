@@ -173,6 +173,7 @@ def _test_cuda_graphs(
     graph_mode: str,
     module: str,
     model_config: ModelConfig,
+    checkpoint: bool,
     num_layers: int,
     dtype: torch.dtype,
     fp8: bool,
@@ -197,6 +198,7 @@ def _test_cuda_graphs(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     params_dtype=dtype,
+                    checkpoint=checkpoint,
                 )
                 for _ in range(num_layers)
             ]
@@ -262,10 +264,12 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("checkpoint", (False, True))
 def test_make_graphed_callables(
     *,
     module: str,
     model_config: str = "small",
+    checkpoint: bool,
     num_layers: int = 3,
     dtype: torch.dtype,
     fp8_params: bool,
@@ -290,12 +294,16 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
+    if checkpoint:
+        pytest.skip("CUDA graphs for SelectiveLayerNorm with checkpointing not supported yet")
+
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
     kwargs = dict(
         module=module,
         model_config=model_config,
+        checkpoint=checkpoint,
         num_layers=num_layers,
         dtype=dtype,
         fp8=fp8,
@@ -326,15 +334,18 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("checkpoint", (False, True))
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
+    checkpoint: bool,
     dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
 ) -> None:
     test_make_graphed_callables(
         module=module,
+        checkpoint=checkpoint,
         dtype=dtype,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,

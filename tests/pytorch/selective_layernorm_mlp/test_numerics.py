@@ -387,8 +387,9 @@ def reset_global_fp8_state():
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_selective_layernorm_mlp_accuracy(
-    dtype, bs, model, activation, normalization, return_bias, bias
+    dtype, bs, model, activation, normalization, return_bias, bias, checkpoint
 ):
     config = model_configs[model]
 
@@ -401,6 +402,7 @@ def test_selective_layernorm_mlp_accuracy(
         params_dtype=dtype,
         return_bias=return_bias,
         bias=bias,
+        checkpoint=checkpoint,
         device="cuda",
     )
 
@@ -457,14 +459,14 @@ def test_selective_layernorm_mlp_accuracy(
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, bias, fuse_wgrad_accumulation
+    dtype, bs, model, bias, fuse_wgrad_accumulation, checkpoint
 ):
     config = model_configs[model]
 
@@ -474,6 +476,7 @@ def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
         eps=config.eps,
         bias=bias,
         params_dtype=dtype,
+        checkpoint=checkpoint,
         device="cuda",
         delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,

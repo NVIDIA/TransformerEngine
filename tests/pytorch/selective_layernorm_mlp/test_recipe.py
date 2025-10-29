@@ -37,14 +37,15 @@ class TestFP8Recipe:
         "module_class",
         [SelectiveLayerNormMLP],
     )
-    def test_quantizer_update(self, module_class):
+    @pytest.mark.parametrize("checkpoint", (True, False))
+    def test_quantizer_update(self, module_class, checkpoint):
         in_features = 32
         out_features = 32
         batch_size = 32
 
         recipe = DelayedScaling(amax_history_len=1024)
         with quantized_model_init(recipe=recipe):
-            module = module_class(in_features, out_features).cuda()
+            module = module_class(in_features, out_features, checkpoint=checkpoint).cuda()
 
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)

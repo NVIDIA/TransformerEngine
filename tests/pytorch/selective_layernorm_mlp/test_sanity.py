@@ -157,6 +157,7 @@ def _test_sanity_common(
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("microbatching", all_boolean)
+@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_sanity_selective_layernorm_mlp(
     dtype,
     fp8_recipe,
@@ -167,6 +168,7 @@ def test_sanity_selective_layernorm_mlp(
     activation,
     normalization,
     microbatching,
+    checkpoint,
 ):
     config = model_configs[model]
 
@@ -189,6 +191,7 @@ def test_sanity_selective_layernorm_mlp(
         activation=activation,
         normalization=normalization,
         params_dtype=dtype,
+        checkpoint=checkpoint,
         device="cuda",
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
