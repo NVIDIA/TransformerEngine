@@ -1,6 +1,6 @@
 import time
 import torch
-from transformer_engine.pytorch import SelectiveLayerNormMLP
+from transformer_engine.pytorch import LayerNormMLP
 from collections import defaultdict
 
 torch.manual_seed(1234)
@@ -32,10 +32,10 @@ class ModelConfig:
 
         ln_list, sln_list = [], []
         for _ in range(self._layers):
-            ln = SelectiveLayerNormMLP(
+            ln = LayerNormMLP(
                 self._hidden_size, self._ffn_hidden_size, checkpoint=False
             ).to(device)
-            sln = SelectiveLayerNormMLP(
+            sln = LayerNormMLP(
                 self._hidden_size, self._ffn_hidden_size, checkpoint=True
             ).to(device)
             with torch.no_grad():
@@ -180,7 +180,7 @@ class Profiler:
             self.stats[desc]["diff"][key] = self._max_diff(ln_grads[key], sln_grads[key])
 
     def summarize(self):
-        _modules = [("ln_stats", "LayerNormMLP"), ("sln_stats", "SelectiveLayerNormMLP")]
+        _modules = [("ln_stats", "No Checkpointing"), ("sln_stats", "Checkpointing")]
         _metric_map = {"time": (1, "ms"), "mem": (1e-6, "MB")}
 
         left_w = 18  # "fwd time" / "bwd mem" label

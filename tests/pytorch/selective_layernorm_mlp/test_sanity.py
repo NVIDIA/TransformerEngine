@@ -15,7 +15,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch import (
     autocast,
-    SelectiveLayerNormMLP,
+    LayerNormMLP,
     is_bf16_available,
 )
 from transformer_engine.common import recipe
@@ -158,7 +158,7 @@ def _test_sanity_common(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("microbatching", all_boolean)
 @pytest.mark.parametrize("checkpoint", all_boolean)
-def test_sanity_selective_layernorm_mlp(
+def test_sanity_layernorm_mlp(
     dtype,
     fp8_recipe,
     model,
@@ -182,7 +182,7 @@ def test_sanity_selective_layernorm_mlp(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = SelectiveLayerNormMLP(
+    block = LayerNormMLP(
         config.hidden_size,
         4 * config.hidden_size,
         init_method=init_method,

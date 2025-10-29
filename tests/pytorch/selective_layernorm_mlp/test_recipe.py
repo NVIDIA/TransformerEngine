@@ -8,7 +8,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     quantized_model_init,
-    SelectiveLayerNormMLP,
+    LayerNormMLP,
 )
 
 from transformer_engine.common.recipe import DelayedScaling
@@ -35,7 +35,7 @@ class TestFP8Recipe:
 
     @pytest.mark.parametrize(
         "module_class",
-        [SelectiveLayerNormMLP],
+        [LayerNormMLP],
     )
     @pytest.mark.parametrize("checkpoint", (True, False))
     def test_quantizer_update(self, module_class, checkpoint):

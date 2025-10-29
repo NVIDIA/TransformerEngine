@@ -162,7 +162,7 @@ def main(argv=None, namespace=None):
         HIDDEN_SIZE = 512
 
     test_dict = [
-        test_selective_layernorm_mlp,
+        test_layernorm_mlp,
     ]
 
     for test in test_dict:
@@ -378,13 +378,13 @@ def _alloc_main_grad(model_single_node, model_distributed):
 
 
 ############################################
-#          SelectiveLayerNormMLP          #
+#          LayerNormMLP          #
 ############################################
 
 
 @run_distributed_test()
-def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwargs):
-    """Test the SelectiveLayerNormMLP with specified parallel mode and sequence parallelization.
+def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwargs):
+    """Test the LayerNormMLP with specified parallel mode and sequence parallelization.
 
     Args:
         set_parallel_mode (bool): Enable parallel mode.
@@ -396,8 +396,8 @@ def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=Fals
     FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
-    model_single_node = te.SelectiveLayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
-    model_distributed = te.SelectiveLayerNormMLP(
+    model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
+    model_distributed = te.LayerNormMLP(
         HIDDEN_SIZE,
         FFN_HIDDEN_SIZE,
         tp_size=WORLD_SIZE,
@@ -464,7 +464,7 @@ def _test_selective_layernorm_mlp(set_parallel_mode=None, sequence_parallel=Fals
         )
 
 
-def test_selective_layernorm_mlp():
+def test_layernorm_mlp():
     kwargs_list = [
         {},
         {"init_method": _constant},
@@ -485,4 +485,4 @@ def test_selective_layernorm_mlp():
     for kwargs in kwargs_list:
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
-                _test_selective_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)
+                _test_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)

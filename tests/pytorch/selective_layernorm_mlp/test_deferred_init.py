@@ -8,7 +8,7 @@ import torch
 import transformer_engine.pytorch as te
 
 _core_modules = [
-    te.SelectiveLayerNormMLP,
+    te.LayerNormMLP,
 ]
 _composed_modules = []
 
@@ -26,7 +26,7 @@ class TestDeferredInit:
         hidden_size = num_heads * head_dim
         args = (hidden_size,)
         kwargs = {"params_dtype": dtype, "device": "meta"}
-        if module == te.SelectiveLayerNormMLP:
+        if module == te.LayerNormMLP:
             ffn_hidden_size = 2 * hidden_size
             args += (ffn_hidden_size,)
             kwargs["bias"] = True

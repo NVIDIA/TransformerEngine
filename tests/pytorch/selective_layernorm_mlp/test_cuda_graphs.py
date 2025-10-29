@@ -7,7 +7,7 @@ import pytest
 
 import torch
 from transformer_engine.pytorch import (
-    SelectiveLayerNormMLP,
+    LayerNormMLP,
     autocast,
     quantized_model_init,
     make_graphed_callables,
@@ -165,7 +165,7 @@ class _Sequential(torch.nn.Sequential):
 
 
 # Supported modules
-_test_cuda_graphs_modules: List[str] = ["selective_layernorm_mlp"]
+_test_cuda_graphs_modules: List[str] = ["layernorm_mlp"]
 
 
 def _test_cuda_graphs(
@@ -192,9 +192,9 @@ def _test_cuda_graphs(
     # Create modules.
     with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
 
-        if module == "selective_layernorm_mlp":
+        if module == "layernorm_mlp":
             modules = [
-                SelectiveLayerNormMLP(
+                LayerNormMLP(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     params_dtype=dtype,
@@ -322,7 +322,7 @@ def test_make_graphed_callables(
 
 
 _test_make_graphed_callables_with_fp8_weight_caching_modules = [
-    "selective_layernorm_mlp",
+    "layernorm_mlp",
 ]
 
 

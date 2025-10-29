@@ -22,7 +22,7 @@ from torch.nn import Parameter
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch import (
     autocast,
-    SelectiveLayerNormMLP,
+    LayerNormMLP,
     get_device_compute_capability,
     is_fp8_available,
     is_mxfp8_available,
@@ -388,13 +388,13 @@ def reset_global_fp8_state():
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("checkpoint", all_boolean)
-def test_selective_layernorm_mlp_accuracy(
+def test_layernorm_mlp_accuracy(
     dtype, bs, model, activation, normalization, return_bias, bias, checkpoint
 ):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(
-        SelectiveLayerNormMLP,
+        LayerNormMLP,
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
         activation=activation,
@@ -466,12 +466,12 @@ def test_selective_layernorm_mlp_accuracy(
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("checkpoint", all_boolean)
-def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
+def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     dtype, bs, model, bias, fuse_wgrad_accumulation, checkpoint
 ):
     config = model_configs[model]
 
-    ln_mlp = SelectiveLayerNormMLP(
+    ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
@@ -483,7 +483,7 @@ def test_selective_layernorm_mlp_accuracy_delay_wgrad_compute(
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
-    ln_mlp_ref = SelectiveLayerNormMLP(
+    ln_mlp_ref = LayerNormMLP(
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
