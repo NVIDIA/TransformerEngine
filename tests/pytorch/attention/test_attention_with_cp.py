@@ -287,7 +287,6 @@ def test_cp_with_fused_attention(
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
     if qkv_format == "thd":
-        print(f"config.attn_mask_type: {config.attn_mask_type}")
         if "causal" in config.attn_mask_type:
             config.attn_mask_type = "padding_causal"
         else:

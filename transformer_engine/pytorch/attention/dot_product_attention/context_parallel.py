@@ -304,12 +304,14 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
         (
             # 1st segment
             torch.arange(
-                seq_start + (cp_rank * slice_size), seq_start + ((cp_rank + 1) * slice_size)
+                seq_start + (cp_rank * slice_size), seq_start + ((cp_rank + 1) * slice_size),
+                device=cu_seqlens.device,
             ),
             # 2nd segment
             torch.arange(
                 seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
                 seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
+                device=cu_seqlens.device,
             ),
         )
         for cp_rank in range(cp_size)
@@ -318,7 +320,7 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
 
     # flatten the list of tuples to a list
     indices = list(itertools.chain(*indices))
-    indices = torch.cat(indices).to(device=cu_seqlens.device)
+    indices = torch.cat(indices)
     return x.index_select(seq_dim, indices)
 
 
@@ -386,12 +388,13 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, c
                 if loc < cp_size
                 else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
             ),
+            device=cu_seqlens.device,
         )
         for start, end in zip(cu_seqlens_on_any_cp_rank[:-1], cu_seqlens_on_any_cp_rank[1:])
         for loc, chunk_id in enumerate(seq_chunk_ids)
     ]
 
-    indices = torch.cat(indices).to(device=cu_seqlens.device)
+    indices = torch.cat(indices)
     return x.index_select(seq_dim, indices)
 
 
