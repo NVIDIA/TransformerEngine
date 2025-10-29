@@ -377,7 +377,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 or len(strides) != 2
                 or strides[0] % 128 != 0
                 or shape[0] % 128 != 0
-                or shape[1] % MXFP8_BLOCK_SCALING_SIZE != 0
+                or shape[1] % 128 != 0
             ):
                 return super().__torch_dispatch__(func, types, args, kwargs)
 
@@ -422,7 +422,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 columnwise_data=out_data[1],
                 columnwise_scale_inv=out_data[3],
                 quantizer=tensor._quantizer,
-                requires_grad=tensor.requires_grad,
+                requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
         if func == torch.ops.aten.copy_.default:
@@ -478,10 +478,14 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             columnwise_scale_inv = None
             tensor = args[0]
             shape = args[1]
-            rowwise_scale_inv_shape = [math.prod(shape[:-1]), shape[-1] // MXFP8_BLOCK_SCALING_SIZE]
+            first_dim = math.prod(shape[:-1])
+            last_dim = shape[-1]
+            if first_dim % 128 != 0 or last_dim % 128 != 0:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+            rowwise_scale_inv_shape = [first_dim, last_dim // MXFP8_BLOCK_SCALING_SIZE]
             columnwise_scale_inv_shape = [
-                math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
-                shape[-1],
+                first_dim // MXFP8_BLOCK_SCALING_SIZE,
+                last_dim,
             ]
             if tensor._rowwise_data is not None:
                 rowwise_data = tensor._rowwise_data.__torch_dispatch__(
