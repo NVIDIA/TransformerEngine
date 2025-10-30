@@ -332,7 +332,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
                                         fused_attn/context_parallel.cu
                                         fused_attn/kv_cache.cu)
 
-option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" ON)
+option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/relu.cu
