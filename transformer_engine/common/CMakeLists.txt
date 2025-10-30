@@ -168,7 +168,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      gemm/cutlass_grouped_gemm.cu
-     util/cast.cu
+     cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
      activation/swiglu.cu
@@ -336,8 +336,7 @@ option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --u
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/relu.cu
-                                          activation/swiglu.cu
-                                          util/cast.cu)
+                                          activation/swiglu.cu)
 endif()
 
 foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
