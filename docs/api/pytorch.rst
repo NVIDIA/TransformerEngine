@@ -85,7 +85,7 @@ Mixture of Experts (MoE) functions
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
 
-GEMM Comm overlap
+Communication-computation overlap
 ---------------------
 
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
