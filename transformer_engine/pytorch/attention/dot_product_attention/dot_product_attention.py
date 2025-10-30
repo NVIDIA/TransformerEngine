@@ -983,9 +983,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 key_layer is None and value_layer is None
             ), "key_layer and value_layer must be None for MLA CP exchanging latent!"
-            assert (
-                k_pos_emb is not None
-            ), "k_pos_emb must be provided for MLA CP exchanging latent!"
+            assert k_pos_emb is not None, "k_pos_emb must be provided for MLA CP exchanging latent!"
             assert (
                 kv_up_proj_fn is not None
             ), "kv_up_proj_fn must be provided for MLA CP exchanging latent!"
@@ -994,12 +992,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 key_layer is not None and value_layer is not None
             ), "key_layer and value_layer must be provided."
-            assert (
-                k_pos_emb is None
-            ), "k_pos_emb provided, but kv_compressed is None!"
-            assert (
-                kv_up_proj_fn is None
-            ), "kv_up_proj_fn provided, but kv_compressed is None!"
+            assert k_pos_emb is None, "k_pos_emb provided, but kv_compressed is None!"
+            assert kv_up_proj_fn is None, "kv_up_proj_fn provided, but kv_compressed is None!"
 
         with torch.cuda.device(query_layer.device), self.prepare_forward(
             query_layer,
@@ -1039,9 +1033,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+            assert query_layer.is_cuda, "DotProductAttention only supports CUDA tensors."
             head_dim_qk = query_layer.shape[-1]
             assert (
                 head_dim_qk == self.hidden_size_per_attention_head_k
@@ -1053,13 +1045,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     kv_compressed.is_cuda and k_pos_emb.is_cuda
                 ), "DotProductAttention only supports CUDA tensors."
                 assert (  # TODO: is it correct?
-                    query_layer.dtype == kv_compressed.dtype and query_layer.dtype == k_pos_emb.dtype
+                    query_layer.dtype == kv_compressed.dtype
+                    and query_layer.dtype == k_pos_emb.dtype
                 ), "Queries, keys and values must have the same data type!"
-                assert (
-                    kv_compressed.shape[:-1] == k_pos_emb.shape[:-1]
-                ), (
-                    "kv_compressed and k_pos_emb must have the same batch size and sequence length! "
-                    f"kv_compressed.shape: {kv_compressed.shape}, k_pos_emb.shape: {k_pos_emb.shape}"
+                assert kv_compressed.shape[:-1] == k_pos_emb.shape[:-1], (
+                    "kv_compressed and k_pos_emb must have the same batch size and sequence"
+                    f" length! kv_compressed.shape: {kv_compressed.shape}, k_pos_emb.shape:"
+                    f" {k_pos_emb.shape}"
                 )
                 num_gqa_groups = self.num_gqa_groups_per_partition
                 head_dim_v = self.hidden_size_per_attention_head_v
@@ -1070,15 +1062,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
                 ), "Queries, keys and values must have the same data type!"
-                assert (
-                    key_layer.shape[:-1] == value_layer.shape[:-1]
-                ), (
-                    "Keys and values must have the same batch size, sequence length and number of heads! "
-                    f"key_layer.shape: {key_layer.shape}, value_layer.shape: {value_layer.shape}"
+                assert key_layer.shape[:-1] == value_layer.shape[:-1], (
+                    "Keys and values must have the same batch size, sequence length and number of"
+                    f" heads! key_layer.shape: {key_layer.shape}, value_layer.shape:"
+                    f" {value_layer.shape}"
                 )
-                assert (
-                    query_layer.shape[-1] == key_layer.shape[-1]
-                ), (
+                assert query_layer.shape[-1] == key_layer.shape[-1], (
                     "Queries and keys must have the same head dimension! "
                     f"query_layer.shape: {query_layer.shape}, key_layer.shape: {key_layer.shape}"
                 )
@@ -1119,7 +1108,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
             batch_size = None
             if qkv_format in ["sbhd", "bshd"]:
-                assert len(query_layer.shape) == 4, f"Queries must be 4D tensors when {qkv_format=}!"
+                assert (
+                    len(query_layer.shape) == 4
+                ), f"Queries must be 4D tensors when {qkv_format=}!"
                 if mla_cp_exchange_latent:
                     assert all(
                         len(x.shape) == 3 for x in (kv_compressed, k_pos_emb)
@@ -1136,9 +1127,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     ), f"Keys and values must be 4D tensors when {qkv_format=}!"
                     if max_seqlen_kv is None:
                         max_seqlen_kv = (
-                            key_layer.shape[0]
-                            if qkv_format == "sbhd"
-                            else key_layer.shape[1]
+                            key_layer.shape[0] if qkv_format == "sbhd" else key_layer.shape[1]
                         )
                 if qkv_format == "sbhd":
                     batch_size = query_layer.shape[1]
@@ -1147,7 +1136,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
             if qkv_format == "thd":
-                assert len(query_layer.shape) == 3, f"Queries must be 3D tensors when {qkv_format=}!"
+                assert (
+                    len(query_layer.shape) == 3
+                ), f"Queries must be 3D tensors when {qkv_format=}!"
                 if mla_cp_exchange_latent:
                     assert all(
                         len(x.shape) == 2 for x in (kv_compressed, k_pos_emb)
@@ -1199,9 +1190,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.fused_attention.attention_type = self.attention_type
                 self.unfused_attention.attention_type = self.attention_type
 
-                assert not mla_cp_exchange_latent, (
-                    "MLA CP exchanging latent is not supported for inference!"
-                )
+                assert (
+                    not mla_cp_exchange_latent
+                ), "MLA CP exchanging latent is not supported for inference!"
 
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
@@ -1274,9 +1265,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_size *= get_distributed_world_size(group)
             context_parallel = cp_size > 1
             if not context_parallel:
-                assert not mla_cp_exchange_latent, (
-                    "MLA CP exchanging latent is not supported for context parallel!"
-                )
+                assert (
+                    not mla_cp_exchange_latent
+                ), "MLA CP exchanging latent is not supported for context parallel!"
                 assert (
                     self.attention_type == "self"
                 ), "MLA CP exchanging latent is only supported for self-attention!"

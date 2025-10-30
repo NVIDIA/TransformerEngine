@@ -177,19 +177,38 @@ model_configs_fused_attn = {
         2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
     ),  # GQA
     "cp_5_0": ModelConfig(
-        2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64,
-        kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_mask_type="causal",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA CP exchanging latent
     "cp_5_1": ModelConfig(
         2, 4096, 12, 128, head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
     ),  # MLA CP exchanging latent
     "cp_5_2": ModelConfig(
-        2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias",
-        head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_mask_type="causal",
+        attn_bias_type="post_scale_bias",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA CP exchanging latent
     "cp_5_3": ModelConfig(
-        2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64,
-        kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_bias_type="post_scale_bias",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA CP exchanging latent
 }
 

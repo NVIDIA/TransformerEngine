@@ -311,11 +311,15 @@ def run_dpa_with_cp(
         ).cuda()
 
         head_dim_k_no_pe = config.head_dim_qk - config.qk_pos_emb_head_dim
-        linear = torch.nn.Linear(
-            config.kv_lora_rank,
-            config.num_heads * (head_dim_k_no_pe + config.head_dim_v),
-            bias=False
-        ).cuda().to(dtypes[dtype])
+        linear = (
+            torch.nn.Linear(
+                config.kv_lora_rank,
+                config.num_heads * (head_dim_k_no_pe + config.head_dim_v),
+                bias=False,
+            )
+            .cuda()
+            .to(dtypes[dtype])
+        )
 
         def kv_up_proj(kv_compressed, k_pos_emb):
             kv = linear(kv_compressed).view(*kv_compressed.shape[:-1], config.num_heads, -1)
@@ -330,7 +334,7 @@ def run_dpa_with_cp(
                 k_pos_emb = k_pos_emb.expand(-1, config.num_heads, -1)
             k = torch.cat([k_no_pe, k_pos_emb], dim=-1)
             return k, v
-        
+
         k_orig = None
         v_orig = None
     else:
@@ -439,23 +443,25 @@ def run_dpa_with_cp(
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
         q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            ) if x is not None else None
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                if x is not None
+                else None
+            )
             for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
         q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
-            x.index_select(seq_dim, seq_idx)
-            if x is not None else None
+            x.index_select(seq_dim, seq_idx) if x is not None else None
             for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
         q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
-            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
-            if x is not None else None
+            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) if x is not None else None
             for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
     elif qkv_format == "thd":
@@ -475,8 +481,7 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
-        x.contiguous()
-        if x is not None else None
+        x.contiguous() if x is not None else None
         for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
     ]
     if scaling_mode == "delayed":
@@ -551,8 +556,18 @@ def run_dpa_with_cp(
 
     # get outputs
     tensors = [
-        out, dq, dk, dv, dkv_compressed, dk_pos_emb,
-        out_, dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_,
+        out,
+        dq,
+        dk,
+        dv,
+        dkv_compressed,
+        dk_pos_emb,
+        out_,
+        dq_,
+        dk_,
+        dv_,
+        dkv_compressed_,
+        dk_pos_emb_,
     ]
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
@@ -566,37 +581,52 @@ def run_dpa_with_cp(
         assert torch.all(~torch.isnan(tensor))
         assert torch.all(~torch.isinf(tensor))
     (
-        out, dq, dk, dv, dkv_compressed, dk_pos_emb,
-        out_, dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_,
+        out,
+        dq,
+        dk,
+        dv,
+        dkv_compressed,
+        dk_pos_emb,
+        out_,
+        dq_,
+        dk_,
+        dv_,
+        dkv_compressed_,
+        dk_pos_emb_,
     ) = tensors
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, dkv_compressed, dk_pos_emb, out = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            ) if x is not None else None
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                if x is not None
+                else None
+            )
             for x in [dq, dk, dv, dkv_compressed, dk_pos_emb, out]
         ]
         dq, dk, dv, dkv_compressed, dk_pos_emb, out = [
-            x.index_select(seq_dim, seq_idx)
-            if x is not None else None
+            x.index_select(seq_dim, seq_idx) if x is not None else None
             for x in [dq, dk, dv, dkv_compressed, dk_pos_emb, out]
         ]
         dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            if x is not None else None
+            (
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                if x is not None
+                else None
+            )
             for x in [dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_]
         ]
     elif qkv_format == "thd":
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
         if mla_exchange_latent:
             dkv_compressed, dk_pos_emb = [
-                x.index_select(0, seq_idx_kv).contiguous()
-                for x in [dkv_compressed, dk_pos_emb]
+                x.index_select(0, seq_idx_kv).contiguous() for x in [dkv_compressed, dk_pos_emb]
             ]
         else:
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]

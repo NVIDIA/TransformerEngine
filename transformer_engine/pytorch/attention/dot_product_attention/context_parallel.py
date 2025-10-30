@@ -1379,7 +1379,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if mla_exchange_latent:
             # For MLA CP exchanging latent, we exchange the latent
             # and k position embedding directly.
-            k_shape, k_numel, v_shape = None, None, None # to be filled later
+            k_shape, k_numel, v_shape = None, None, None  # to be filled later
             kv_compressed_shape = kv_compressed.shape
             kv_compressed_numel = kv_compressed.numel()
             k_pos_emb_shape = k_pos_emb.shape
@@ -1420,8 +1420,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if mla_exchange_latent:
                         # For MLA CP exchanging latent, we exchange the latent
                         # and k position embedding directly.
-                        kv_compressed_part = kv_inputs[i % 2][:kv_compressed_numel].view(*kv_compressed_shape)
-                        k_pos_emb_part = kv_inputs[i % 2][kv_compressed_numel:].view(*k_pos_emb_shape)
+                        kv_compressed_part = kv_inputs[i % 2][:kv_compressed_numel].view(
+                            *kv_compressed_shape
+                        )
+                        k_pos_emb_part = kv_inputs[i % 2][kv_compressed_numel:].view(
+                            *k_pos_emb_shape
+                        )
                         with torch.no_grad():
                             k_part, v_part = kv_up_proj_fn(kv_compressed_part, k_pos_emb_part)
                             k_part = k_part.contiguous()
@@ -1638,7 +1642,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if qkv_format == "thd":
                             if mla_exchange_latent:
                                 out = torch.zeros(
-                                    v_shape, dtype=k_part.dtype, layout=k_part.layout, device=k_part.device
+                                    v_shape,
+                                    dtype=k_part.dtype,
+                                    layout=k_part.layout,
+                                    device=k_part.device,
                                 )
                             elif enable_mla:
                                 out = torch.zeros_like(v if not fp8 else out_per_step[0]).view(
@@ -2196,7 +2203,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             kv_cache = p2p_comm_buffers[i % 2][0]
             dq_, dk_, dv_ = None, None, None
             if ctx.mla_exchange_latent:
-                kv_compressed_part = kv_cache[: ctx.kv_compressed_numel].view(*ctx.kv_compressed_shape)
+                kv_compressed_part = kv_cache[: ctx.kv_compressed_numel].view(
+                    *ctx.kv_compressed_shape
+                )
                 k_pos_emb_part = kv_cache[ctx.kv_compressed_numel :].view(*ctx.k_pos_emb_shape)
 
                 kv_compressed_part.requires_grad_(True)
@@ -2522,7 +2531,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:  # i > 0
                     dk.add_(dk_)
                     dv.add_(dv_)
-            
+
             if ctx.mla_exchange_latent:
                 # If MLA exchange latent, backward pass from dk and dv to
                 # dkv_compressed and dk_pos_emb, and accumulate the gradients to dkv_cache.
@@ -2583,10 +2592,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     for x in [dq, dkv_compressed, dk_pos_emb]
                 ]
             else:
-                dq, dk, dv = [
-                    x.view(*x.shape[:dim], -1, *x.shape[dim + 2 :])
-                    for x in [dq, dk, dv]
-                ]
+                dq, dk, dv = [x.view(*x.shape[:dim], -1, *x.shape[dim + 2 :]) for x in [dq, dk, dv]]
 
         if ctx.qkv_format == "thd" and not ctx.use_fused_attention:
             dq[cu_seqlens_q_padded[-1] :].fill_(0)
