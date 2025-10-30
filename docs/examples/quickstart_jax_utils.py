@@ -37,17 +37,13 @@ def speedometer(
     key = dropout_key
     for _ in range(warmup_iters):
         key, step_key = jax.random.split(key)
-        loss, (param_grads, other_grads) = train_step_fn(
-            variables, input, output_grad, step_key
-        )
+        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_key)
 
     # Timing runs
     start = time.time()
     for _ in range(timing_iters):
         key, step_key = jax.random.split(key)
-        loss, (param_grads, other_grads) = train_step_fn(
-            variables, input, output_grad, step_key
-        )
+        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_key)
     end = time.time()
 
     print(f"Mean time: {(end - start) * 1000 / timing_iters} ms")
