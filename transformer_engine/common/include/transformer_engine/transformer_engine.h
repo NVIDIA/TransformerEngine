@@ -336,6 +336,10 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
   /*! Whether to enable stochastic rounding */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Whether to enable PDL sync */
+  kNVTEQuantizationConfigPDLSync = 7,
+  /*! Whether to enable PDL trigger */
+  kNVTEQuantizationConfigPDLTrigger = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -878,6 +882,18 @@ class QuantizationConfigWrapper {
   void set_stochastic_rounding(bool stochastic_rounding) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
                                            &stochastic_rounding, sizeof(bool));
+  }
+
+  /*! \brief Set PDL sync */
+  void set_pdl_sync(bool pdl_sync) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigPDLSync, &pdl_sync,
+                                           sizeof(bool));
+  }
+
+  /*! \brief Set PDL trigger */
+  void set_pdl_trigger(bool pdl_trigger) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigPDLTrigger, &pdl_trigger,
+                                           sizeof(bool));
   }
 
  private:
