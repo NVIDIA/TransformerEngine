@@ -151,6 +151,83 @@ def _act_func(activation: str, recipe: Optional[Recipe] = None):
     return funcs[activation]
 
 
+@torch.no_grad()
+def _copy_quantizer(
+    quantizer: Optional[Quantizer],
+    device: Optional[Union[str, torch.device]] = None,
+) -> Optional[Quantizer]:
+    if quantizer is None:
+        return None
+
+    inferred_device = None
+    for attr in ("scale", "amax"):
+        tensor = getattr(quantizer, attr, None)
+        if isinstance(tensor, torch.Tensor):
+            inferred_device = tensor.device
+            break
+    if device is not None:
+        inferred_device = torch.device(device)
+    if inferred_device is None:
+        inferred_device = torch.device("cuda")
+
+    if isinstance(quantizer, Float8BlockQuantizer):
+        q = Float8BlockQuantizer(
+            fp8_dtype=quantizer.dtype,
+            rowwise=quantizer.rowwise_usage,
+            columnwise=quantizer.columnwise_usage,
+            amax_epsilon=quantizer.amax_epsilon,
+            force_pow_2_scales=quantizer.force_pow_2_scales,
+            block_scaling_dim=quantizer.block_scaling_dim,
+            all_gather_usage=quantizer.all_gather_usage,
+        )
+    elif isinstance(quantizer, Float8Quantizer):
+        q = Float8Quantizer(
+            scale=quantizer.scale.clone(),
+            amax=quantizer.amax.clone(),
+            fp8_dtype=quantizer.dtype,
+            rowwise=quantizer.rowwise_usage,
+            columnwise=quantizer.columnwise_usage,
+        )
+    elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=quantizer.dtype,
+            device=inferred_device,
+            rowwise=quantizer.rowwise_usage,
+            columnwise=quantizer.columnwise_usage,
+            use_existing_amax=quantizer.use_existing_amax,
+            with_amax_reduction=quantizer.with_amax_reduction,
+            amax_reduction_group=quantizer.amax_reduction_group,
+            force_pow_2_scales=quantizer.force_pow_2_scales,
+            amax_epsilon=quantizer.amax_epsilon,
+        )
+        q.scale = quantizer.scale.clone()
+        q.amax = quantizer.amax.clone()
+    elif isinstance(quantizer, MXFP8Quantizer):
+        q = MXFP8Quantizer(
+            fp8_dtype=quantizer.dtype,
+            rowwise=quantizer.rowwise_usage,
+            columnwise=quantizer.columnwise_usage,
+        )
+    elif isinstance(quantizer, NVFP4Quantizer):
+        q = NVFP4Quantizer(
+            fp4_dtype=quantizer.dtype,
+            rowwise=quantizer.rowwise_usage,
+            columnwise=quantizer.columnwise_usage,
+            with_amax_reduction=quantizer.with_amax_reduction,
+            amax_reduction_group=quantizer.amax_reduction_group,
+            with_rht=quantizer.with_rht,
+            with_post_rht_amax=quantizer.with_post_rht_amax,
+            with_2d_quantization=quantizer.with_2d_quantization,
+            stochastic_rounding=quantizer.stochastic_rounding,
+            with_random_sign_mask=quantizer.rht_matrix_random_sign_mask_t!=0,
+        )
+    else:
+        raise NotImplementedError(
+            f"Checkpointing in LayerNormMLP not implemented for {type(quantizer).__name__} quantizer yet"
+        )
+    q.internal = quantizer.internal
+    return q
+
 class _LayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
     Calls custom cuda extensions.
@@ -245,54 +322,57 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             # save other arguments to _forward
-            ctx.other_args = [
-                eps,
-                is_first_microbatch,
-                fp8,
-                fp8_calibration,
-                wgrad_store,
-                fuse_wgrad_accumulation,
-                fc1_input_quantizer,
-                fc1_weight_quantizer,
-                fc1_output_quantizer,
-                fc1_grad_input_quantizer,
-                fc1_grad_weight_quantizer,
-                fc1_grad_output_quantizer,
-                fc2_input_quantizer,
-                fc2_weight_quantizer,
-                fc2_output_quantizer,
-                fc2_grad_input_quantizer,
-                fc2_grad_weight_quantizer,
-                fc2_grad_output_quantizer,
-                cpu_offloading,
-                tp_group,
-                tp_size,
-                sequence_parallel,
-                tensor_parallel,
-                activation_dtype,
-                return_layernorm_output,
-                return_layernorm_output_gathered,
-                bias_gelu_fusion,
-                set_parallel_mode,
-                is_grad_enabled,
-                fwd_ln_sm_margin,
-                bwd_ln_sm_margin,
-                zero_centered_gamma,
-                activation,
-                normalization,
-                ub_overlap_ag,
-                ub_overlap_rs,
-                ub_overlap_rs_dgrad,
-                ub_bulk_wgrad,
-                ub_bulk_dgrad,
-                gemm_gelu_fusion,
-                fsdp_group,
-                module,
-                skip_fp8_weight_update,
-                symmetric_ar_type,
-                checkpoint,
-                debug,
-            ]
+            def clone_quantizer(q: Optional[Quantizer]) -> Optional[Quantizer]:
+                return _copy_quantizer(q, device=inp.device) if q is not None else None
+
+            ctx.other_args = {
+                "eps": eps,
+                "is_first_microbatch": is_first_microbatch,
+                "fp8": fp8,
+                "fp8_calibration": fp8_calibration,
+                "wgrad_store": wgrad_store,
+                "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
+                "fc1_input_quantizer": clone_quantizer(fc1_input_quantizer),
+                "fc1_weight_quantizer": clone_quantizer(fc1_weight_quantizer),
+                "fc1_output_quantizer": clone_quantizer(fc1_output_quantizer),
+                "fc1_grad_input_quantizer": clone_quantizer(fc1_grad_input_quantizer),
+                "fc1_grad_weight_quantizer": clone_quantizer(fc1_grad_weight_quantizer),
+                "fc1_grad_output_quantizer": clone_quantizer(fc1_grad_output_quantizer),
+                "fc2_input_quantizer": clone_quantizer(fc2_input_quantizer),
+                "fc2_weight_quantizer": clone_quantizer(fc2_weight_quantizer),
+                "fc2_output_quantizer": clone_quantizer(fc2_output_quantizer),
+                "fc2_grad_input_quantizer": clone_quantizer(fc2_grad_input_quantizer),
+                "fc2_grad_weight_quantizer": clone_quantizer(fc2_grad_weight_quantizer),
+                "fc2_grad_output_quantizer": clone_quantizer(fc2_grad_output_quantizer),
+                "cpu_offloading": cpu_offloading,
+                "tp_group": tp_group,
+                "tp_size": tp_size,
+                "sequence_parallel": sequence_parallel,
+                "tensor_parallel": tensor_parallel,
+                "activation_dtype": activation_dtype,
+                "return_layernorm_output": return_layernorm_output,
+                "return_layernorm_output_gathered": return_layernorm_output_gathered,
+                "bias_gelu_fusion": bias_gelu_fusion,
+                "set_parallel_mode": set_parallel_mode,
+                "is_grad_enabled": is_grad_enabled,
+                "fwd_ln_sm_margin": fwd_ln_sm_margin,
+                "bwd_ln_sm_margin": bwd_ln_sm_margin,
+                "zero_centered_gamma": zero_centered_gamma,
+                "activation": activation,
+                "normalization": normalization,
+                "ub_overlap_ag": ub_overlap_ag,
+                "ub_overlap_rs": ub_overlap_rs,
+                "ub_overlap_rs_dgrad": ub_overlap_rs_dgrad,
+                "ub_bulk_wgrad": ub_bulk_wgrad,
+                "ub_bulk_dgrad": ub_bulk_dgrad,
+                "gemm_gelu_fusion": gemm_gelu_fusion,
+                "fsdp_group": fsdp_group,
+                "module": module,
+                "skip_fp8_weight_update": skip_fp8_weight_update,
+                "symmetric_ar_type": symmetric_ar_type,
+                "checkpoint": checkpoint,
+                "debug": debug,
+            }
 
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
@@ -318,7 +398,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # 1) no checkpointing
         # or 2) doing the recomputation with checkpointing
         backwards_needs_fc1_input = fc1_weight.requires_grad and (
-            is_recomputation or (is_grad_enabled and not checkpoint)
+            (is_grad_enabled and not checkpoint)
         )
 
         device = inp.device
@@ -390,7 +470,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if sequence_parallel:
 
             # do not return ln output if checkpointing and in recomputation, not necessary
-            if return_layernorm_output_gathered and not is_recomputation:
+            if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
@@ -437,11 +517,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = (
-                is_first_microbatch is None or is_first_microbatch
-            )  # and not is_recomputation  # only update workspace if not checkpointing or checkpointing with no recomp, otherwise cache workspace
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            update_workspace = (is_first_microbatch is None or is_first_microbatch)
+            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled )#and (is_recomputation or not checkpoint))
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled )#and (is_recomputation or not checkpoint))
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -569,6 +647,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
                     act_out = activation_func(fc1_out, fc2_input_quantizer)
 
+        if not fp8 and fp8_calibration:
+            if fc2_input_quantizer is not None:
+                fc2_input_quantizer.calibrate(act_out)
+                
         # we want to skip fc2 computation if we are checkpointing and recomputing,
         # otherwise we compute fc2
         if not (is_recomputation and checkpoint):
@@ -585,8 +667,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 clear_tensor_data(fc1_out)
 
             if not fp8 and fp8_calibration:
-                if fc2_input_quantizer is not None:
-                    fc2_input_quantizer.calibrate(act_out)
+
                 if fc2_weight_quantizer is not None:
                     fc2_weight_quantizer.calibrate(fc2_weight)
 
@@ -945,7 +1026,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx.tensor_objects = None
 
         if ctx.checkpoint:  # do recomputation from the original args
-            return _LayerNormMLP._forward(ctx, *tensors, *ctx.other_args, recompute_for_bwd=True)
+            return _LayerNormMLP._forward(ctx, *tensors, *ctx.other_args.values(), recompute_for_bwd=True)
         else:  # load from saved (return ctx is just because the other branch does too)
             return [ctx] + tensors
 
@@ -956,7 +1037,6 @@ class _LayerNormMLP(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
-
             (  # pylint: disable=unbalanced-tuple-unpacking
                 ctx,
                 inputmat,
