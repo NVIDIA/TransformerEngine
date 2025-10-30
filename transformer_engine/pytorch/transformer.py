@@ -176,7 +176,7 @@ class TransformerLayer(torch.nn.Module):
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
           Options are: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                       'silu', 'swiglu', and 'clamped_swiglu'.
+          'silu', 'swiglu', and 'clamped_swiglu'.
     activation_params : Optional[dict], default = `None`
                         Additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which

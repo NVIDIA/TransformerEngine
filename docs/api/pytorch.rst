@@ -86,7 +86,7 @@ Mixture of Experts (MoE) functions
 
 
 Communication-computation overlap
----------------------
+---------------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
