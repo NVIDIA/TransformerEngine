@@ -81,7 +81,7 @@ def get_sharding_map_logic_axis_to_mesh_axis():
         return {}
 
     abstract_mesh = get_abstract_mesh()
-    if abstract_mesh is None or sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
+    if sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
         # If all mesh axes are manual axes, return an empty dict and do not require a MeshResource context to be present
         return {}
 
