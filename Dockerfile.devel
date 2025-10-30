@@ -27,6 +27,13 @@ RUN set -x \
  && NO_PROT="${GIT_URL#*://}" \
  && NO_USER="${NO_PROT#*@}" \
  && git remote set-url origin "https://${NO_USER}"
+ 
+# TE pulls these small datasets when running its tests, which can run into
+# rate limits. Pull it into the /root/.cache/huggingface directory here.
+RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+    && pip install datasets \
+    && python -c 'from datasets import load_dataset; load_dataset("glue", "cola"); load_dataset("mnist")' \
+    || [[ ! "${FRAMEWORK}" =~ jax|all ]]
 
 # Export pipeline and build IDs
 ARG NVIDIA_PIPELINE_ID=unknown
