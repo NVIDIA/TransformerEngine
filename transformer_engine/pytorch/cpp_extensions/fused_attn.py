@@ -139,6 +139,7 @@ def fused_attn_fwd(
     window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
     softmax_offset: torch.Tensor = None,
+    return_max_logit: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -216,6 +217,8 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor, default = None
                 softmax offset tensor in shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
+    return_max_logit: bool, default = False
+                      whether to return the maximum attention score
 
     Returns
     ----------
@@ -246,6 +249,7 @@ def fused_attn_fwd(
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
+    max_logit: if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
 
     if attn_scale is None:
@@ -315,7 +319,21 @@ def fused_attn_fwd(
         softmax_offset,
         rng_gen,
         rng_elts_per_thread,
+        return_max_logit,
     )
+
+    if return_max_logit:
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        # thd:  output_tensors: out [tq, h, d],    Max [tq, h, 1],    Sum_Exp [tq, h, 1]
+        # bshd: output_tensors: out [b, sq, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        # sbhd: output_tensors: out [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        stats = output_tensors[1] + torch.log(output_tensors[2])
+        amax_dims = (0, 2) if qkv_format == "thd" else (0, 2, 3)
+        # Max -> max_logit [h]
+        max_logit = torch.amax(output_tensors[1], dim=amax_dims).to(dtype=output_tensors[0].dtype)
+        aux_ctx_tensors = [stats]
+        aux_ctx_tensors.extend(output_tensors[3:])
+        return output_tensors[0], aux_ctx_tensors, max_logit
 
     # out, aux_ctx_tensors
     return output_tensors[0], output_tensors[1:]

@@ -27,7 +27,7 @@ from .misc import (
     NamedSharding,
     get_cudnn_version,
 )
-from .quantization import _quantize_dbias_impl, AmaxScope
+from .quantization import quantize, AmaxScope
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp_tpsp,
@@ -944,7 +944,7 @@ def layernorm_fwd(
     beta: jnp.ndarray,
     zero_centered_gamma: bool,
     epsilon: float,
-    quantizer: Optional[Quantizer],
+    quantizer: Optional[Quantizer] = None,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
@@ -974,7 +974,16 @@ def layernorm_fwd(
         - Reciprocal of the standard deviation of the input tensor. Shape: (..., 1)
     """
     if not NormFwdPrimitive.enabled():
-        return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
+        output, mu, rsigma = _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon)
+        if quantizer is not None:
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-1,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
+        return (output, mu, rsigma)
 
     # TE/common does not support normalization with colwise only quantization yet
     if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
@@ -1028,7 +1037,7 @@ def layernorm_fwd(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=False,
         )
-        out, _ = _quantize_dbias_impl(
+        out, _ = quantize(
             out, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence
         )
         return out, mu, rsigma
@@ -1049,11 +1058,9 @@ def layernorm_fwd(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
         )
-        out, _ = _quantize_dbias_impl(
+        out = quantize(
             out,
-            is_dbias=False,
             quantizer=quantizer,
-            dq_dtype=x.dtype,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
@@ -1218,7 +1225,16 @@ def rmsnorm_fwd(
             Shape: (..., 1)
     """
     if not NormFwdPrimitive.enabled():
-        return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
+        output, rsigma = _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon)
+        if quantizer is not None:
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-1,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
+        return (output, rsigma)
 
     # TE/common does not support normalization with colwise only quantization yet
     if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
@@ -1273,7 +1289,7 @@ def rmsnorm_fwd(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=False,
         )
-        out, _ = _quantize_dbias_impl(
+        out = quantize(
             out.data,
             quantizer,
             amax_scope=amax_scope,
@@ -1296,11 +1312,9 @@ def rmsnorm_fwd(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
         )
-        out, _ = _quantize_dbias_impl(
+        out = quantize(
             out,
-            is_dbias=False,
             quantizer=quantizer,
-            dq_dtype=x.dtype,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
