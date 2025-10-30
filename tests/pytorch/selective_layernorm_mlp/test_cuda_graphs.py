@@ -264,7 +264,9 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
-@pytest.mark.parametrize("checkpoint", (False, True), ids=lambda x: "checkpoint" if x else "no_checkpoint")
+@pytest.mark.parametrize(
+    "checkpoint", (False, True), ids=lambda x: "checkpoint" if x else "no_checkpoint"
+)
 def test_make_graphed_callables(
     *,
     module: str,
@@ -294,8 +296,15 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
-    if checkpoint and type(fp8_recipe).__name__=="Float8CurrentScaling" and dtype!=torch.float32:
-        pytest.skip(f"CUDA graphs for LayerNormMLP with checkpointing, Float8CurrentScaling recipe, with {dtype} dtype tensors not supported yet")
+    if (
+        checkpoint
+        and type(fp8_recipe).__name__ == "Float8CurrentScaling"
+        and dtype != torch.float32
+    ):
+        pytest.skip(
+            "CUDA graphs for LayerNormMLP with checkpointing, Float8CurrentScaling recipe, with"
+            f" {dtype} dtype tensors not supported yet"
+        )
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -333,7 +342,9 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
-@pytest.mark.parametrize("checkpoint", (False, True), ids=lambda x: "checkpoint" if x else "no_checkpoint")
+@pytest.mark.parametrize(
+    "checkpoint", (False, True), ids=lambda x: "checkpoint" if x else "no_checkpoint"
+)
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,

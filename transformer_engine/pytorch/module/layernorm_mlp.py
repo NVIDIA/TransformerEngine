@@ -219,14 +219,16 @@ def _copy_quantizer(
             with_post_rht_amax=quantizer.with_post_rht_amax,
             with_2d_quantization=quantizer.with_2d_quantization,
             stochastic_rounding=quantizer.stochastic_rounding,
-            with_random_sign_mask=quantizer.rht_matrix_random_sign_mask_t!=0,
+            with_random_sign_mask=quantizer.rht_matrix_random_sign_mask_t != 0,
         )
     else:
         raise NotImplementedError(
-            f"Checkpointing in LayerNormMLP not implemented for {type(quantizer).__name__} quantizer yet"
+            "Checkpointing in LayerNormMLP not implemented for"
+            f" {type(quantizer).__name__} quantizer yet"
         )
     q.internal = quantizer.internal
     return q
+
 
 class _LayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
@@ -517,9 +519,13 @@ class _LayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = (is_first_microbatch is None or is_first_microbatch)
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled )#and (is_recomputation or not checkpoint))
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled )#and (is_recomputation or not checkpoint))
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            fc1_weight_quantizer.set_usage(
+                rowwise=True, columnwise=is_grad_enabled
+            )  # and (is_recomputation or not checkpoint))
+            fc2_weight_quantizer.set_usage(
+                rowwise=True, columnwise=is_grad_enabled
+            )  # and (is_recomputation or not checkpoint))
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -650,7 +656,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if not fp8 and fp8_calibration:
             if fc2_input_quantizer is not None:
                 fc2_input_quantizer.calibrate(act_out)
-                
+
         # we want to skip fc2 computation if we are checkpointing and recomputing,
         # otherwise we compute fc2
         if not (is_recomputation and checkpoint):
@@ -1026,7 +1032,9 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx.tensor_objects = None
 
         if ctx.checkpoint:  # do recomputation from the original args
-            return _LayerNormMLP._forward(ctx, *tensors, *ctx.other_args.values(), recompute_for_bwd=True)
+            return _LayerNormMLP._forward(
+                ctx, *tensors, *ctx.other_args.values(), recompute_for_bwd=True
+            )
         else:  # load from saved (return ctx is just because the other branch does too)
             return [ctx] + tensors
 
