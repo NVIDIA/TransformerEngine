@@ -574,12 +574,16 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
-        if device_compute_capability == (12, 0) and (head_dim_qk > 128 or head_dim_qk % 8 != 0):
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+        ):
             if use_fused_attention:
                 logger.debug(
-                    "Disabling FusedAttention as MLA is not supported for compute capability ="
-                    " sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found: head_dim_qk"
-                    " = %s",
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
                     head_dim_qk,
                 )
             use_fused_attention = False
