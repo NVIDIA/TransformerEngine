@@ -479,9 +479,14 @@ def get_attention_backend(
                 use_fused_attention = False
             # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
             # determinism for Blackwell
-            elif cudnn_version < (9, 18, 0):
-                logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.18.0")
-                use_fused_attention = False
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0")
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug("Disabling FusedAttention for FP8 current scaling requiring determinism with cuDNN < 9.18.0")
+                        use_fused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:
