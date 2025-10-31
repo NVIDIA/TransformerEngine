@@ -1268,6 +1268,9 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     te_linear_ref = Linear(
@@ -1564,6 +1567,9 @@ def test_layernorm_linear_accuracy(
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
     dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1699,6 +1705,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     dtype, bs, model, bias, fuse_wgrad_accumulation
 ):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     ln_mlp = LayerNormMLP(
@@ -1843,6 +1852,8 @@ def test_grouped_linear_accuracy(
     fp8 = recipe is not None
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -1985,6 +1996,8 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2704,6 +2717,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         A,
         B,
         out,
+        [None] * z,
         dtype,
         get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
@@ -2855,6 +2869,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         A_fp8,
         B_fp8,
         out,
+        [None] * z,
         dtype,
         get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
