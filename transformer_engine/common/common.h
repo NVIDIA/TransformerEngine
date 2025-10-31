@@ -79,8 +79,8 @@ struct SimpleTensor {
   std::vector<size_t> shape;
   DType dtype;
 
-  SimpleTensor(void *dptr, const std::vector<size_t> &shape, DType dtype)
-      : dptr(dptr), shape(shape), dtype(dtype) {}
+  SimpleTensor(void *dptr, std::vector<size_t> shape, DType dtype)
+      : dptr{dptr}, shape{std::move(shape)}, dtype{dtype} {}
 
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
       : dptr(tensor.data_ptr),
@@ -126,11 +126,11 @@ struct Tensor {
   Tensor()
       : data(),
         columnwise_data(),
-        amax(nullptr, {1}, DType::kFloat32),
-        columnwise_amax(nullptr, {1}, DType::kFloat32),
-        scale(nullptr, {1}, DType::kFloat32),
-        scale_inv(nullptr, {1}, DType::kFloat32),
-        columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
+        amax(),
+        columnwise_amax(),
+        scale(),
+        scale_inv(),
+        columnwise_scale_inv(),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
         nvte_tensor(0) {}
 
@@ -284,8 +284,9 @@ struct Tensor {
         }
         return data.shape;
       }
+    default:
+      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
     }
-    NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
   }
 
   /*! Matrix height after tensor is flattened to 2D

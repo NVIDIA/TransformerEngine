@@ -633,7 +633,8 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      const size_t zero = 0;
+      return nvte_make_shape(&zero, 1);
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -644,7 +645,8 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      const size_t zero = 0;
+      return nvte_make_shape(&zero, 1);
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
@@ -768,7 +770,8 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      const size_t zero = 0;
+      return nvte_make_shape(&zero, 1);
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }

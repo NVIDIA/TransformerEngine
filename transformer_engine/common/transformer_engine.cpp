@@ -313,7 +313,8 @@ class TensorAllocator {
       return ret;
     }
     if (memory.size() < memory.capacity()) {
-      memory.emplace_back();
+      // memory.emplace_back(); /// TODO Debug why this is initializing tensors with scale_inv shape=[1]
+      memory.push_back(Tensor());
       Tensor &t = memory.back();
       size = memory.size();
       // 1-based indexing
@@ -539,7 +540,8 @@ void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor) {
 NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    return nvte_make_shape(nullptr, 0);
+    const size_t zero = 0;
+    return nvte_make_shape(&zero, 1);
   }
   return nvte_make_shape(t->scale_inv.shape.data(), t->scale_inv.shape.size());
 }
@@ -578,7 +580,8 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
+    const size_t zero = 0;
+    return {nullptr, kNVTEFloat32, nvte_make_shape(&zero, 1)};
   }
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   switch (param_name) {
