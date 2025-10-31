@@ -197,6 +197,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             fused_scale_factor = scale_factor
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
+                bias = None
 
         def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""
