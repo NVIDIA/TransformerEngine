@@ -58,6 +58,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     combine_and_quantize,
     combine_and_dequantize,
     print_quantizers,
+    ConvertTHDtoBSHD,
+    ConvertBSHDtoTHD,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
@@ -201,6 +203,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
         softmax_type: str = "vanilla",
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -209,6 +212,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
         self.softmax_type = softmax_type
+        self.return_max_logit = return_max_logit
 
         def mask_func(x, y):
             return (
@@ -217,6 +221,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 else attention_mask_func(x, y)
             )
 
+        self.mask_func = mask_func
         self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -238,6 +243,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         cu_seqlens_kv: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+        max_seqlen_q: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+        max_seqlen_kv: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
@@ -261,6 +268,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
 
+        # convert to sbhd
+        # training: bshd, thd
+        # inference: bshd, sbhd_2bshd, thd_2bshd
         if qkv_format == "bshd":
             # convert to sbhd and use sbhd implementation for now
             query_layer, key_layer, value_layer = [
@@ -269,9 +279,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if qkv_format == "sbhd_2bshd":
             key_layer, value_layer = [x.transpose(0, 1) for x in [key_layer, value_layer]]
 
-        total_tokens, batch_size = None, None
         if qkv_format == "thd_2bshd":
-            total_tokens, batch_size = query_layer.shape[0], key_layer.shape[0]
+            batch_size = key_layer.shape[0]
             query_layer = tex.convert_thd_to_bshd(
                 query_layer,
                 cu_seqlens_q,
@@ -281,6 +290,26 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
+        if qkv_format == "thd":
+            assert cu_seqlens_q is not None and cu_seqlens_kv is not None
+            assert max_seqlen_q is not None and max_seqlen_kv is not None
+            query_layer = ConvertTHDtoBSHD.apply(
+                query_layer,
+                cu_seqlens_q,
+                max_seqlen_q,
+            )
+            key_layer, value_layer = [
+                ConvertTHDtoBSHD.apply(
+                    x,
+                    cu_seqlens_kv,
+                    max_seqlen_kv,
+                )
+                for x in [key_layer, value_layer]
+            ]
+            query_layer, key_layer, value_layer = [
+                x.transpose(0, 1).contiguous() for x in [query_layer, key_layer, value_layer]
+            ]
+
         batch_size, max_seqlen_q, max_seqlen_kv = (
             query_layer.shape[1],
             query_layer.shape[0],
@@ -426,6 +455,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 matmul_result, None, None, dP_quantizer, "dP_quantizer", None
             )
 
+        # max attention score
+        max_logit = None
+        if self.return_max_logit:
+            # matmul_result [b, np, sq, dk], max_logit [np]
+            max_logit = matmul_result
+            if attn_mask_type != "no_mask":
+                max_logit = self.mask_func(matmul_result, attention_mask)
+            max_logit = torch.amax(max_logit, dim=(0, 2, 3))
+
         # add attention sink to the last column: [b, np, sq, sk+1]
         if self.softmax_type != "vanilla":
             matmul_result = torch.cat(
@@ -506,14 +544,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
             # [b, sq, np, hn] --> [tq, np, hn]
-            context_layer = tex.convert_bshd_to_thd(
+            context_layer = ConvertBSHDtoTHD.apply(
                 context_layer,
                 cu_seqlens_q,
-                total_tokens,
             )
 
             # [tq, np, hn] --> [tq, hp]
-            context_layer = context_layer.view(total_tokens, -1)
+            context_layer = context_layer.view(context_layer.shape[0], -1)
 
         if fp8:
             # quantize and dequantize O to emulate FP8
@@ -528,6 +565,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # quantize O
             if fp8_output:
                 context_layer = O_quantizer(context_layer)
+
+        if self.return_max_logit:
+            return context_layer, max_logit
 
         return context_layer
 
@@ -1067,6 +1107,7 @@ class FusedAttnFunc(torch.autograd.Function):
         softmax_offset,
         fp8_output,
         layer_number,
+        return_max_logit,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1102,6 +1143,7 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attention:       torch.float16 or torch.bfloat16
         out_nominal_dtype = q.dtype
 
+        max_logit = None
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
 
@@ -1129,7 +1171,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors = fused_attn_fwd(
+            out_, aux_ctx_tensors, *_ = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1205,7 +1247,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors = fused_attn_fwd(
+            out_, aux_ctx_tensors, *max_logit = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -1233,6 +1275,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
                 softmax_offset,
+                return_max_logit,
             )
             out = out_
             out_ret = out_
@@ -1327,10 +1370,12 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
+        if return_max_logit:
+            return out_ret, *max_logit
         return out_ret
 
     @staticmethod
-    def backward(ctx, d_out):
+    def backward(ctx, d_out, *_args):
         # pylint: disable=missing-function-docstring
 
         # d_out is expected to be in FP8 if is_output_fp8=True,
@@ -1574,6 +1619,7 @@ class FusedAttnFunc(torch.autograd.Function):
             d_softmax_offset,
             None,
             None,
+            None,
         )
 
 
@@ -1614,6 +1660,7 @@ class FusedAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         deterministic: bool = False,
         softmax_type: str = "vanilla",
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -1627,6 +1674,7 @@ class FusedAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.softmax_type = softmax_type
+        self.return_max_logit = return_max_logit
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1846,6 +1894,7 @@ class FusedAttention(torch.nn.Module):
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
+                    return_max_logit=self.return_max_logit,
                 )
         else:
             with self.attention_dropout_ctx():
@@ -1881,7 +1930,11 @@ class FusedAttention(torch.nn.Module):
                     softmax_offset,
                     fp8_output,
                     self.layer_number,
+                    self.return_max_logit,
                 )
 
+        if self.return_max_logit:
+            # ...hd -> ...(hd)
+            return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
