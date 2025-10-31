@@ -27,7 +27,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope
+from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope, quantize
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -1266,7 +1266,16 @@ def act_lu(
     )
     act_params = act_params if act_params is not None else ActivationParams()
     if not ActLuPrimitive.enabled():
-        return _jax_act_lu(x, activation_type, quantizer, act_params)
+        output = _jax_act_lu(x, activation_type, act_params=act_params)
+        if quantizer is not None:
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-1,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
+        return output
 
     # TE/common does not support colwise-only quantization yet
     if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
@@ -1417,7 +1426,17 @@ def quantize_dact_dbias(
     if not PrimitiveClass.enabled() or (
         quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE
     ):
-        return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer, act_params)
+        output, dbias = _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, act_params=act_params)
+        if quantizer is not None:
+            output = quantize(
+                output,
+                quantizer,
+                flatten_axis=-2,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
+            )
+        return output, dbias
+
     if quantizer is None:
         output, _, _, _, updated_amax, _ = PrimitiveClass.outer_primitive.bind(
             dz,
