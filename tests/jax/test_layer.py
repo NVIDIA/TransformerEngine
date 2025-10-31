@@ -334,11 +334,11 @@ class BaseRunner:
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
         ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        ref_out = self._loss_fn(ref_params, ref_others, ref_layer, inputs, ref_masks)
-        test_out = self._loss_fn(test_params, test_others, test_layer, inputs, test_masks)
+        ref_out = self._loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer)
+        test_out = self._loss_fn(inputs, test_masks, test_params, test_others, test_layer)
 
         tols = dtype_tols(dtype, rtol=rtol, atol=atol)
-        assert_allclose(ref_out.mean(), test_out.mean(), **tols)
+        assert_allclose(ref_out, test_out, **tols)
 
     def test_backward(
         self,
