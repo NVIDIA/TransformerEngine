@@ -699,11 +699,12 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
 
   // Optimized BWD/FWD SwiGLU MXFP8 Rowwise kernels for BF16/FP16 inputs
   if constexpr (!std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-    if constexpr ((!IS_BWD && (ActOP == &silu<fp32, fp32>))
-                  || (IS_BWD && (ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>))) {
-      if (((gated_input.dtype() == DType::kFloat16) || (gated_input.dtype() == DType::kBFloat16)) 
-          && (scaling_type == ScalingType::ROWWISE)) {
-        quantize_gated_rowwise<IS_BWD, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream); 
+    if constexpr ((!IS_BWD && (ActOP == &silu<fp32, fp32>)) ||
+                  (IS_BWD && (ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>))) {
+      if (((gated_input.dtype() == DType::kFloat16) || (gated_input.dtype() == DType::kBFloat16)) &&
+          (scaling_type == ScalingType::ROWWISE)) {
+        quantize_gated_rowwise<IS_BWD, ParamOP, ActOP, DActOP>(grad, gated_input, output, p,
+                                                               stream);
         return;
       }
     }
