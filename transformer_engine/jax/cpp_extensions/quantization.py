@@ -15,6 +15,7 @@ from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
+from transformer_engine_jax import QuantizeLayout
 
 from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
 from .base import BasePrimitive, register_primitive
@@ -40,7 +41,6 @@ from ..quantize import (
     GroupedScaledTensor1x,
     Quantizer,
     GroupedQuantizer,
-    QuantizeLayout,
     ScalingMode,
     compute_scale_from_amax,
     NoScaleTensor,

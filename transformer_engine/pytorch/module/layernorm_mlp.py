@@ -16,7 +16,7 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.utils import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
@@ -1447,7 +1447,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     activation : str, default = 'gelu'
           activation function used.
           Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                   'silu', 'swiglu', and 'clamped_swiglu'.
+          'silu', 'swiglu', and 'clamped_swiglu'.
     activation_params : dict, default = `None`
                         Additional parameters for the activation function.
                         At the moment, only used for 'clamped_swiglu' activation which

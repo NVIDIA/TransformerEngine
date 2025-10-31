@@ -245,14 +245,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax scale for the attention scores. If `None`, defaults to
                 `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 softmax type as described in this paper:
+                 Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
-                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
-                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
-                 where alpha is a learnable parameter in shape [h].
+
+                 For a given attention score ``S = Q x K^T``, of shape ``[b, h, s_q, s_kv]``:
+
+                 * 'vanilla': ``S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1)``
+                 * 'off-by-one': ``S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1))``
+                 * 'learnable': ``S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1))``
+
+                 where ``alpha`` is a learnable parameter in shape ``[h]``.
                  'off-by-one' and 'learnable' softmax types are also called sink attention
                  ('zero sink' and 'learnable sink').
     return_max_logit: Optional[bool], default = `False`
@@ -284,16 +287,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                can overlap two flash attention kernels.
     cp_comm_type : str, default = `p2p`
                   inter-gpu communication type for context parallelism.
-                  Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                  "p2p": Exchange KV chunks with P2P communications in ring topology.
-                         P2P is async and can be overlapped with attention compute.
-                  "all_gather": All-gather to get full sequence of KV before attention.
-                                The all-gather is not async, and cannot be overlapped.
-                  "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                         group, and gather to get full sequence of QKV.
-                  "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                  across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                  p2p between sub-groups (e.g., via IBLink).
+                  Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                  - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                    P2P is async and can be overlapped with attention compute.
+                  - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                    The all-gather is not async, and cannot be overlapped.
+                  - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                    group, and gather to get full sequence of QKV.
+                  - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                    across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                    p2p between sub-groups (e.g., via IBLink).
     """
 
     def __init__(
@@ -531,16 +535,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                    cuda stream for context parallel execution.
         cp_comm_type : str, default = `p2p`
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                      "p2p": Exchange KV chunks with P2P communications in ring topology.
-                             P2P is async and can be overlapped with attention compute.
-                      "all_gather": All-gather to get full sequence of KV before attention.
-                                    The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                             group, and gather to get full sequence of QKV.
-                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                      p2p between sub-groups (e.g., via IBLink).
+                      Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                      - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                        P2P is async and can be overlapped with attention compute.
+                      - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                        The all-gather is not async, and cannot be overlapped.
+                      - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                        group, and gather to get full sequence of QKV.
+                      - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                        across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                        p2p between sub-groups (e.g., via IBLink).
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
