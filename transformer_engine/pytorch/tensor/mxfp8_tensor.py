@@ -372,9 +372,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             strides = args[2]
             tensor = args[0]
             if (
-                strides[-1] != 1
-                or len(shape) != 2
-                or len(strides) != 2
+                len(shape) != 2
+                or strides[1] != 1
                 or strides[0] % 128 != 0
                 or shape[0] % 128 != 0
                 or shape[1] % 128 != 0
@@ -547,7 +546,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             MXFP8Tensor after all-gather.
         """
         # pylint: disable=unused-argument
-        fsdp_state = module._get_fsdp_state()
+        from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+        fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         quantizer = self._quantizer.copy()
         sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv)

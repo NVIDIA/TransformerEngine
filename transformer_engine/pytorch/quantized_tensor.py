@@ -395,7 +395,7 @@ class QuantizedTensor(torch.Tensor):
             # We hackily add a dummy function to handle this case.
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
-
+    
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 

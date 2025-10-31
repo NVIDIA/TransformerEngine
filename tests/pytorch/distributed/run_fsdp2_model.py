@@ -48,7 +48,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--recipe",
         type=str,
-        default="mx_fp8_block_scaling",
+        default="current_scaling",
         help="Quantizer type.",
         choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
     )
@@ -65,6 +65,7 @@ def _parse_args(argv=None, namespace=None):
         ],
         help="Transformer Engine layer type",
     )
+    parser.add_argument("--num-layers", type=int, default=4, help="Number of layers in the model")
     parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
     )
@@ -145,7 +146,7 @@ def init_te_model(config):
         if layer_type is te.MultiheadAttention:
             kwargs["input_layernorm"] = True
     kwargs["device"] = config.device
-    model = layer_type(*args, **kwargs)
+    model = nn.Sequential(*[layer_type(*args, **kwargs) for _ in range(config.num_layers)])
     return model, inp_shape, out_shape
 
 
@@ -170,26 +171,9 @@ def get_device_mesh(world_size, sharding_dims):
 
 
 def shard_model_with_fsdp2(model, mesh):
-    # fully_shard has compatibilty issue with TransformerLayer at the moment.
-    # If we wrap the TransformerLayer as well as its submodule, there seems to be
-    # some sort of parameter group conflict which needs to be fixed.
-    # Workaround at the moment is to only shard the inner submodules that
-    # have parameters
-    # TODO Varun: Need to fix fully_shard to work with TransformerLayer.
-    all_modules = list(model.modules())
-    if isinstance(model, te.TransformerLayer):
-        sub_modules_to_wrap = [
-            te.Linear,
-            te.LayerNormLinear,
-            te.LayerNormMLP,
-        ]
-        for sub_module in all_modules[::-1]:  # Reverse order traversal
-            if type(sub_module) in sub_modules_to_wrap:
-                fully_shard(sub_module, mesh=mesh)
-    else:
-        for sub_module in all_modules[::-1]:
-            fully_shard(sub_module, mesh=mesh)
-
+    for child in model.children():
+        fully_shard(child, mesh=mesh)
+    fully_shard(model, mesh=mesh)
     return model
 
 

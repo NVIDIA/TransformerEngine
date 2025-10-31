@@ -4,7 +4,6 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-import os
 from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 import torch
@@ -733,6 +732,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             pass
         return super().__torch_dispatch__(func, types, args, kwargs)
 
+            
     def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
         """Functions FSDP2 calls before all-gather of the
         weights for both forward and backward passes.
@@ -752,7 +752,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
-        # pylint: disable=unused-argument
+        # Importing here to avoid circular imports
+        from transformer_engine.pytorch.distributed import _get_module_fsdp_state
         if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
@@ -763,7 +764,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # Allgathered weights might only need one of data or transpose based on
         # L40/Hopper based on forward or backward pass in fsdp state.
         quantizer = self._quantizer.copy()  # quantizer to be used for allgathered weights
-        fsdp_state = module._get_fsdp_state()
+        fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
         # based on whether its forward or backward pass. If weights are not resharded after forward pass,
