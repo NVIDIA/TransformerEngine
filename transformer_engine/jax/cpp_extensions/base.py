@@ -28,13 +28,7 @@ class BasePrimitive(metaclass=ABCMeta):
     _is_enabled = True
 
     # Default list of primitives to disable for all recipes
-    _default_disable_names = [
-        "NormFwdPrimitive",
-        "NormBwdPrimitive",
-        "ActLuPrimitive",
-        "DActLuQuantizePrimitive",
-        "DActLuDBiasQuantizePrimitive",
-    ]
+    _default_disable_names = []
 
     @classmethod
     def enabled(cls):
