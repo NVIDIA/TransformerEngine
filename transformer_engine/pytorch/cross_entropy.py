@@ -47,7 +47,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tensor: The computed loss.
         """
-        loss, _input = triton_cross_entropy.cross_entropy_forward(
+        loss, m_d_X_y = triton_cross_entropy.cross_entropy_forward(
             _input,
             target,
             label_smoothing,
@@ -56,7 +56,10 @@ class CrossEntropyFunction(torch.autograd.Function):
             ignore_idx,
         )
 
-        ctx.save_for_backward(_input.detach())
+        ctx.save_for_backward(_input.detach(), target.detach(), m_d_X_y.detach())
+        ctx.dist_process_group = dist_process_group
+        ctx.label_smoothing = label_smoothing
+        ctx.reduce_loss = reduce_loss
         ctx.is_cg_capturable = is_cg_capturable
         return loss
 
@@ -72,9 +75,12 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
         """
-        (_input,) = ctx.saved_tensors
+        (_input, target, m_d_X_y) = ctx.saved_tensors
+        dist_process_group = ctx.dist_process_group
+        label_smoothing = ctx.label_smoothing
+        reduce_loss = ctx.reduce_loss
         _input = triton_cross_entropy.cross_entropy_backward(
-            _input, grad_output, ctx.is_cg_capturable
+            _input, target, m_d_X_y, grad_output, label_smoothing, reduce_loss, dist_process_group, ctx.is_cg_capturable
         )
         return (
             _input,
