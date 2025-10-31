@@ -595,14 +595,14 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
         (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
         "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     // We don't allow empty tensors. They should be filtered out before calling this function.
-    if (input[i]->data.numel() == 0) {
-      NVTE_ERROR("Tensor input[" + std::to_string(i) + "] is empty.");
+    if (input[i]->numel() == 0) {
+      NVTE_ERROR("Tensor input[", i, "] is empty.");
     }
     CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]");
     CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]");
-    all_has_data &= input[i]->has_data();
-    all_has_columnwise_data &= input[i]->has_columnwise_data();
-    all_nvfp4 &= is_nvfp4_scaling(scaling_mode);
+    all_has_data = all_has_data && input[i]->has_data();
+    all_has_columnwise_data = all_has_columnwise_data && input[i]->has_columnwise_data();
+    all_nvfp4 = all_nvfp4 && is_nvfp4_scaling(scaling_mode);
   }
   NVTE_CHECK(all_has_data || all_has_columnwise_data,
              "All tensors should have data or columnwise data.");

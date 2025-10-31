@@ -87,7 +87,7 @@ struct SimpleTensor {
         shape(tensor.shape.data, tensor.shape.data + tensor.shape.ndim),
         dtype(static_cast<DType>(tensor.dtype)) {}
 
-  SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
+  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
     return {dptr, static_cast<NVTEDType>(dtype),
@@ -104,7 +104,8 @@ struct SimpleTensor {
 
   void clear() {
     dptr = nullptr;
-    shape.resize(0);
+    shape.resize(1);
+    shape[0] = 0;
     dtype = DType::kFloat32;
   }
 };
@@ -154,11 +155,13 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept { return data.dptr != nullptr; }
+  bool has_data() const noexcept {
+    return data.dptr != nullptr;
+    // TODO return data.dptr != nullptr && data.numel() != 0;
+  }
 
-  // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept {
-    return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
+    return columnwise_data.dptr != nullptr && columnwise_data.numel() != 0;
   }
 
   DType dtype() const {
@@ -169,34 +172,52 @@ struct Tensor {
   }
 
   size_t dim() const {
-    if (!has_data() && has_columnwise_data()) {
-      return columnwise_data.shape.size();
-    } else {
-      return data.shape.size();
+    // Check whether a tensor shape matches an uninitialized tensor
+    auto is_shape_trivial = [](const std::vector<size_t> &shape) -> bool {
+      return shape.size() == 1 && shape[0] == 0;
+    };
+
+    // Choose data buffer based on whether it is initialized
+    // Note: Logically each tensor format interprets its data
+    // differently, but for simplicity we assume they all use row-wise
+    // and column-wise data similarly.
+    bool use_columnwise_shape = false;
+    if (data.dptr != nullptr) {
+      use_columnwise_shape = false;
+    } else if (columnwise_data.dptr != nullptr) {
+      use_columnwise_shape = true;
+    } else if (!is_shape_trivial(data.shape)) {
+      use_columnwise_shape = false;
+    } else if (!is_shape_trivial(columnwise_data.shape)) {
+      use_columnwise_shape = true;
     }
+
+    // Infer number of dims based on data
+    if (use_columnwise_shape) {
+      return columnwise_data.shape.size();
+    }
+    return data.shape.size();
   }
 
   std::vector<size_t> shape() const {
-    /* Note: We sometimes experience spurious compiler errors
-     * (-Wstringop-overflow) from this function. It appears that GCC
-     * has some bugs with std::vector (see
-     * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109569).
-     */
+    // Check whether a tensor shape matches an uninitialized tensor
+    auto is_shape_trivial = [](const std::vector<size_t> &shape) -> bool {
+      return shape.size() == 1 && shape.front() == 0;
+    };
+
+    // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
       case NVTE_NVFP4_1D_SCALING: {
         // Choose data buffer based on whether it is initialized
-        // Note: Uninitialized buffers currently have shape=[].
-        // However, this is logically incorrect. 0-D tensors have 1
-        // entry, and uninitialized tensors should have shape=[0].
         bool use_columnwise_shape = false;
         if (data.dptr != nullptr) {
           use_columnwise_shape = false;
         } else if (columnwise_data.dptr != nullptr) {
           use_columnwise_shape = true;
-        } else if (data.shape.size() != 0) {
+        } else if (!is_shape_trivial(data.shape)) {
           use_columnwise_shape = false;
-        } else if (columnwise_data.shape.size() != 0) {
+        } else if (!is_shape_trivial(columnwise_data.shape)) {
           use_columnwise_shape = true;
         }
 
@@ -215,39 +236,56 @@ struct Tensor {
         }
         return data.shape;
       }
-      case NVTE_MXFP8_1D_SCALING:
-        if (!has_data() && has_columnwise_data()) {
-          return columnwise_data.shape;
-        } else {
-          return data.shape;
+      case NVTE_MXFP8_1D_SCALING: {
+        // Choose data buffer based on whether it is initialized
+        bool use_columnwise_shape = false;
+        if (data.dptr != nullptr) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.dptr != nullptr) {
+          use_columnwise_shape = true;
+        } else if (!is_shape_trivial(data.shape)) {
+          use_columnwise_shape = false;
+        } else if (!is_shape_trivial(columnwise_data.shape)) {
+          use_columnwise_shape = true;
         }
-        break;
+
+        // Infer shape based on data
+        if (use_columnwise_shape) {
+          return columnwise_data.shape;
+        }
+        return data.shape;
+      }
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D: {
-        if (!has_data() && has_columnwise_data()) {
-          std::vector<size_t> shape;
-          size_t ndim = columnwise_data.shape.size();
-          shape.reserve(ndim);
-          for (size_t i = 0; i + 1 < ndim; ++i) {
-            shape.push_back(columnwise_data.shape[i + 1]);
-          }
-          if (ndim > 0) {
-            shape.push_back(columnwise_data.shape[0]);
-          }
-          return shape;
-        } else {
-          // NOTE: We may have removed the data pointer from
-          // data by setting usage. In that case, we return
-          // the non-null shape. It is our best guess at the most
-          // recent shape.
-          return data.shape;
+        // Choose data buffer based on whether it is initialized
+        bool use_columnwise_shape = false;
+        if (data.dptr != nullptr) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.dptr != nullptr) {
+          use_columnwise_shape = true;
+        } else if (!is_shape_trivial(data.shape)) {
+          use_columnwise_shape = false;
+        } else if (!is_shape_trivial(columnwise_data.shape)) {
+          use_columnwise_shape = true;
         }
-        break;
+
+        // Infer shape based on data
+        if (use_columnwise_shape) {
+          // Column-wise data is transposed
+          std::vector<size_t> ret;
+          if (!columnwise_data.shape.empty()) {
+            ret.reserve(columnwise_data.shape.size());
+            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
+              ret.push_back(columnwise_data.shape[i]);
+            }
+            ret.push_back(columnwise_data.shape.front());
+          }
+          return ret;
+        }
+        return data.shape;
       }
-      default:
-        NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
-        return {};
     }
+    NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
   }
 
   /*! Matrix height after tensor is flattened to 2D
