@@ -251,15 +251,15 @@ __device__ __forceinline__ void compute_bwd_gated_activation(
       dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
       gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
     }
-    float x = act_elt;
     float act_x;
     float dact_x;
     if constexpr (IS_CLAMPED_SWIGLU) {
-      x = min(act_elt, p.limit);
+      const float x = min(act_elt, p.limit);
       const float s = sigmoidf(p.alpha * x);
       act_x = x * s;
       dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
     } else {
+      const float x = act_elt;
       act_x = ActOP(x, p);
       dact_x = DActOP(x, p);
     }
