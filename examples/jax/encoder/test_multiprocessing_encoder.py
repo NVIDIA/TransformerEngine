@@ -672,7 +672,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_nvfp4(self):
         """Test Transformer Engine with NVFP4"""
         result = self.exec(True, "NVFP4BlockScaling")
-        assert result[0] < 0.451 and result[1] > 0.79
+        assert result[0] < 0.451 and result[1] > 0.788
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
@@ -710,7 +710,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_nvfp4_shardy(self):
         """Test Transformer Engine with NVFP4"""
         result = self.exec(True, "NVFP4BlockScaling", enable_shardy=True)
-        assert result[0] < 0.451 and result[1] > 0.79
+        assert result[0] < 0.451 and result[1] > 0.788
 
 
 if __name__ == "__main__":

@@ -5,15 +5,6 @@
 cmake_minimum_required(VERSION 3.21)
 
 # Language options
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-  endif()
-endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -30,8 +21,62 @@ project(transformer_engine LANGUAGES CUDA CXX)
 
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
-if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+if (CUDAToolkit_VERSION VERSION_LESS 12.1)
+  message(FATAL_ERROR "CUDA 12.1+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# Process GPU architectures
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
+endif()
+
+# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+set(NVTE_GENERIC_ARCHS)
+set(NVTE_SPECIFIC_ARCHS)
+
+# Check for architecture 100
+list(FIND CMAKE_CUDA_ARCHITECTURES "100" arch_100_index)
+if(NOT arch_100_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "100")
+  list(APPEND NVTE_GENERIC_ARCHS "100")
+  list(APPEND NVTE_SPECIFIC_ARCHS "100a")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "103a")
+  endif()
+endif()
+
+# Check for architecture 101 (if we see this we are in toolkit <= 12.9)
+list(FIND CMAKE_CUDA_ARCHITECTURES "101" arch_101_index)
+if(NOT arch_101_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "101")
+  list(APPEND NVTE_GENERIC_ARCHS "101")
+  list(APPEND NVTE_SPECIFIC_ARCHS "101a")
+endif()
+
+# Check for architecture 110 (if we see this we are in toolkit >= 13.0)
+list(FIND CMAKE_CUDA_ARCHITECTURES "110" arch_110_index)
+if(NOT arch_110_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "110")
+  list(APPEND NVTE_GENERIC_ARCHS "110")
+  list(APPEND NVTE_SPECIFIC_ARCHS "110f")
+endif()
+
+# Check for architecture 120
+list(FIND CMAKE_CUDA_ARCHITECTURES "120" arch_120_index)
+if(NOT arch_120_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "120")
+  list(APPEND NVTE_GENERIC_ARCHS "120")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "120f")
+  else()
+    list(APPEND NVTE_SPECIFIC_ARCHS "120a")
+  endif()
 endif()
 
 # cuDNN frontend API
@@ -53,34 +98,31 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-# NVIDIA MathDX include directory (from Python package install location)
-if(NOT DEFINED MATHDX_INCLUDE_DIR)
-  execute_process(
-    COMMAND ${Python_EXECUTABLE} -m pip show nvidia-mathdx
-    OUTPUT_VARIABLE _PIP_SHOW_MATHDX
-    ERROR_VARIABLE _PIP_SHOW_MATHDX_ERR
-    RESULT_VARIABLE _PIP_SHOW_MATHDX_RES
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(NOT _PIP_SHOW_MATHDX_RES EQUAL 0)
-    message(FATAL_ERROR "Failed to query 'nvidia-mathdx' with pip (using ${Python_EXECUTABLE}): ${_PIP_SHOW_MATHDX_ERR}")
-  endif()
-  string(REGEX MATCH "Location: ([^\n\r]+)" _MATHDX_LOC_MATCH "${_PIP_SHOW_MATHDX}")
-  if(NOT _MATHDX_LOC_MATCH)
-    message(FATAL_ERROR "Could not parse installation location for 'nvidia-mathdx'. Output was:\n${_PIP_SHOW_MATHDX}")
-  endif()
-  set(MATHDX_LOCATION "${CMAKE_MATCH_1}")
-  set(MATHDX_INCLUDE_DIR "${MATHDX_LOCATION}/nvidia/mathdx/include")
-endif()
-if(NOT EXISTS "${MATHDX_INCLUDE_DIR}")
-  message(FATAL_ERROR "MATHDX include directory not found at ${MATHDX_INCLUDE_DIR}. Set MATHDX_INCLUDE_DIR or ensure 'nvidia-mathdx' is installed for ${Python_EXECUTABLE}.")
-endif()
-
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
-list(APPEND transformer_engine_SOURCES
+set(transformer_engine_cpp_sources)
+set(transformer_engine_cuda_sources)
+set(transformer_engine_cuda_arch_specific_sources)
+
+list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
+     fused_attn/fused_attn.cpp
+     gemm/config.cpp
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/rmsnorm/rmsnorm_api.cpp
+     util/cuda_driver.cpp
+     util/cuda_nvml.cpp
+     util/cuda_runtime.cpp
+     util/multi_stream.cpp
+     util/rtc.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
+
+list(APPEND transformer_engine_cuda_sources
      common.cu
      multi_tensor/adam.cu
      multi_tensor/compute_scale.cu
@@ -92,40 +134,23 @@ list(APPEND transformer_engine_SOURCES
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-     transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
-     transpose/quantize_transpose_vector_blockwise_fp4.cu
-     activation/gelu.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     activation/relu.cu
-     activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
      fused_attn/utils.cu
-     gemm/config.cpp
      gemm/cublaslt_gemm.cu
-     gemm/cutlass_grouped_gemm.cu
-     normalization/common.cpp
-     normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
-     normalization/rmsnorm/rmsnorm_api.cpp
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     util/cast.cu
      util/padding.cu
-     util/cuda_driver.cpp
-     util/cuda_nvml.cpp
-     util/cuda_runtime.cpp
-     util/multi_stream.cpp
-     util/rtc.cpp
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -139,12 +164,58 @@ list(APPEND transformer_engine_SOURCES
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
      recipe/nvfp4.cu
+     comm_gemm_overlap/userbuffers/userbuffers.cu)
+
+list(APPEND transformer_engine_cuda_arch_specific_sources
+     gemm/cutlass_grouped_gemm.cu
+     cast/cast.cu
+     activation/gelu.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu
      hadamard_transform/hadamard_transform.cu
-     hadamard_transform/hadamard_transform_cast_fusion.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     hadamard_transform/hadamard_transform_cast_fusion.cu)
+
+# Compiling the files with the worst compilation time first to hopefully overlap
+# better with the faster-compiling cpp files
+list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_sources}
+                                       ${transformer_engine_cuda_sources}
+                                       ${transformer_engine_cpp_sources})
+
+# Set compile options for CUDA sources with generic architectures
+foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
+
+# Set compile options for CUDA sources with specific architectures
+foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
 
 if (NVTE_WITH_CUBLASMP)
 list(APPEND transformer_engine_SOURCES
@@ -170,7 +241,6 @@ target_link_libraries(transformer_engine PUBLIC
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-target_include_directories(transformer_engine PRIVATE ${MATHDX_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -249,36 +319,42 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
-set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                            fused_softmax/scaled_upper_triang_masked_softmax.cu
-                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                            multi_tensor/adam.cu
-                            multi_tensor/compute_scale.cu
-                            multi_tensor/l2norm.cu
-                            multi_tensor/scale.cu
-                            multi_tensor/sgd.cu
-                            fused_attn/flash_attn.cu
-                            fused_attn/context_parallel.cu
-                            fused_attn/kv_cache.cu
-                            PROPERTIES
-                            COMPILE_OPTIONS "--use_fast_math")
+set(nvte_sources_with_fast_math)
+list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
+                                        fused_softmax/scaled_upper_triang_masked_softmax.cu
+                                        fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                                        multi_tensor/adam.cu
+                                        multi_tensor/compute_scale.cu
+                                        multi_tensor/l2norm.cu
+                                        multi_tensor/scale.cu
+                                        multi_tensor/sgd.cu
+                                        fused_attn/flash_attn.cu
+                                        fused_attn/context_parallel.cu
+                                        fused_attn/kv_cache.cu)
+
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  set_source_files_properties(activation/gelu.cu
-                              activation/relu.cu
-                              activation/swiglu.cu
-                              util/cast.cu
-                              PROPERTIES
-                              COMPILE_OPTIONS "--use_fast_math")
+  list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/relu.cu
+                                          activation/swiglu.cu)
 endif()
+
+foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
+  set_property(
+    SOURCE ${cuda_source}
+    APPEND
+    PROPERTY
+    COMPILE_OPTIONS "--use_fast_math")
+endforeach()
+
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Number of parallel build jobs
-if(ENV{MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
-elseif(ENV{NVTE_BUILD_MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
+if($ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{MAX_JOBS})
+elseif($ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{NVTE_BUILD_MAX_JOBS})
 else()
   set(BUILD_JOBS_STR "max")
 endif()
