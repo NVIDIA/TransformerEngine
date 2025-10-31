@@ -2,11 +2,6 @@
 #
 # See LICENSE for license information.
 
-function error_exit() {
-    echo "Error: $1"
-    exit 1
-}
-
 function test_fail() {
     RET=1
     FAILED_CASES="$FAILED_CASES $1"
@@ -23,7 +18,7 @@ mkdir -p "$XML_LOG_DIR"
 export NVTE_JAX_UNITTEST_LEVEL="L1"
 
 # Use --xla_gpu_enable_triton_gemm=false to ensure the reference JAX implementation we are using is accurate.
-XLA_FLAGS="$XLA_FLAGS --xla_gpu_enable_triton_gemm=false"
+export XLA_FLAGS="$XLA_FLAGS --xla_gpu_enable_triton_gemm=false"
 
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_dense.xml $TE_PATH/tests/jax/test_distributed_dense.py || test_fail "test_distributed_dense.py"
 
