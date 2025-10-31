@@ -131,11 +131,11 @@ class LogTensorStats(BaseLogTensorStats):
         Adds all max_blockwise_dynamic_range stats to the stat computation logic.
         Changes the types of the stats from Dict to BlockwiseDynamicRangeStat named tuple,
         for other stats nothing is changed.
-        
+
         For example, if the stats is [{"max_blockwise_dynamic_range": {"block_size": 32, "dims": 1}}],
         it will be changed to [BlockwiseDynamicRangeStat(block_size=32, dims=1, max_over_orientations=True)]
         or [BlockwiseDynamicRangeStat(block_size=32, dims=1, max_over_orientations=False)] depending on tensor_name.
-        
+
         """
         max_over_orientations = tensor_name in ["activation", "weight"]
         parsed_stats = []
@@ -143,7 +143,7 @@ class LogTensorStats(BaseLogTensorStats):
             if isinstance(stat, dict):
                 block_size = stat["max_blockwise_dynamic_range"].get("block_size", 32)
                 dims = stat["max_blockwise_dynamic_range"].get("dims", 1)
-                
+
                 # Register stat and return the named tuple
                 parsed_stat = add_max_blockwise_dynamic_range_stats(
                     block_size, dims, max_over_orientations

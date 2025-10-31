@@ -14,12 +14,13 @@ from transformer_engine.common.recipe import Format
 from collections import namedtuple
 
 
+class BlockwiseDynamicRangeStat(
+    namedtuple("BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"])
+):
+    """Named tuple representing a blockwise dynamic range statistic configuration."""
 
-class BlockwiseDynamicRangeStat(namedtuple("BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"])):
-    """   Named tuple representing a blockwise dynamic range statistic configuration.  """
-    
     def __str__(self) -> str:
-        """ Convert to string representation for stat name. Used for logging.   """
+        """Convert to string representation for stat name. Used for logging."""
         suffix = "_max_over_orientations" if self.max_over_orientations else ""
         return f"max_blockwise_dynamic_range_block_size_{self.block_size}_dims_{self.dims}{suffix}"
 
@@ -403,21 +404,21 @@ def add_max_blockwise_dynamic_range_stats(
     block_size: int, dims: int, max_over_orientations: bool = False
 ):
     """Register max_blockwise_X_dynamic_range stats for the recipe.
-    
+
     Args:
         block_size: Size of blocks for computing blockwise dynamic range
         dims: 1 for 1D blocks, 2 for 2D blocks
         max_over_orientations: Whether to compute max over rowwise and columnwise orientations
-        
+
     Returns:
         BlockwiseDynamicRangeStat named tuple representing this stat (used as the stat key)
     """
     # Use named tuple directly as the stat key - this is cleaner than string keys
     stat_key = BlockwiseDynamicRangeStat(block_size, dims, max_over_orientations)
-    
+
     if stat_key in stats_to_num:
         return stat_key  # already registered
-    
+
     assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
     stats_to_num[stat_key] = len(stats_to_num)
     DEPENDENCIES[stat_key] = {stat_key}
@@ -426,7 +427,7 @@ def add_max_blockwise_dynamic_range_stats(
         lambda x, aux_dict, _stat_key=stat_key: compute_max_blockwise_dynamic_range(x, _stat_key),
         lambda buffers, _stat_key=stat_key: max(_get(buffers, _stat_key)),
     )
-    
+
     return stat_key
 
 

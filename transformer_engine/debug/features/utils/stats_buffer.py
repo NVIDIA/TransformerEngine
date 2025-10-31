@@ -130,10 +130,10 @@ class _Buffer:
         for stat_name in self.stats_to_log:
             combiner = STATS[stat_name][1]
             stat_value = combiner(gathered_helper_stats)
-            
+
             # Convert stat key to string for logging (uses __str__ for named tuples)
             stat_name_str = str(stat_name)
-            
+
             MetricLogger.log_scalar(
                 f"{self.layer_name}_{self.tensor_name}_{stat_name_str}", stat_value, self.iteration
             )
