@@ -80,7 +80,14 @@ class CrossEntropyFunction(torch.autograd.Function):
         label_smoothing = ctx.label_smoothing
         reduce_loss = ctx.reduce_loss
         _input = triton_cross_entropy.cross_entropy_backward(
-            _input, target, m_d_X_y, grad_output, label_smoothing, reduce_loss, dist_process_group, ctx.is_cg_capturable
+            _input,
+            target,
+            m_d_X_y,
+            grad_output,
+            label_smoothing,
+            reduce_loss,
+            dist_process_group,
+            ctx.is_cg_capturable,
         )
         return (
             _input,

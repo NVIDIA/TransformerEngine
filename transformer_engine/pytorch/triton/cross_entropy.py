@@ -201,6 +201,7 @@ def cross_entropy_forward_kernel(
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
 
+
 @triton.jit
 def cross_entropy_backward_kernel(
     X_ptr,
@@ -251,7 +252,6 @@ def cross_entropy_backward_kernel(
     grad_output_ptr += program_id * grad_output_stride
     grad_output = tl.load(grad_output_ptr)
 
-
     # 1. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
@@ -283,7 +283,7 @@ def cross_entropy_backward_kernel(
             X_block = tl.exp(X_block - m) / d - eps
         grad_input = X_block * grad_output
         tl.store(X_ptr + X_offsets, grad_input.to(input_dtype), mask=X_offsets < n_cols)
-    
+
     # We need tl.debug_barrier() to ensure the new result of X_ptr is written
     tl.debug_barrier()
 
@@ -391,18 +391,22 @@ def cross_entropy_forward(
     return loss, m_d_X_y_gathered
 
 
-def cross_entropy_backward(_input: torch.Tensor,
-                           target: torch.Tensor,
-                           m_d_X_y: torch.Tensor,
-                           grad_output: torch.Tensor,
-                           label_smoothing: float,
-                           reduce_loss: bool,
-                           dist_process_group: Union[dist.ProcessGroup, None],
-                           is_cg_capturable: bool = False):
+def cross_entropy_backward(
+    _input: torch.Tensor,
+    target: torch.Tensor,
+    m_d_X_y: torch.Tensor,
+    grad_output: torch.Tensor,
+    label_smoothing: float,
+    reduce_loss: bool,
+    dist_process_group: Union[dist.ProcessGroup, None],
+    is_cg_capturable: bool = False,
+):
     """Backward implementation of cross entropy loss kernel"""
 
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    if not is_cg_capturable and torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
+    if not is_cg_capturable and torch.equal(
+        grad_output, torch.tensor(1.0, device=grad_output.device)
+    ):
         pass
 
     else:
