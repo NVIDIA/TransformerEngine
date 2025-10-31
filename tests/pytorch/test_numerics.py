@@ -1817,7 +1817,7 @@ def _test_grouped_linear_accuracy(
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    for name, p in block.named_parameters():
+    for p in block.parameters():
         if p.requires_grad:
             if getattr(p, "main_grad", None) is not None:
                 outputs.append(p.main_grad)
