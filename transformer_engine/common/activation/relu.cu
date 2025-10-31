@@ -20,6 +20,19 @@ void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
   dact_fn<fp32, Empty, drelu<fp32, fp32>>(grad, input, output, stream);
 }
 
+void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor activation_input,
+                               NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+                               cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_dbias_drelu);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = true;
+
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, drelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
+}
+
 void nvte_reglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_reglu);
   using namespace transformer_engine;
@@ -46,6 +59,19 @@ void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
   NVTE_API_CALL(nvte_dsrelu);
   using namespace transformer_engine;
   dact_fn<fp32, Empty, dsrelu<fp32, fp32>>(grad, input, output, stream);
+}
+
+void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activation_input,
+                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_dbias_dsrelu);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = true;
+
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsrelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_sreglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
