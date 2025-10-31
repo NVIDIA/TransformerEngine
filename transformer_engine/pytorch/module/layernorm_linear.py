@@ -8,6 +8,7 @@ import warnings
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
+import contextlib
 
 import torch
 from torch.nn import init
@@ -40,6 +41,7 @@ from ..utils import (
     nvtx_range_push,
     requires_grad,
     needs_quantized_gemm,
+    should_set_cuda_device_every_batch,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -1532,10 +1534,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(
-            inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
+        if should_set_cuda_device_every_batch():
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(
+            inp,
+            allow_non_contiguous=False,  # removed .contiguous from inside the layer
         ) as inp:
 
             # Get concatenated weight and bias tensors
