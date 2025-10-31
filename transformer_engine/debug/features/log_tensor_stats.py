@@ -21,6 +21,7 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import next_enabled_iter, get_reduction_params
 from transformer_engine.debug.features.utils.stats_computation import (
     add_max_blockwise_dynamic_range_stats,
+    BlockwiseDynamicRangeStat,
 )
 
 
@@ -125,24 +126,29 @@ class LogTensorStats(BaseLogTensorStats):
 
     def _parse_max_blockwise_dynamic_range_stats(
         self, stats: List[str | Dict], tensor_name: str
-    ) -> List[str]:
+    ) -> List[str | BlockwiseDynamicRangeStat]:
         """
         Adds all max_blockwise_dynamic_range stats to the stat computation logic.
-        Changes the types of the stats from Dict to str, for other stats nothing is changed.
+        Changes the types of the stats from Dict to BlockwiseDynamicRangeStat named tuple,
+        for other stats nothing is changed.
+        
         For example, if the stats is [{"max_blockwise_dynamic_range": {"block_size": 32, "dims": 1}}],
-        it will be changed to ["max_blockwise_dynamic_range_block_size_32_dims_1_both_orientations_True"]
-        or ["max_blockwise_dynamic_range_block_size_32_dims_1_both_orientations_False"] depending on tensor_name.
+        it will be changed to [BlockwiseDynamicRangeStat(block_size=32, dims=1, max_over_orientations=True)]
+        or [BlockwiseDynamicRangeStat(block_size=32, dims=1, max_over_orientations=False)] depending on tensor_name.
+        
         """
-        both_orientations = tensor_name in ["activation", "weight"]
+        max_over_orientations = tensor_name in ["activation", "weight"]
         parsed_stats = []
         for stat in stats:
             if isinstance(stat, dict):
                 block_size = stat["max_blockwise_dynamic_range"].get("block_size", 32)
                 dims = stat["max_blockwise_dynamic_range"].get("dims", 1)
-                add_max_blockwise_dynamic_range_stats(block_size, dims, both_orientations)
-                parsed_stats.append(
-                    f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}_both_orientations_{both_orientations}"
+                
+                # Register stat and return the named tuple
+                parsed_stat = add_max_blockwise_dynamic_range_stats(
+                    block_size, dims, max_over_orientations
                 )
+                parsed_stats.append(parsed_stat)
             else:
                 parsed_stats.append(stat)
         return parsed_stats

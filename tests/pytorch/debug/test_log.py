@@ -18,6 +18,10 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import RecipeState
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
+from transformer_engine.debug.features.utils.stats_computation import (
+    compute_max_blockwise_dynamic_range,
+    BlockwiseDynamicRangeStat,
+)
 import math
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
@@ -268,35 +272,51 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
 
         output = read_log(log_dir)
 
-    both_orientations = tensor_name in ["activation", "weight"]
+    max_over_orientations = tensor_name in ["activation", "weight"]
+    max_over_orientations_suffix = "_max_over_orientations" if max_over_orientations else ""
+
+    # Track which stats were found to ensure all are present
+    found_dims_1 = False
+    found_dims_2 = False
+    found_dynamic_range = False
 
     for line in output.splitlines():
         if (
-            f"max_blockwise_dynamic_range_block_size_4_dims_1_both_orientations_{both_orientations}"
+            f"max_blockwise_dynamic_range_block_size_4_dims_1{max_over_orientations_suffix}"
             in line
         ):
             max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
-            if both_orientations:
+            if max_over_orientations:
+                # Columnwise blocks have mixed values [A, B, B, B] -> dynamic_range = log2(A/B)
                 expected = math.log2(A) - math.log2(B)
             else:
+                # Rowwise blocks have uniform values -> dynamic_range = 0
                 expected = 0
             assert max_blockwise_dynamic_range_block_size_4_dims_1 == pytest.approx(
                 expected, abs=1e-4
             )
+            found_dims_1 = True
         elif (
-            f"max_blockwise_dynamic_range_block_size_4_dims_2_both_orientations_{both_orientations}"
+            f"max_blockwise_dynamic_range_block_size_4_dims_2{max_over_orientations_suffix}"
             in line
         ):
             max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
-
+            # For 2D blocks (4x4 tiles), blocks always contain mixed values from different rows
             expected = math.log2(A) - math.log2(B)
             assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
                 expected, abs=1e-4
             )
-        elif "dynamic_range" in line and "max_blockwise" not in line:
+            found_dims_2 = True
+        elif "_dynamic_range" in line and "max_blockwise_dynamic_range" not in line:
             dynamic_range = float(line.split("value=")[1])
             expected = math.log2(A) - math.log2(epsilon)
             assert dynamic_range == pytest.approx(expected, abs=1e-4)
+            found_dynamic_range = True
+
+    # Ensure all expected stats were found in the output
+    assert found_dims_1, "max_blockwise_dynamic_range (dims=1) not found in output"
+    assert found_dims_2, "max_blockwise_dynamic_range (dims=2) not found in output"
+    assert found_dynamic_range, "dynamic_range not found in output"
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
@@ -345,3 +365,81 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
     debug_api.end_debug()
     TEDebugState._reset()
+
+
+def test_compute_max_blockwise_dynamic_range_direct():
+    """Direct unit test for compute_max_blockwise_dynamic_range function.
+    
+    Tests the function with various configurations to ensure correct behavior
+    for different block sizes, dimensions, and orientation settings.
+    """
+    # Create test tensor with uniform rows but mixed columns
+    # Row 0: all 1000, Row 1-3: all 50, remaining: all 0.01
+    epsilon = 0.01
+    A = 1000.0
+    B = 50.0
+    tensor = torch.zeros(1024, 1024).cuda() + epsilon
+    tensor[0, :] = A
+    tensor[1:4, :] = B
+    
+    # Test 1: dims=1, max_over_orientations=False (rowwise only)
+    # Rowwise blocks have uniform values -> dynamic_range should be 0
+    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=False)
+    result = compute_max_blockwise_dynamic_range(tensor, stat_config)
+    assert result.item() == pytest.approx(0.0, abs=1e-4), \
+        "Rowwise 1D blocks with uniform values should have dynamic_range=0"
+    
+    # Test 2: dims=1, max_over_orientations=True (max of rowwise and columnwise)
+    # Columnwise blocks have mixed values [A, B, B, B] -> dynamic_range = log2(A/B)
+    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=True)
+    result = compute_max_blockwise_dynamic_range(tensor, stat_config)
+    expected = math.log2(A) - math.log2(B)
+    assert result.item() == pytest.approx(expected, abs=1e-4), \
+        f"Max over orientations should capture columnwise dynamic_range, expected {expected}, got {result.item()}"
+    
+    # Test 3: dims=2, block_size=4 (4x4 tiles)
+    # 2D blocks span multiple rows -> always have mixed values
+    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=2, max_over_orientations=False)
+    result = compute_max_blockwise_dynamic_range(tensor, stat_config)
+    expected = math.log2(A) - math.log2(B)
+    assert result.item() == pytest.approx(expected, abs=1e-4), \
+        f"2D blocks should capture mixed values from different rows, expected {expected}, got {result.item()}"
+    
+    # Test 4: Different block size
+    # With block_size=8, columnwise blocks contain [A, B, B, B, epsilon, epsilon, epsilon, epsilon]
+    # So max=A, min=epsilon (not B anymore)
+    stat_config = BlockwiseDynamicRangeStat(block_size=8, dims=1, max_over_orientations=True)
+    result = compute_max_blockwise_dynamic_range(tensor, stat_config)
+    expected = math.log2(A) - math.log2(epsilon)  # min is epsilon, not B
+    assert result.item() == pytest.approx(expected, abs=1e-4), \
+        f"Block size 8 should work correctly, expected {expected}, got {result.item()}"
+    
+    # Test 5: Tensor with all uniform values -> dynamic_range should be 0
+    uniform_tensor = torch.ones(64, 64).cuda() * 42.0
+    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=True)
+    result = compute_max_blockwise_dynamic_range(uniform_tensor, stat_config)
+    assert result.item() == pytest.approx(0.0, abs=1e-4), \
+        "Uniform tensor should have dynamic_range=0"
+    
+    # Test 6: 3D tensor flattening validation using 2D/3D comparison
+    # Create a 4x4 tensor with distinct 2x2 blocks, compute with dims=2, block_size=2
+    # Then reshape to 3D and compute again - results should match if flattening is correct
+    tensor_2d = torch.tensor([
+        [1.0,  1.0,  10.0, 10.0],
+        [1.0,  1.0,  10.0, 10.0],
+        [100.0, 100.0, 1000.0, 1000.0],
+        [100.0, 100.0, 1000.0, 1000.0]
+    ]).cuda()
+    
+    # Compute on 2D tensor: 4 blocks of 2x2, max range is log2(1000/100)
+    stat_config = BlockwiseDynamicRangeStat(block_size=2, dims=2, max_over_orientations=False)
+    result_2d = compute_max_blockwise_dynamic_range(tensor_2d, stat_config)
+    
+    # Reshape to 3D [2, 2, 4] and compute - should give same result if flattening is correct
+    tensor_3d = tensor_2d.reshape(2, 2, 4)
+    result_3d = compute_max_blockwise_dynamic_range(tensor_3d, stat_config)
+    
+    assert result_2d.item() == pytest.approx(result_3d.item(), abs=1e-6), \
+        f"3D tensor [2,2,4] flattened to [4,4] must give same result as original 2D, got 2D={result_2d.item()}, 3D={result_3d.item()}"
+    
+    print("All direct tests for compute_max_blockwise_dynamic_range passed!")

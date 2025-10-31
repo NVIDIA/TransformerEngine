@@ -11,6 +11,17 @@ import torch
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
+from collections import namedtuple
+
+
+
+class BlockwiseDynamicRangeStat(namedtuple("BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"])):
+    """   Named tuple representing a blockwise dynamic range statistic configuration.  """
+    
+    def __str__(self) -> str:
+        """ Convert to string representation for stat name. Used for logging.   """
+        suffix = "_max_over_orientations" if self.max_over_orientations else ""
+        return f"max_blockwise_dynamic_range_block_size_{self.block_size}_dims_{self.dims}{suffix}"
 
 
 @torch.compile
@@ -38,21 +49,28 @@ def _compute_dynamic_range_bottom(tensor):
     return torch.log2(amin)
 
 
-# @torch.compile
-def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientations: bool = False):
+def compute_max_blockwise_dynamic_range(tensor, stat_config):
     """
-    Max blockwise dynamic range (log2 max/min_nonzero) across both tensor orientations.
+    Computes maximum blockwise dynamic range (log2 max/min_nonzero) within blocks.
 
-    Flattens tensor to 2D and computes dynamic range for both rowwise and columnwise
-    orientations, returning the maximum. This ensures the metric captures the worst-case
-    scenario regardless of how the tensor is used in GEMM operations.
+    Flattens tensor to 2D and computes maximum dynamic range within blocks. If max_over_orientations
+    is True, computes for both rowwise and columnwise orientations and returns the maximum,
+    capturing the worst-case scenario regardless of how the tensor is used in GEMM operations.
+    If False, computes only for rowwise orientation.
 
-    Returns 0 if all blocks are zeros.
-    Otherwise computes dynamic range over non-zero blocks.
+    Returns 0 if all blocks are zeros, otherwise computes dynamic range over non-zero blocks.
 
-    For dims = 1 blocks contain block_size consecutive elements,
-    for dims = 2 blocks contain block_size x block_size elements.
+    Args:
+        tensor: Input tensor (will be flattened to 2D)
+        stat_config: BlockwiseDynamicRangeStat named tuple with:
+            - block_size: Size of blocks (int)
+            - dims: 1 for 1D blocks (consecutive elements), 2 for 2D blocks (tiles)
+            - max_over_orientations: If True, compute max over rowwise and columnwise orientations
     """
+    # Extract parameters from stat_config
+    block_size = stat_config.block_size
+    dims = stat_config.dims
+    max_over_orientations = stat_config.max_over_orientations
 
     def _compute_for_one_orientation(tensor):
         total_numel = tensor.numel()
@@ -90,9 +108,9 @@ def compute_max_blockwise_dynamic_range(tensor, block_size, dims, both_orientati
         )
         return dynamic_range_per_block.max()
 
-    # Flatten to 2D: [batch, seq, hidden, ...] -> [batch*seq*..., hidden]
+    # Flatten to 2D
     tensor_2d = tensor.reshape(-1, tensor.shape[-1])
-    if both_orientations:
+    if max_over_orientations:
         return max(
             _compute_for_one_orientation(tensor_2d),  # Rowwise orientation
             _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
@@ -382,22 +400,34 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
 
 def add_max_blockwise_dynamic_range_stats(
-    block_size: int, dims: int, both_orientations: bool = False
+    block_size: int, dims: int, max_over_orientations: bool = False
 ):
-    """Register max_blockwise_X_dynamic_range stats for the recipe."""
-    stat_name = f"max_blockwise_dynamic_range_block_size_{block_size}_dims_{dims}_both_orientations_{both_orientations}"
-    if stat_name in stats_to_num:
-        return  # already registered
+    """Register max_blockwise_X_dynamic_range stats for the recipe.
+    
+    Args:
+        block_size: Size of blocks for computing blockwise dynamic range
+        dims: 1 for 1D blocks, 2 for 2D blocks
+        max_over_orientations: Whether to compute max over rowwise and columnwise orientations
+        
+    Returns:
+        BlockwiseDynamicRangeStat named tuple representing this stat (used as the stat key)
+    """
+    # Use named tuple directly as the stat key - this is cleaner than string keys
+    stat_key = BlockwiseDynamicRangeStat(block_size, dims, max_over_orientations)
+    
+    if stat_key in stats_to_num:
+        return stat_key  # already registered
+    
     assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
-    stats_to_num[stat_name] = len(stats_to_num)
-    DEPENDENCIES[stat_name] = {stat_name}
+    stats_to_num[stat_key] = len(stats_to_num)
+    DEPENDENCIES[stat_key] = {stat_key}
 
-    STATS[stat_name] = (
-        lambda x, aux_dict, _block_size=block_size, _dims=dims, _both_orientations=both_orientations: compute_max_blockwise_dynamic_range(
-            x, _block_size, _dims, _both_orientations
-        ),
-        lambda buffers: max(_get(buffers, stat_name)),
+    STATS[stat_key] = (
+        lambda x, aux_dict, _stat_key=stat_key: compute_max_blockwise_dynamic_range(x, _stat_key),
+        lambda buffers, _stat_key=stat_key: max(_get(buffers, _stat_key)),
     )
+    
+    return stat_key
 
 
 for _columnwise in [True, False]:
