@@ -311,10 +311,6 @@ class BaseRunner:
         variables = {"params": params, **others}
         output = model.apply(variables, *diff_xs, *no_diff_xs, rngs=self.apply_rng)
         return jnp.mean(output, dtype=jnp.float32).astype(output.dtype)
-    
-    def _output_fn(self, params, others, model, diff_xs, no_diff_xs):
-        variables = {"params": params, **others}
-        return model.apply(variables, *diff_xs, *no_diff_xs, rngs=self.apply_rng)
 
     def _sync_params(self, ref, target):
         """Copy the reference params to target"""
@@ -338,14 +334,11 @@ class BaseRunner:
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
         ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        ref_out = self._output_fn(ref_params, ref_others, ref_layer, inputs, ref_masks)
-        test_out = self._output_fn(test_params, test_others, test_layer, inputs, test_masks)
+        ref_out = self._loss_fn(ref_params, ref_others, ref_layer, inputs, ref_masks)
+        test_out = self._loss_fn(test_params, test_others, test_layer, inputs, test_masks)
 
         tols = dtype_tols(dtype, rtol=rtol, atol=atol)
-        if not get_quantize_config().is_fp8_enabled():
-            assert_allclose(ref_out, test_out, **tols)
-        else:
-            assert_allclose(ref_out.mean(), test_out.mean(), **tols)
+        assert_allclose(ref_out.mean(), test_out.mean(), **tols)
 
     def test_backward(
         self,
