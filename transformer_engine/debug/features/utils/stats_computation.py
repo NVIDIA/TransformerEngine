@@ -7,10 +7,23 @@ Mathematical functions used to tensor statistics computation.
 """
 
 import math
+from collections import namedtuple
+
 import torch
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
+
+
+class BlockwiseDynamicRangeStat(
+    namedtuple("BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"])
+):
+    """Named tuple representing a blockwise dynamic range statistic configuration."""
+
+    def __str__(self) -> str:
+        """Convert to string representation for stat name. Used for logging."""
+        suffix = "_max_over_orientations" if self.max_over_orientations else ""
+        return f"max_blockwise_dynamic_range_block_size_{self.block_size}_dims_{self.dims}{suffix}"
 
 
 @torch.compile
@@ -26,6 +39,7 @@ def _compute_dynamic_range_top(tensor):
     return torch.log2(amax)
 
 
+@torch.compile
 def _compute_dynamic_range_bottom(tensor):
     """Computes the log2 of the amin of the tensor"""
     tensor_abs = tensor.abs()
@@ -37,6 +51,76 @@ def _compute_dynamic_range_bottom(tensor):
     return torch.log2(amin)
 
 
+def compute_max_blockwise_dynamic_range(tensor, stat_config):
+    """
+    Computes maximum blockwise dynamic range (log2 max/min_nonzero) within blocks.
+
+    Flattens tensor to 2D and computes maximum dynamic range within blocks. If max_over_orientations
+    is True, computes for both rowwise and columnwise orientations and returns the maximum,
+    capturing the worst-case scenario regardless of how the tensor is used in GEMM operations.
+    If False, computes only for rowwise orientation.
+
+    Returns 0 if all blocks are zeros, otherwise computes dynamic range over non-zero blocks.
+
+    Args:
+        tensor: Input tensor (will be flattened to 2D)
+        stat_config: BlockwiseDynamicRangeStat named tuple with:
+            - block_size: Size of blocks (int)
+            - dims: 1 for 1D blocks (consecutive elements), 2 for 2D blocks (tiles)
+            - max_over_orientations: If True, compute max over rowwise and columnwise orientations
+    """
+    # Extract parameters from stat_config
+    block_size = stat_config.block_size
+    dims = stat_config.dims
+    max_over_orientations = stat_config.max_over_orientations
+
+    def _compute_for_one_orientation(tensor):
+        total_numel = tensor.numel()
+        assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
+
+        # torch.compile friendly code - standard ** power does not work with jit
+        total_block_size = block_size * block_size if dims == 2 else block_size
+        assert (
+            total_numel % total_block_size == 0
+        ), f"Tensor numel ({total_numel}) is not divisible by block_size ({block_size})."
+
+        tensor = tensor.abs().float()
+        if dims == 1:
+            tensor = tensor.reshape(-1, block_size)
+            per_block_amax = tensor.amax(dim=1)
+            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=1)
+        else:
+            # We want to have tensor of shape [nr_blocks, block_size, block_size],
+            # where each block is a block_size x block_size tile of the original tensor.
+            dim_y = tensor.shape[-1] // block_size
+            tensor = (
+                tensor.reshape(-1, block_size, dim_y, block_size)
+                .permute(0, 2, 1, 3)
+                .reshape(-1, block_size, block_size)
+            )
+            per_block_amax = tensor.amax(dim=(1, 2))
+            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
+
+        # Identify blocks that contain any non-zero element
+        nonzero_blocks = per_block_amax != 0
+        dynamic_range_per_block = torch.where(
+            nonzero_blocks,
+            torch.log2(per_block_amax) - torch.log2(per_block_amin),
+            torch.zeros_like(per_block_amax, dtype=torch.float32),
+        )
+        return dynamic_range_per_block.max()
+
+    # Flatten to 2D
+    tensor_2d = tensor.reshape(-1, tensor.shape[-1])
+    if max_over_orientations:
+        return max(
+            _compute_for_one_orientation(tensor_2d),  # Rowwise orientation
+            _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
+        )
+    return _compute_for_one_orientation(tensor_2d)
+
+
+@torch.compile
 def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
     mean = torch.sum(sums) / torch.sum(numels)
@@ -45,6 +129,7 @@ def compute_variance(variances, numels, sums):
     return var
 
 
+@torch.compile
 def compute_std(variances, numels, sums):
     """Computates standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
@@ -314,6 +399,37 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
     DEPENDENCIES[stat_err] = {stat_err}
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
+
+
+def add_max_blockwise_dynamic_range_stats(
+    block_size: int, dims: int, max_over_orientations: bool = False
+):
+    """Register max_blockwise_X_dynamic_range stats for the recipe.
+
+    Args:
+        block_size: Size of blocks for computing blockwise dynamic range
+        dims: 1 for 1D blocks, 2 for 2D blocks
+        max_over_orientations: Whether to compute max over rowwise and columnwise orientations
+
+    Returns:
+        BlockwiseDynamicRangeStat named tuple representing this stat (used as the stat key)
+    """
+    # Use named tuple directly as the stat key - this is cleaner than string keys
+    stat_key = BlockwiseDynamicRangeStat(block_size, dims, max_over_orientations)
+
+    if stat_key in stats_to_num:
+        return stat_key  # already registered
+
+    assert dims in [1, 2], f"dims must be 1 or 2, got {dims}"
+    stats_to_num[stat_key] = len(stats_to_num)
+    DEPENDENCIES[stat_key] = {stat_key}
+
+    STATS[stat_key] = (
+        lambda x, aux_dict, _stat_key=stat_key: compute_max_blockwise_dynamic_range(x, _stat_key),
+        lambda buffers, _stat_key=stat_key: max(_get(buffers, _stat_key)),
+    )
+
+    return stat_key
 
 
 for _columnwise in [True, False]:
