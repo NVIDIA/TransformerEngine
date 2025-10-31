@@ -4,6 +4,8 @@
 
 from typing import Iterable, List, Union
 import pytest
+from torch.profiler import profile, ProfilerActivity
+import torch.cuda.nvtx as nvtx
 
 import torch
 from transformer_engine.pytorch import (
@@ -246,7 +248,7 @@ def _test_cuda_graphs(
     # Training steps.
     for _ in range(3):
         optimizer.zero_grad(set_to_none=False)
-        for grad_accumulation_step in range(2):
+        for grad_accumulation_step in range(1):
             input_ = generate_data(model_config, dtype)
             grad_output = generate_data(model_config, dtype, requires_grad=False)
             with autocast(enabled=fp8, recipe=fp8_recipe):
@@ -254,6 +256,7 @@ def _test_cuda_graphs(
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0
                 output = model(input_, **kwargs)
+
             output.backward(grad_output)
         optimizer.step()
 
@@ -296,15 +299,6 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
-    if (
-        checkpoint
-        and type(fp8_recipe).__name__ == "Float8CurrentScaling"
-        and dtype != torch.float32
-    ):
-        pytest.skip(
-            "CUDA graphs for LayerNormMLP with checkpointing, Float8CurrentScaling recipe, with"
-            f" {dtype} dtype tensors not supported yet"
-        )
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]

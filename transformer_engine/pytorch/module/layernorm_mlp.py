@@ -150,86 +150,6 @@ def _act_func(activation: str, recipe: Optional[Recipe] = None):
         raise NotImplementedError("Activation type " + activation + " is not supported!")
     return funcs[activation]
 
-
-@torch.no_grad()
-def _copy_quantizer(
-    quantizer: Optional[Quantizer],
-    device: Optional[Union[str, torch.device]] = None,
-) -> Optional[Quantizer]:
-    if quantizer is None:
-        return None
-
-    inferred_device = None
-    for attr in ("scale", "amax"):
-        tensor = getattr(quantizer, attr, None)
-        if isinstance(tensor, torch.Tensor):
-            inferred_device = tensor.device
-            break
-    if device is not None:
-        inferred_device = torch.device(device)
-    if inferred_device is None:
-        inferred_device = torch.device("cuda")
-
-    if isinstance(quantizer, Float8BlockQuantizer):
-        q = Float8BlockQuantizer(
-            fp8_dtype=quantizer.dtype,
-            rowwise=quantizer.rowwise_usage,
-            columnwise=quantizer.columnwise_usage,
-            amax_epsilon=quantizer.amax_epsilon,
-            force_pow_2_scales=quantizer.force_pow_2_scales,
-            block_scaling_dim=quantizer.block_scaling_dim,
-            all_gather_usage=quantizer.all_gather_usage,
-        )
-    elif isinstance(quantizer, Float8Quantizer):
-        q = Float8Quantizer(
-            scale=quantizer.scale.clone(),
-            amax=quantizer.amax.clone(),
-            fp8_dtype=quantizer.dtype,
-            rowwise=quantizer.rowwise_usage,
-            columnwise=quantizer.columnwise_usage,
-        )
-    elif isinstance(quantizer, Float8CurrentScalingQuantizer):
-        q = Float8CurrentScalingQuantizer(
-            fp8_dtype=quantizer.dtype,
-            device=inferred_device,
-            rowwise=quantizer.rowwise_usage,
-            columnwise=quantizer.columnwise_usage,
-            use_existing_amax=quantizer.use_existing_amax,
-            with_amax_reduction=quantizer.with_amax_reduction,
-            amax_reduction_group=quantizer.amax_reduction_group,
-            force_pow_2_scales=quantizer.force_pow_2_scales,
-            amax_epsilon=quantizer.amax_epsilon,
-        )
-        q.scale = quantizer.scale.clone()
-        q.amax = quantizer.amax.clone()
-    elif isinstance(quantizer, MXFP8Quantizer):
-        q = MXFP8Quantizer(
-            fp8_dtype=quantizer.dtype,
-            rowwise=quantizer.rowwise_usage,
-            columnwise=quantizer.columnwise_usage,
-        )
-    elif isinstance(quantizer, NVFP4Quantizer):
-        q = NVFP4Quantizer(
-            fp4_dtype=quantizer.dtype,
-            rowwise=quantizer.rowwise_usage,
-            columnwise=quantizer.columnwise_usage,
-            with_amax_reduction=quantizer.with_amax_reduction,
-            amax_reduction_group=quantizer.amax_reduction_group,
-            with_rht=quantizer.with_rht,
-            with_post_rht_amax=quantizer.with_post_rht_amax,
-            with_2d_quantization=quantizer.with_2d_quantization,
-            stochastic_rounding=quantizer.stochastic_rounding,
-            with_random_sign_mask=quantizer.rht_matrix_random_sign_mask_t != 0,
-        )
-    else:
-        raise NotImplementedError(
-            "Checkpointing in LayerNormMLP not implemented for"
-            f" {type(quantizer).__name__} quantizer yet"
-        )
-    q.internal = quantizer.internal
-    return q
-
-
 class _LayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
     Calls custom cuda extensions.
@@ -298,8 +218,11 @@ class _LayerNormMLP(torch.autograd.Function):
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
             ctx.checkpoint = checkpoint
-
-        # few helper flags for simpler logic
+            if checkpoint:
+                # save the state of autocast and quantizers for recomputation
+                ctx.autocast_state = FP8GlobalStateManager.get_autocast_state() # to restore autocast state during recomputation
+                if fp8 and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling": # only applicable for delayed scaling
+                    FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(module.fp8_meta) # to restore quantizers during recomputation
 
         # whether to save activations regularly, or save inputs for recomputation in bwd
         save_for_checkpoint = checkpoint and is_grad_enabled and not recompute_for_bwd
@@ -323,10 +246,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
-            # save other arguments to _forward
-            def clone_quantizer(q: Optional[Quantizer]) -> Optional[Quantizer]:
-                return _copy_quantizer(q, device=inp.device) if q is not None else None
-
             ctx.other_args = {
                 "eps": eps,
                 "is_first_microbatch": is_first_microbatch,
@@ -334,18 +253,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 "fp8_calibration": fp8_calibration,
                 "wgrad_store": wgrad_store,
                 "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
-                "fc1_input_quantizer": clone_quantizer(fc1_input_quantizer),
-                "fc1_weight_quantizer": clone_quantizer(fc1_weight_quantizer),
-                "fc1_output_quantizer": clone_quantizer(fc1_output_quantizer),
-                "fc1_grad_input_quantizer": clone_quantizer(fc1_grad_input_quantizer),
-                "fc1_grad_weight_quantizer": clone_quantizer(fc1_grad_weight_quantizer),
-                "fc1_grad_output_quantizer": clone_quantizer(fc1_grad_output_quantizer),
-                "fc2_input_quantizer": clone_quantizer(fc2_input_quantizer),
-                "fc2_weight_quantizer": clone_quantizer(fc2_weight_quantizer),
-                "fc2_output_quantizer": clone_quantizer(fc2_output_quantizer),
-                "fc2_grad_input_quantizer": clone_quantizer(fc2_grad_input_quantizer),
-                "fc2_grad_weight_quantizer": clone_quantizer(fc2_grad_weight_quantizer),
-                "fc2_grad_output_quantizer": clone_quantizer(fc2_grad_output_quantizer),
+                "fc1_input_quantizer": fc1_input_quantizer,
+                "fc1_weight_quantizer": fc1_weight_quantizer,
+                "fc1_output_quantizer": fc1_output_quantizer,
+                "fc1_grad_input_quantizer": fc1_grad_input_quantizer,
+                "fc1_grad_weight_quantizer": fc1_grad_weight_quantizer,
+                "fc1_grad_output_quantizer": fc1_grad_output_quantizer,
+                "fc2_input_quantizer": fc2_input_quantizer,
+                "fc2_weight_quantizer": fc2_weight_quantizer,
+                "fc2_output_quantizer": fc2_output_quantizer,
+                "fc2_grad_input_quantizer": fc2_grad_input_quantizer, 
+                "fc2_grad_weight_quantizer": fc2_grad_weight_quantizer,
+                "fc2_grad_output_quantizer": fc2_grad_output_quantizer,
                 "cpu_offloading": cpu_offloading,
                 "tp_group": tp_group,
                 "tp_size": tp_size,
@@ -738,7 +657,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight_final.update_usage(columnwise_usage=True)
             if isinstance(fc2_weight_final, QuantizedTensorStorage):
                 fc2_weight_final.update_usage(columnwise_usage=True)
-
+            
             ctx.fc1_weight_quantizer = fc1_weight_quantizer
             ctx.fc2_weight_quantizer = fc2_weight_quantizer
 
@@ -1032,9 +951,23 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx.tensor_objects = None
 
         if ctx.checkpoint:  # do recomputation from the original args
-            return _LayerNormMLP._forward(
+
+            # backward is not in autocast context, so we set the state here
+            # we also have to set the quantizer states to what they were before the forward pass (only relevant for DelayedScaling recipe)
+            final_autocast_state = FP8GlobalStateManager.get_autocast_state() # get current autocast state
+            FP8GlobalStateManager.set_autocast_state(ctx.autocast_state) # set old autocast state
+            if ctx.other_args["fp8"] and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling": # only applicable for delayed scaling
+                FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(ctx.other_args["module"].fp8_meta) # set old quantizer state
+            out = _LayerNormMLP._forward( # recompute
                 ctx, *tensors, *ctx.other_args.values(), recompute_for_bwd=True
             )
+
+            FP8GlobalStateManager.set_autocast_state(final_autocast_state) # restore autocast state
+            if ctx.other_args["fp8"] and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling":
+                FP8GlobalStateManager.restore_fp8_meta_tensors(ctx.other_args["module"].fp8_meta) # restore quantizers 
+
+            return out
+
         else:  # load from saved (return ctx is just because the other branch does too)
             return [ctx] + tensors
 
@@ -1044,24 +977,24 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
+        (  # pylint: disable=unbalanced-tuple-unpacking
+            ctx,
+            inputmat,
+            ln_weight,
+            ln_out,
+            fc1_weight,
+            origin_fc1_weight,
+            fc1_bias,
+            fc1_out,
+            fc1_out_without_bias,
+            act_out,
+            fc2_weight,
+            origin_fc2_weight,
+            fc2_bias,
+            mu,
+            rsigma,
+        ) = _LayerNormMLP._recompute(ctx)
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
-            (  # pylint: disable=unbalanced-tuple-unpacking
-                ctx,
-                inputmat,
-                ln_weight,
-                ln_out,
-                fc1_weight,
-                origin_fc1_weight,
-                fc1_bias,
-                fc1_out,
-                fc1_out_without_bias,
-                act_out,
-                fc2_weight,
-                origin_fc2_weight,
-                fc2_bias,
-                mu,
-                rsigma,
-            ) = _LayerNormMLP._recompute(ctx)
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
@@ -1725,12 +1658,26 @@ class _LayerNormMLP(torch.autograd.Function):
         #    )
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            # inputmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+
             dgamma,
+            # ln_weight,
+
             dbeta,
+            # ln_weight,
+            
             fc1_wgrad,
+            # origin_fc1_weight,
+            
             fc1_bias_grad if fc1_bias is not None else None,
+            # fc1_bias,
+
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
+            # origin_fc2_weight,
+
             fc2_bias_grad,
+            # fc2_bias,
+            
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
