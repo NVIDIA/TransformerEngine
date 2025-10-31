@@ -123,7 +123,6 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
@@ -133,7 +132,6 @@ __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t cou
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-inval
 __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
@@ -143,8 +141,8 @@ __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
-__device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
+__device__ __forceinline__ void
+mbarrier_arrive(uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.shared.b64 _, [%0];" ::"r"(mbar_ptr) : "memory");
@@ -153,14 +151,45 @@ __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
-__device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
+__device__ __forceinline__ void
+mbarrier_arrive_relaxed_cta_shared_cta(uint64_t* mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile("mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%0], 1;" :: "r"(mbar_ptr));
+#else
+  NVTE_DEVICE_ERROR("mbarrier_arrive_relaxed_cta_shared_cta is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+mbarrier_arrive_release_cta_shared_cta(uint64_t* mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0], 1;" :: "r"(mbar_ptr));
+#else
+  NVTE_DEVICE_ERROR("mbarrier_arrive_release_cta_shared_cta is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(mbar_ptr), "r"(tx_count)
                : "memory");
 #else
   NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(uint64_t* mbar, const uint32_t tx_count) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile("mbarrier.arrive.expect_tx.relaxed.cta.shared::cta.b64 _, [%0], %1;"
+    :: "r"(mbar_ptr), "r"(tx_count));
+#else
+  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx_cta_relaxed_shared_cta is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -172,8 +201,6 @@ __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
-// global -> shared::cluster
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
     uint64_t *dst_shmem, const uint64_t *src_global_ptr, const uint32_t size, uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -193,8 +220,6 @@ __device__ __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
-// global -> shared::cluster
 __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
     uint64_t *dst_shmem, const uint64_t *tensor_map_ptr, const uint32_t offset_x,
     const uint32_t offset_y, uint64_t *mbar) {
@@ -241,6 +266,101 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint3
 #else
   NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+mbarrier_wait_parity_acquire_cta_shared_cta(uint64_t* mbar, uint32_t phase_parity) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile(
+    "{\n\t"
+      ".reg .b64 r1; \n\t"
+      ".reg .pred waitComplete; \n\t"         // predicate representing if barrier condition is met
+      "WAIT: \n\t"                            // loop around barrier wait
+      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64  waitComplete, [%0], %1; \n\t"
+      "@waitComplete bra DONE; \n\t"          // mbarrier conditions are met
+      "bra WAIT; \n\t"                        // just a time-out, try again
+      "DONE: \n\t"
+    "}\n\t"
+    :
+    : "r"(mbar_ptr),
+      "r"(phase_parity)
+    : "memory"
+  );
+#else
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity_acquire_cta_shared_cta is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+mbarrier_wait_parity_relaxed_cta_shared_cta(uint64_t* mbar, uint32_t phase_parity) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile(
+    "{\n\t"
+      ".reg .b64 r1; \n\t"
+      ".reg .pred waitComplete; \n\t"         // predicate representing if barrier condition is met
+      "WAIT: \n\t"                            // loop around barrier wait
+      "mbarrier.try_wait.parity.relaxed.cta.shared::cta.b64  waitComplete, [%0], %1; \n\t"
+      "@waitComplete bra DONE; \n\t"          // mbarrier conditions are met
+      "bra WAIT; \n\t"                        // just a time-out, try again
+      "DONE: \n\t"
+    "}\n\t"
+    :
+    : "r"(mbar_ptr),
+      "r"(phase_parity)
+    : "memory"
+  );
+#else
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity_relaxed_cta_shared_cta is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void
+clusterlaunchcontrol_try_cancel_async_shared_cta_mbarrier_complete_tx_bytes(
+  uint64_t* mbar, __uint128_t* response_data_ptr) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
+    asm volatile("clusterlaunchcontrol.try_cancel.async.mbarrier::complete_tx::bytes.multicast::cluster::all.b128 "
+                "[%0], [%1];" :: "r"(workID_response), "r"(mbar_ptr));
+  } else {
+    NVTE_DEVICE_ERROR(
+        "Cluster Launch Control PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+}
+
+__device__ __forceinline__ void
+get_cancelled_cta_2D_id(__uint128_t* response_data_ptr, int32_t& ctaid_X, int32_t& ctaid_Y) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
+    asm volatile(
+      "{\n\t"
+        ".reg .s32 x_ctaid; \n\t"
+        ".reg .s32 y_ctaid; \n\t"
+        "mov .s32 x_ctaid, -1; \n\t"
+        "mov .s32 y_ctaid, -1; \n\t"
+        ".reg.b128 try_cancel_response; \n\t"
+        "ld.shared.b128 try_cancel_response, [%2]; \n\t"
+        ".reg .pred P1; \n\t"
+        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 P1, try_cancel_response; \n\t"
+        "@P1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {x_ctaid, y_ctaid, _, _}, try_cancel_response; \n\t"
+        "mov .s32 %0, x_ctaid; \n\t"
+        "mov .s32 %1, y_ctaid; \n\t"
+      "}\n\t"
+        : "=r"(ctaid_X),
+          "=r"(ctaid_Y)
+        : "r"(workID_response)
+        : "memory"
+    );
+  } else {
+    NVTE_DEVICE_ERROR(
+        "Cluster Launch Control PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
 }
 
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
@@ -321,7 +441,6 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.wait_group 0;");
@@ -330,7 +449,6 @@ __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -373,7 +491,6 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("cp.async.bulk.commit_group;");
@@ -824,6 +941,52 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #else
   NVTE_DEVICE_ERROR("abs_max_2x is only supported on SM 8.9+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+}
+
+// Loads a pair of BF16/FP16 values from shared memory state space and converts them into float2
+template <typename IType2>
+__device__ __forceinline__ float2
+ld_shared_cvt_f32x2(const IType2* src_smem) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
+  float2 dst;
+  if constexpr (std::is_same<IType2, typename ptx::bf16x2>::value) {
+    asm volatile (
+      "{\n\t"
+      ".reg.b32 in_2x; \n\t"
+      "ld.shared.b32 in_2x, [%1]; \n\t"
+      ".reg.b16 in1, in2; \n\t"
+      "mov.b32 {in1, in2}, in_2x; \n\t"
+      ".reg.f32 out1, out2; \n\t"
+      "cvt.rn.f32.bf16 out1, in1; \n\t"
+      "cvt.rn.f32.bf16 out2, in2; \n\t"
+      "mov.b64 %0, {out1, out2}; \n"
+      "}\n"
+      : "=l"(reinterpret_cast<uint64_t&>(dst))
+      : "r"(src_smem_ptr)
+    );
+  } else if constexpr (std::is_same<IType2, typename ptx::fp16x2>::value) {
+    asm volatile (
+      "{\n\t"
+      ".reg.b32 in_2x; \n\t"
+      "ld.shared.b32 in_2x, [%1]; \n\t"
+      ".reg.b16 in1, in2; \n\t"
+      "mov.b32 {in1, in2}, in_2x; \n\t"
+      ".reg.f32 out1, out2; \n\t"
+      "cvt.f32.f16 out1, in1; \n\t"
+      "cvt.f32.f16 out2, in2; \n\t"
+      "mov.b64 %0, {out1, out2}; \n"
+      "}\n"
+      : "=l"(reinterpret_cast<uint64_t&>(dst))
+      : "r"(src_smem_ptr)
+    );
+  } else {
+    NVTE_DEVICE_ERROR("Unsupported by the ld_shared_cvt_f32x2 type.");
+  }
+  return dst;
+#else
+  NVTE_DEVICE_ERROR("ld_shared_cvt_f32x2 is only supported on SM 9.0+.");
+#endif
 }
 
 }  // namespace ptx

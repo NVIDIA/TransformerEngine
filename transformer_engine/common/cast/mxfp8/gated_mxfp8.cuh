@@ -20,6 +20,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "./specialized/gated_mxfp8_rowwise_swiglu.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -694,6 +695,18 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
     scaling_type = ScalingType::COLWISE;
   } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
     scaling_type = ScalingType::BIDIMENSIONAL;
+  }
+
+  // Optimized BWD/FWD SwiGLU MXFP8 Rowwise kernels for BF16/FP16 inputs
+  if constexpr (!std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
+    if constexpr ((!IS_BWD && (ActOP == &silu<fp32, fp32>))
+                  || (IS_BWD && (ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>))) {
+      if (((gated_input.dtype() == DType::kFloat16) || (gated_input.dtype() == DType::kBFloat16)) 
+          && (scaling_type == ScalingType::ROWWISE)) {
+        quantize_gated_rowwise<IS_BWD, ParamOP, ActOP, DActOP>(grad, gated_input, output, p, stream); 
+        return;
+      }
+    }
   }
 
   const size_t rows = gated_input.flat_first_dim();
