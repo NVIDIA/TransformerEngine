@@ -127,7 +127,13 @@ void TeNormalizationPlan<KernelParamsType>::_build() {
 
 template <typename KernelParamsType>
 std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
-  return {_launch_params.getTotalWorkspaceBytes(_is_layernorm)};
+  size_t workspace_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm);
+  if (workspace_size == 0) {
+    // Workspace size must not be zero since that corresponds to a
+    // workspace size query
+    workspace_size = 1;
+  }
+  return {workspace_size};
 }
 
 template <typename KernelParamsType>
@@ -405,7 +411,13 @@ void CudnnNormalizationPlan::_build() {
 }
 
 std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
-  return {static_cast<size_t>(_graph.get_workspace_size())};
+  size_t workspace_size = _graph.get_workspace_size();
+  if (workspace_size == 0) {
+    // Workspace size must not be zero since that corresponds to a
+    // workspace size query
+    workspace_size = 1;
+  }
+  return {workspace_size};
 }
 
 void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
