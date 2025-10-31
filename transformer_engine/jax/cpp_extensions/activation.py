@@ -1426,7 +1426,9 @@ def quantize_dact_dbias(
     if not PrimitiveClass.enabled() or (
         quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE
     ):
-        output, dbias = _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, act_params=act_params)
+        output, dbias = _jax_quantize_dact_dbias(
+            dz, x, activation_type, is_dbias, act_params=act_params
+        )
         if quantizer is not None:
             output = quantize(
                 output,
