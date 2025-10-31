@@ -280,15 +280,10 @@ class _LayerNormLinear(torch.autograd.Function):
         if fp8 or debug:
             quantized_weight = not isinstance(weight, QuantizedTensorStorage)
 
-            # Configure quantizer.
-            # No need to set the quantizer states if weight is already quantized
-            if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
+            # Configure quantizer
+            if weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            if isinstance(weight, QuantizedTensor):
-                # In case of FSDP2, this will be an allgathered quantized tensor, which can have
-                # different usage settings specified in its quantizer copy compared
-                # to the quantizer used for the original weight shard.
-                weight_quantizer = weight._quantizer
+
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
@@ -418,6 +413,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     ):
                         ln_out.update_usage(rowwise_usage=False)
 
+            # Weight with column-wise usage is needed for dgrad GEMM.
+            if isinstance(weightmat, QuantizedTensorStorage):
+                weightmat.update_usage(columnwise_usage=True)
+
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
 
@@ -458,6 +457,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
+            ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
@@ -684,74 +684,75 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
-            dgrad = None
-            if ctx.requires_dgrad:
-                # Make sure required data is available
-                if isinstance(grad_output, QuantizedTensorStorage):
-                    grad_output.update_usage(rowwise_usage=True)
-                if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensorStorage):
-                    weight.update_usage(columnwise_usage=True)
+            # Make sure required data is available
+            if isinstance(grad_output, QuantizedTensorStorage):
+                grad_output.update_usage(rowwise_usage=True)
+            if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensorStorage):
+                weight.update_usage(columnwise_usage=True)
 
-                # Choose whether to use GEMM kernel with split accumulator
-                use_split_accumulator = _2X_ACC_DGRAD
-                if ctx.fp8:
-                    recipe = ctx.fp8_recipe
-                    if hasattr(recipe, "fp8_gemm_dgrad"):
-                        use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+            # Choose whether to use GEMM kernel with split accumulator
+            use_split_accumulator = _2X_ACC_DGRAD
+            if ctx.fp8:
+                recipe = ctx.fp8_recipe
+                if hasattr(recipe, "fp8_gemm_dgrad"):
+                    use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
-                # Update grad input quantizer
-                if ctx.grad_input_quantizer is not None:
-                    ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
+            # Update grad input quantizer
+            if ctx.grad_input_quantizer is not None:
+                ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
-                # Output buffers for Userbuffers reduce-scatter
-                gemm_out = None
-                reduce_scatter_out = None
-                if ctx.ub_overlap_rs_dgrad:
-                    reduce_scatter_out = torch.empty(
-                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_outputs[0].device
-                    )
-                elif ctx.ub_bulk_wgrad:
-                    gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
-                # dgrad GEMM
-                # Note: dx = dy * w
-                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-                gemm_out, *_, reduce_scatter_out = general_gemm(
-                    weight,
-                    grad_output,
-                    get_workspace(),
-                    layout="NN",
-                    grad=True,
-                    quantization_params=ctx.grad_input_quantizer,
-                    out=gemm_out,
-                    out_dtype=ctx.activation_dtype,
-                    use_split_accumulator=use_split_accumulator,
-                    ub=ub_obj_dgrad,
-                    ub_type=ub_type_dgrad,
-                    extra_output=reduce_scatter_out,
-                    bulk_overlap=ctx.ub_bulk_dgrad,
+            # Output buffers for Userbuffers reduce-scatter
+            gemm_out = None
+            reduce_scatter_out = None
+            if ctx.ub_overlap_rs_dgrad:
+                reduce_scatter_out = torch.empty(
+                    dgrad_shape, dtype=ctx.activation_dtype, device=grad_outputs[0].device
                 )
-                nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
-                # Prepare grad input tensor
-                # Note: Perform tensor-parallel communication
-                dgrad_work = None
-                if ctx.ub_overlap_rs_dgrad:
-                    dgrad = reduce_scatter_out
-                elif ctx.ub_bulk_wgrad:
-                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
-                elif ctx.parallel_mode == "column" and ctx.tp_size > 1:
-                    nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
-                    dgrad = gemm_out
-                    if ctx.sequence_parallel:
-                        dgrad, dgrad_work = reduce_scatter_along_first_dim(
-                            dgrad,
-                            ctx.tp_group,
-                            async_op=True,
-                        )
-                    else:
-                        dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
-                    nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
+            elif ctx.ub_bulk_wgrad:
+                gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
+
+            # dgrad GEMM
+            # Note: dx = dy * w
+            nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+            gemm_out, *_, reduce_scatter_out = general_gemm(
+                weight,
+                grad_output,
+                get_workspace(),
+                layout="NN",
+                grad=True,
+                quantization_params=ctx.grad_input_quantizer,
+                out=gemm_out,
+                out_dtype=ctx.activation_dtype,
+                use_split_accumulator=use_split_accumulator,
+                ub=ub_obj_dgrad,
+                ub_type=ub_type_dgrad,
+                extra_output=reduce_scatter_out,
+                bulk_overlap=ctx.ub_bulk_dgrad,
+            )
+            nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            # Prepare grad input tensor
+            # Note: Perform tensor-parallel communication
+            dgrad = None
+            dgrad_work = None
+            if ctx.ub_overlap_rs_dgrad:
+                dgrad = reduce_scatter_out
+            elif ctx.ub_bulk_wgrad:
+                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+            elif ctx.parallel_mode == "column" and ctx.tp_size > 1:
+                nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
+                dgrad = gemm_out
+                if ctx.sequence_parallel:
+                    dgrad, dgrad_work = reduce_scatter_along_first_dim(
+                        dgrad,
+                        ctx.tp_group,
+                        async_op=True,
+                    )
                 else:
-                    dgrad = gemm_out
+                    dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
+                nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
+            else:
+                dgrad = gemm_out
 
             # --------------------------------------------------
             # Grad input tensor has been computed...
@@ -919,7 +920,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
-                if ctx.ub_bulk_wgrad and ctx.requires_dgrad:
+                if ctx.ub_bulk_wgrad:
                     if ub_obj_wgrad.is_fp8_ubuf():
                         dgrad = reduce_scatter_out
                     else:
@@ -937,42 +938,41 @@ class _LayerNormLinear(torch.autograd.Function):
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
+            if dgrad_work is not None:
+                dgrad_work.wait()
+                dgrad_work = None
+
+            # Residual gradient
+            dgrad = dgrad.view(inputmat.shape)
+            if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
+                dgrad = dgrad + grad_outputs[1].view_as(dgrad)
+
+            # Norm gradient
             dgamma = None
             dbeta = None
-            if ctx.requires_dgrad:
-                if dgrad_work is not None:
-                    dgrad_work.wait()
-                    dgrad_work = None
-                # Residual gradient
-                dgrad = dgrad.view(inputmat.shape)
-                if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
-                    dgrad = dgrad + grad_outputs[1].view_as(dgrad)
-                # Norm gradient
-                dgamma = None
+            nvtx_range_push(f"{nvtx_label}.norm")
+            if ctx.normalization == "LayerNorm":
+                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                    dgrad,
+                    inputmat,
+                    mu,
+                    rsigma,
+                    ln_weight,
+                    ctx.bwd_ln_sm_margin,
+                    ctx.zero_centered_gamma,
+                )
+                dgrad = dgrad.reshape(inputmat.size())
+            elif ctx.normalization == "RMSNorm":
+                dgrad, dgamma = tex.rmsnorm_bwd(
+                    dgrad,
+                    inputmat,
+                    rsigma,
+                    ln_weight,
+                    ctx.bwd_ln_sm_margin,
+                    ctx.zero_centered_gamma,
+                )
+                dgrad = dgrad.reshape(inputmat.size())
                 dbeta = None
-                nvtx_range_push(f"{nvtx_label}.norm")
-                if ctx.normalization == "LayerNorm":
-                    dgrad, dgamma, dbeta = tex.layernorm_bwd(
-                        dgrad,
-                        inputmat,
-                        mu,
-                        rsigma,
-                        ln_weight,
-                        ctx.bwd_ln_sm_margin,
-                        ctx.zero_centered_gamma,
-                    )
-                    dgrad = dgrad.reshape(inputmat.size())
-                elif ctx.normalization == "RMSNorm":
-                    dgrad, dgamma = tex.rmsnorm_bwd(
-                        dgrad,
-                        inputmat,
-                        rsigma,
-                        ln_weight,
-                        ctx.bwd_ln_sm_margin,
-                        ctx.zero_centered_gamma,
-                    )
-                    dgrad = dgrad.reshape(inputmat.size())
-                    dbeta = None
             nvtx_range_pop(f"{nvtx_label}.norm")
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
