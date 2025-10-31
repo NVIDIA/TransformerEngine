@@ -547,6 +547,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         # pylint: disable=unused-argument
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         quantizer = self._quantizer.copy()
