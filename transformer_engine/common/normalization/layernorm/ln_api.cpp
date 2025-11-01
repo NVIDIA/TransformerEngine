@@ -51,7 +51,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
              "RSigma must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
-  if (!workspace->data.shape.empty()) {
+  if (workspace->data.numel() != 0) {
     CheckInputTensor(x, "x");
     CheckInputTensor(gamma, "gamma");
     CheckInputTensor(beta, "beta");
@@ -94,7 +94,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
       gamma_in_weight_dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (workspace->data.numel() == 0) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
@@ -146,7 +146,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_CHECK(dbeta->data.shape == gamma.data.shape);
   NVTE_CHECK(dbeta->data.dtype == gamma.data.dtype);
 
-  if (!workspace->data.shape.empty()) {
+  if (workspace->data.numel() != 0) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(mu, "mu");
@@ -179,7 +179,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (workspace->data.numel() == 0) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
