@@ -586,7 +586,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
             are all-gathered and received here as a tuple.
             metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the MXFP8Tensor.
-            param_dtype (torch.dtype):
+            param_dtype (torch.dtype): high precision dtype of the MXFP8Tensor.
             out (Optional[torch.Tensor], optional): _description_. Defaults to None.
         Returns:
             Tuple[MXFP8Tensor, Tuple[torch.Tensor, ...]]: Allgathered MXFP8Tensor and tuple of internal tensors
