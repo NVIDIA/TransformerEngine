@@ -153,7 +153,7 @@ def init_te_model(config):
 def get_device_mesh(world_size, sharding_dims):
     dist_print(f"sharding-dims:{sharding_dims}")
     device_ids = list(range(world_size))
-    if sharding_dims == None:  # FSDP
+    if sharding_dims is None:  # FSDP
         mesh = DeviceMesh("cuda", device_ids)
     elif len(sharding_dims) == 1:
         assert sharding_dims[0] == world_size
