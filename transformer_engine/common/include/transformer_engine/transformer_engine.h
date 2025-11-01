@@ -472,14 +472,14 @@ class TensorWrapper {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
     nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
-    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32, amax_dptr != nullptr ? defaultShape : emptyShape};
+    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
+                            amax_dptr != nullptr ? defaultShape : emptyShape};
     nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
-    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32, scale_dptr != nullptr ? defaultShape : emptyShape};
+    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
+                             scale_dptr != nullptr ? defaultShape : emptyShape};
     nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
-    if (scale_inv_dptr == nullptr
-        && scale_inv_shape.ndim == defaultShape.ndim
-        && scale_inv_shape.ndim == 1
-        && scale_inv_shape.data[0] == defaultShape.data[0]) {
+    if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
+        scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
       // Scale-inv pointer has not been provided and shape matches default
       scale_inv_shape = emptyShape;
     }
@@ -790,8 +790,7 @@ class TensorWrapper {
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {
       {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
-  static constexpr NVTEShape emptyShape = {
-      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
+  static constexpr NVTEShape emptyShape = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
   NVTEShape convertShape(const NVTEShape &s) { return s; }

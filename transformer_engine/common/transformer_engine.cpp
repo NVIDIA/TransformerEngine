@@ -92,8 +92,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       // FP8 tensor with tensor scaling
       if (t.has_data()) {
         NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
-                   "\" has invalid scale_inv shape (expected 1 entry, got ",
-                   t.scale_inv.shape, ")");
+                   "\" has invalid scale_inv shape (expected 1 entry, got ", t.scale_inv.shape,
+                   ")");
       }
       if (t.has_columnwise_data()) {
         NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
@@ -104,8 +104,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       // High-precision tensor
       if (t.has_data()) {
         NVTE_CHECK(t.scale_inv.numel() == 0, "Tensor \"", name,
-                   "\" has invalid scale_inv shape (expected 0 entries, got ",
-                   t.scale_inv.shape, ")");
+                   "\" has invalid scale_inv shape (expected 0 entries, got ", t.scale_inv.shape,
+                   ")");
       }
       if (t.has_columnwise_data()) {
         NVTE_CHECK(t.columnwise_scale_inv.numel() == 0, "Tensor \"", name,

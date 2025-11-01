@@ -284,8 +284,8 @@ struct Tensor {
         }
         return data.shape;
       }
-    default:
-      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
+      default:
+        NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
     }
   }
 
