@@ -570,7 +570,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 # If weights are not resharded after forward, then both
                 # rowwise and columnwise data/scale_inv need to be allgathered.
                 sharded_tensors += (self._columnwise_data, self._columnwise_scale_inv)
-        metadata = (self._fp8_dtype, quantizer, reshard_after_forward)
+        metadata = (self._fp8_dtype, quantizer)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -593,32 +593,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             Tuple[MXFP8Tensor, Tuple[torch.Tensor, ...]]: Allgathered MXFP8Tensor and tuple of internal tensors
             used by the MXFP8Tensor that was being computed after allgather.
         """
-        fp8_dtype, quantizer, reshard_after_forward = metadata
-        if not reshard_after_forward:
-            rowwise_data, rowwise_scale_inv = (
-                all_gather_outputs[:2] if quantizer.rowwise_usage else (None, None)
-            )
-            columnwise_data, columnwise_scale_inv = (
-                all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
-            )
-        else:
-            data, scale_inv = all_gather_outputs
-            # Based on forward or backward pass, only one of rowwise or columnwise
-            # data/scale_inv will be present in all_gather_outputs.
-            rowwise_data = data if quantizer.rowwise_usage else None
-            rowwise_scale_inv = scale_inv if quantizer.rowwise_usage else None
-            columnwise_data = data if quantizer.columnwise_usage else None
-            columnwise_scale_inv = scale_inv if quantizer.columnwise_usage else None
-
-        mxfp8_tensor = MXFP8Tensor(
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            fp8_dtype=fp8_dtype,
-            dtype=param_dtype,
-            shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
-            quantizer=quantizer,
+        fp8_dtype, quantizer = metadata
+        rowwise_data, rowwise_scale_inv = (
+            all_gather_outputs[:2] if quantizer.rowwise_usage else (None, None)
+        )
+        columnwise_data, columnwise_scale_inv = (
+            all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
         )
 
         if out is not None:
@@ -628,7 +608,19 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             out._columnwise_scale_inv = columnwise_scale_inv
             out._quantizer = quantizer
 
-        return mxfp8_tensor, all_gather_outputs
+        else:
+            out = MXFP8Tensor(
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=columnwise_data,
+                columnwise_scale_inv=columnwise_scale_inv,
+                fp8_dtype=fp8_dtype,
+                dtype=param_dtype,
+                shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
+                quantizer=quantizer,
+            )
+
+        return out, all_gather_outputs
 
     @classmethod
     def _make_in_reduce_ex(

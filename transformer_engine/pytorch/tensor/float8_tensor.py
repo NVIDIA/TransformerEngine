@@ -827,7 +827,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 rowwise_usage=quantizer.rowwise_usage,
                 columnwise_usage=quantizer.columnwise_usage,
             )
-        return out, (data,)
+        return out, all_gather_outputs
 
     @classmethod
     def _make_in_reduce_ex(
