@@ -278,10 +278,13 @@ class _LayerNormLinear(torch.autograd.Function):
         weightmat = weight
         quantized_weight = False
         if fp8 or debug:
-            quantized_weight = not isinstance(weight, QuantizedTensorStorage)
+            quantized_weight = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
-            if weight_quantizer is not None:
+            # If weight is already quantized, no need to set quantizer states
+            if quantized_weight:
+                weight_quantizer = weight._quantizer
+            elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             # Get quantized weight
@@ -412,10 +415,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         or not ctx.ln_out_needs_gather
                     ):
                         ln_out.update_usage(rowwise_usage=False)
-
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(weightmat, QuantizedTensorStorage):
-                weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
