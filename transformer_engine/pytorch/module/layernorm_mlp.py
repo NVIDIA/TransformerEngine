@@ -447,7 +447,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = (is_first_microbatch is None or is_first_microbatch) and not is_recomputation
+            update_workspace = (
+                is_first_microbatch is None or is_first_microbatch
+            ) and not is_recomputation
             fc1_weight_quantizer.set_usage(
                 rowwise=True, columnwise=is_grad_enabled
             )  # and (is_recomputation or not checkpoint))
