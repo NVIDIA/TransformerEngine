@@ -635,10 +635,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 Float8Tensor.make_like(
                     tensor,
                     data=split_tensor,
-                    data_transpose=split_tranpose_tensor,
+                    data_transpose=split_transpose_tensor,
                     shape=split_tensor.shape,
                 )
-                for split_tensor, split_tranpose_tensor in zip(func_out, t_func_out)
+                for split_tensor, split_transpose_tensor in zip(func_out, t_func_out)
             ]
             return outs
 
@@ -668,7 +668,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             quantizer = tensor._quantizer.copy()
             out_tensor = Float8Tensor(
                 data=func_out,
-                shape=data.shape,
+                shape=func_out.shape,
                 dtype=tensor.dtype,
                 fp8_dtype=tensor._fp8_dtype,
                 fp8_scale_inv=scale_inv,
@@ -753,7 +753,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
         # Importing here to avoid circular imports
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
-
         if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
@@ -772,13 +771,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if reshard_after_forward:
             # Transpose is not needed at all for Blackwell+
             tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
-            # When module is wrapped with torch no_grad, the training state
-            # will be IDLE even in forward pass
-            is_forward_pass = fsdp_state._training_state in (
-                TrainingState.FORWARD,
-                TrainingState.IDLE,
-            )
-            transpose_needed = tensor_has_transpose and not is_forward_pass
+            training_state = fsdp_state._fsdp_param_group._training_state
+            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
+            transpose_needed = tensor_has_transpose and not is_backward_pass
             quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, quantizer)

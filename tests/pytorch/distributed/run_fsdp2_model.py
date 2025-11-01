@@ -40,7 +40,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--num-heads", type=int, default=8, help="Number of attn. heads")
     parser.add_argument("--head-dim", type=int, default=64, help="Attention head size")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size of input")
-    parser.add_argument("--seq-length", type=int, default=512, help="Sequence length of input")
+    parser.add_argument("--seq-length", type=int, default=128, help="Sequence length of input")
     parser.add_argument("--params-dtype", type=str, default="float32", help="Parameter dtype.")
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -48,7 +48,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--recipe",
         type=str,
-        default="current_scaling",
+        default="mx_fp8_block_scaling",
         help="Quantizer type.",
         choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
     )
