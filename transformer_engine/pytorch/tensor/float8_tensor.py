@@ -751,6 +751,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             metadata: Tuple[Any]: Metadata needed for reconstructing the
             Float8Tensor after all-gather.
         """
+        # pylint: disable=unused-argument
         # Importing here to avoid circular imports
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
 
@@ -774,7 +775,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
             training_state = fsdp_state._fsdp_param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
-            transpose_needed = tensor_has_transpose and not is_backward_pass
+            transpose_needed = tensor_has_transpose and is_backward_pass
             quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, quantizer)

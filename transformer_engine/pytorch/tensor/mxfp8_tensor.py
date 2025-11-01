@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Union, Any
 import warnings
 
 import torch
-from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState, compiled_autograd_enabled
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -758,11 +758,18 @@ class _ViewFunc(torch.autograd.Function):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        if shape[-1] != ctx.shape[-1]:
+        if shape[-1] != ctx.shape[-1] and compiled_autograd_enabled():
+            raise RuntimeError(
+                "MXFP8Tensor does not support reshaping inner dimension "
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+            )
+        elif shape[-1] != ctx.shape[-1]:
             warnings.warn(
                 "MXFP8Tensor does not support reshaping inner dimension."
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
-                "If you are using this for FSDP2, then ignore this warning."
+                "If you are using this for FSDP2, then ignore this warning. Since this view is"
+                " not going to be used anywhere.",
+                stacklevel=2,
             )
             return tensor.detach()
 

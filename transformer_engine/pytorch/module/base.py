@@ -1356,9 +1356,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param.clear_high_precision_init_val = MethodType(clear, param)
                 # Update the parameter based on its type
 
-            (
-                setattr(self, name, param) if not is_dtensor else setattr(self, name, dtensor_param)
-            )  # pylint: disable=expression-not-assigned
+            if not is_dtensor:
+                setattr(self, name, param)
+            else:
+                setattr(self, name, dtensor_param)
 
     @abstractmethod
     def forward(self):

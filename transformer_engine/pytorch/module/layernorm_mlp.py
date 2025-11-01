@@ -352,14 +352,15 @@ class _LayerNormMLP(torch.autograd.Function):
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
             # No need to set the quantizer states if weights are already quantized
-            if not isinstance(fc1_weight, QuantizedTensorStorage):
+            if isinstance(fc1_weight, QuantizedTensorStorage):
+                 fc1_weight_quantizer = fc1_weight._quantizer
+            elif fc1_weight_quantizer is not None:
                 fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            else:
-                fc1_weight_quantizer = fc1_weight._quantizer
-            if not isinstance(fc2_weight, QuantizedTensorStorage):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            else:
+ 
+            if isinstance(fc2_weight, QuantizedTensorStorage):
                 fc2_weight_quantizer = fc2_weight._quantizer
+            elif fc2_weight_quantizer is not None:
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
