@@ -328,7 +328,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # 1) no checkpointing
         # or 2) doing the recomputation with checkpointing
         backwards_needs_fc1_input = fc1_weight.requires_grad and (
-            (is_grad_enabled and not checkpoint)
+            (is_grad_enabled and not checkpoint) or is_recomputation
         )
 
         device = inp.device
@@ -400,7 +400,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if sequence_parallel:
 
             # do not return ln output if checkpointing and in recomputation, not necessary
-            if return_layernorm_output_gathered:
+            if return_layernorm_output_gathered and not is_recomputation:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
@@ -447,7 +447,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = is_first_microbatch is None or is_first_microbatch
+            update_workspace = (is_first_microbatch is None or is_first_microbatch) and not is_recomputation
             fc1_weight_quantizer.set_usage(
                 rowwise=True, columnwise=is_grad_enabled
             )  # and (is_recomputation or not checkpoint))
