@@ -547,6 +547,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         # pylint: disable=unused-argument
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         quantizer = self._quantizer.copy()
@@ -594,10 +595,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         fp8_dtype, quantizer, reshard_after_forward = metadata
         if not reshard_after_forward:
-            rowwise_data, rowwise_scale_inv = all_gather_outputs[:2]\
-                if quantizer.rowwise_usage else (None, None)
-            columnwise_data, columnwise_scale_inv = all_gather_outputs[-2:]\
-                if quantizer.columnwise_usage else (None, None)
+            rowwise_data, rowwise_scale_inv = (
+                all_gather_outputs[:2] if quantizer.rowwise_usage else (None, None)
+            )
+            columnwise_data, columnwise_scale_inv = (
+                all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
+            )
         else:
             data, scale_inv = all_gather_outputs
             # Based on forward or backward pass, only one of rowwise or columnwise
