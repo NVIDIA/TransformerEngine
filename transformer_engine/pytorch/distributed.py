@@ -1893,6 +1893,7 @@ def _get_module_fsdp_state(module):
     in the module hierarchy the module belongs to.
     """
     from torch.distributed._composable_state import _module_state_mapping
+
     # this will return correct fsdp state if module itself is an fsdp module
     if hasattr(module, "_get_fsdp_state"):
         fsdp_state = module._get_fsdp_state()

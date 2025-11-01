@@ -286,7 +286,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             else:
                 weight_quantizer = weight._quantizer
-            
+
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
