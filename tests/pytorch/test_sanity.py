@@ -122,6 +122,7 @@ all_activations = [
     "sreglu",
     "silu",
     "swiglu",
+    "clamped_swiglu",
 ]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -547,7 +548,7 @@ def test_sanity_layernorm_mlp(
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
+    activation_params = None if activation != "clamped_swiglu" else {"limit": 7.0, "alpha": 1.702}
     block = LayerNormMLP(
         config.hidden_size,
         4 * config.hidden_size,
@@ -555,6 +556,7 @@ def test_sanity_layernorm_mlp(
         output_layer_init_method=output_layer_init_method,
         zero_centered_gamma=zero_centered_gamma,
         activation=activation,
+        activation_params=activation_params,
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",

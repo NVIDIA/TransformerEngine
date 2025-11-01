@@ -477,9 +477,35 @@ def get_attention_backend(
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
-            elif cudnn_version < (9, 14, 0):
-                logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0")
-                use_fused_attention = False
+            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
+            # determinism for Blackwell
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug(
+                        "Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0"
+                    )
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug(
+                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
+                            " with cuDNN < 9.18.0"
+                        )
+                        use_fused_attention = False
+
+        if device_compute_capability == (12, 0):
+            if use_flash_attention:
+                logger.debug(
+                    "Disabling FlashAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            use_flash_attention = False
+            use_fused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:
@@ -560,6 +586,20 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+        ):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
+                    head_dim_qk,
+                )
+            use_fused_attention = False
+
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
@@ -629,6 +669,13 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
+        if device_compute_capability == (12, 0):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as qkv_format = thd is"
+                    " not supported for compute capability = sm120"
+                )
+            use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
