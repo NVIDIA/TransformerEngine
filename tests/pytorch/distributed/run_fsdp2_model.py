@@ -142,7 +142,7 @@ def init_te_model(config):
     # more details below.
     if layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         # For this case, we are creating a model that resemebles production use-cases
-        # wherein there are mltiple TransformerLayers in the model. And we would need 
+        # wherein there are mltiple TransformerLayers in the model. And we would need
         # to shard each transformer layer. Since each transformer layer is not a root module,
         # FSDP2's fully_shard assigns reshard_after_forward=False for all parameters of the model.
         args[1] *= 4  # FFN hidden size
@@ -291,6 +291,7 @@ def _train(args):
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
+
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
