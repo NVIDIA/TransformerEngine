@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
-from typing import Callable, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
@@ -75,6 +75,8 @@ from ..cpu_offload import (
     mark_activation_offload,
 )
 from ...debug.pytorch.debug_state import TEDebugState
+from .metis.quant import  MetisSvdFunction
+from .metis.metix_context import LinearLowbitContext
 
 __all__ = ["Linear"]
 
@@ -128,6 +130,7 @@ class _Linear(torch.autograd.Function):
             symmetric_ar_type,
             save_original_input,
             debug,
+            use_metis,
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -227,6 +230,19 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if isinstance(inputmat, QuantizedTensorStorage):
                     inputmat.update_usage(rowwise_usage=True)
+                elif use_metis and LinearLowbitContext.enable_activation_svd:
+                    # ------------------------------------------------------
+                    # Forward x SVD
+                    # Note: x = U @ S @ V
+                    # ------------------------------------------------------
+                    inputmat = MetisSvdFunction.svd_lowrank_quant(
+                        inputmat,
+                        input_quantizer,
+                        rank=LinearLowbitContext.activation_lowrank_svd,
+                        niter=LinearLowbitContext.activation_lowrank_niter,
+                        broadcast_dim=LinearLowbitContext.activation_broadcast_dim
+                    )
+                    own_quantized_input = True
                 else:
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
@@ -476,7 +492,6 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
-
             ctx.owns_input = saved_inputmat is not inp
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
@@ -484,7 +499,10 @@ class _Linear(torch.autograd.Function):
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
-
+            ctx.use_metis = use_metis
+            if use_metis:
+                # Load metis lowbit context
+                ctx.metis_context = LinearLowbitContext().clone()
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -1096,6 +1114,7 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        use_metis: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1111,6 +1130,7 @@ class Linear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
         self.name = name
+        self.use_metis = use_metis
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -1464,6 +1484,7 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
+                self.use_metis,
             )
             out = linear_fn(
                 *autograd_ctx,

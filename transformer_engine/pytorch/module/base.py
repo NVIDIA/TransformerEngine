@@ -1143,7 +1143,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         Float8BlockwiseQTensorStorage,
                     ),
                 ):
-                    grad_output = quantizer(grad_output)
+                    if hasattr(ctx,"use_metis") and ctx.use_metis and ctx.metis_context.enable_backward_svd:
+                        print("backward use metis ")
+                        from .metis.quant import MetisSvdFunction
+                        if ctx.metis_context.backward_lowrank_svd > 0:
+                            grad_output = MetisSvdFunction.svd_lowrank_quant(
+                                grad_output, 
+                                quantizer,
+                                rank=ctx.metis_context.backward_lowrank_svd,
+                                niter=ctx.metis_context.backward_lowrank_niter,
+                                adaptive_schedule=ctx.metis_context.backward_longtail_schedule,
+                                broadcast_dim=ctx.metis_context.backward_broadcast_dim,
+                            )
+                        else:
+                            grad_output = MetisSvdFunction.svd_fullrank_quant(grad_output, quantizer)
+                    else:        
+                        grad_output = quantizer(grad_output)
 
                 # Copy into communication buffer, and replace original gradient with it
                 grad_output, _ = fill_userbuffers_buffer_for_all_gather(
