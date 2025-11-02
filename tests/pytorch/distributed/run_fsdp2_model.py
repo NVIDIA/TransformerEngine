@@ -135,18 +135,32 @@ def init_te_model(config):
     kwargs = {
         "params_dtype": params_dtype,
     }
+    kwargs["device"] = config.device
+
     layer_type = get_te_layer_from_string(config.layer_type)
-    if layer_type == te.LayerNormLinear:
-        args[1] *= 3  # QKV projection
-        out_shape[-1] *= 3
-    elif layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+    # We are creating model in a way so that we can test both reshard_after_forward=True/False cases.
+    # more details below.
+    if layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+        # For this case, we are creating a model that resemebles production use-cases
+        # wherein there are mltiple TransformerLayers in the model. And we would need 
+        # to shard each transformer layer. Since each transformer layer is not a root module,
+        # FSDP2's fully_shard assigns reshard_after_forward=False for all parameters of the model.
         args[1] *= 4  # FFN hidden size
         args.append(config.num_heads)
         kwargs["fuse_qkv_params"] = True
         if layer_type is te.MultiheadAttention:
             kwargs["input_layernorm"] = True
-    kwargs["device"] = config.device
-    model = nn.Sequential(*[layer_type(*args, **kwargs) for _ in range(config.num_layers)])
+        model = nn.Sequential(*[layer_type(*args, **kwargs) for _ in range(config.num_layers)])
+    elif layer_type == te.LayerNormLinear:
+        # For this case, we are creating a model with just one LayerNormLinear layer
+        # so that the model itself is a root module, and FSDP2's fully_shard assigns
+        # reshard_after_forward=True for the parameters of these model.
+        args[1] *= 3  # QKV projection
+        out_shape[-1] *= 3
+        model = layer_type(*args, **kwargs)
+    else:
+        model = layer_type(*args, **kwargs)
+
     return model, inp_shape, out_shape
 
 
@@ -277,7 +291,6 @@ def _train(args):
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
-
         build_model_context = fp8_model_init
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
@@ -307,8 +320,7 @@ def _train(args):
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
         dist_print(f" Sharded parameters materialized and initialized on cuda device.")
-    if args.fp8_init:
-        test_fp8_fsdp2_allgather(model)
+
     dist_print(
         f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB"
     )
@@ -326,6 +338,11 @@ def _train(args):
         loss.backward()
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
+
+    # Some of the FSDP states are lazy initialized during FSDP forward pass
+    # so testing fp8 allgather at the end of the training loop.
+    if args.fp8_init:
+        test_fp8_fsdp2_allgather(model)
 
     dist.destroy_process_group()
     return 0
