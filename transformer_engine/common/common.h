@@ -155,9 +155,7 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept {
-    return data.dptr != nullptr && data.numel() != 0;
-  }
+  bool has_data() const noexcept { return data.dptr != nullptr && data.numel() != 0; }
 
   bool has_columnwise_data() const noexcept {
     return columnwise_data.dptr != nullptr && columnwise_data.numel() != 0;
