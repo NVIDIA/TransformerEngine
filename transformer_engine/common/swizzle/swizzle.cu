@@ -375,7 +375,7 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         k = input->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
         NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
+                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape, ".");
         m = input->columnwise_scale_inv.shape[1];
         k = input->columnwise_scale_inv.shape[0];
       }
@@ -389,7 +389,7 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         k = input->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
         NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
+                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape, ".");
         m = input->columnwise_scale_inv.shape[0];
         k = input->columnwise_scale_inv.shape[1];
       }
