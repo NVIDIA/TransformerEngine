@@ -345,7 +345,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            for scale_inv, split_size in zip(scale_invs, split_sizes_for_scale):
+            for scale_inv, scale_split_size in zip(scale_invs, split_sizes_for_scale):
                 scale_inv_out = scale_inv.__torch_dispatch__(
                     func,
                     types,
