@@ -335,13 +335,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             out_data = []
             for data in [tensor._rowwise_data, tensor._columnwise_data]:
-                func_out = data.__torch_dispatch__(
-                    func,
-                    types,
-                    [data] + list(args[1:]),
-                    kwargs,
-                )
-                out_data.append(func_out)
+                if data is not None:
+                    func_out = data.__torch_dispatch__(
+                        func,
+                        types,
+                        [data] + list(args[1:]),
+                        kwargs,
+                    )
+                    out_data.append(func_out)
+                else:
+                    out_data.append(None)
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
