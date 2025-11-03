@@ -239,8 +239,7 @@ def test_fp8_fsdp2_allgather(model):
         fp32_allgathered_params[name] = full_tensor
     # FP8 allgather using FSDP2
     for module in model.modules():
-        # In case of Transformerlayer, just root module is sharded
-        # at the moment.
+        # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "unshard"):
             module.unshard()
     # Make sure allgathered parameters match exactly
@@ -248,6 +247,7 @@ def test_fp8_fsdp2_allgather(model):
         assert torch.allclose(param.dequantize(), fp32_allgathered_params[name])
     # Revert model to original sharded state
     for module in model.modules():
+        # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "reshard"):
             module.reshard()
 
