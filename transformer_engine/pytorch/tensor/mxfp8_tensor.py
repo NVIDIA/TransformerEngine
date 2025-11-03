@@ -774,7 +774,7 @@ class _ViewFunc(torch.autograd.Function):
                 "then ignore this warning. Since this view is not going to be used anywhere. ",
                 stacklevel=2,
             )
-            return tensor.detach().dequantize().view(*shape)
+            return tensor.dequantize().view(*shape)
 
         # Construct new tensor if shape is provided
         new_rowwise_data = None
