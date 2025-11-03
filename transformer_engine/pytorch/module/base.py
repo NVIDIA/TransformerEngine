@@ -1188,6 +1188,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # FP8 without all-gather: fused bgrad + cast + transpose
         grad_bias = None
+        # print("backward use_bias==",ctx.use_bias)
         if ctx.use_bias:
             if isinstance(
                 grad_output,
@@ -1207,7 +1208,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):
             if hasattr(ctx,"use_metis") and ctx.use_metis and ctx.metis_context.enable_backward_svd:
-                print("backward use metis ,ctx.metis_context=",ctx.metis_context)
+                # print("backward use metis ,ctx.metis_context=",ctx.metis_context)
                 from .metis.quant import MetisSvdFunction
                 if ctx.metis_context.backward_lowrank_svd > 0:
                     grad_output = MetisSvdFunction.svd_lowrank_quant(

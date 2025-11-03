@@ -1953,7 +1953,7 @@ class MetisLinear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
         self.name = name
-
+        self.weight_svd_has_initialized = False
         self.commonMetisSvdFunction_args = {
             "init_method": init_method,
             "return_bias": return_bias,
@@ -1985,6 +1985,7 @@ class MetisLinear(TransformerEngineBaseModule):
             self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,**self.commonMetisSvdFunction_args)
 
         if LinearLowbitContext.enable_weight_svd:
+
             self.weight_svd_decomposition()
 
     @torch.no_grad()
@@ -1996,7 +1997,7 @@ class MetisLinear(TransformerEngineBaseModule):
         u = u.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
         s = s.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
         v = v.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
-        if self.linear_residual.bias :
+        if self.use_bias:
             bias = self.linear_residual.bias.to(device=device)
         else:
             bias = None
@@ -2035,6 +2036,7 @@ class MetisLinear(TransformerEngineBaseModule):
 
     @torch.no_grad()
     def weight_svd_decomposition(self):
+        print("start weight_svd_decomposition")
         from transformer_engine.pytorch.module.linear import Linear # avoid circular import
         if not self.weight_svd_has_initialized:
           u,s,v,bias = self.initialize_weight_svd_decomposition()
@@ -2128,3 +2130,14 @@ class MetisLinear(TransformerEngineBaseModule):
             y = self.linear_residual(inp,**kvargs)
         
         return y
+
+    def __repr__(self):
+        if self.weight_svd_has_initialized:
+            base_repr = f"MetisLinear(in_features={self.in_features}, out_features={self.out_features}, weight_svd_rank={self.s.shape[0]}, bias={self.use_bias})"
+        else:
+            base_repr =  f"MetisLinear(in_features={self.in_features}, out_features={self.out_features}, weight_svd_rank=NotInitialized, bias={self.use_bias})"
+        child_repr = repr(self.linear_residual)
+        child_repr += repr(self.vlinear)
+        child_repr += repr(self.ulinear)
+        child_repr = "\n  " + child_repr.replace("\n", "\n  ")
+        return base_repr + child_repr

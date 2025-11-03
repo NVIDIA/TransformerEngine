@@ -29,6 +29,7 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
     buffer for ZeRO-2.
 
     """
+    print("tensor type=", type(tensor), " new_raw_data dtype=", new_raw_data.dtype)
     if isinstance(tensor, Float8Tensor):
         old_raw_data = tensor._data
         assert old_raw_data.dtype == new_raw_data.dtype, "The data types of raw data don't match"
