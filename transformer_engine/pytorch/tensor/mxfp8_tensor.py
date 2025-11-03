@@ -455,16 +455,17 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     out_data.append(func_out)
                 else:
                     out_data.append(None)
-            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
-            scale_lengths = [length, length // MXFP8_BLOCK_SCALING_SIZE]
             for scale_inv, scale_length in zip(scale_invs, scale_lengths):
-                scale_inv_out = scale_inv.__torch_dispatch__(
-                    func,
-                    types,
-                    [scale_inv, dim, start, scale_length] + list(args[4:]),
-                    kwargs,
-                )
-                out_data.append(scale_inv_out)
+                if scale_inv is not None:
+                    scale_inv_out = scale_inv.__torch_dispatch__(
+                        func,
+                        types,
+                        [scale_inv, dim, start, scale_length] + list(args[4:]),
+                        kwargs,
+                    )
+                    out_data.append(scale_inv_out)
+                else:
+                    out_data.append(None)
             return MXFP8Tensor(
                 shape=out_data[0].shape,
                 dtype=tensor.dtype,
