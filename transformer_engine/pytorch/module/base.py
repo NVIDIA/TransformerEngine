@@ -1248,7 +1248,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Initialize param_init_meta exactly once during the init. FSDP2 can call
         # register parameter again to change parameters to DTensors. And it calls
         # it without custom fp8 specific kwargs that we need. And so we dont want
-        # our fp8 init attributes.
+        # to reset/loose our fp8 init attributes.
         if hasattr(self, "param_init_meta") and name not in self.param_init_meta:
             self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
