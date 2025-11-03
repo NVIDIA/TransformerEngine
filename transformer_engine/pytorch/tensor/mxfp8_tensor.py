@@ -770,11 +770,11 @@ class _ViewFunc(torch.autograd.Function):
             warnings.warn(
                 "MXFP8Tensor does not support reshaping inner dimension."
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
-                "If you are using this for FSDP2, then ignore this warning. Since this view is"
-                " not going to be used anywhere. ",
+                "If you are using this for FSDP2 without compiled_autograd_enabled,"
+                "then ignore this warning. Since this view is not going to be used anywhere. ",
                 stacklevel=2,
             )
-            return tensor.detach()
+            return tensor.detach().dequantize().view(*shape)
 
         # Construct new tensor if shape is provided
         new_rowwise_data = None

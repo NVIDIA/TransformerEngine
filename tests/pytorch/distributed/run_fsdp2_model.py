@@ -223,16 +223,12 @@ def test_fp8_fsdp2_allgather(model):
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor)
         local_tensor = param._local_tensor
-        # assert(isinstance(local_tensor, QuantizedTensor))
         device_mesh = param.device_mesh
-        if device_mesh.ndim == 1:
-            # For 1D mesh (FSDP), use the only available dimension
-            dist_group = device_mesh.get_group()
-        else:
-            # For 2D mesh (HSDP), use the shard dimension (last dimension)
-            # which corresponds to where weights are actually sharded
-            shard_dim = device_mesh.ndim - 1
-            dist_group = device_mesh.get_group(mesh_dim=shard_dim)
+        dist_group = (
+            device_mesh.get_group(mesh_dim="shard")
+            if device_mesh.ndim > 1
+            else device_mesh.get_group()
+        )
         # Perform manual allgather on local_tensor. zeros_like will create hp tensor since torch_dispatch
         # for local_tensor will go down the dequantization route.
         gathered_tensor = [
