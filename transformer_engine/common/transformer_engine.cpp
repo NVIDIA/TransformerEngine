@@ -313,8 +313,7 @@ class TensorAllocator {
       return ret;
     }
     if (memory.size() < memory.capacity()) {
-      // memory.emplace_back(); /// TODO Debug why this is initializing tensors with scale_inv shape=[1]
-      memory.push_back(Tensor());
+      memory.emplace_back();
       Tensor &t = memory.back();
       size = memory.size();
       // 1-based indexing
