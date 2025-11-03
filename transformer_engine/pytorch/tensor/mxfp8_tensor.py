@@ -765,9 +765,9 @@ class _ViewFunc(torch.autograd.Function):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        elif shape[-1] != ctx.shape[-1]:
+        if shape[-1] != ctx.shape[-1]:
             warnings.warn(
-                "MXFP8Tensor does not support reshaping inner dimension."
+                "MXFP8Tensor does not support reshaping inner dimension. "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
                 "If you are using this for FSDP2 without compiled_autograd_enabled,"
                 "then ignore this warning. Since this view is not going to be used anywhere. ",
