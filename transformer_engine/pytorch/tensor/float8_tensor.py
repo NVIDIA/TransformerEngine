@@ -580,8 +580,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     out_transpose = None
                 else:
                     view_shape_for_transpose = [out_shape[-1]] + list(out_shape[:-1])
-                    if out_transpose is not None:
-                        out_transpose = out_transpose.view(*view_shape_for_transpose)
                     out_transpose = out_transpose.view(*view_shape_for_transpose)
             return Float8Tensor(
                 shape=out_shape,
