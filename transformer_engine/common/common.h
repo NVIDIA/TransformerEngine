@@ -156,8 +156,7 @@ struct Tensor {
   }
 
   bool has_data() const noexcept {
-    return data.dptr != nullptr;
-    // TODO return data.dptr != nullptr && data.numel() != 0;
+    return data.dptr != nullptr && data.numel() != 0;
   }
 
   bool has_columnwise_data() const noexcept {
