@@ -575,6 +575,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 out_transpose_shape = out_transpose.size()
                 if (
                     out_transpose_shape[0] != out_shape[-1]
+                    or out_transpose_shape[1:] != out_shape[:-1]
+                ):
+                    out_transpose = None
                 else:
                     view_shape_for_transpose = [out_shape[-1]] + list(out_shape[:-1])
                     if out_transpose is not None:
