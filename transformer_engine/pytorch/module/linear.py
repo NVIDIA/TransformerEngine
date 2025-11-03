@@ -235,6 +235,7 @@ class _Linear(torch.autograd.Function):
                     # Forward x SVD
                     # Note: x = U @ S @ V
                     # ------------------------------------------------------
+                    print("foward enable_activation_svd use_metis LinearLowbitContext=", LinearLowbitContext())
                     inputmat = MetisSvdFunction.svd_lowrank_quant(
                         inputmat,
                         input_quantizer,
@@ -613,7 +614,7 @@ class _Linear(torch.autograd.Function):
                 and ctx.grad_output_quantizer is not None
             ):
                 ctx.grad_output_quantizer.set_usage(columnwise=False)
-
+            print("backward  ctx.use_metis=", ctx.use_metis)
             # Prepare grad output tensor
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (

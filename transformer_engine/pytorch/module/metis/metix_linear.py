@@ -10,66 +10,11 @@ import warnings
 
 import torch
 
-from transformer_engine.pytorch.tensor import MXFP8TensorStorage
+from transformer_engine.pytorch.distributed import dist_group_type
+from transformer_engine.pytorch.transformer import TransformerEngineBaseModule
 import transformer_engine_torch as tex
 import debugpy
-from transformer_engine.common.recipe import Recipe
 
-from ..linear import Linear
-from ..base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_dummy_wgrad,
-    get_ub,
-    get_workspace,
-    TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
-from .._common import noop_cat, WeightGradStore
-from ...quantization import FP8GlobalStateManager
-from ...utils import (
-    cast_if_needed,
-    clear_tensor_data,
-    divide,
-    init_method_constant,
-    requires_grad,
-    needs_quantized_gemm,
-    assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
-from ...distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    symmetric_all_reduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-    _fsdp_gather_tensors,
-)
-from ...cpp_extensions import (
-    general_gemm,
-)
-from ...constants import GemmParallelModes, dist_group_type
-from ...jit import no_torch_dynamo
-from ...graph import is_graph_capturing
-from ...tensor.quantized_tensor import (
-    QuantizedTensor,
-    QuantizedTensorStorage,
-    Quantizer,
-    prepare_for_saving,
-    restore_from_saved,
-)
-# from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-# from ...tensor.mxfp8_tensor import MXFP8Quantizer
-from ...tensor.utils import is_experimental
-from ...export import is_in_onnx_export_mode, assert_warmed_up
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 # from ....debug.pytorch.debug_state import TEDebugState
 from .metix_context import LinearLowbitContext
 
@@ -1994,7 +1939,21 @@ class MetisLinear(TransformerEngineBaseModule):
         name: Optional[str] = None,
     ) -> None:
         # print("current LinearLowbitContext=", LinearLowbitContext())
+        from transformer_engine.pytorch.module.linear import Linear  # avoid circular import
         super().__init__()
+        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        self.in_features = in_features
+        self.out_features = out_features
+        self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+        self.use_bias = bias
+        self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
+        self.get_rng_state_tracker = get_rng_state_tracker
+        self.rng_tracker_name = rng_tracker_name
+        self.symmetric_ar_type = symmetric_ar_type
+        self.save_original_input = save_original_input
+        self.name = name
+
         self.commonMetisSvdFunction_args = {
             "init_method": init_method,
             "return_bias": return_bias,
@@ -2030,6 +1989,7 @@ class MetisLinear(TransformerEngineBaseModule):
 
     @torch.no_grad()
     def initialize_weight_svd_decomposition(self):
+        
         device = self.linear_residual.weight.device
         weight_fp32 = self.linear_residual.weight.float()
         u, s, v = torch.linalg.svd(weight_fp32, full_matrices=False)
@@ -2075,7 +2035,7 @@ class MetisLinear(TransformerEngineBaseModule):
 
     @torch.no_grad()
     def weight_svd_decomposition(self):
-
+        from transformer_engine.pytorch.module.linear import Linear # avoid circular import
         if not self.weight_svd_has_initialized:
           u,s,v,bias = self.initialize_weight_svd_decomposition()
         else:

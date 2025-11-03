@@ -1206,7 +1206,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):
-            grad_output = quantizer(grad_output)
+            if hasattr(ctx,"use_metis") and ctx.use_metis and ctx.metis_context.enable_backward_svd:
+                print("backward use metis ,ctx.metis_context=",ctx.metis_context)
+                from .metis.quant import MetisSvdFunction
+                if ctx.metis_context.backward_lowrank_svd > 0:
+                    grad_output = MetisSvdFunction.svd_lowrank_quant(
+                        grad_output, 
+                        quantizer,
+                        rank=ctx.metis_context.backward_lowrank_svd,
+                        niter=ctx.metis_context.backward_lowrank_niter,
+                        adaptive_schedule=ctx.metis_context.backward_longtail_schedule,
+                        broadcast_dim=ctx.metis_context.backward_broadcast_dim,
+                    )
+                else:
+                    grad_output = MetisSvdFunction.svd_fullrank_quant(grad_output, quantizer)
+            else:        
+                grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
     def register_parameter(self, name, param, **kwargs):
