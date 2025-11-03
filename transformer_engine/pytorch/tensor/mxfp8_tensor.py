@@ -349,7 +349,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 scale_inv_out = scale_inv.__torch_dispatch__(
                     func,
                     types,
-                    [scale_inv, split_size] + list(args[2:]),
+                    [scale_inv, scale_split_size] + list(args[2:]),
                     kwargs,
                 )
                 out_data.append(scale_inv_out)
