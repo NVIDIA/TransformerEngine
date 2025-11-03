@@ -341,10 +341,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                         types,
                         [data] + list(args[1:]),
                         kwargs,
-                    )
+                    ) if data is not None else None
                     out_data.append(func_out)
-                else:
-                    out_data.append(None)
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
@@ -354,7 +352,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     types,
                     [scale_inv, scale_split_size] + list(args[2:]),
                     kwargs,
-                )
+                ) if scale_inv is not None else None
                 out_data.append(scale_inv_out)
             return [
                 MXFP8Tensor(
@@ -432,8 +430,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
                 dst._rowwise_data.copy_(src._rowwise_data.detach())
                 dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
-                dst._columnwise_data.copy_(src._columnwise_data.detach())
-                dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                if src._columnwise_data is not None and dst._columnwise_data is not None:
+                    dst._columnwise_data.copy_(src._columnwise_data.detach())
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
                 dst._quantizer = src._quantizer
                 return dst
         if func == aten.slice.Tensor:
@@ -455,17 +454,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     out_data.append(func_out)
                 else:
                     out_data.append(None)
+            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+            scale_lengths = [length, length // MXFP8_BLOCK_SCALING_SIZE]
             for scale_inv, scale_length in zip(scale_invs, scale_lengths):
-                if scale_inv is not None:
-                    scale_inv_out = scale_inv.__torch_dispatch__(
-                        func,
-                        types,
-                        [scale_inv, dim, start, scale_length] + list(args[4:]),
-                        kwargs,
-                    )
-                    out_data.append(scale_inv_out)
-                else:
-                    out_data.append(None)
+                scale_inv_out = scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [scale_inv, dim, start, scale_length] + list(args[4:]),
+                    kwargs,
+                ) if scale_inv is not None else None
+                out_data.append(scale_inv_out)
             return MXFP8Tensor(
                 shape=out_data[0].shape,
                 dtype=tensor.dtype,
