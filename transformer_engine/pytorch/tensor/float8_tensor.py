@@ -768,15 +768,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
-        # based on whether its forward or backward pass. If weights are not resharded after forward pass,
-        # weights allgathered in forward are used in backward and pre/post allgather methods wont be called.
+        # based on whether its forward or backward pass. Otherwise, weights allgathered in forward
+        # are used in backward and pre/post allgather methods wont be called again in backward pass.
         if reshard_after_forward:
-            # Transpose is not needed at all for Blackwell+
-            tensor_has_transpose = not self._transpose_invalid and self._transpose is not None
             training_state = fsdp_state._fsdp_param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
-            transpose_needed = tensor_has_transpose and is_backward_pass
-            quantizer.set_usage(rowwise=not transpose_needed, columnwise=transpose_needed)
+            # In case of hopper/L40, only one of data/transpose is needed
+            # based on forward or backward pass.
+            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, quantizer)
         return sharded_tensors, metadata
@@ -807,7 +806,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         (fp8_scale_inv, fp8_dtype, quantizer) = metadata
         orig_shape = data.size()
         # Quantizer has only columnwise usage set for backward pass
-        # with pre-hopper architectures if weights are resharded after forward pass.
+        # In Blackwell+ architectures, transpose is not needed at all,
+        # even if columnwise usage is set. and is going to be handled
+        # internally in the update_usage method.
         if out is not None:
             out.update_usage(
                 rowwise_usage=quantizer.rowwise_usage,
