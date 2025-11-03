@@ -595,7 +595,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         metadata: Any,
         param_dtype: torch.dtype,
         *,
-        out: Optional[torch.Tensor] = None,
+        out: Optional[MXFP8Tensor] = None,
     ):
         """Functions FSDP2 calls after all-gather of the
         weights for both forward and backward passes.

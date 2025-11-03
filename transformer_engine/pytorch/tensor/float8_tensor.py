@@ -786,7 +786,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         metadata: Any,
         param_dtype: torch.dtype,
         *,
-        out: Optional[torch.Tensor] = None,
+        out: Optional[Float8Tensor] = None,
     ):
         """Functions FSDP2 calls after all-gather of the
         weights for both forward and backward passes.
