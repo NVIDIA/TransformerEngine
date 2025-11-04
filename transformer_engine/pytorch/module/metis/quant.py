@@ -49,6 +49,7 @@ class MetisSvdFunction():
             layout=layout,
             quantization_params=output_quantizer,
             out_dtype=output_dtype,
+            use_split_accumulator=True,
         )
         nvtx_range_pop(f"transformer_engine._MetisLowBitLinear.svd_quant_{nvtx_label}.gemm")
         return gemm_out
@@ -83,23 +84,25 @@ class MetisSvdFunction():
         # start_time.record()
         ug = ug.to(input_.dtype)
         sg = sg.to(input_.dtype)
-        vg = vg.to(input_.dtype)
+        vg = vg.T.to(input_.dtype)
         # vg = vg.T
         # ug = ug.T
         
         # sg, res_scalar = LinearLowbitContext.schedule_list[adaptive_schedule](sg)
         sg = torch.diag(sg)
-        ker = (ug @ sg @ vg.T)
+        ker = (ug @ sg @ vg)
         if broadcast_dim >= 0:
             ker = ker.unsqueeze(broadcast_dim)
 
         input_res = input_ - ker
+        # print("input_res mean=",torch.mean(input_res))
         # end_time.record()
         # torch.cuda.synchronize()
         # ker_time_elapsed = start_time.elapsed_time(end_time)
         # print("input_res time elapsed = ",ker_time_elapsed)
         # input_res = input_quantizer(input_res)
         # start_time.record()
+
         ug_nvfp4 = input_quantizer.make_empty(
             ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
         )
@@ -110,16 +113,28 @@ class MetisSvdFunction():
             sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
         )
         ug_native = input_quantizer.update_quantized(ug, ug_nvfp4)
-        vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
-        sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
+        ug_native.update_usage(rowwise_usage=True, columnwise_usage=True)
 
+        vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
+        vg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
+
+        sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
+        sg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
         # end_time.record()
         # torch.cuda.synchronize()
         # print("quant time elapsed = ",start_time.elapsed_time(end_time))
         # out = torch.randn(sg_native.shape,dtype = input_.dtype, device=input_.device)
         # start_time.record()
         gemm_out = MetisSvdFunction.svd_quant_gemm(sg_native, ug_native, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
-        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg_native, gemm_out, input_.dtype, None, layout="TN", nvtx_label="U@S@V")
+        gemm_out.update_usage(rowwise_usage=True, columnwise_usage=True)
+        # gemmout_tmp = ug @ sg
+        # loss = torch.mean(torch.abs(gemmout_tmp - gemm_out.dequantize()))
+        # print("gemm_tmp loss=",loss.item())
+        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg_native,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
+        
+        # gemmout_tmp = gemmout_tmp @ vg
+        # loss = torch.mean(torch.abs(de_svd_gemm_out - gemmout_tmp))
+        # print("svd lowrank quant loss=",loss.item())
         input_ = de_svd_gemm_out + input_res
         # input_ = de_svd_gemm_out
         output_fp4 = input_quantizer.make_empty(

@@ -195,7 +195,7 @@ def check_nvfp4_module_versus_reference(
         )
     else:
         raise ValueError(f"Unsupported module class: {module_class}")
-
+    print("native_module=",native_module)
     # Create reference module with same weights
     reset_rng_states()
 
@@ -259,8 +259,8 @@ def check_nvfp4_module_versus_reference(
         
         x_val = torch.normal(mean=0.0, std=1.0, size=x_shape, dtype=x_dtype, device=device)
         x_native = x_val.clone().detach().requires_grad_(True)
-        x_ref = x_native.clone().detach().requires_grad_(True)
-        x_base = x_native.clone().detach().requires_grad_(True)
+        x_ref = x_val.clone().detach().requires_grad_(True)
+        x_base = x_val.clone().detach().requires_grad_(True)
 
         grad_output_shape = (batch_size, seq_len, out_features)
         grad_output_val = torch.normal(
@@ -271,6 +271,7 @@ def check_nvfp4_module_versus_reference(
         grad_output_baseline = grad_output_val.clone().detach()
 
         metis_param = {
+            "activation_lowrank_niter":2,
             "activation_lowrank_svd":max(in_features//8,64),
             "backward_lowrank_svd":max(in_features//8,64),
             "forward_svd_rank":max(in_features//8,64),

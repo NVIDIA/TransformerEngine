@@ -11,8 +11,8 @@ class LinearLowbitContext:
     q_backward_outputgrad = "Cast2Fp4e2m1"
 
         # SVD & low-rank 配置
-    activation_lowrank_niter = 0
-    backward_lowrank_niter = 0
+    activation_lowrank_niter = 2
+    backward_lowrank_niter = 2
     q_scalar = 1.0
     enable_activation_svd = False
     activation_lowrank_svd = -1

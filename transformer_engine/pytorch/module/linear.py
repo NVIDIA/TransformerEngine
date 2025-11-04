@@ -76,7 +76,7 @@ from ..cpu_offload import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from .metis.quant import  MetisSvdFunction
-from .metis.metix_context import LinearLowbitContext
+from .metis.metis_context import LinearLowbitContext
 
 __all__ = ["Linear"]
 
@@ -235,7 +235,7 @@ class _Linear(torch.autograd.Function):
                     # Forward x SVD
                     # Note: x = U @ S @ V
                     # ------------------------------------------------------
-                    # print("foward enable_activation_svd use_metis LinearLowbitContext=", LinearLowbitContext())
+                    # print("foward enable_activation_svd LinearLowbitContext=", LinearLowbitContext())
                     inputmat = MetisSvdFunction.svd_lowrank_quant(
                         inputmat,
                         input_quantizer,
