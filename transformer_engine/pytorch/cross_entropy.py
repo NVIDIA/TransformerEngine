@@ -76,9 +76,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
         """
         (inp,) = ctx.saved_tensors
-        inp = triton_cross_entropy.cross_entropy_backward(
-            inp, grad_output, ctx.is_cg_capturable
-        )
+        inp = triton_cross_entropy.cross_entropy_backward(inp, grad_output, ctx.is_cg_capturable)
         return (
             inp,
             None,
