@@ -417,8 +417,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 << std::endl;
     }
     if ((cudnn_runtime_version == 91500) && is_training &&
-        (qkv_format == NVTE_QKV_Format::NVTE_BSHD) && (max_seqlen_q % 128 != 0) &&
-        (max_seqlen_kv % 128 != 0) && (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK)) {
+        (qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
+        ((max_seqlen_q % 128 != 0) || (max_seqlen_kv % 128 != 0)) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK)) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: Given combination of attention mask (non-padding),"
                    " max_seqlen_k (not divisible by 128), max_seqlen_q "
