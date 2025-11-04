@@ -49,6 +49,7 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
 
+.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
 
 Recipe availability
 -------------------
@@ -79,8 +80,6 @@ Mixture of Experts (MoE) functions
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
-
-.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
