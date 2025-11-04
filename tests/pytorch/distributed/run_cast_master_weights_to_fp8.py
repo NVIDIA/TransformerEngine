@@ -51,13 +51,14 @@ def _get_raw_data(quantized_tensor):
 class MiniZero_1:
     """A mini zero-1 optimizer implementation, just used for this test"""
 
-    def __init__(self, weights, lr, dp_group):
+    def __init__(self, weights, lr, dp_group, keep_columnwise=False):
         self.rank = dist.get_rank(dp_group)
         self.world_size = dist.get_world_size(dp_group)
 
         self.weights = weights
         self.lr = lr
         self.dp_group = dp_group
+        self.keep_columnwise = keep_columnwise
 
         # [self.offsets[i], self.offsets[i+1]) is the range of weights[i] in the global buffer
         self.offsets = [0]
@@ -164,7 +165,11 @@ class MiniZero_1:
             for i in range(1, len(self.weights)):
                 assert isinstance(self.weights[i], QuantizedTensor)
             cast_master_weights_to_fp8(
-                self.weights, self.master_weights, self.start_offsets, self.dp_group
+                self.weights,
+                self.master_weights,
+                self.start_offsets,
+                self.dp_group,
+                keep_columnwise=self.keep_columnwise,
             )
         else:
             # BF16 weights case
@@ -203,15 +208,18 @@ class MiniZero_1:
         # -----------------------------------------------------------------------------------------
         # Step 7: Copy the gathered weights from weight buffer to the actual weights
         # -----------------------------------------------------------------------------------------
-        quantized_weights = []
         for weight, offset in zip(self.weights, self.offsets[:-1]):
             start = offset
             end = offset + weight.numel()
             if isinstance(weight, QuantizedTensor):
-                quantized_weights.append(weight)
                 weight = _get_raw_data(weight)
             weight.view(-1).data.copy_(self.weight_buffer[start:end])
-        post_all_gather_processing(quantized_weights)
+
+        if self.keep_columnwise:
+            quantized_weights = [
+                weight for weight in self.weights if isinstance(weight, QuantizedTensor)
+            ]
+            post_all_gather_processing(quantized_weights)
 
 
 class MiniOptimizer:
@@ -246,13 +254,14 @@ class MiniOptimizer:
 
 
 class MiniFSDP:
-    def __init__(self, weights, lr, dp_group):
+    def __init__(self, weights, lr, dp_group, keep_columnwise=False):
         rank = dist.get_rank(dp_group)
         world_size = dist.get_world_size(dp_group)
 
         self.weights = weights
         self.lr = lr
         self.dp_group = dp_group
+        self.keep_columnwise = keep_columnwise
 
         # Flatten the weights and pad to align with world size
         if isinstance(weights[0], QuantizedTensor):
@@ -403,6 +412,7 @@ class MiniFSDP:
                 [idx[0] for idx in self.weight_indices],
                 self.dp_group,
                 local_weights,
+                keep_columnwise=self.keep_columnwise,
             )
         else:
             for weight, master_weight in zip(self.local_weights, self.master_weights):
@@ -416,14 +426,15 @@ class MiniFSDP:
         dist.all_gather_into_tensor(
             self.flatten_weight, self.local_weight_shard, group=self.dp_group
         )
-        quantized_weights = []
-        for weight in self.weights:
-            if isinstance(weight, QuantizedTensor):
-                quantized_weights.append(weight)
-        post_all_gather_processing(quantized_weights)
+
+        if self.keep_columnwise:
+            quantized_weights = [
+                weight for weight in self.weights if isinstance(weight, QuantizedTensor)
+            ]
+            post_all_gather_processing(quantized_weights)
 
 
-def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
+def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, keep_columnwise):
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
@@ -467,7 +478,7 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
         high_precision_init_val = w_fp8.get_high_precision_init_val()
         w.data.copy_(high_precision_init_val)
 
-    optimizer_fp8 = MiniFSDP([w for w in model_fp8.parameters()], 10.0, dp_group)
+    optimizer_fp8 = MiniFSDP([w for w in model_fp8.parameters()], 10.0, dp_group, keep_columnwise)
     optimizer = MiniFSDP([w for w in model.parameters()], 10.0, dp_group)
 
     for _ in range(100):
@@ -566,7 +577,7 @@ def quantization_recipe(quantization) -> Recipe:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
 
-def _test_cast_master_weights_to_fp8(quantization, dp_group):
+def _test_cast_master_weights_to_fp8(quantization, dp_group, keep_columnwise):
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
@@ -607,7 +618,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         w_fp8.main_grad = torch.zeros_like(w_fp8, dtype=torch.float32, device="cuda")
         w.main_grad = torch.zeros_like(w, dtype=torch.float32, device="cuda")
 
-    optimizer_fp8 = MiniZero_1([w for w in model_fp8.parameters()], 10.0, dp_group)
+    optimizer_fp8 = MiniZero_1([w for w in model_fp8.parameters()], 10.0, dp_group, keep_columnwise)
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
     for i in range(100):
@@ -674,12 +685,13 @@ def main(argv=None, namespace=None):
     parser.add_argument(
         "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
     )
+    parser.add_argument("--keep-columnwise", action="store_true")
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")
     _test_mini_optimizer(dp_group)
-    _test_cast_master_weights_to_fp8(args.quantization, dp_group)
-    _test_fsdp_cast_master_weights_to_fp8(args.quantization, dp_group)
+    _test_cast_master_weights_to_fp8(args.quantization, dp_group, args.keep_columnwise)
+    _test_fsdp_cast_master_weights_to_fp8(args.quantization, dp_group, args.keep_columnwise)
 
     dist.destroy_process_group()
     return 0

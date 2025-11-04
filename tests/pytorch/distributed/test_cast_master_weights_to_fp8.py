@@ -24,17 +24,20 @@ NUM_PROCS: int = min(2, torch.cuda.device_count())
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
-def _run_test(quantization):
+def _run_test(quantization, keep_columnwise):
     test_path = TEST_ROOT / "run_cast_master_weights_to_fp8.py"
     test_cmd = LAUNCH_CMD + [str(test_path)] + ["--quantization", quantization]
+    if keep_columnwise:
+        test_cmd.append("--keep-columnwise")
     result = subprocess.run(test_cmd, env=os.environ, check=False)
     assert result.returncode == 0
 
 
 @pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block"])
-def test_cast_master_weights_to_fp8(quantization):
+@pytest.mark.parametrize("keep_columnwise", [False, True])
+def test_cast_master_weights_to_fp8(quantization, keep_columnwise):
     if quantization in ("fp8", "fp8_cs") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "fp8_block" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
-    _run_test(quantization)
+    _run_test(quantization, keep_columnwise)
