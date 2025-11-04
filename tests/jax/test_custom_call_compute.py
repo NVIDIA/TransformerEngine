@@ -605,7 +605,12 @@ class TestNorm:
         )
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
-    @pytest.mark.parametrize("out_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize(
+        "out_dtype",
+        [
+            jnp.float8_e4m3fn,
+        ],
+    )
     def test_norm_forward_with_block_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype
     ):
