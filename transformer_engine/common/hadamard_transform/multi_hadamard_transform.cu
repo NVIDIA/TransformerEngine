@@ -28,9 +28,8 @@ struct MultiAmaxArgs {
   void* output_identity_amax_list[kMaxTensorsPerKernel];
   // (output) Amax buffer for RHT transpose amax buffer
   void* output_transpose_amax_list[kMaxTensorsPerKernel];
-  // Prefix sum (with leading zero) of m_splits of each tensor of input
-  // Note: use int instead of int64_t to reduce kernel argument size
-  int m_splits_range[kMaxTensorsPerKernel + 1];
+  // Prefix sum (with leading zero) of split_sections of each tensor of input
+  int split_sections_range[kMaxTensorsPerKernel + 1];
   // Number of tensors (splits) being processed by kernel
   int num_tensors;
 };
@@ -342,9 +341,9 @@ template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
 __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor_map_input,
-                                      const MultiAmaxArgs args,
-                                      uint16_t random_sign_mask, uint16_t random_sign_mask_t,
-                                      uint64_t num_rows, uint64_t row_length) {
+                                           const MultiAmaxArgs args, uint16_t random_sign_mask,
+                                           uint16_t random_sign_mask_t, uint64_t num_rows,
+                                           uint64_t row_length) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
   float* output_pre_rht_amax_ptr;
@@ -354,13 +353,12 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
   // calculate the global offset in Y direction to access the correct amax buffer
   int global_offset_y = blockIdx.y * CHUNK_DIM_Y;
   int tensor_id = 0;
-  while (args.m_splits_range[tensor_id + 1] <= global_offset_y) {
+  while (args.split_sections_range[tensor_id + 1] <= global_offset_y) {
     ++tensor_id;
   }
   output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tensor_id]);
   output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tensor_id]);
   output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tensor_id]);
-  
 
   static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y && CHUNK_DIM_Y % BUFF_DIM_Y == 0);
   static_assert(CHUNK_DIM_X >= BUFF_DIM_X && CHUNK_DIM_X % BUFF_DIM_X == 0);
@@ -500,21 +498,13 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-
 }  // namespace
 
-
-
-void multi_hadamard_transform_amax(
-    const Tensor& input_,
-    std::vector<Tensor*>& output_list,
-    const int64_t* m_splits,
-    size_t num_tensors,
-    uint16_t random_sign_mask,
-    uint16_t random_sign_mask_t,
-    cudaStream_t stream
-) {
-    NVTE_API_CALL(multi_hadamard_transform_amax);
+void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
+                                   const int* split_sections, size_t num_tensors,
+                                   uint16_t random_sign_mask, uint16_t random_sign_mask_t,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(multi_hadamard_transform_amax);
 #if CUDA_VERSION >= 12080
 
   // Check input tensor
@@ -526,50 +516,56 @@ void multi_hadamard_transform_amax(
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   const SimpleTensor& input = input_.data;
 
-  // TODO: validate num_tensors and m_splits
+  // TODO: validate num_tensors and split_sections
   // assert if num_tensors is greater than kMaxTensorsPerKernel
   // will expand 64 to higher value if needed
-  // if input size is going to exceed 4KB kernel launch limit, will then support multi-launch 
-  NVTE_CHECK(num_tensors <= kMaxTensorsPerKernel, "Number of tensors should be less than or equal to ", kMaxTensorsPerKernel);
+  // if input size is going to exceed 4KB kernel launch limit, will then support multi-launch
+  NVTE_CHECK(num_tensors <= kMaxTensorsPerKernel,
+             "Number of tensors should be less than or equal to ", kMaxTensorsPerKernel);
 
-  // check m_splits
+  // check split_sections
   // TODO: support m_splits_tensor for device initiated API
-  NVTE_CHECK(m_splits != nullptr, "m_splits should not be nullptr");
+  NVTE_CHECK(split_sections != nullptr, "split_sections should not be nullptr");
 
   MultiAmaxArgs kernel_args;
   kernel_args.num_tensors = 0;
-  kernel_args.m_splits_range[0] = 0;
+  kernel_args.split_sections_range[0] = 0;
   bool all_return_pre_rht_amax = true;
   bool all_return_identity_amax = true;
   bool all_return_transposed_amax = true;
   for (size_t i = 0; i < num_tensors; ++i) {
     void* output_pre_rht_amax_ptr = output_list[i]->amax.dptr;
-    // disable RHT(x) for now, only RHT_T(x) should be used 
-    void *output_identity_amax_ptr = nullptr;
-    void *output_transpose_amax_ptr = output_list[i]->columnwise_amax.dptr;
+    // disable RHT(x) for now, only RHT_T(x) should be used
+    void* output_identity_amax_ptr = nullptr;
+    void* output_transpose_amax_ptr = output_list[i]->columnwise_amax.dptr;
     all_return_pre_rht_amax &= (output_pre_rht_amax_ptr != nullptr);
     all_return_identity_amax &= (output_identity_amax_ptr != nullptr);
     all_return_transposed_amax &= (output_transpose_amax_ptr != nullptr);
-    // sanity check m_splits component to see if it's 64 multiple for each element
-    NVTE_CHECK(m_splits[i] % 64 == 0, "component ", i, " of m_splits should be 64 multiple");
+    // sanity check split_sections component to see if it's 64 multiple for each element
+    NVTE_CHECK(split_sections[i] % 64 == 0, "component ", i,
+               " of split_sections should be 64 multiple");
     // also skip adding this tensor to the kernel args there are zero elements in this split
-    if (m_splits[i] == 0) {
+    if (split_sections[i] == 0) {
       continue;
     }
     // fill in kernel arguments
     kernel_args.output_pre_rht_amax_list[kernel_args.num_tensors] = output_pre_rht_amax_ptr;
     kernel_args.output_identity_amax_list[kernel_args.num_tensors] = output_identity_amax_ptr;
     kernel_args.output_transpose_amax_list[kernel_args.num_tensors] = output_transpose_amax_ptr;
-    kernel_args.m_splits_range[kernel_args.num_tensors + 1] = kernel_args.m_splits_range[kernel_args.num_tensors] + static_cast<int>(m_splits[i]);
+    kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
+        kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
     // check overflow
-    NVTE_CHECK(kernel_args.m_splits_range[kernel_args.num_tensors + 1] >= 0, "m_splits_range overflow the int32_t");
+    NVTE_CHECK(kernel_args.split_sections_range[kernel_args.num_tensors + 1] >= 0,
+               "split_sections_range overflow the int32_t");
     kernel_args.num_tensors++;
   }
 
-  NVTE_CHECK(all_return_pre_rht_amax || all_return_identity_amax || all_return_transposed_amax, "At least one of return_pre_rht_amax, return_identity_amax, or return_transposed_amax must be true");
+  NVTE_CHECK(all_return_pre_rht_amax || all_return_identity_amax || all_return_transposed_amax,
+             "At least one of return_pre_rht_amax, return_identity_amax, or return_transposed_amax "
+             "must be true");
   // currently we haven't supported all_return_identity_amax, assert error if it's mistakenly enabled
-  NVTE_CHECK(!all_return_identity_amax, "Currently RHT transform should only be applied to transposed input");
-
+  NVTE_CHECK(!all_return_identity_amax,
+             "Currently RHT transform should only be applied to transposed input");
 
   // Multi zero out multiple amaxes if needed
   // Curretly don't support multi-launch when num_tensors is larger than kMaxTensorsPerKernel
@@ -596,7 +592,7 @@ void multi_hadamard_transform_amax(
   NVTE_CHECK(num_rows % kHadamardDimension == 0,
              "num_rows must be divisible by hadamard_dimension");
 
-  // four (1x4) 64x64 sub-tiles for ping-pong overlap 
+  // four (1x4) 64x64 sub-tiles for ping-pong overlap
   constexpr uint64_t kChunkBlockXSmall = 256;
   constexpr uint64_t kChunkBlockYSmall = 64;
   constexpr uint64_t kBuffDimX = 64;
@@ -648,9 +644,9 @@ void multi_hadamard_transform_amax(
               cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    shmem_bytes);
 
-              kernel<<<grid, block, shmem_bytes, stream>>>(
-                  tensor_map_input, kernel_args, random_sign_mask,
-                  random_sign_mask_t, num_rows, row_length);)));
+              kernel<<<grid, block, shmem_bytes, stream>>>(tensor_map_input, kernel_args,
+                                                           random_sign_mask, random_sign_mask_t,
+                                                           num_rows, row_length);)));
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
@@ -664,34 +660,28 @@ void multi_hadamard_transform_amax(
 // Multi hadamard transform API is unlike other multi-input & multi-output APIs
 // Multi hadamard transform will take in a single input tensor, and directly calculate amax
 // with optional RHT transform. That's because we can assume the input tensor list to be
-// contiguous in memory, so the tensors are only splitted in dimension 0. 
-// RHT transform is 16x16, so as long as each split of the input has 16 multiple shape 
+// contiguous in memory, so the tensors are only splitted in dimension 0.
+// RHT transform is 16x16, so as long as each split of the input has 16 multiple shape
 // in dimension 0, we can treat the entire input as a single tensor.
-// Although mathmatically 16 multple is enough for this function to be correct, 
-// for this kernel, we required 64 multiple of 16 in dimension 0 for better performance. 
-// Note: currently assumes m_splits is a list of integers in CPU
-// TODO: m_splits could be a tensor for device initiated API
-void nvte_multi_hadamard_transform_amax(const NVTETensor input,
-                                        NVTETensor* outputs,
-                                        const int64_t* m_splits,
-                                        const size_t num_tensors,
-                                        int random_sign_mask,
-                                        int random_sign_mask_t,
+// Although mathmatically 16 multple is enough for this function to be correct,
+// for this kernel, we required 64 multiple of 16 in dimension 0 for better performance.
+// Note: currently assumes split_sections is a list of integers in CPU
+// TODO: split_sections could be a tensor for device initiated API
+void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
+                                        const int* split_sections, const size_t num_tensors,
+                                        int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream) {
-    NVTE_API_CALL(nvte_multi_hadamard_transform_amax);
-    using namespace transformer_engine;
-    NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  NVTE_API_CALL(nvte_multi_hadamard_transform_amax);
+  using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
 
-    Tensor* input_tensor = convertNVTETensorCheck(input);
-    std::vector<Tensor*> output_list(num_tensors);
-    for (size_t i = 0; i < num_tensors; ++i) {
-        output_list[i] = convertNVTETensorCheck(outputs[i]);
-    }
-    // Call the multi-tensor Hadamard transform amax implementation.
-    multi_hadamard_transform_amax(*input_tensor, output_list, 
-        m_splits, num_tensors,
-        static_cast<uint16_t>(random_sign_mask),
-        static_cast<uint16_t>(random_sign_mask_t),
-        stream
-    );
+  Tensor* input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor*> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+  // Call the multi-tensor Hadamard transform amax implementation.
+  multi_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors,
+                                static_cast<uint16_t>(random_sign_mask),
+                                static_cast<uint16_t>(random_sign_mask_t), stream);
 }

@@ -100,10 +100,36 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
 
 namespace {
 
-void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
+void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
+                                      const std::vector<TensorWrapper> &input_list,
+                                      std::vector<TensorWrapper> &output_list,
+                                      const std::vector<int> &split_sections,
+                                      NVFP4Quantizer *quantizer) {
+  // Sanity check input before splitting
+  if (input.numel() == 0) {
+    for (size_t i = 0; i < input_list.size(); ++i) {
+      if (input_list[i].numel() != 0) {
+        NVTE_CHECK(false,
+                   "NVFP4 multi_quantize: Single input tensor has zero elements but input_list "
+                   "contains non-empty tensor, inconsistent args were provided.");
+      }
+    }
+    return;
+  }
+  // split_sections should have the same size with input output list
+  NVTE_CHECK(input_list.size() == output_list.size(),
+             "Input and output list must have the same size");
+  NVTE_CHECK(split_sections.size() == input_list.size(),
+             "Split sections must have the same size as input and output list");
+  // TODO: implement this
+}
+
+void multi_tensor_quantize_impl(const TensorWrapper &single_input,
+                                const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
-                                std::vector<TensorWrapper> &output_list) {
+                                std::vector<TensorWrapper> &output_list,
+                                const std::vector<int> &split_sections) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -114,15 +140,31 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
              " output tensors, but got ", output_list.size());
 
   // Choose implementation
-  // Note: Currently only have fused kernel for FP8 delayed scaling
   bool with_fused_kernel = true;
+  // Set the scaling mode based on the first quantizer's recipe
+  auto scaling_mode =
+      quantizer_cpp_list.empty() ? NVTE_INVALID_SCALING : quantizer_cpp_list[0]->get_scaling_mode();
+
+  // Check scaling mode consistency across all tensors
   for (size_t i = 0; i < num_tensors; i++) {
-    if (!detail::IsFloat8Quantizers(quantizer_py_list[i].ptr())) {
-      with_fused_kernel = false;
-      break;
-    }
-    if (nvte_tensor_data(output_list[i].data()) == nullptr ||
-        nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
+    // Support both Float8 and NVFP4 quantizers
+    if (detail::IsFloat8Quantizers(quantizer_py_list[i].ptr())) {
+      // for fp8 delayed scaling, only fp8 quantize transpose is supported
+      if (nvte_tensor_data(output_list[i].data()) == nullptr ||
+          nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
+        with_fused_kernel = false;
+        break;
+      }
+      if (scaling_mode != NVTE_DELAYED_TENSOR_SCALING) {
+        with_fused_kernel = false;
+        break;
+      }
+    } else if (detail::IsNVFP4Quantizers(quantizer_py_list[i].ptr())) {
+      if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
+        with_fused_kernel = false;
+        break;
+      }
+    } else {
       with_fused_kernel = false;
       break;
     }
@@ -130,17 +172,33 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
 
   // Launch TE kernel
   if (with_fused_kernel) {
-    // Fused kernel for multi-tensor quantize
-    std::vector<NVTETensor> nvte_tensor_input_list;
-    std::vector<NVTETensor> nvte_tensor_output_list;
-    for (size_t i = 0; i < num_tensors; ++i) {
-      nvte_tensor_input_list.push_back(input_list[i].data());
-      nvte_tensor_output_list.push_back(output_list[i].data());
+    switch (scaling_mode) {
+      case NVTE_DELAYED_TENSOR_SCALING: {
+        // Fused kernel for multi-tensor quantize
+        std::vector<NVTETensor> nvte_tensor_input_list;
+        std::vector<NVTETensor> nvte_tensor_output_list;
+        for (size_t i = 0; i < num_tensors; ++i) {
+          nvte_tensor_input_list.push_back(input_list[i].data());
+          nvte_tensor_output_list.push_back(output_list[i].data());
+        }
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+                                    nvte_tensor_output_list.data(),
+                                    at::cuda::getCurrentCUDAStream());
+        });
+        break;
+      }
+      case NVTE_NVFP4_1D_SCALING: {
+        auto nvfp4_quantizer = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp_list[0].get());
+        multi_tensor_quantize_nvfp4_impl(single_input, input_list, output_list, split_sections,
+                                         nvfp4_quantizer);
+        break;
+      }
+      default:
+        NVTE_ERROR(
+            "Fused multi-tensor quantize is only supported for FP8 delayed scaling and NVFP4 1D "
+            "scaling");
     }
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
-    });
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -184,8 +242,13 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
     output_py_list.emplace_back(std::move(output_py));
   }
 
+  // Prepare for multi-tensor quantization.
+  // Use empty split_sections and a dummy input wrapper, since the tensors are already individually provided.
+  std::vector<int> dummy_split_sections;
+  TensorWrapper dummy_input_wrapper;
   // Perform multi-tensor quantization
-  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+  multi_tensor_quantize_impl(dummy_input_wrapper, input_cpp_list, quantizer_list,
+                             quantizer_cpp_list, output_cpp_list, dummy_split_sections);
 
   return output_py_list;
 }
@@ -718,6 +781,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     input_size *= d;
   }
   NVTE_CHECK(input_shape.size() > 0, "Input tensor has 0 dims");
+  // get a single tensor wrapper of the input
+  TensorWrapper input_wrapper = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
 
   // Split input tensor along dim 0
   std::vector<TensorWrapper> input_list;
@@ -803,7 +868,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   }
 
   // Perform multi-tensor quantization
-  multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+  multi_tensor_quantize_impl(input_wrapper, input_list, quantizer_list, quantizer_cpp_list,
+                             output_cpp_list, split_sections);
 
   return output_py_list;
 }
