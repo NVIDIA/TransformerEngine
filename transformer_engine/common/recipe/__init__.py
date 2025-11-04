@@ -50,7 +50,7 @@ class MMParams:
 
     Parameters
     ----------
-    use_split_accumulator : bool, default = `True`
+    use_split_accumulator : bool, default = True
         Use FP8 fast accumulation on Hopper or Ada. For more details,
         see CUBLASLT_MATMUL_DESC_FAST_ACCUM option for cublasLtMatmul.
     """
@@ -159,7 +159,7 @@ class DelayedScaling(Recipe):
                                                               recipe: DelayedScaling) -> Tensor
 
                                  where `Tensor` is a framework tensor type.
-    reduce_amax: bool, default = `True`
+    reduce_amax: bool, default = True
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
                 tensors is reduced across the `amax_reduction_group` (specified in the `autocast`
                 call). This keeps the amaxes and scaling factors synced across the given
@@ -167,13 +167,13 @@ class DelayedScaling(Recipe):
                 GPU maintains local amaxes and scaling factors. To ensure results are
                 numerically identical across checkpointing boundaries in this case, all
                 ranks must checkpoint in order to store the local tensors.
-    fp8_dpa: bool, default = `False`
+    fp8_dpa: bool, default = False
              Whether to enable FP8 dot product attention (DPA). When the model is placed in an
              `autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
              inputs from higher precision to FP8, performs attention in FP8, and casts tensors
              back to higher precision as outputs. FP8 DPA currently is only supported in the
              `FusedAttention` backend.
-    fp8_mha: bool, default = `False`
+    fp8_mha: bool, default = False
             Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
             operations mentioned above at the DPA boundaries. Currently only standard MHA modules
             i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
@@ -422,11 +422,11 @@ class NVFP4BlockScaling(Recipe):
     ----------
     fp4_format : {Format.E2M1}, default = Format.E2M1
              FP4 data type.
-    disable_rht : bool, default = `False`
+    disable_rht : bool, default = False
              If set to `True`, random Hadamard transforms are not applied to any tensor.
-    disable_stochastic_rounding : bool, default = `False`
+    disable_stochastic_rounding : bool, default = False
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
-    disable_2d_quantization : bool, default = `False`
+    disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     """
 

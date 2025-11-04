@@ -3,7 +3,7 @@
 
     See LICENSE for license information.
 
-pyTorch
+PyTorch
 =======
 
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, bias=True, **kwargs)

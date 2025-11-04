@@ -525,9 +525,9 @@ class NonPagedKVCacheManager(KVCacheManager):
         new_v: torch.Tensor
             New value tokens for layer_number in current inference iteration
         cu_new_seqlens: torch.Tensor
-            Cumulative sequence lengths for new_k and new_v, in shape [batch_size + 1]
+            Cumulative sequence lengths for new_k and new_v, of shape [batch_size + 1]
         cu_cached_seqlens: torch.Tensor
-            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), in shape [batch_size + 1]
+            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), of shape [batch_size + 1]
         qkv_format: str
             Format of new_k and new_v tensors, {'bshd', 'sbhd', 'thd'}
 
@@ -701,7 +701,7 @@ class PagedKVCacheManager(KVCacheManager):
         return [x.page_id for x in self.allocated_pages[seq]]
 
     def get_page_table(self, sequences: List[int]):
-        """Get the page table, in shape [batch_size, max_pages_per_seq]"""
+        """Get the page table, of shape [batch_size, max_pages_per_seq]"""
         page_table = torch.Tensor(
             [
                 self.get_page_list(seq) + [0] * (self.max_pages_per_seq - self.get_page_count(seq))
@@ -783,9 +783,9 @@ class PagedKVCacheManager(KVCacheManager):
         new_v: torch.Tensor
             New value tokens for layer_number in current inference iteration
         cu_new_seqlens: torch.Tensor
-            Cumulative sequence lengths for new_k and new_v, in shape [batch_size + 1]
+            Cumulative sequence lengths for new_k and new_v, of shape [batch_size + 1]
         cu_cached_seqlens: torch.Tensor
-            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), in shape [batch_size + 1]
+            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), of shape [batch_size + 1]
         qkv_format: str
             Format of new_k and new_v tensors, {'bshd', 'sbhd', 'thd'}
 

@@ -425,7 +425,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         The hidden dimension of each attention head.
     num_attention_heads: int
         The number of attention heads.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -442,24 +442,24 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
         |
 
-        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
         |
 
-        .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+        .. note:: THD format only supports ``'padding'`` or ``'causal_padding'`` mask type.
 
         |
 
@@ -581,7 +581,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means to mask out the corresponding values.
-            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *:
@@ -763,7 +763,7 @@ def rotary_pos_emb(
 ):
     """
     Rotary Positional Embedding
-    x should be in shape of
+    x should be of shape
     [Batch, Seqlen, ..., Heads, Hidden] if transpose_batch_sequence is False, or
     [Seqlen, Batch, ..., Heads, Hidden] if transpose_batch_sequence is True.
     """
@@ -901,7 +901,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         The hidden dimension of each attention head.
     num_attention_heads: int
         The number of attention heads.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -918,24 +918,24 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
-        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
-        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        Available options: ``{'no_bias', 'pre_scale_bias', 'post_scale_bias'}``.
         When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        Where it is ``'post_scale_bias'`` if there is bias. Otherwise ``'no_bias'`` is used.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
@@ -944,27 +944,27 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma: bool, default = False
-        If set to `True`, the LayerNorm formula changes to
+        If set to ``True``, the LayerNorm formula changes to
 
         .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} \cdot
             (1 + \gamma) + \beta
 
-        This parameter is only applicable for 'layernorm'.
+        This parameter is only applicable for ``'layernorm'``.
     kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')``
         Used for initializing the QKV and output projection weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     use_bias: bool, default = False
         Indicate whether or not to enable bias shifting for QKV and output projections.
-        If set to False, the layer will not learn additive biases.
-    bias_init: Initializer, default = flax.linen.initializers.zeros
+        If set to ``False``, the layer will not learn additive biases.
+    bias_init: Initializer, default = ``flax.linen.initializers.zeros``
         Used for initializing bias of QKVO projections, only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     input_layernorm: bool, default = True
-        If set to False, layer normalization to the input is not applied.
+        If set to ``False``, layer normalization to the input is not applied.
     return_layernorm_output: bool, default = False
-        If set to True, output of layernorm is returned from the forward together with the output
+        If set to ``True``, output of layernorm is returned from the forward together with the output
         of the linear transformation.
         Example use case: residual connection for transformer module is taken post layernorm.
     enable_rotary_pos_emb: bool, default = False
@@ -974,17 +974,17 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
         Indicate the method to coupled the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
-        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+        ``['consecutive', 'alternate']``. ``'alternate'`` is to pair index :math:`i` with :math:`i + d/2`
+        , d is the hidden dimension. ``'consecutive'`` pairs index :math:`i` with :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
-        ['none', 'all', 'qkv_proj', 'output_proj', 'exclude_qkv_proj', 'exclude_output_proj']
+        ``['none', 'all', 'qkv_proj', 'output_proj', 'exclude_qkv_proj', 'exclude_output_proj']``
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
@@ -1010,8 +1010,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     scale_attn_logits: bool, default = False
         Indicate whether to scale attention logits.
-        If set to True, :math:`\frac{Q}{\sqrt{head\_dim}*K}`,
-        else :math:`Q*K`
+        If set to True, :math:`\frac{Q \cdot K^T}{\sqrt{head\_dim}}`,
+        else :math:`Q \cdot K^T`
     scaled_query_init: bool, default = True
         Whether to scale WQ on initialization by :math:`\frac{1}{\sqrt{head\_dim}}`
     float32_logits: bool, default = False
@@ -1125,7 +1125,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means mask out the corresponding values.
-            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
@@ -1610,7 +1610,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Intermediate size to which input samples are projected.
     num_attention_heads: int, default = 8
         Number of attention heads in the transformer layer.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -1644,31 +1644,31 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         The key in given RNGs via flax.linen.Module.apply that for
         generating Dropout masks in the Multi-Head Attention.
     mha_kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')``
         Used for initializing weights of QKV and Output projection weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     mlp_kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')``
         Used for initializing weights of FC1 and FC2 layers.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     mlp_activations: Sequence[str], default = ('relu', )
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     mlp_activation_params: dict = None
-         This is only used when ('clamped_silu', 'clamped_linear') is in :attr:`mlp_activations`. At the moment
-        ClampedSwiglu is the only activation that requires parameters.
+         This is only used when ``('clamped_silu', 'clamped_linear')`` is in :attr:`mlp_activations`. At the moment
+        ``ClampedSwiglu`` is the only activation that requires parameters.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
-        If set to False, the layer will not learn additive biases.
-    bias_init: Initializer, default = flax.linen.initializers.zeros
+        If set to ``False``, the layer will not learn additive biases.
+    bias_init: Initializer, default = ``flax.linen.initializers.zeros``
         Used for initializing bias of QKVO projections,
         FC1 and FC2. It is only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     apply_residual_connection_post_layernorm: bool, default = False
-        If set to True, residual connections are taken from the output
+        If set to ``True``, residual connections are taken from the output
         of layer norm (default is taken from input of layer norm)
     output_layernorm: bool, default = False
-        If set to True, layer normalization is applied on the output side,
+        If set to ``True``, layer normalization is applied on the output side,
         after the final dropout-add. default behavior is to apply layer
         normalization on the input side, before the QKV transformation.
     float32_attention_logits: bool, default = False
@@ -1676,7 +1676,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         For fused attention backend, the accumulation is always float32 without the perf overhead.
     layer_type: TransformerLayerType, default = TransformerLayerType.ENCODER
         If set to TransformerLayerType.DECODER, an additional cross-attention block
-        is added after self-attention.this can be used for structures like `T5`
+        is added after self-attention.this can be used for structures like T5
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     self_attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
@@ -1685,34 +1685,34 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the self attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the self attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
-        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
     self_attn_bias_type: Optional[str], default = None
         Type of the attention bias passed into the self attention.
-        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        Available options: ``{'no_bias', 'pre_scale_bias', 'post_scale_bias'}``.
         When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        Where it is ``'post_scale_bias'`` if there is bias. Otherwise ``'no_bias'`` is used.
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
         The module for relative embedding execution, only used when
-        :attr:`enable_relative_embedding=True`. Default is None, which will create
+        :attr:`enable_relative_embedding=True`. Default is ``None``, which will create
         an instance of RelativePositionBiases if :attr:`enable_relative_embedding=True`.
-        Default: RelativePositionBiases( num_buckets=32, max_distance=128,
+        Default: ``RelativePositionBiases( num_buckets=32, max_distance=128,
         num_attention_heads=self.num_attention_heads, dtype=self.dtype,
         embedding_init=flax.linen.initializers.variance_scaling(1.0, 'fan_avg', 'uniform'),
-        name='relpos_bias')
+        name='relpos_bias')``
     enable_rotary_pos_emb: bool, default = False
         Whether to enable rotary position embedding to projected query and key in MHA.
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
@@ -1720,19 +1720,19 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
         Indicate the method to couple the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`,
-        where :math:`d` is the hidden dimension. 'consecutive' pairs index :math:`i` with
+        ``['consecutive', 'alternate']``. ``'alternate'`` is to pair index :math:`i` with :math:`i + d/2`,
+        where :math:`d` is the hidden dimension. ``'consecutive'`` pairs index :math:`i` with
         :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
-        ['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
-        'exclude_output_proj', 'exclude_mlp']
+        ``['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
+        'exclude_output_proj', 'exclude_mlp']``
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     window_size: Optional[Tuple[int, int]], default = None
@@ -1746,19 +1746,19 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         When > 0.0, applies stochastic depth per sample in the main
         path of the residual block.
     fuse_qkv_params: bool, default = True
-        If set to True, `TransformerLayer` module exposes a single fused
+        If set to ``True``, ``TransformerLayer`` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
     transpose_batch_sequence: bool, default = False
         Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
+        and sequence length dimension. if set to ``True``, the input tensors
+        should be in ``(seqlen, batch, hidden)``, otherwise ``(batch, seqlen, hidden)``.
     scale_attn_logits: bool, default = False
         Indicate whether to scale attention logits.
-        if set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
-        else :math:`Q*K`
-    scaled_query_init: bool, default = `True`
-        Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
+        if set to ``True``, :math:`\frac{Q \cdot K^T}{\sqrt{head\_dim}}`,
+        else :math:`Q \cdot K^T`
+    scaled_query_init: bool, default = True
+        Whether to scale WQ on initialization by :math:`\sqrt{head\_dim}`
     """
 
     hidden_size: int = 512
@@ -1840,7 +1840,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         attention_mask : jax.numpy.ndarray, default = None
             Boolean tensor used to mask out self-attention softmax input.
             :attr:`True` means mask out the corresponding values.
-            Ignored when :attr:`self.self_attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.self_attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         encoder_decoder_mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.

@@ -215,7 +215,7 @@ def fused_attn_fwd(
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
     softmax_offset: torch.Tensor, default = None
-                softmax offset tensor in shape [1, h_q, 1, 1].
+                softmax offset tensor of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
     return_max_logit: bool, default = False
                       whether to return the maximum attention score
@@ -452,7 +452,7 @@ def fused_attn_bwd(
                 gradient tensor of Bias when attn_bias_type is "pre_scale_bias"
                 or "post_scale_bias"; same data type and shape as Bias
     d_softmax_offset: torch.Tensor, optional
-                gradient tensor of softmax offset in shape [1, h_q, 1, 1].
+                gradient tensor of softmax offset of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
     """
     if attn_scale is None:

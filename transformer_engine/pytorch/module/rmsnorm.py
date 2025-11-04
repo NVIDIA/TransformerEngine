@@ -41,8 +41,8 @@ class RMSNorm(_RMSNormOp):
         Tensor device
     dtype: torch.dtype, default = default dtype
         Tensor datatype
-    zero_centered_gamma : bool, default = 'False'
-        If `True`, the :math:`\gamma` parameter is initialized to zero
+    zero_centered_gamma : bool, default = False
+        If ``True``, the :math:`\gamma` parameter is initialized to zero
         and the calculation changes to
 
             .. math::
@@ -52,13 +52,10 @@ class RMSNorm(_RMSNormOp):
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
         For more fine-grained control, provide a dict with the SM
-        margin at each compute stage ("forward", "backward",
-        "inference").
-
-    Legacy
-    ------
+        margin at each compute stage (``"forward"``, ``"backward"``,
+        ``"inference"``).
     sequence_parallel: bool
-        Set a bool attr named `sequence_parallel` in the parameters.
+        **Legacy parameter.** Set a bool attr named ``sequence_parallel`` in the parameters.
         This is custom logic for Megatron-LM integration.
 
     """

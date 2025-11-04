@@ -98,6 +98,7 @@ napoleon_custom_sections = [
     ("Values", "params_style"),
     ("Graphing parameters", "params_style"),
     ("FP8-related parameters", "params_style"),
+    ("Quantization parameters", "params_style"),
 ]
 
 breathe_projects = {"TransformerEngine": root_path / "docs" / "doxygen" / "xml"}

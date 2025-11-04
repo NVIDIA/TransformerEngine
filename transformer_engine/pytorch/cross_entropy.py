@@ -26,7 +26,7 @@ class CrossEntropyFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input,
+        inp,
         target,
         label_smoothing=0.0,
         reduce_loss=False,
@@ -40,7 +40,7 @@ class CrossEntropyFunction(torch.autograd.Function):
 
         Parameters:
         ctx : The context object.
-        input (tensor): The input tensor of shape (B, SQ, V) or (SQ, B, V) where B is batch size, SQ is sequence length, V is vocab size.
+        inp (tensor): The input tensor of shape (B, SQ, V) or (SQ, B, V) where B is batch size, SQ is sequence length, V is vocab size.
         target (tensor): The target tensor of shape (B,SQ) or (SQ, B) where each value is in [0, V-1].
         label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
         reduce_loss (bool): If true, returns the averaged loss across the B*SQ dimension.
@@ -50,8 +50,8 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tensor: The computed loss.
         """
-        loss, input = triton_cross_entropy.cross_entropy_forward(
-            input,
+        loss, inp = triton_cross_entropy.cross_entropy_forward(
+            inp,
             target,
             label_smoothing,
             reduce_loss,
@@ -59,7 +59,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             ignore_idx,
         )
 
-        ctx.save_for_backward(input.detach())
+        ctx.save_for_backward(inp.detach())
         ctx.is_cg_capturable = is_cg_capturable
         return loss
 
@@ -75,12 +75,12 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
         """
-        (input,) = ctx.saved_tensors
-        input = triton_cross_entropy.cross_entropy_backward(
-            input, grad_output, ctx.is_cg_capturable
+        (inp,) = ctx.saved_tensors
+        inp = triton_cross_entropy.cross_entropy_backward(
+            inp, grad_output, ctx.is_cg_capturable
         )
         return (
-            input,
+            inp,
             None,
             None,
             None,
@@ -91,7 +91,7 @@ class CrossEntropyFunction(torch.autograd.Function):
 
 
 def parallel_cross_entropy(
-    input: torch.Tensor,
+    inp: torch.Tensor,
     target: torch.Tensor,
     label_smoothing: float = 0.0,
     reduce_loss: bool = False,
@@ -114,7 +114,7 @@ def parallel_cross_entropy(
 
     Parameters
     ----------
-    input : torch.Tensor
+    inp : torch.Tensor
         The input tensor of shape ``(B, SQ, V)`` or ``(SQ, B, V)`` where B is batch size,
         SQ is sequence length, V is vocab size.
     target : torch.Tensor
@@ -138,13 +138,13 @@ def parallel_cross_entropy(
     # Handle backward compatibility with _input parameter
     if _input is not None:
         warnings.warn(
-            "The '_input' parameter is deprecated. Please use 'input' instead.",
+            "The '_input' parameter is deprecated. Please use 'inp' instead.",
             FutureWarning,
         )
-        input = _input
+        inp = _input
 
     return CrossEntropyFunction.apply(
-        input,
+        inp,
         target,
         label_smoothing,
         reduce_loss,
