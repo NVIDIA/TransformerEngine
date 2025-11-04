@@ -25,10 +25,10 @@ sys.path.append(str(DIR))
 from encoder.common import (
     is_bf16_supported,
     get_quantization_recipe_from_name_string,
-    hf_login_if_available,
+    unpack_cached_datasets_if_available,
 )
 
-hf_login_if_available()
+unpack_cached_datasets_if_available()
 
 IMAGE_H = 28
 IMAGE_W = 28
