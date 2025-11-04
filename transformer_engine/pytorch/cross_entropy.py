@@ -138,10 +138,9 @@ def parallel_cross_entropy(
     # Handle backward compatibility with _input parameter
     if _input is not None:
         warnings.warn(
-            "The '_input' parameter is deprecated and will be removed in a future version. "
+            "The '_input' parameter is deprecated. "
             "Please use 'input' instead.",
             FutureWarning,
-            stacklevel=2,
         )
         input = _input
     
