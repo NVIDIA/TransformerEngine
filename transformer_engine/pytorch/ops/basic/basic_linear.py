@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...fp8 import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -303,8 +303,8 @@ class BasicLinear(BasicOperation):
                     "Tried to quantize weight with deferred initialization "
                     "due to meta device, but no quantizer was available. "
                     "This is most likely because the weight was initialized "
-                    "within fp8_model_init, but the forward pass was not "
-                    "performed within fp8_autocast."
+                    "within quantized_model_init, but the forward pass was not "
+                    "performed within autocast."
                 )
             quantizer.set_usage(
                 rowwise=True,

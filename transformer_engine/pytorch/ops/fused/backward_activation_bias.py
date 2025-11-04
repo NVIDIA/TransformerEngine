@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import Recipe
+from transformer_engine.pytorch.quantization import Recipe
 from transformer_engine.pytorch.ops.basic import Bias
 from transformer_engine.pytorch.ops.basic.activation import (
     _ActivationOperation,

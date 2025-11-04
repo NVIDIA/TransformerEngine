@@ -8,16 +8,15 @@ import logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
-from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
-from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
+from transformer_engine.pytorch import (
+    autocast,
+    DotProductAttention,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
@@ -249,6 +248,7 @@ def run_dpa_with_cp(
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
         softmax_type=config.softmax_type,
+        return_max_logit=config.return_max_logit,
     ).cuda()
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
@@ -306,9 +306,10 @@ def run_dpa_with_cp(
     ############ run without CP ############
     logging.info(f"[Rank {rank}] Run without context parallelism")
     if dtype == "fp8":
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
+    max_logit = None
     with fp8_context:
         # q, k, v, out in FP8; dout in F16
         out = core_attn(
@@ -323,6 +324,8 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
+        if config.return_max_logit:
+            out, max_logit = out
         if fp8_bwd and fp8_mha:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
@@ -396,11 +399,12 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         core_attn.fp8_initialized = False
         core_attn.fp8_meta_tensors_initialized = False
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
     # run attention
+    max_logit_ = None
     with fp8_context:
         # q, k, v, out in FP8; dout in F16
         out_ = core_attn(
@@ -415,6 +419,8 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
+        if config.return_max_logit:
+            out_, max_logit_ = out_
         if fp8_bwd and fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
@@ -496,15 +502,15 @@ def run_dpa_with_cp(
                 )
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
-    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_]
-    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset]
-    names = ["out", "dq", "dk", "dv", "d_softmax_offset"]
+    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_, max_logit_]
+    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset, max_logit]
+    names = ["out", "dq", "dk", "dv", "d_softmax_offset", "max_logit"]
     names_cp = [x + "_cp" for x in names]
     names_no_cp = [x + "_no_cp" for x in names]
     is_fp8 = dtype == "fp8"
     for i, t in enumerate(tensors_no_cp):
         if t is not None:
-            if "softmax_offset" not in names[i]:
+            if "softmax_offset" not in names[i] and "max_logit" not in names[i]:
                 if qkv_format == "bshd":
                     compare_and_assert(
                         t[:, 0],

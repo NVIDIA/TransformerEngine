@@ -17,9 +17,9 @@
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
+#include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-#include "curanddx.hpp"
 
 namespace transformer_engine {
 
@@ -32,14 +32,6 @@ using std::uint32_t;
 using std::uint8_t;
 
 using transformer_engine::detail::TypeExtrema;
-
-// Define a cuRANDDx descriptor
-// Note curanddx::PhiloxRounds<4> means 4 rounds of philox4_32. If the operator is not specified, it will be default to 10.
-// curanddx::SM<800>() does NOT mean the code can only run on SM 800. The operator is used for do some internal checks, e.g.,
-// if shared memory, if needed, is enough for the described problem, usually not applicable.
-// curanddx doc: https://docs.nvidia.com/cuda/curanddx/index.html
-using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
-                     curanddx::SM<800>() + curanddx::Thread());
 
 // clang-format off
 /*
@@ -209,12 +201,15 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t get_rbits(RNG& rng, uint4& random_uint4, int& rnd_idx) {
+__device__ __forceinline__ uint32_t
+get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>&
+              rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
+          uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
-    curanddx::uniform_bits dist;
-    random_uint4 = dist.generate4(rng);
+    random_uint4 = rng.generate4();
   }
+
   // Treat uint4 as an array of 4x uint32_t elements for indexing
   const uint32_t* const rbits_arr = reinterpret_cast<uint32_t*>(&random_uint4);
   const uint32_t rbits = rbits_arr[rnd_idx++];
@@ -264,48 +259,50 @@ __device__ __forceinline__ size_t scale_factor_swizzled_offset(size_t row_idx, s
 
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
     const float2 in01, const float2 in23, const uint32_t rbits) {
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  uint16_t out_4x;
-  asm volatile(
-      "{\n"
-      "cvt.rs.satfinite.e2m1x4.f32 %0, {%3, %4, %1, %2}, %5; \n\t"
-      "}"
-      : "=h"(out_4x)
-      : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
-  return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-  uint16_t dummy = 0;
-  return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    uint16_t out_4x;
+    asm volatile(
+        "{\n"
+        "cvt.rs.satfinite.e2m1x4.f32 %0, {%3, %4, %1, %2}, %5; \n\t"
+        "}"
+        : "=h"(out_4x)
+        : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
+    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
+  } else {
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt.rs PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    uint16_t dummy = 0;
+    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+  }
 }
 
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  // NOTE: rbits unused for rn.
-  uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
-  asm volatile(
-      "{\n"
-      ".reg.b8 f0; \n\t"
-      ".reg.b8 f1; \n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
-      "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-      "}"
-      : "=r"(out_4x)
-      : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
-  return reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x)[0];
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-  uint16_t dummy = 0;
-  return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
+  constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
+  if constexpr (has_fp4) {
+    // NOTE: rbits unused for rn.
+    uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
+    asm volatile(
+        "{\n"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
+    return reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x)[0];
+  } else {
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    uint16_t dummy = 0;
+    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+  }
 }
 
 template <bool kApplyStochasticRounding>
@@ -346,9 +343,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       threadIdx.x + block_idx_x * kThreadsPerBlock + block_idx_y * gridDim.x * kThreadsPerBlock;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = kApplyStochasticRounding ? dist.generate4(rng) : uint4{0, 0, 0, 0};
+
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = kApplyStochasticRounding ? rng.generate4() : uint4{0, 0, 0, 0};
+
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
@@ -716,13 +715,11 @@ void quantize_transpose_vector_blockwise_fp4(
   // raise error if pow2_scale is true
   NVTE_CHECK(!pow2_scale, "No support for pow2_scale for MXFP4 for now");
 
-  if (!return_identity && !return_transpose) {
-    return;
-  }
+  NVTE_CHECK(return_identity || return_transpose,
+             "At least one of return_identity or return_transpose must be true.");
 
-  if (use_2d_quantization && !return_identity) {
-    return;
-  }
+  NVTE_CHECK(return_identity || !use_2d_quantization,
+             "2D block quantization is only supported when return_identity is true.");
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_elements = row_length;
@@ -775,7 +772,7 @@ void quantize_transpose_vector_blockwise_fp4(
       input.dtype, InputType,
 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP4x2_ONLY(
-          output.dtype, 2, OutputType,
+          return_identity ? output.dtype : output_t.dtype, 2, OutputType,
 
           dim3 grid(num_blocks_x, num_blocks_y, 1);
 

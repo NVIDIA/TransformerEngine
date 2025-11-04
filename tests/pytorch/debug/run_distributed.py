@@ -16,7 +16,7 @@ import transformer_engine
 import transformer_engine_torch as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import is_fp8_available
 
 from test_numerics import (
     _emulate_linear,
@@ -45,7 +45,7 @@ FEATURE_DIRS = None
 all_boolean = [True, False]
 TEST_NR = 0
 
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_available = is_fp8_available()
 
 
 def _get_tensors(parallel_mode, weight_seed=SEED, data_seed=SEED, tp_size=None, tp_rank=None):
@@ -117,7 +117,7 @@ class AllGather(torch.autograd.Function):
 
 
 def _run_forward_backward(x, model, parallel_mode=None, group=None):
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=True, recipe=FP8_RECIPE):
         y = model(x)
 
     y.requires_grad_(True)
@@ -413,13 +413,13 @@ def test_log_expert_parallel(**kwargs):
     )  # data parallel
     model = _init_model(weight, parallel_mode=None, name="linear1")
     model1 = _init_model(weight, parallel_mode=None, name="linear2")
-    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=fp8_available, recipe=FP8_RECIPE):
         y1 = model(x)
         y2 = model1(x)
         y = y1 + y2
     y.sum().backward()
     debug_api.step()
-    with transformer_engine.pytorch.fp8_autocast(enabled=fp8_available, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=fp8_available, recipe=FP8_RECIPE):
         y = model(x)
         if WORLD_RANK != 0:
             y = y + model1(x)
@@ -532,7 +532,7 @@ def test_per_tensor_scaling(
 
     LOSS_MULTIPLIER = 100
 
-    with transformer_engine.pytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+    with transformer_engine.pytorch.autocast(enabled=True, recipe=FP8_RECIPE):
         y = model(x)
         model.zero_grad()
         if parallel_mode == "column":
@@ -668,11 +668,12 @@ if __name__ == "__main__":
     _init_distributed()
 
     test_log_expert_parallel()
-    for parallel_mode in ["column", "row"]:
-        for gather_weight in [True, False]:
-            test_log_distributed(parallel_mode, gather_weight)
 
     if fp8_available:
+        for parallel_mode in ["column", "row"]:
+            for gather_weight in [True, False]:
+                test_log_distributed(parallel_mode, gather_weight)
+
         for parallel_mode in ["row", "column"]:
             test_disable_fp8_layer(parallel_mode)
 

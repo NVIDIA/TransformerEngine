@@ -12,8 +12,11 @@ import numpy as np
 import torch
 
 from . import torch_version
-from .tensor.quantized_tensor import Quantizer
+from .quantized_tensor import Quantizer
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+
+
+__all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -453,11 +456,34 @@ def assert_dim_for_all_gather(
         )
 
 
-def is_bf16_compatible() -> None:
+def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+def is_bf16_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine whether bfloat16 (BF16) computation is supported on the current device.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating BF16 availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when BF16 is not available. When BF16 is available,
+        the reason will be an empty string.
+
+    """
+    available = is_bf16_compatible()
+    if not return_reason:
+        return available
+
+    reason = (
+        "" if available else "BF16 support requires a GPU with compute capability 8.0 or higher."
+    )
+    return available, reason
 
 
 @functools.lru_cache(maxsize=None)

@@ -22,7 +22,7 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -378,14 +378,14 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-
+        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
         if (
-            get_device_compute_capability(0) == 100
+            get_device_compute_capability(0) >= 100
             and self.dropout_prob == 0.1
             and self.attn_bias_type is not AttnBiasType.NO_BIAS
         ):
             pytest.skip(
-                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
             )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
@@ -771,7 +771,7 @@ class FusedAttnRunner:
             ],
         )
 
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
@@ -788,7 +788,7 @@ class FusedAttnRunner:
         assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
 
         if self.coll_count_ref is not None:
-            with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+            with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = (
                     customcall_fused_dpa_jit.lower(*customcall_args, **kwargs).compile().as_text()
                 )
@@ -888,7 +888,7 @@ class FusedAttnRunner:
             )
         )
 
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out, primitive_dgrad = jitted_primitive(*customcall_args)
 
         reference_out, reference_dgrad = jitted_reference(*args)
@@ -959,7 +959,7 @@ class FusedAttnRunner:
             )
 
         if self.coll_count_ref is not None:
-            with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+            with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 

@@ -13,6 +13,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from .base import (
+    get_dummy_wgrad,
     get_multi_stream_cublas_workspace,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -20,7 +21,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..fp8 import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager
 from ..utils import (
     divide,
     cast_if_needed,
@@ -43,7 +44,7 @@ from ..graph import is_graph_capturing
 from ..cpu_offload import is_cpu_offload_enabled
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.quantized_tensor import (
+from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -209,6 +210,19 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
 
+            if cpu_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weights[0], "grad_added_to_main_grad")
+
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_objects = []
+                    for weight in weights:
+                        ctx.weight_objects.append(weight)
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -271,11 +285,15 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                for i in range(ctx.num_gemms):
-                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
-                    w.main_grad = main_grads[i]
-                    weights[i] = w
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    for i, weight in enumerate(ctx.weight_objects):
+                        origin_weights[i] = ctx.weight_objects[i]
+                        ctx.weight_objects[i] = None
+
+                if ctx.fuse_wgrad_accumulation:
+                    for i in range(N):
+                        origin_weights[i].main_grad = main_grads[i]
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -430,18 +448,15 @@ class _GroupedLinear(torch.autograd.Function):
                         ):
                             weight.grad_added_to_main_grad = True
                             if getattr(weight, "zero_out_wgrad", False):
-                                wgrad = torch.zeros(
-                                    weight.main_grad.shape,
-                                    dtype=weight.dtype,
-                                    device=torch.cuda.current_device(),
-                                    requires_grad=False,
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
+                                    zero=True,
                                 )
                             else:
-                                wgrad = torch.empty(
-                                    weight.main_grad.shape,
-                                    dtype=weight.dtype,
-                                    device=torch.cuda.current_device(),
-                                    requires_grad=False,
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
                                 )
                         elif ctx.fuse_wgrad_accumulation:
                             wgrad = None
@@ -823,7 +838,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        if not self.need_backward_dw():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()

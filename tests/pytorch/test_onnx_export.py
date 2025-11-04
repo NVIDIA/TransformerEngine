@@ -34,7 +34,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
 import tensorrt as trt
 
@@ -57,8 +57,8 @@ NVTE_TEST_ARTIFACTS_DIR = NVTE_TEST_ARTIFACTS_DIR or os.path.join(
 # The directory where this file is stored.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 fp8_recipes = []
 if mxfp8_available:
@@ -68,7 +68,7 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -178,8 +178,8 @@ def do_export(
     input_names = input_names or ["input"]
     output_names = output_names or ["output"]
 
-    with torch.inference_mode(), te.fp8_autocast(
-        enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
+    with torch.inference_mode(), te.autocast(
+        enabled=fp8_recipe is not None, recipe=fp8_recipe
     ), warnings.catch_warnings():
         warnings.filterwarnings(action="ignore", category=torch.jit.TracerWarning, module=r".*")
 
@@ -233,8 +233,8 @@ def te_infer(
     fp8_recipe: recipe.Recipe,
 ):
     """Transformer Engine forward propagation."""
-    with torch.inference_mode(), te.fp8_autocast(
-        enabled=is_fp8, fp8_recipe=fp8_recipe
+    with torch.inference_mode(), te.autocast(
+        enabled=is_fp8, recipe=fp8_recipe
     ), warnings.catch_warnings():
         te_outputs = model(*inps if isinstance(inps, tuple) else (inps,))
         if not isinstance(te_outputs, tuple):
@@ -440,7 +440,7 @@ def _test_export_linear(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.linear{fp8_str}{bias_str}{high_prec_str}.onnx"
-    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         model = Test_Linear(in_features, out_features, use_bias, return_bias, precision).to(
             device="cuda"
         )
@@ -500,7 +500,7 @@ def _test_export_layernorm(
     fname = f"te.layernorm_linear{fp8_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             layernorm_cls = te.LayerNorm if normalization == "LayerNorm" else te.RMSNorm
             model = layernorm_cls(
                 hidden_size,
@@ -568,7 +568,7 @@ def _test_export_layernorm_linear(
     fname = f"te.layernorm_linear{fp8_str}{bias_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             model = te.LayerNormLinear(
                 hidden_size,
                 3 * hidden_size,
@@ -654,7 +654,7 @@ def _test_export_layernorm_mlp(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}_{activation}.onnx"
-    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         model = te.LayerNormMLP(
             hidden_size,
             ffn_hidden_size,
@@ -1160,13 +1160,13 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
 
     inps = (torch.randn([16, 16, 128], device="cuda", requires_grad=False),)
 
-    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         out_ref = model(*inps)
 
     onnx_fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
     os.close(onnx_fd)
     try:
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             with te.onnx_export(enabled=True):
                 torch.onnx.export(
                     model,
