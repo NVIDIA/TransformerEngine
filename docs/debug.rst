@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Precision debug tools
-==============================================
+=====================
 
 .. toctree::
    :caption: Precision debug tools

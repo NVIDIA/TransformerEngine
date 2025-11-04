@@ -51,7 +51,7 @@ pyTorch
 
 
 Recipe availability
-------------------------
+-------------------
 
 .. autoapifunction:: transformer_engine.pytorch.is_fp8_available
 
@@ -70,7 +70,7 @@ Recipe availability
 .. autoapifunction:: transformer_engine.pytorch.get_default_recipe
 
 Mixture of Experts (MoE) functions
-------------------------------------------
+----------------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
@@ -97,7 +97,7 @@ Communication-computation overlap
 
 
 Deprecated functions
----------------------
+--------------------
 
 
 .. autoapifunction:: transformer_engine.pytorch.fp8_autocast
