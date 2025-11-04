@@ -7,7 +7,7 @@ Jax
 ===
 
 Pre-defined Variable of Logical Axes
--------------------------------------
+------------------------------------
 Variables are available in `transformer_engine.jax.sharding`.
 
 * BATCH_AXES: The logical axis of batch dimension. It is usually sharded along DP + FSDP on Mesh.
