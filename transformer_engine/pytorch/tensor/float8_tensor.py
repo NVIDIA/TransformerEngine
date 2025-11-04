@@ -812,6 +812,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # even if columnwise usage is set. and is going to be handled
         # internally in the update_usage method.
         if out is not None:
+            out._data = data
             out.update_usage(
                 rowwise_usage=quantizer.rowwise_usage,
                 columnwise_usage=quantizer.columnwise_usage,
