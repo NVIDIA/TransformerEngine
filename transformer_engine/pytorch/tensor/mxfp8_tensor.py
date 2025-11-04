@@ -314,6 +314,29 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
+        # View op
+        if func == aten.view.default:
+            tensor = args[0]
+            data = tensor._rowwise_data
+            out_data = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            out_shape = out_data.size()
+            return MXFP8Tensor(
+                shape=out_shape,
+                dtype=tensor.dtype,
+                rowwise_data=out_data,
+                rowwise_scale_inv=tensor._rowwise_scale_inv,
+                columnwise_data=tensor._columnwise_data,
+                columnwise_scale_inv=tensor._columnwise_scale_inv,
+                quantizer=tensor._quantizer,
+                requires_grad=False,
+                fp8_dtype=tensor._fp8_dtype,
+            )
+
         # FSDP2 related functions
         if func == aten.split.Tensor:
             if "dim" in kwargs:
