@@ -497,7 +497,7 @@ class QuantizedTensor(torch.Tensor):
         """Create new quantized tensor
 
         By default, new tensor has the same attributes and underlying
-        data.
+        data. This function is intended to create view of tensors.
 
         """
         shape = shape if shape is not None else tensor.shape
