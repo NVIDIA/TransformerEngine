@@ -584,7 +584,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nv
       rowwise_scale_list.emplace_back(
           make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
       amax_rowwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kUInt8));
+          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
     }
   }
 
@@ -639,7 +639,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nv
       columnwise_scale_list.emplace_back(
           make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
       amax_columnwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kUInt8));
+          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
     }
   }
 
