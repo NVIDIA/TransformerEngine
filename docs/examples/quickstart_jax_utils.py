@@ -6,10 +6,101 @@ import jax
 import jax.numpy as jnp
 import time
 import math
+from enum import Enum
 
 from typing import Callable, Any, Dict, Optional, Tuple
 from flax import linen as nn
 import transformer_engine.jax as te
+import transformer_engine.jax.flax as te_flax
+from transformer_engine.jax.flax.transformer import DotProductAttention as TEDotProductAttention
+
+
+class AttentionType(Enum):
+    """Enum for selecting attention implementation type."""
+    CUSTOM_DOT_PRODUCT = "custom_dot_product"
+    FLAX_LINEN_MULTIHEAD = "flax_linen_multihead"
+    TE_FLAX_MULTIHEAD = "te_flax_multihead"
+
+
+class AttentionWrapper(nn.Module):
+    """
+    Args:
+        num_attention_heads: Number of attention heads
+        hidden_size: Hidden dimension size
+        kv_channels: Dimension per attention head (hidden_size // num_attention_heads)
+        attention_dropout: Dropout rate for attention
+        attention_type: Type of attention implementation to use (default: TE_FLAX_MULTIHEAD)
+        attention_mask_type: Mask type for TE attention (default: 'no_mask')
+    """
+    
+    num_attention_heads: int
+    hidden_size: int
+    kv_channels: int
+    attention_dropout: float = 0.1
+    attention_type: AttentionType = AttentionType.TE_FLAX_MULTIHEAD
+    attention_mask_type: str = 'no_mask'
+    
+    @nn.compact
+    def __call__(
+        self,
+        query: jnp.ndarray,
+        key: jnp.ndarray,
+        value: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
+        deterministic: bool = False,
+    ) -> jnp.ndarray:
+
+        # Create the attention module based on attention_type
+        if self.attention_type == AttentionType.CUSTOM_DOT_PRODUCT:
+            attention = DotProductAttention(
+                num_attention_heads=self.num_attention_heads,
+                kv_channels=self.kv_channels,
+                attention_dropout=self.attention_dropout,
+            )
+            x = attention(query, key, value, attention_mask, deterministic=deterministic)
+            x = te_flax.DenseGeneral(features=self.hidden_size, use_bias=True)(x)
+            x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
+            return x
+        
+        elif self.attention_type == AttentionType.FLAX_LINEN_MULTIHEAD:
+            # Flax Linen expects [batch, seq_len, num_heads, head_dim]
+            # Input is [seq_len, batch, num_heads, head_dim]
+            sq, b, np, hn = query.shape
+            
+            # [seq_len, batch, num_heads, head_dim] -> [batch, seq_len, num_heads * head_dim]
+            query_reshaped = jnp.transpose(query, (1, 0, 2, 3)).reshape(b, sq, np * hn)
+            key_reshaped = jnp.transpose(key, (1, 0, 2, 3)).reshape(b, key.shape[0], np * hn)
+            value_reshaped = jnp.transpose(value, (1, 0, 2, 3)).reshape(b, value.shape[0], np * hn)
+            
+            attention = nn.MultiHeadDotProductAttention(
+                num_heads=self.num_attention_heads,
+                qkv_features=self.kv_channels,
+                dropout_rate=self.attention_dropout,
+            )
+            # Output shape: [batch, seq_len, num_heads * head_dim]
+            output = attention(query_reshaped, key_reshaped, value_reshaped, mask=attention_mask, deterministic=deterministic)
+            
+            # Reshape back to [seq_len, batch, num_heads * head_dim]
+            output = jnp.transpose(output, (1, 0, 2))
+            return output
+        
+        elif self.attention_type == AttentionType.TE_FLAX_MULTIHEAD:
+            # Use DotProductAttention (not MultiHeadAttention which includes QKV projection)
+            attention = TEDotProductAttention(
+                head_dim=self.kv_channels,
+                num_attention_heads=self.num_attention_heads,
+                num_gqa_groups=self.num_attention_heads,  # No GQA, set equal to num_attention_heads
+                attention_dropout=self.attention_dropout,
+                attn_mask_type=self.attention_mask_type,
+                transpose_batch_sequence=True,  # Expected format: [seq_len, batch, num_heads, head_dim]
+            )
+            x = attention(query, key, value, mask=attention_mask, deterministic=deterministic)
+            # Reshape from [seq_len, batch, num_heads, head_dim] to [seq_len, batch, hidden_size]
+            x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
+            return x
+        
+        else:
+            raise ValueError(f"Unknown attention type: {self.attention_type}")
 
 
 def speedometer(
@@ -73,50 +164,15 @@ def create_train_step_fn(
         #  sigma(y)/sigma(w) = J_model(w)
         return jnp.vdot(out, grad_target)
 
+    def fwd_bwd_fn(*args, **kwargs):
+        return jax.value_and_grad(loss_fn, argnums=(0, 1))(*args, **kwargs)
+
     # Use jax.value_and_grad to get the loss value and gradients simultaneously. (forward + backward pass)
     # ∇_params[output^T · grad_target] = grad_target^T · J_output(params) = VJP
-    fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
+    # fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
 
     # JIT-compile the fwd_bwd_fn
     return jax.jit(fwd_bwd_fn)
-
-
-def create_train_step_fn_vjp(
-    model_apply_fn: Callable,
-    fp8_autocast_kwargs: Dict[str, Any],
-    forward_kwargs: Dict[str, Any] = None,
-) -> Callable:
-    """
-    Alternative implementation using JAX's vjp directly instead of jnp.vdot + jax.grad.
-    This is more explicit about computing the Vector-Jacobian Product.
-    """
-
-    if forward_kwargs is None:
-        forward_kwargs = {}
-
-    def train_step_fn(variables: Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key):
-        """Compute forward pass and VJP in one step"""
-
-        # Define forward function that closes over dropout_key
-        def forward_fn(variables: Any, inp: jnp.ndarray):
-            """Pure forward function for VJP computation"""
-            rngs = {"dropout": dropout_key}
-            with te.fp8_autocast(**fp8_autocast_kwargs):
-                call_kwargs = {**forward_kwargs, "rngs": rngs}
-                return model_apply_fn(variables, inp, **call_kwargs)
-
-        # Compute forward pass and get VJP function (w.r.t. variables and inp)
-        output, vjp_fn = jax.vjp(forward_fn, variables, inp)
-
-        # Compute gradients using VJP - returns gradients w.r.t. variables and inp
-        var_grads, inp_grads = vjp_fn(grad_target)
-
-        # Return loss value and gradients
-        loss_value = jnp.vdot(output, grad_target)
-        return loss_value, (var_grads, inp_grads)
-
-    return jax.jit(train_step_fn)
-
 
 class DotProductAttention(nn.Module):
     """Attention operation in Transformer layer
