@@ -93,33 +93,34 @@ class MetisSvdFunction():
         if broadcast_dim >= 0:
             ker = ker.unsqueeze(broadcast_dim)
 
-        # input_res = input_ - ker
+        input_res = input_ - ker
         # end_time.record()
         # torch.cuda.synchronize()
         # ker_time_elapsed = start_time.elapsed_time(end_time)
         # print("input_res time elapsed = ",ker_time_elapsed)
         # input_res = input_quantizer(input_res)
         # start_time.record()
-        # ug_nvfp4 = input_quantizer.make_empty(
-        #     ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
-        # )
-        # vg_nvfp4 = input_quantizer.make_empty(
-        #     vg.shape,dtype = vg.dtype, device=vg.device, requires_grad=False
-        # )
-        # sg_nvfp4 = input_quantizer.make_empty(
-        #     sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
-        # )
-        # ug_native = input_quantizer.update_quantized(ug, ug_nvfp4)
-        # vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
-        # sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
+        ug_nvfp4 = input_quantizer.make_empty(
+            ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
+        )
+        vg_nvfp4 = input_quantizer.make_empty(
+            vg.shape,dtype = vg.dtype, device=vg.device, requires_grad=False
+        )
+        sg_nvfp4 = input_quantizer.make_empty(
+            sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
+        )
+        ug_native = input_quantizer.update_quantized(ug, ug_nvfp4)
+        vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
+        sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
+
         # end_time.record()
         # torch.cuda.synchronize()
         # print("quant time elapsed = ",start_time.elapsed_time(end_time))
         # out = torch.randn(sg_native.shape,dtype = input_.dtype, device=input_.device)
         # start_time.record()
-        gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, None, layout="NN", nvtx_label="U@S")
-        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg, gemm_out, input_.dtype, None, layout="TN", nvtx_label="U@S@V")
-        # input_ = de_svd_gemm_out + input_res
+        gemm_out = MetisSvdFunction.svd_quant_gemm(sg_native, ug_native, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
+        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg_native, gemm_out, input_.dtype, None, layout="TN", nvtx_label="U@S@V")
+        input_ = de_svd_gemm_out + input_res
         # input_ = de_svd_gemm_out
         output_fp4 = input_quantizer.make_empty(
             input_.shape,dtype = input_.dtype, device=input_.device, requires_grad=False

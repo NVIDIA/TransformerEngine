@@ -16,7 +16,7 @@ import transformer_engine_torch as tex
 import debugpy
 
 # from ....debug.pytorch.debug_state import TEDebugState
-from .metix_context import LinearLowbitContext
+from .metis_context import LinearLowbitContext
 
 __all__ = ["MetisLinear"]
 # class MetisSvdFunction(torch.autograd.Function):
@@ -1982,6 +1982,7 @@ class MetisLinear(TransformerEngineBaseModule):
             # only quantize activation
             self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=True,**self.commonMetisSvdFunction_args)
         else:
+            # only quantize weight
             self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,**self.commonMetisSvdFunction_args)
 
         if LinearLowbitContext.enable_weight_svd:
@@ -2132,12 +2133,45 @@ class MetisLinear(TransformerEngineBaseModule):
         return y
 
     def __repr__(self):
+        # 基础信息
+        header = (
+            f"{type(self).__name__}(\n"
+            f"  in_features={self.in_features},\n"
+            f"  out_features={self.out_features},\n"
+            f"  bias={self.use_bias},\n"
+            f"  enable_weight_svd={self.weight_svd_has_initialized},\n"
+            f"  name={repr(self.name)}"
+        )
+
+        # SVD 已初始化的情况
         if self.weight_svd_has_initialized:
-            base_repr = f"MetisLinear(in_features={self.in_features}, out_features={self.out_features}, weight_svd_rank={self.s.shape[0]}, bias={self.use_bias})"
+            svd_rank = self.s.shape[0]
+            header += f",\n  weight_svd_rank={svd_rank}"
+            lines = [header + ",\n"]
+
+            def indent(text, n=4):
+                pad = " " * n
+                return pad + text.replace("\n", "\n" + pad)
+
+            # lines.append("  submodules:\n")
+
+            # 主分支（线性残差）
+            if hasattr(self, "linear_residual"):
+                lines.append(indent(f"linear_residual: {repr(self.linear_residual)} # use_metis={self.linear_residual.use_metis}\n", 6))
+
+            # SVD 分支
+            if hasattr(self, "vlinear"):
+                lines.append(indent(f"vlinear: {repr(self.vlinear)} # use_metis={self.vlinear.use_metis}\n", 6))
+            if hasattr(self, "ulinear"):
+                lines.append(indent(f"ulinear: {repr(self.ulinear)} # use_metis={self.ulinear.use_metis}\n", 6))
+            lines.append(indent(f"s: Tensor(shape={tuple(self.s.shape)}, dtype={self.s.dtype})\n", 6))
+
+            return "".join(lines) + ")"
+
+        # 未初始化 SVD 的情况
         else:
-            base_repr =  f"MetisLinear(in_features={self.in_features}, out_features={self.out_features}, weight_svd_rank=NotInitialized, bias={self.use_bias})"
-        child_repr = repr(self.linear_residual)
-        child_repr += repr(self.vlinear)
-        child_repr += repr(self.ulinear)
-        child_repr = "\n  " + child_repr.replace("\n", "\n  ")
-        return base_repr + child_repr
+            lines = [header + ",\n"]
+            # lines.append("  submodules:\n")
+            lines.append("      linear_residual: " + repr(self.linear_residual) + f"# use_metis={self.linear_residual.use_metis}" + "\n")
+            lines.append(")")
+            return "".join(lines)
