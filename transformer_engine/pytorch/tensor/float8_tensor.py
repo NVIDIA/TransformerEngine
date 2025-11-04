@@ -548,6 +548,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         data.
 
         """
+        if shape is None and data is not None:
+            shape = data.shape
         new_tensor = super().make_like(
             tensor, shape=shape, dtype=dtype, requires_grad=requires_grad
         )
