@@ -4,40 +4,35 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file nvfp4_transpose.cuh
+/*! \file quantize_transpose_nvfp4.cuh
  *  \brief CUDA kernels to cast to NVFP4 and transpose.
  */
 
-#ifndef TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_
-#define TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_
+#ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_
+#define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
+#include <transformer_engine/transformer_engine.h>
 
-#if CUDA_VERSION > 12080
-#include <cuda_fp4.h>
-#endif  // CUDA_VERSION > 12080
-
-#include <cfloat>
-
-#include "../common.h"
-#include "../utils.cuh"
-#include "curanddx.hpp"
-#include "math.h"
-#include "ptx.cuh"
-#include "transformer_engine/transformer_engine.h"
+#include "../../common.h"
+#include "../../util/math.h"
+#include "../../util/ptx.cuh"
+#include "../../utils.cuh"
+#include "core_nvfp4.cuh"
 
 namespace transformer_engine {
+namespace dispatch {
+namespace nvfp4 {
 
-#if CUDA_VERSION > 12080
-namespace nvfp4_transpose {
+namespace quantize_transpose_kernel {
 
-using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() + curanddx::PhiloxRounds<10>() +
-                     curanddx::SM<800>() + curanddx::Thread());
-
+using namespace quantization_and_transposition_SF;
+using namespace core;
 using namespace ptx;
-using nvfp4_scale_t = fp8e4m3;
+
+#if FP4_TYPE_SUPPORTED
 
 constexpr size_t SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 
@@ -49,8 +44,9 @@ constexpr size_t SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / SCALE_DIM;
 constexpr size_t SCALES_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM;
 
 constexpr size_t SCALES_PER_THREAD = 2 * (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM / THREADS_NUM;
-constexpr size_t RNG_GENS_PER_THREAD =
-    SCALES_PER_THREAD / 4;  // Each call generates 4x uint32_t random numbers
+
+// Each call generates 4x uint32_t random numbers
+constexpr size_t RNG_GENS_PER_THREAD = SCALES_PER_THREAD / 4;
 
 constexpr size_t TILE_DIM_Y = 32;
 constexpr size_t TILE_DIM_X = 128;
@@ -110,244 +106,18 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
-// Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
-                                                                         const float S_enc) {
-  // constexpr float rcp_6f = 1.0f / 6.0f;
-  // const float S_dec_b = block_amax * rcp_6f;
-  // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
-  // return S_dec_b_fp8;
-  // NOTE: Divide by 6.0f is not elegant and not efficient.
-  // However, this is part of the emulation code to ensure exact match.
-  using namespace detail;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  const float S_dec_b = block_amax / fp4_max * S_enc;
-  return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
-}
-
-// Compute the global encode scale factor for a given global amax
-__device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
-  using namespace detail;
-  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return max value of float32
-  global_encode_scale = fminf(global_encode_scale, TypeExtrema<float>::max);
-  // If global amax is 0 or infinity, return 1
-  if (global_amax == 0.0f || global_encode_scale == 0.0f) {
-    return 1.0f;
-  }
-  return global_encode_scale;
-}
-
-__device__ __forceinline__ uint32_t get_rbits(RNG &rng, uint4 &random_uint4, int &rnd_idx) {
-  if (rnd_idx == 4) {
-    rnd_idx = 0;
-    curanddx::uniform_bits dist;
-    random_uint4 = dist.generate4(rng);
-  }
-  // Treat uint4 as an array of 4x uint32_t elements for indexing
-  const uint32_t *const rbits_arr = reinterpret_cast<uint32_t *>(&random_uint4);
-  const uint32_t rbits = rbits_arr[rnd_idx++];
-  return rbits;
-}
-
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
-    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
-  uint16_t out_4x = 0;
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b16 v0_bf16; \n\t"
-      ".reg.b16 v1_bf16; \n\t"
-      ".reg.b16 v2_bf16; \n\t"
-      ".reg.b16 v3_bf16; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-      "cvt.f32.bf16 v0, v0_bf16; \n\t"
-      "cvt.f32.bf16 v1, v1_bf16; \n\t"
-      "cvt.f32.bf16 v2, v2_bf16; \n\t"
-      "cvt.f32.bf16 v3, v3_bf16; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
-      "}"
-      : "=h"(out_4x)
-      : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  // NOTE: rbits unused for rn.
-  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b16 v0_bf16; \n\t"
-      ".reg.b16 v1_bf16; \n\t"
-      ".reg.b16 v2_bf16; \n\t"
-      ".reg.b16 v3_bf16; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      ".reg.b8 f0; \n\t"
-      ".reg.b8 f1; \n\t"
-      "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-      "cvt.f32.bf16 v0, v0_bf16; \n\t"
-      "cvt.f32.bf16 v1, v1_bf16; \n\t"
-      "cvt.f32.bf16 v2, v2_bf16; \n\t"
-      "cvt.f32.bf16 v3, v3_bf16; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-      "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-      "}"
-      : "=r"(out_4x)
-      : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
-}
-
-template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
-  if constexpr (USE_STOCHASTIC_ROUNDING) {
-    return mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(in_4x, scale, rbits);
-  } else {
-    return mul_cvt_bf16_to_fp4_4x_with_rn(in_4x, scale, rbits);
-  }
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
-    const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
-  uint16_t out_4x = 0;
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      "mov.b64 {v0, v1} , %1; \n\t"
-      "mov.b64 {v2, v3} , %2; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
-      "}"
-      : "=h"(out_4x)
-      : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
-                                                                    const float2 in23,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  // NOTE: rbits unused for rn.
-  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-#if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  asm volatile(
-      "{\n"
-      ".reg.b64 v01; \n\t"
-      ".reg.b64 v23; \n\t"
-      ".reg.b32 v0; \n\t"
-      ".reg.b32 v1; \n\t"
-      ".reg.b32 v2; \n\t"
-      ".reg.b32 v3; \n\t"
-      ".reg.b8 f0; \n\t"
-      ".reg.b8 f1; \n\t"
-      "mov.b64 {v0, v1} , %1; \n\t"
-      "mov.b64 {v2, v3} , %2; \n\t"
-      "mov.b64 v01, {v0, v1}; \n\t"
-      "mov.b64 v23, {v2, v3}; \n\t"
-      "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-      "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-      "mov.b64 {v1, v0}, v01; \n\t"
-      "mov.b64 {v3, v2}, v23; \n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-      "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-      "}"
-      : "=r"(out_4x)
-      : "l"(reinterpret_cast<const uint64_t &>(in01)),
-        "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
-#else
-  NVTE_DEVICE_ERROR(
-      "FP4 cvt PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
-#endif  // CUDA_ARCH_HAS_FEATURE_SM10X_ALL
-  return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
-}
-
-template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
-  if constexpr (USE_STOCHASTIC_ROUNDING) {
-    return mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, scale, rbits);
-  } else {
-    return mul_cvt_fp32_to_fp4_4x_with_rn(in01, in23, scale, rbits);
-  }
-}
-
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
-    nvfp4_transpose_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
-                           const __grid_constant__ CUtensorMap tensor_map_output,
-                           const __grid_constant__ CUtensorMap tensor_map_output_t,
-                           nvfp4_scale_t *const scales_ptr, nvfp4_scale_t *const scales_t_ptr,
-                           const float *noop, const float *const amax_rowwise_ptr,
-                           const float *const amax_colwise_ptr, const size_t rows,
-                           const size_t cols, const size_t scale_stride,
-                           const size_t scale_stride_t, const size_t *rng_state) {
+    quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                    const __grid_constant__ CUtensorMap tensor_map_output,
+                                    const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                    nvfp4_scale_t *const scales_ptr,
+                                    nvfp4_scale_t *const scales_t_ptr, const float *noop,
+                                    const float *const amax_rowwise_ptr,
+                                    const float *const amax_colwise_ptr, const size_t rows,
+                                    const size_t cols, const size_t scale_stride,
+                                    const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -364,11 +134,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
-  int rnd_idx =
-      0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
+  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
+  int rnd_idx = 0;
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS;
 
@@ -587,12 +357,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
-                                                                      rbits);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                 in01, in23, block_scale_inverse_2x, rbits);
           }
         }
@@ -771,17 +541,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
             IType2 in23;
             if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else if constexpr (IS_CACHED_ACT_OP) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else {
               const int j = w * PACK_SIZE + 4 * e;
               const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
               const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
-              out.data.elt[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   in01, in23, block_scale_inverse_2x, rbits);
             }
           }
@@ -852,14 +622,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
-    nvfp4_transpose_kernel_2D(const __grid_constant__ CUtensorMap tensor_map_input,
-                              const __grid_constant__ CUtensorMap tensor_map_output,
-                              const __grid_constant__ CUtensorMap tensor_map_output_t,
-                              nvfp4_scale_t *const scales_ptr, nvfp4_scale_t *const scales_t_ptr,
-                              const float *noop, const float *const amax_rowwise_ptr,
-                              const float *const amax_colwise_ptr, const size_t rows,
-                              const size_t cols, const size_t scale_stride,
-                              const size_t scale_stride_t, const size_t *rng_state) {
+    quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                       const __grid_constant__ CUtensorMap tensor_map_output,
+                                       const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                       nvfp4_scale_t *const scales_ptr,
+                                       nvfp4_scale_t *const scales_t_ptr, const float *noop,
+                                       const float *const amax_rowwise_ptr,
+                                       const float *const amax_colwise_ptr, const size_t rows,
+                                       const size_t cols, const size_t scale_stride,
+                                       const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -875,9 +646,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  RNG rng(rng_seed, rng_sequence, rng_offset);
-  curanddx::uniform_bits dist;
-  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? dist.generate4(rng) : uint4{0, 0, 0, 0};
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   int rnd_idx =
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
@@ -1165,12 +936,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(elts, block_scale_inverse_2x,
-                                                                      rbits);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
           } else {
             const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
             const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                 in01, in23, block_scale_inverse_2x, rbits);
           }
         }
@@ -1303,17 +1074,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
             IType2 in23;
             if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else if constexpr (IS_CACHED_ACT_OP) {
               const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
-              out.data.elt[e] = mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   elts, block_scale_inverse_2x, rbits);
             } else {
               const int j = w * PACK_SIZE + 4 * e;
               const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
               const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
-              out.data.elt[e] = mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
                   in01, in23, block_scale_inverse_2x, rbits);
             }
           }
@@ -1379,19 +1150,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-}  // namespace nvfp4_transpose
-#endif  // CUDA_VERSION > 12080
+#endif  // FP4_TYPE_SUPPORTED
+}  // namespace quantize_transpose_kernel
 
-// Compile-time flag to choose kernel variant
-#ifndef USE_2D_NVFP4_KERNEL
-#define USE_2D_NVFP4_KERNEL 0
-#endif
-
-template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          bool use_2d_quantization>
-void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
-                              const QuantizationConfig *quant_config, cudaStream_t stream) {
-#if CUDA_VERSION > 12080
+template <bool use_2d_quantization>
+void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
+                        const QuantizationConfig *quant_config, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace quantize_transpose_kernel;
+  using namespace ptx;
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
@@ -1399,8 +1166,9 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
 
-  using namespace nvfp4_transpose;
-  using namespace ptx;
+  constexpr bool COMPUTE_ACTIVATIONS = false;
+  using ParamOP = Empty;
+  constexpr float (*OP)(float, const ParamOP &) = nullptr;
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
@@ -1493,12 +1261,12 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        auto kernel = nvfp4_transpose_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                             USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+        auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
 
         if constexpr (use_2d_quantization) {
-          kernel = nvfp4_transpose_kernel_2D<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                             USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+          kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
         }
 
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
@@ -1509,8 +1277,11 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
       }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // CUDA_VERSION > 12080
+#endif  // FP4_TYPE_SUPPORTED
 }
+
+}  // namespace nvfp4
+}  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_
+#endif  // TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_

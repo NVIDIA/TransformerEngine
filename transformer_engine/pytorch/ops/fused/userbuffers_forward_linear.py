@@ -21,7 +21,7 @@ from ...module.base import (
     get_workspace,
     _2X_ACC_FPROP,
 )
-from ...tensor.quantized_tensor import Quantizer
+from ...quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_dequantize, is_quantized_tensor
