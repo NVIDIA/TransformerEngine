@@ -27,11 +27,13 @@ from common import (
     is_mxfp8_supported,
     is_nvfp4_supported,
     get_quantization_recipe_from_name_string,
+    hf_login_if_available,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 
+hf_login_if_available()
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
@@ -670,7 +672,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_nvfp4(self):
         """Test Transformer Engine with NVFP4"""
         result = self.exec(True, "NVFP4BlockScaling")
-        assert result[0] < 0.451 and result[1] > 0.79
+        assert result[0] < 0.451 and result[1] > 0.788
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
@@ -708,7 +710,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_nvfp4_shardy(self):
         """Test Transformer Engine with NVFP4"""
         result = self.exec(True, "NVFP4BlockScaling", enable_shardy=True)
-        assert result[0] < 0.451 and result[1] > 0.79
+        assert result[0] < 0.451 and result[1] > 0.788
 
 
 if __name__ == "__main__":

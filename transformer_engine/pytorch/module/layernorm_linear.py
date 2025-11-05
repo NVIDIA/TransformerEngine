@@ -16,7 +16,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.tensor.utils import is_experimental
+from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_workspace,
@@ -56,7 +56,7 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import apply_normalization, noop_cat, WeightGradStore
-from ..tensor.quantized_tensor import (
+from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
@@ -194,13 +194,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
-        experimental = is_experimental(input_quantizer)
+        custom = is_custom(input_quantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not experimental  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
+            and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
         )
 
         # Apply normalization
@@ -246,8 +246,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if fp8 or debug:
                     quantizer = input_quantizer
-                    # experimental recipe doesn't need to support quantized AG
-                    if not with_quantized_norm and not experimental:
+                    # custom recipe doesn't need to support quantized AG
+                    if not with_quantized_norm and not custom:
                         ln_out = quantizer(ln_out)
                     quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
