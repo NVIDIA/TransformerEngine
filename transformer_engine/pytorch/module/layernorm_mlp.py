@@ -806,7 +806,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors
-                return [
+                return (
                     ctx,
                     inputmat,
                     ln_weight,
@@ -822,7 +822,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_bias,
                     mu,
                     rsigma,
-                ]
+                )
 
         # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
         if return_layernorm_output:
@@ -1003,7 +1003,7 @@ class _LayerNormMLP(torch.autograd.Function):
             return out
 
         else:  # load from saved (return ctx is just because the other branch does too)
-            return [ctx] + tensors
+            return tuple([ctx] + tensors)
 
     @staticmethod
     def backward(
