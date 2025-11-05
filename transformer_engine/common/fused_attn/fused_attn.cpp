@@ -408,18 +408,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 << std::endl;
     }
     if ((cudnn_runtime_version == 91400) && (max_seqlen_kv > 1024) &&
-        (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK)) {
+        (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: Given combination of attention mask (non-causal) and "
                    "max_seqlen_kv (> 1024) does not support cuda graph capture with "
-                   "fused attention for cuDNN 9.13.* or 9.14.*."
+                   "fused attention for cuDNN 9.14.0."
                    " Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if ((cudnn_runtime_version <= 91500) && is_training &&
+    if ((cudnn_runtime_version >= 91300) && (cudnn_runtime_version <= 91500) && is_training &&
         (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
         (max_seqlen_kv % 128 != 0) && cuda_graph &&
-        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK)) {
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK)) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: Given combination of attention mask (non-padding),"
                    " max_seqlen_kv (not divisible by 128), and qkv_format (BSHD/SBHD) for"
