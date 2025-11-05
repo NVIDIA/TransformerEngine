@@ -195,7 +195,7 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         if softmax_offset is not None:
             assert self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
         if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
-            softmax_offset = 1.0
+            softmax_offset = 0.0
 
         # use primitives
         if is_softmax_kernel_available(
