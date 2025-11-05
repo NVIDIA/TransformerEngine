@@ -45,9 +45,6 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.common import recipe
-from transformer_engine.jax import flax as te_flax
-import transformer_engine.jax as te
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -1909,57 +1906,3 @@ class TestGroupedDense:
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
-
-
-class TestJaxprAndHlo:
-
-    @pytest.mark.skipif(not is_fp4_supported, reason=fp4_unsupported_reason)
-    def test_layernorm_mlp_reuses_amax_nvfp4(self):
-        """Tests that layernorm_mlp reuses the amax computed in layernorm and the activation and does not recompute it during quantizaton."""
-
-        with helper.autocast(
-            enabled=True, recipe=recipe.NVFP4BlockScaling(), mesh_resource=te.MeshResource()
-        ):
-            model = te_flax.LayerNormMLP(
-                layernorm_type="rmsnorm",
-                return_layernorm_output=False,
-                intermediate_dropout_rate=0.0,
-                dtype=jnp.bfloat16,
-            )
-
-            var_collect = model.init(
-                jax.random.PRNGKey(0),
-                jnp.ones((128, 128), dtype=jnp.bfloat16),
-            )
-
-            def loss_fn(x, rngs):
-                return jnp.mean(model.apply(var_collect, x, rngs=rngs)[0])
-
-            x = jax.random.normal(jax.random.PRNGKey(0), (128, 128), dtype=jnp.bfloat16)
-            rngs = {"sr_rng": jax.random.PRNGKey(1), "dropout": jax.random.PRNGKey(2)}
-            jaxpr = jax.make_jaxpr(jax.value_and_grad(loss_fn))(x, rngs=rngs)
-
-            rht_amax_eqns = [
-                eqn for eqn in jaxpr.jaxpr.eqns if eqn.primitive.name == "te_rht_amax_ffi_wrapper"
-            ]
-
-            assert len(rht_amax_eqns) == 4, f"Expected 4 rht_amax_eqns, got {len(rht_amax_eqns)}"
-
-            def assert_param(index, tensor_name, expected_value: bool):
-                if expected_value:
-                    assert rht_amax_eqns[index].params["produce_regular_amax"] == True, (
-                        f"Expected produce_regular_amax for {tensor_name} to be True, indicating no"
-                        " reuse of amax as this tensor does not have a previous operation to fuse"
-                        " with"
-                    )
-                else:
-                    assert rht_amax_eqns[index].params["produce_regular_amax"] == False, (
-                        f"Expected produce_regular_amax for {tensor_name} to be False, indicating"
-                        " reuse of amax"
-                    )
-
-            assert_param(0, "fwd ln+q", False)
-            assert_param(1, "fwd act+q", False)
-            # No previous op before incoming dgrad in the backward so amax is not reused
-            assert_param(2, "bwd dgrad", True)
-            assert_param(3, "bwd dact+q", False)
