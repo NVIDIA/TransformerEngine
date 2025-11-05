@@ -799,6 +799,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -1412,6 +1413,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
 
             if use_fused_attention:

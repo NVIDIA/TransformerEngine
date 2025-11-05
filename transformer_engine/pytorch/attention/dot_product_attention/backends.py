@@ -668,6 +668,7 @@ class FlashAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
+        num_splits: Optional[int] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -924,6 +925,9 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                     if fa_utils.v2_4_1_plus:
                         fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if num_splits is not None:
+                        # Forward optional split control to flash-attn if available
+                        fa_optional_forward_kwargs["num_splits"] = num_splits
                     if inference_params is not None:
                         # use block_table kwarg to support thd_2bshd for non-paged
                         fa_optional_forward_kwargs["block_table"] = (
@@ -958,6 +962,9 @@ class FlashAttention(torch.nn.Module):
                             fa_3_optional_forward_kwargs["page_table"] = (
                                 inference_params.cache_manager.page_table[:batch_size]
                             )
+                    if num_splits is not None:
+                        # Forward optional split control to flash-attn v3 if supported
+                        fa_3_optional_forward_kwargs["num_splits"] = num_splits
                     if fp8:
                         QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
