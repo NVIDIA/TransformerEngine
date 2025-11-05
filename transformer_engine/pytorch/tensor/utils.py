@@ -141,17 +141,11 @@ def cast_master_weights_to_fp8(
 
     extra_args = [group, use_fsdp_shard_model_weights, manual_post_all_gather_processing]
     if len(delayed_scaling_params) > 0:
-        _cast_master_weights_to_fp8_delayed_scaling(
-            delayed_scaling_params, *extra_args
-        )
+        _cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, *extra_args)
     if len(current_scaling_params) > 0:
-        _cast_master_weights_to_fp8_current_scaling(
-            current_scaling_params, *extra_args
-        )
+        _cast_master_weights_to_fp8_current_scaling(current_scaling_params, *extra_args)
     if len(blockwise_scaling_params) > 0:
-        _cast_master_weights_to_fp8_blockwise_scaling(
-            blockwise_scaling_params, *extra_args
-        )
+        _cast_master_weights_to_fp8_blockwise_scaling(blockwise_scaling_params, *extra_args)
 
 
 def _cast_master_weights_to_fp8_delayed_scaling(

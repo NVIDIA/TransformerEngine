@@ -710,7 +710,9 @@ def run_parallel_tests() -> None:
     dist.destroy_process_group()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="cast_master_weights_to_fp8 test needs at least 2 GPUs.")
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="cast_master_weights_to_fp8 test needs at least 2 GPUs."
+)
 @pytest.mark.parametrize("world_size", [2])
 def test_cast_master_weights_to_fp8(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
