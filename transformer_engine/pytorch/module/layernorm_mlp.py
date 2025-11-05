@@ -452,15 +452,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
-            update_workspace = (
-                is_first_microbatch is None or is_first_microbatch
-            )
-            fc1_weight_quantizer.set_usage(
-                rowwise=True, columnwise=is_grad_enabled
-            )
-            fc2_weight_quantizer.set_usage(
-                rowwise=True, columnwise=is_grad_enabled
-            )
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -1036,7 +1030,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 mu,
                 rsigma,
             ) = _LayerNormMLP._recompute(ctx)
-            
+
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
                 ctx.fc1_main_grad_func()

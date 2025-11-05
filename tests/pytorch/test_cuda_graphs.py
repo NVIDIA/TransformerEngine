@@ -238,7 +238,7 @@ def _test_cuda_graphs(
                     checkpoint=True,
                 )
                 for _ in range(num_layers)
-            ]            
+            ]
         elif module == "layernorm_linear":
             modules = [
                 LayerNormLinear(

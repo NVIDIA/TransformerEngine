@@ -48,6 +48,7 @@ class ModelConfig:
 
         return ln_model, sln_model
 
+
 config = {
     "small": ModelConfig(128, 512, 12),
     "medium": ModelConfig(512, 2048, 12),
@@ -57,9 +58,11 @@ config = {
 
 seq_sizes = [2**7, 2**10, 2**14, 2**16]
 
+
 def _warmup(model, tensor):
     for _ in range(3):
         model(tensor).sum().backward()
+
 
 def _run_fwd(model, tensor):
 
@@ -79,6 +82,7 @@ def _run_fwd(model, tensor):
     mem = float(peak_mem - start_mem)
 
     return out, elapsed, mem
+
 
 def _run_bwd(model, out):
 
@@ -103,6 +107,7 @@ def _run_bwd(model, out):
     param_grads = _collect_param_grads(model)
     return param_grads, elapsed, mem
 
+
 def _max_diff(ref, other):
     """Return max absolute difference between two tensors or collections."""
     if ref is None or other is None:
@@ -111,6 +116,7 @@ def _max_diff(ref, other):
         diffs = [_max_diff(r, o) for r, o in zip(ref, other)]
         return max(diffs) if diffs else 0.0
     return torch.max(torch.abs(ref.detach() - other.detach())).item()
+
 
 def _collect_param_grads(model):
     grads = {}
@@ -122,6 +128,7 @@ def _collect_param_grads(model):
             grads[key] = param.grad.detach().clone()
     return grads
 
+
 def _param_key(name):
     return name.split(".")[-1]
 
@@ -129,7 +136,7 @@ def _param_key(name):
 @pytest.mark.parametrize("size", config.keys())
 @pytest.mark.parametrize("seq_size", seq_sizes)
 def test_selective_activation_checkpoint(size, seq_size):
-    
+
     ln_model, sln_model = config[size].build()
     data = torch.randn((seq_size, config[size]._hidden_size), device=device)
 
@@ -141,9 +148,14 @@ def test_selective_activation_checkpoint(size, seq_size):
     sln_fwd_out, sln_fwd_time, sln_fwd_mem = _run_fwd(sln_model, data.clone())
     sln_grads, sln_bwd_time, sln_bwd_mem = _run_bwd(sln_model, sln_fwd_out)
 
-    assert ln_fwd_mem > 6*sln_fwd_mem, f"selective activation checkpointing does not reduce forward memory by 6X, only by {ln_fwd_mem/sln_fwd_mem}!"
-    assert ln_bwd_time < sln_bwd_time, "selective activation activation checkpointing backward pass is slower than native!"
-    assert _max_diff(ln_fwd_out, sln_fwd_out)==0.0, "outputs are not equal!"
+    assert ln_fwd_mem > 6 * sln_fwd_mem, (
+        "selective activation checkpointing does not reduce forward memory by 6X, only by"
+        f" {ln_fwd_mem/sln_fwd_mem}!"
+    )
+    assert (
+        ln_bwd_time < sln_bwd_time
+    ), "selective activation activation checkpointing backward pass is slower than native!"
+    assert _max_diff(ln_fwd_out, sln_fwd_out) == 0.0, "outputs are not equal!"
     for key in [
         "layer_norm_weight",
         "layer_norm_bias",
@@ -152,5 +164,6 @@ def test_selective_activation_checkpoint(size, seq_size):
         "fc2_weight",
         "fc2_bias",
     ]:
-        assert _max_diff(ln_grads[key], sln_grads[key])==0.0, f"gradients for {key} are not equal!"
-
+        assert (
+            _max_diff(ln_grads[key], sln_grads[key]) == 0.0
+        ), f"gradients for {key} are not equal!"

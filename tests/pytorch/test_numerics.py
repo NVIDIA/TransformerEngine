@@ -1623,7 +1623,9 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("checkpoint", all_boolean)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias, checkpoint):
+def test_layernorm_mlp_accuracy(
+    dtype, bs, model, activation, normalization, return_bias, bias, checkpoint
+):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(

@@ -480,8 +480,8 @@ class TestFP8Recipe:
         [
             Linear,
             LayerNormLinear,
-            (LayerNormMLP, False), # (module, checkpoint=False)
-            (LayerNormMLP, True), # (module, checkpoint=True)
+            (LayerNormMLP, False),  # (module, checkpoint=False)
+            (LayerNormMLP, True),  # (module, checkpoint=True)
             GroupedLinear,
         ],
     )
