@@ -1983,10 +1983,12 @@ class MetisLinear(TransformerEngineBaseModule):
         else:
             # only quantize weight
             self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,init_method=init_method,**self.commonMetisSvdFunction_args)
-
+        # debugpy.breakpoint()
         if LinearLowbitContext.enable_weight_svd:
 
             self.weight_svd_decomposition()
+            # print(super(self.vlinear.weight,).__repr__)
+            # print(self.vlinear)
 
     @torch.no_grad()
     def initialize_weight_svd_decomposition(self):
@@ -2035,10 +2037,10 @@ class MetisLinear(TransformerEngineBaseModule):
         return u,s,v,bias
 
     @staticmethod
-    def init_tensor_with_data(source_tensor:torch.Tensor, weight_tensor:torch.Tensor):
-        weight_tensor.copy_(source_tensor)
-
     @torch.no_grad()
+    def init_tensor_with_data(source_tensor:torch.Tensor, weight_tensor:torch.Tensor):
+        weight_tensor.copy_(source_tensor.detach())
+
     def weight_svd_decomposition(self):
         print("start weight_svd_decomposition")
         from transformer_engine.pytorch.module.linear import Linear # avoid circular import
