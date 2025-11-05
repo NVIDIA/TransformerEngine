@@ -53,7 +53,7 @@ def cast_master_weights_to_fp8(
     start_offsets,
     group,
     fsdp_shard_model_weights=None,
-    keep_columnwise=False,
+    manual_post_all_gather_processing=False,
 ):
     r"""Helper function to cast master weights to FP8 primary weights.
 
@@ -74,9 +74,11 @@ def cast_master_weights_to_fp8(
     fsdp_shard_model_weights : list of FSDP shard model weights. If None, it means that the model weights are
                              not sharded. Otherwise, it means that the model weights are sharded and we get
                              target model weights data storage using the FSDP shard model weights.
-    keep_columnwise: bool. If True, keep the columnwise data of model weights, and the
-                     post_all_gather_processing function must be called manually by user after the
-                     weights all-gather. Default is False.
+    manual_post_all_gather_processing: bool, default = `False`.
+                     If False, post processing will be automatically triggered during next forward.
+                     If True, the timing of calling post_all_gather_processing is left to the user.
+                     Note that users must call `post_all_gather_processing` if it's set to True,
+                     otherwise the weights won't be updated correctly.
 
     """
 
@@ -137,22 +139,23 @@ def cast_master_weights_to_fp8(
                 f"cast_master_weights_to_fp8 for {type(quantizer)} is not supported yet"
             )
 
+    extra_args = [group, use_fsdp_shard_model_weights, manual_post_all_gather_processing]
     if len(delayed_scaling_params) > 0:
         _cast_master_weights_to_fp8_delayed_scaling(
-            delayed_scaling_params, group, use_fsdp_shard_model_weights, keep_columnwise
+            delayed_scaling_params, *extra_args
         )
     if len(current_scaling_params) > 0:
         _cast_master_weights_to_fp8_current_scaling(
-            current_scaling_params, group, use_fsdp_shard_model_weights, keep_columnwise
+            current_scaling_params, *extra_args
         )
     if len(blockwise_scaling_params) > 0:
         _cast_master_weights_to_fp8_blockwise_scaling(
-            blockwise_scaling_params, group, use_fsdp_shard_model_weights, keep_columnwise
+            blockwise_scaling_params, *extra_args
         )
 
 
 def _cast_master_weights_to_fp8_delayed_scaling(
-    params, group, use_fsdp_shard_model_weights=False, keep_columnwise=False
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
     r"""Helper function to cast master weights to FP8 primary weights for delayed scaling.
 
@@ -170,7 +173,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(
     amaxes, scales, scale_invs = [], [], []
 
     for model_weight, master_weight, start_offset, shard_model_weight_raw in params:
-        if not keep_columnwise:
+        if not manual_post_all_gather_processing:
             # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
@@ -237,7 +240,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(
 
 
 def _cast_master_weights_to_fp8_current_scaling(
-    params, group, use_fsdp_shard_model_weights=False, keep_columnwise=False
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
     r"""Helper function to cast master weights to FP8 primary weights for current scaling.
 
@@ -316,7 +319,7 @@ def _cast_master_weights_to_fp8_current_scaling(
     for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
         params, scales
     ):
-        if not keep_columnwise:
+        if not manual_post_all_gather_processing:
             # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
@@ -348,7 +351,7 @@ def _cast_master_weights_to_fp8_current_scaling(
 
 
 def _cast_master_weights_to_fp8_blockwise_scaling(
-    params, group, use_fsdp_shard_model_weights=False, keep_columnwise=False
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
     r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
 
@@ -447,7 +450,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
         params, scales
     ):
-        if not keep_columnwise:
+        if not manual_post_all_gather_processing:
             # Clear columnwise data for all model weights.
             # We cannot create columnwise data here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
