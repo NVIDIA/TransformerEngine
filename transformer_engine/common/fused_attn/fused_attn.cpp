@@ -536,7 +536,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 #if (CUDNN_VERSION >= 8901)
     // Unpack QKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
-    size_t stride = 2 * h * d;  // For max512, layout is always BS3HD or SB3HD (3HD group)
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
     std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
     // Create tensor views for Q, K, V
@@ -656,7 +656,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
     // Unpack QKV and dQKV and call the non-packed function
     const auto QKV_type = input_QKV->data.dtype;
-    size_t stride = 2 * h * d;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
     std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
 
     // Create tensor views for Q, K, V and dQ, dK, dV
@@ -839,17 +839,10 @@ void nvte_fused_attn_fwd_kvpacked(
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
     // Unpack KV and call the non-packed function
-    size_t stride = 2 * h_q * d;  // For max512, KV layout is BS2HD or SB2HD
-
-    // Create tensor views for K, V
     NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-    std::vector<size_t> unpacked_kv_shape;
-    if (kv_format == NVTE_QKV_Format::NVTE_THD) {
-      unpacked_kv_shape = {t_kv, h_kv, d};
-    } else {
-      // BS2HD or SB2HD -> BSHD or SBHD
-      unpacked_kv_shape = {input_KV->data.shape[0], input_KV->data.shape[1], h_kv, d};
-    }
+    size_t stride = calculate_kv_stride(layout_group, input_Q->data.dtype, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
     Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
     Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
@@ -976,17 +969,10 @@ void nvte_fused_attn_bwd_kvpacked(
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
 
     // Unpack KV and dKV and call the non-packed function
-    size_t stride = 2 * h_q * d;
-
-    // Create tensor views for K, V
     NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-    std::vector<size_t> unpacked_kv_shape;
-    if (kv_format == NVTE_QKV_Format::NVTE_THD) {
-      unpacked_kv_shape = {t_kv, h_kv, d};
-    } else {
-      // BS2HD or SB2HD -> BSHD or SBHD
-      unpacked_kv_shape = {input_KV->data.shape[0], input_KV->data.shape[1], h_kv, d};
-    }
+    size_t stride = calculate_kv_stride(layout_group, input_Q->data.dtype, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
 
     Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
     Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
