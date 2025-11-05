@@ -56,6 +56,8 @@ from ..distributed import (
     use_reentrant_activation_recompute,
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
+    _get_cuda_rng_state,
+    _set_cuda_rng_state,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
@@ -232,6 +234,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(
                         module.fp8_meta
                     )  # to restore quantizers during recomputation
+                # save the rng states
+                ctx.cpu_rng_state = torch.get_rng_state()
+                ctx.cuda_rng_state = _get_cuda_rng_state()
 
         # whether to save activations regularly, or save inputs for recomputation in bwd
         save_for_checkpoint = checkpoint and is_grad_enabled and not recompute_for_bwd
@@ -449,13 +454,13 @@ class _LayerNormMLP(torch.autograd.Function):
             # FP8 cast to workspace buffer
             update_workspace = (
                 is_first_microbatch is None or is_first_microbatch
-            ) and not is_recomputation
+            )
             fc1_weight_quantizer.set_usage(
                 rowwise=True, columnwise=is_grad_enabled
-            )  # and (is_recomputation or not checkpoint))
+            )
             fc2_weight_quantizer.set_usage(
                 rowwise=True, columnwise=is_grad_enabled
-            )  # and (is_recomputation or not checkpoint))
+            )
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -976,6 +981,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(
                     ctx.other_args["module"].fp8_meta
                 )  # set old quantizer state
+
+            # get current rng state
+            final_cpu_rng_state = torch.get_rng_state()
+            final_cuda_rng_state = _get_cuda_rng_state()
+
+            # set rng state for fwd
+            torch.set_rng_state(ctx.cpu_rng_state)
+            _set_cuda_rng_state(ctx.cuda_rng_state)
+
             out = _LayerNormMLP._forward(  # recompute
                 ctx, *tensors, *ctx.other_args.values(), recompute_for_bwd=True
             )
@@ -988,6 +1002,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 FP8GlobalStateManager.restore_fp8_meta_tensors(
                     ctx.other_args["module"].fp8_meta
                 )  # restore quantizers
+            # set rng state for fwd
+            torch.set_rng_state(final_cpu_rng_state)
+            _set_cuda_rng_state(final_cuda_rng_state)
 
             return out
 
@@ -1000,25 +1017,26 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
-        (  # pylint: disable=unbalanced-tuple-unpacking
-            ctx,
-            inputmat,
-            ln_weight,
-            ln_out,
-            fc1_weight,
-            origin_fc1_weight,
-            fc1_bias,
-            fc1_out,
-            fc1_out_without_bias,
-            act_out,
-            fc2_weight,
-            origin_fc2_weight,
-            fc2_bias,
-            mu,
-            rsigma,
-        ) = _LayerNormMLP._recompute(ctx)
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
 
+            (  # pylint: disable=unbalanced-tuple-unpacking
+                ctx,
+                inputmat,
+                ln_weight,
+                ln_out,
+                fc1_weight,
+                origin_fc1_weight,
+                fc1_bias,
+                fc1_out,
+                fc1_out_without_bias,
+                act_out,
+                fc2_weight,
+                origin_fc2_weight,
+                fc2_bias,
+                mu,
+                rsigma,
+            ) = _LayerNormMLP._recompute(ctx)
+            
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
                 ctx.fc1_main_grad_func()
@@ -1681,19 +1699,12 @@ class _LayerNormMLP(torch.autograd.Function):
         #    )
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-            # inputmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
-            # ln_weight,
             dbeta,
-            # ln_weight,
             fc1_wgrad,
-            # origin_fc1_weight,
             fc1_bias_grad if fc1_bias is not None else None,
-            # fc1_bias,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
-            # origin_fc2_weight,
             fc2_bias_grad,
-            # fc2_bias,
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1886,7 +1897,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        checkpoint: Optional[bool] = False,
+        checkpoint: bool = False,
     ) -> None:
         super().__init__()
 
