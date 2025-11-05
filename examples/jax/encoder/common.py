@@ -144,6 +144,9 @@ def _unpack_cached_dataset(artifacts_dir: pathlib.Path, folder_name: str) -> Non
         print(f"Cached dataset {folder_name} not found at {dataset_dir}, skipping unpack")
         return
 
+    # Disable any HF network calls since the dataset is cached locally
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
     for filename in os.listdir(dataset_dir):
         filepath = dataset_dir / filename
         if not filename.endswith(".zip"):
