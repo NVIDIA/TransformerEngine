@@ -362,7 +362,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             if (
                 dim0_size % split_size != 0
                 or dim_to_split != 0
-                or split_size % MXFP8_BLOCK_SCALING_SIZE != 0\
+                or split_size % MXFP8_BLOCK_SCALING_SIZE != 0
                 or dimlast_size % MXFP8_BLOCK_SCALING_SIZE != 0
             ):
                 # Handle splitting by dequantizing and splitting the hp tensor
@@ -386,7 +386,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
             # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
             padding_multiples = [128, 4]
-            for scale_inv, scale_split_size, pad_multiple in zip(scale_invs, split_sizes_for_scale, padding_multiples):
+            for scale_inv, scale_split_size, pad_multiple in zip(
+                scale_invs, split_sizes_for_scale, padding_multiples
+            ):
                 scale_inv_out = (
                     scale_inv.__torch_dispatch__(
                         func,
@@ -553,7 +555,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             flattened_in_shape0 = math.prod(shape[:-1])
             if rowwise_scale_inv.size(0) != flattened_in_shape0:
                 rowwise_scale_inv = rowwise_scale_inv[:flattened_in_shape0]
-        
+
         if columnwise_scale_inv is not None:
             # Remove padding from columnwise scale_inv
             flattened_in_shape0 = math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE
@@ -609,7 +611,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         columnwise_data, columnwise_scale_inv = (
             all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
         )
-        
+
         # Add padding to scale_inv tensors to be multiples of [128, 4]for rowwise and [4, 128] for columnwise
         if rowwise_scale_inv is not None:
             # Pad rowwise_scale_inv to be a multiple of [128, 4]
@@ -623,7 +625,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             current_shape = columnwise_scale_inv.shape
             pad_dim0 = (4 - current_shape[0] % 4) % 4
             if pad_dim0 > 0:
-                columnwise_scale_inv = torch.nn.functional.pad(columnwise_scale_inv, (0, 0, 0, pad_dim0))
+                columnwise_scale_inv = torch.nn.functional.pad(
+                    columnwise_scale_inv, (0, 0, 0, pad_dim0)
+                )
 
         if out is not None:
             out._rowwise_data = rowwise_data
