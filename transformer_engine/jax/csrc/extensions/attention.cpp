@@ -199,9 +199,9 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
-        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, scaling_factor,
-        dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-        window_size_right, query_workspace_tensor.data(), nullptr);
+        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false,
+        scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
+        window_size_left, window_size_right, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
