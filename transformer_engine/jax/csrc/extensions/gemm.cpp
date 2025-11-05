@@ -34,9 +34,8 @@ static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
 }
 
 std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
-    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, uint8_t* swizzle_scale_ptr,
-  JAXX_Scaling_Mode scaling_mode,
-    size_t axis_boundary, bool rowwise) {
+    cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, uint8_t *swizzle_scale_ptr,
+    JAXX_Scaling_Mode scaling_mode, size_t axis_boundary, bool rowwise) {
   // Set tensor data with collapsed 2D shape
   auto buffer_dims = buffer.dimensions();
   std::vector<size_t> input_shape = {product(buffer_dims, 0, axis_boundary),
@@ -63,15 +62,16 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       // Block scaling also needs to be collapsed to match 2D data
       scale_shape = {product(scale_inv.dimensions(), 0, axis_boundary),
                      product(scale_inv.dimensions(), axis_boundary, scale_inv.dimensions().size())};
-      NVTE_CHECK(typeToSize(scale_dtype) == 1, "Inverse scale factors need to have an 8-bit data type.");
+      NVTE_CHECK(typeToSize(scale_dtype) == 1,
+                 "Inverse scale factors need to have an 8-bit data type.");
     }
-    if (!is_nvfp4){
+    if (!is_nvfp4) {
       if (rowwise) {
         input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       } else {
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
-    } else { // Swizzle for NVFP4
+    } else {  // Swizzle for NVFP4
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
@@ -153,7 +153,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"));
 
-
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Buffer_Type alpha, Buffer_Type beta, Result_Type output, Result_Type bias_grad,
@@ -161,15 +160,14 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
                    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
-
   // cuBLAS workspace + (swizzle scales) + 256 alignment enforcement
-  uint8_t* lhs_swizzle_scale_ptr, *rhs_swizzle_scale_ptr;
+  uint8_t *lhs_swizzle_scale_ptr, *rhs_swizzle_scale_ptr;
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
-  if (scaling_mode == jax::JAXX_Scaling_Mode::NVFP4_1D_SCALING){
-    auto lhs_scale_size =  product(lhs_scale_inv.dimensions());
-    auto rhs_scale_size =  product(rhs_scale_inv.dimensions());
+  if (scaling_mode == jax::JAXX_Scaling_Mode::NVFP4_1D_SCALING) {
+    auto lhs_scale_size = product(lhs_scale_inv.dimensions());
+    auto rhs_scale_size = product(rhs_scale_inv.dimensions());
     workspace_size = workspace_size - lhs_scale_size - rhs_scale_size;
     lhs_swizzle_scale_ptr = workspace_ptr;
     rhs_swizzle_scale_ptr = workspace_ptr + lhs_scale_size;
@@ -184,10 +182,12 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   bool make_lhs_rowwise = (always_rowwise) ? true : !lhs_transposed;
   bool make_rhs_rowwise = (always_rowwise) ? true : rhs_transposed;
 
-  auto [lhs_, lhs_shape] = xla_buffer_to_nvte_gemm_operand(stream, lhs, lhs_scale_inv, lhs_swizzle_scale_ptr, scaling_mode,
-                                                           lhs_axis_boundary, make_lhs_rowwise);
-  auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(stream, rhs, rhs_scale_inv, rhs_swizzle_scale_ptr, scaling_mode,
-                                                           rhs_axis_boundary, make_rhs_rowwise);
+  auto [lhs_, lhs_shape] =
+      xla_buffer_to_nvte_gemm_operand(stream, lhs, lhs_scale_inv, lhs_swizzle_scale_ptr,
+                                      scaling_mode, lhs_axis_boundary, make_lhs_rowwise);
+  auto [rhs_, rhs_shape] =
+      xla_buffer_to_nvte_gemm_operand(stream, rhs, rhs_scale_inv, rhs_swizzle_scale_ptr,
+                                      scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
 
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
                                    (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
