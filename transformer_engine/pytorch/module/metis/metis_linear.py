@@ -4,7 +4,7 @@
 
 """Linear API"""
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
-from functools import reduce
+from functools import reduce, partial
 from operator import mul as multiply_op
 import warnings
 
@@ -1955,7 +1955,6 @@ class MetisLinear(TransformerEngineBaseModule):
         self.name = name
         self.weight_svd_has_initialized = False
         self.commonMetisSvdFunction_args = {
-            "init_method": init_method,
             "return_bias": return_bias,
             "get_rng_state_tracker": get_rng_state_tracker,
             "rng_tracker_name": rng_tracker_name,
@@ -1980,10 +1979,10 @@ class MetisLinear(TransformerEngineBaseModule):
         }
         if LinearLowbitContext.enable_lowbit and not LinearLowbitContext.enable_weight_svd:
             # only quantize activation
-            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=True,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=True,init_method=init_method,**self.commonMetisSvdFunction_args)
         else:
             # only quantize weight
-            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,init_method=init_method,**self.commonMetisSvdFunction_args)
 
         if LinearLowbitContext.enable_weight_svd:
 
@@ -2035,6 +2034,10 @@ class MetisLinear(TransformerEngineBaseModule):
         bias = self.ulinear.bias
         return u,s,v,bias
 
+    @staticmethod
+    def init_tensor_with_data(source_tensor:torch.Tensor, weight_tensor:torch.Tensor):
+        weight_tensor.copy_(source_tensor)
+
     @torch.no_grad()
     def weight_svd_decomposition(self):
         print("start weight_svd_decomposition")
@@ -2059,21 +2062,24 @@ class MetisLinear(TransformerEngineBaseModule):
                 self.vlinear = Linear(
                     v.shape[1], 
                     LinearLowbitContext.forward_svd_rank, # v.shape[0] // 30, 
+                    init_method=partial(MetisLinear.init_tensor_with_data,v[: LinearLowbitContext.forward_svd_rank, :]),
                     bias = False,
                     use_metis=True,
                     **self.commonMetisSvdFunction_args
                     )
                 self.ulinear = Linear(
-                    LinearLowbitContext.forward_svd_rank, # u.shape[1] // 30, 
+                    LinearLowbitContext.forward_svd_rank, # u.shape[1] // 30,
                     u.shape[0], 
+                    init_method=partial(MetisLinear.init_tensor_with_data,u[:, : LinearLowbitContext.forward_svd_rank]), 
                     **self.commonMetisSvdFunction_args,
                 )
-                self.vlinear.weight.copy_(v[: LinearLowbitContext.forward_svd_rank, :])
-                self.ulinear.weight.copy_(u[:, : LinearLowbitContext.forward_svd_rank])
+                # self.vlinear.weight.copy_(v[: LinearLowbitContext.forward_svd_rank, :])
+                # self.ulinear.weight.copy_(u[:, : LinearLowbitContext.forward_svd_rank])
             else:
                 self.vlinear = Linear(
                     v.shape[1], 
                     v.shape[0], # v.shape[0] // 30, 
+                    init_method=partial(MetisLinear.init_tensor_with_data,v),
                     bias=False,
                     use_metis=True,
                     **self.commonMetisSvdFunction_args,
@@ -2081,11 +2087,12 @@ class MetisLinear(TransformerEngineBaseModule):
                 self.ulinear = Linear(
                     u.shape[1], # u.shape[1] // 30, 
                     u.shape[0], 
+                    init_method=partial(MetisLinear.init_tensor_with_data,u),
                     bias=True if bias else False,
                     **self.commonMetisSvdFunction_args,
                 )
-                self.vlinear.weight.copy_(v)
-                self.ulinear.weight.copy_(u)
+                # self.vlinear.weight.copy_(v)
+                # self.ulinear.weight.copy_(u)
 
 
             # forward svd low rank
@@ -2093,12 +2100,20 @@ class MetisLinear(TransformerEngineBaseModule):
                 self.ulinear.bias.copy_(bias)
         else:
             
-            self.vlinear = Linear(v.shape[1], v.shape[0], bias=False,**self.commonMetisSvdFunction_args)
-            self.ulinear = Linear(u.shape[1], u.shape[0],**self.commonMetisSvdFunction_args)
+            self.vlinear = Linear(
+                v.shape[1], 
+                v.shape[0], 
+                init_method=partial(MetisLinear.init_tensor_with_data,v),
+                bias=False,
+                **self.commonMetisSvdFunction_args),
+            self.ulinear = Linear(
+                u.shape[1],
+                u.shape[0],
+                init_method=partial(MetisLinear.init_tensor_with_data,u),
+                **self.commonMetisSvdFunction_args)
 
-            
-            self.vlinear.weight.data = v.data
-            self.ulinear.weight.data = u.data
+            # self.vlinear.weight.data = v.data
+            # self.ulinear.weight.data = u.data
             if bias:
                 self.ulinear.bias.data = self.linear_residual.bias.data
                 #     self.linear_residual.bias.clone().cuda(self.linear_residual.weight.get_device())

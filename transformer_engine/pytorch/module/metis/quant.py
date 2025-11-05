@@ -113,20 +113,20 @@ class MetisSvdFunction():
             sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
         )
         ug_native = input_quantizer.update_quantized(ug, ug_nvfp4)
-        ug_native.update_usage(rowwise_usage=True, columnwise_usage=True)
+        # ug_native.update_usage(rowwise_usage=True, columnwise_usage=True)
 
         vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
-        vg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
+        # vg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
 
         sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
-        sg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
+        # sg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
         # end_time.record()
         # torch.cuda.synchronize()
         # print("quant time elapsed = ",start_time.elapsed_time(end_time))
         # out = torch.randn(sg_native.shape,dtype = input_.dtype, device=input_.device)
         # start_time.record()
         gemm_out = MetisSvdFunction.svd_quant_gemm(sg_native, ug_native, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
-        gemm_out.update_usage(rowwise_usage=True, columnwise_usage=True)
+        # gemm_out.update_usage(rowwise_usage=True, columnwise_usage=True)
         # gemmout_tmp = ug @ sg
         # loss = torch.mean(torch.abs(gemmout_tmp - gemm_out.dequantize()))
         # print("gemm_tmp loss=",loss.item())
