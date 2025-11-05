@@ -564,11 +564,12 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
 
     fused_attn_arbitrary_seqlen_fwd(
-        b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training, return_max_logit, attn_scale,
-        dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left,
-        window_size_right, &Q_view, &K_view, &V_view, input_Bias, input_SoftmaxOffset, output_O,
-        Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens, input_cu_seqlens_padded,
-        input_cu_seqlens_padded, nullptr, nullptr, input_rng_state, wkspace, stream, handle);
+        b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training,
+        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
+        window_size_left, window_size_right, &Q_view, &K_view, &V_view, input_Bias,
+        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens,
+        input_cu_seqlens_padded, input_cu_seqlens_padded, nullptr, nullptr, input_rng_state,
+        wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
@@ -874,12 +875,12 @@ void nvte_fused_attn_fwd_kvpacked(
 
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, num_pages_k, num_pages_v,
-        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training, return_max_logit, attn_scale,
-        dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left,
-        window_size_right, input_Q, &K_view, &V_view, input_Bias, input_SoftmaxOffset, output_O,
-        Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
-        input_cu_seqlens_kv_padded, input_page_table_k, input_page_table_v, input_rng_state,
-        wkspace, stream, handle);
+        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
+        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
+        window_size_left, window_size_right, input_Q, &K_view, &V_view, input_Bias,
+        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
+        input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k,
+        input_page_table_v, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
