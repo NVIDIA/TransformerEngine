@@ -29,7 +29,6 @@ from transformer_engine.pytorch.quantization import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
-import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -481,7 +480,8 @@ class TestFP8Recipe:
         [
             Linear,
             LayerNormLinear,
-            LayerNormMLP,
+            (LayerNormMLP, False), # (module, checkpoint=False)
+            (LayerNormMLP, True), # (module, checkpoint=True)
             GroupedLinear,
         ],
     )
@@ -495,7 +495,11 @@ class TestFP8Recipe:
             if module_class == GroupedLinear:
                 module = module_class(1, in_features, out_features).cuda()
             else:
-                module = module_class(in_features, out_features).cuda()
+                if isinstance(module_class, tuple) and module_class[0] == LayerNormMLP:
+                    module_class, checkpoint = module_class
+                    module = module_class(in_features, out_features, checkpoint=checkpoint).cuda()
+                else:
+                    module = module_class(in_features, out_features).cuda()
 
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)

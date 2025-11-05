@@ -186,7 +186,7 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
         return dict(rtol=1e-3, atol=1e-5)
     if dtype == torch.bfloat16:
         return dict(rtol=1.6e-2, atol=1e-5)
-    raise ValueError(f"Unsuppored dtype ({dtype})")
+    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 def assert_allclose(
@@ -1364,7 +1364,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, recipe=recipe)
     te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, recipe=recipe)
 
-    # Shoule be bit-wise match
+    # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
@@ -1622,7 +1622,8 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
+@pytest.mark.parametrize("checkpoint", all_boolean)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias, checkpoint):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(
@@ -1635,6 +1636,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
         return_bias=return_bias,
         bias=bias,
         device="cuda",
+        checkpoint=checkpoint,
     )
 
     torch_ln_mlp = (
@@ -1696,8 +1698,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, bias, fuse_wgrad_accumulation
+    dtype, bs, model, bias, fuse_wgrad_accumulation, checkpoint
 ):
     config = model_configs[model]
 
@@ -1708,6 +1711,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         bias=bias,
         params_dtype=dtype,
         device="cuda",
+        checkpoint=checkpoint,
         delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()

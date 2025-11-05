@@ -176,7 +176,8 @@ _test_cuda_graphs_modules: List[str] = [
     # creating TMA descriptor for MXFP8 quantization.
     "linear",
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "mha",
     "linear_op",
@@ -218,15 +219,26 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif module == "layernorm_mlp":
+        elif module == "layernorm_mlp_nocheckpoint":
             modules = [
                 LayerNormMLP(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     params_dtype=dtype,
+                    checkpoint=False,
                 )
                 for _ in range(num_layers)
             ]
+        elif module == "layernorm_mlp_checkpoint":
+            modules = [
+                LayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                    checkpoint=True,
+                )
+                for _ in range(num_layers)
+            ]            
         elif module == "layernorm_linear":
             modules = [
                 LayerNormLinear(
@@ -383,7 +395,8 @@ def test_make_graphed_callables(
 
 _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "linear",
     "mha",
