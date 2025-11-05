@@ -701,9 +701,10 @@ def run_parallel_tests() -> None:
 
     manual_post_all_gather_processings = [False, True]
 
+    _test_mini_optimizer(dp_group)
+
     for quantization in quantizations:
         for post_ag_processing in manual_post_all_gather_processings:
-            _test_mini_optimizer(dp_group)
             _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
             _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
 
