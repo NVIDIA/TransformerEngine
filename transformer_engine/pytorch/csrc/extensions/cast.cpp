@@ -128,7 +128,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(quantizer->with_amax_reduction == false,
              "NVFP4 multi_quantize: amax reduction is not supported");
 
-  int num_tensors = split_sections.size();
+  size_t num_tensors = split_sections.size();
 
   size_t rows = 1;
   for (size_t i = 0; i < input.ndim() - 1; ++i) {
