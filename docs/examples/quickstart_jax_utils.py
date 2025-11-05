@@ -17,6 +17,7 @@ from transformer_engine.jax.flax.transformer import DotProductAttention as TEDot
 
 class AttentionType(Enum):
     """Enum for selecting attention implementation type."""
+
     CUSTOM_DOT_PRODUCT = "custom_dot_product"
     FLAX_LINEN_MULTIHEAD = "flax_linen_multihead"
     TE_FLAX_MULTIHEAD = "te_flax_multihead"
@@ -32,14 +33,14 @@ class AttentionWrapper(nn.Module):
         attention_type: Type of attention implementation to use (default: TE_FLAX_MULTIHEAD)
         attention_mask_type: Mask type for TE attention (default: 'no_mask')
     """
-    
+
     num_attention_heads: int
     hidden_size: int
     kv_channels: int
     attention_dropout: float = 0.1
     attention_type: AttentionType = AttentionType.TE_FLAX_MULTIHEAD
-    attention_mask_type: str = 'no_mask'
-    
+    attention_mask_type: str = "no_mask"
+
     @nn.compact
     def __call__(
         self,
@@ -61,29 +62,35 @@ class AttentionWrapper(nn.Module):
             x = te_flax.DenseGeneral(features=self.hidden_size, use_bias=True)(x)
             x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
             return x
-        
+
         elif self.attention_type == AttentionType.FLAX_LINEN_MULTIHEAD:
             # Flax Linen expects [batch, seq_len, num_heads, head_dim]
             # Input is [seq_len, batch, num_heads, head_dim]
             sq, b, np, hn = query.shape
-            
+
             # [seq_len, batch, num_heads, head_dim] -> [batch, seq_len, num_heads * head_dim]
             query_reshaped = jnp.transpose(query, (1, 0, 2, 3)).reshape(b, sq, np * hn)
             key_reshaped = jnp.transpose(key, (1, 0, 2, 3)).reshape(b, key.shape[0], np * hn)
             value_reshaped = jnp.transpose(value, (1, 0, 2, 3)).reshape(b, value.shape[0], np * hn)
-            
+
             attention = nn.MultiHeadDotProductAttention(
                 num_heads=self.num_attention_heads,
                 qkv_features=self.kv_channels,
                 dropout_rate=self.attention_dropout,
             )
             # Output shape: [batch, seq_len, num_heads * head_dim]
-            output = attention(query_reshaped, key_reshaped, value_reshaped, mask=attention_mask, deterministic=deterministic)
-            
+            output = attention(
+                query_reshaped,
+                key_reshaped,
+                value_reshaped,
+                mask=attention_mask,
+                deterministic=deterministic,
+            )
+
             # Reshape back to [seq_len, batch, num_heads * head_dim]
             output = jnp.transpose(output, (1, 0, 2))
             return output
-        
+
         elif self.attention_type == AttentionType.TE_FLAX_MULTIHEAD:
             # Use DotProductAttention (not MultiHeadAttention which includes QKV projection)
             attention = TEDotProductAttention(
@@ -98,7 +105,7 @@ class AttentionWrapper(nn.Module):
             # Reshape from [seq_len, batch, num_heads, head_dim] to [seq_len, batch, hidden_size]
             x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
             return x
-        
+
         else:
             raise ValueError(f"Unknown attention type: {self.attention_type}")
 
@@ -173,6 +180,7 @@ def create_train_step_fn(
 
     # JIT-compile the fwd_bwd_fn
     return jax.jit(fwd_bwd_fn)
+
 
 class DotProductAttention(nn.Module):
     """Attention operation in Transformer layer
