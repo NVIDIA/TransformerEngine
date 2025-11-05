@@ -121,7 +121,142 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
              "Input and output list must have the same size");
   NVTE_CHECK(split_sections.size() == input_list.size(),
              "Split sections must have the same size as input and output list");
-  // TODO: implement this
+  // this function is not responsible for 2D nvfp4 quantization
+  NVTE_CHECK(quantizer->with_2d_quantization == false,
+             "NVFP4 multi_quantize: 2D NVFP4 quantization is not supported");
+  // multi quantize function doesn't have amax reduction support
+  NVTE_CHECK(quantizer->with_amax_reduction == false,
+             "NVFP4 multi_quantize: amax reduction is not supported");
+
+  int num_tensors = split_sections.size();
+
+  size_t rows = 1;
+  for (size_t i = 0; i < input.ndim() - 1; ++i) {
+    rows *= input.size(i);
+  }
+  size_t cols = input.size(input.ndim() - 1);
+
+  NVTE_CHECK(cols % 128 == 0, "NVFP4 multi_quantize: number of columns must be a multiple of 128");
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  std::vector<NVTETensor> nvte_tensor_input_list;
+  std::vector<NVTETensor> nvte_tensor_output_list;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    nvte_tensor_input_list.push_back(input_list[i].data());
+    nvte_tensor_output_list.push_back(output_list[i].data());
+  }
+  
+  // stochastic rounding support for multi tensor
+  if (quantizer->stochastic_rounding) {
+    // TODO: implement stochastic rounding support for multi tensor
+  }
+
+  // Get a list of QuantizationConfigWrapper quant_config
+  std::vector<QuantizationConfigWrapper> quant_config_list;
+  for (size_t i = 0; i < num_tensors; i++) {
+    quant_config_list.emplace_back(QuantizationConfigWrapper());
+  }
+
+  // with or without RHT, use nvte_multi_hadamard_transform_amax
+  // out.amax is the rowwise amax, out.columnwise_amax is the columnwise amax
+  // rowwise amax will be the amax of original amax(input) 
+  // columnwise amax will be the amax of the amax(RHT(input.t))
+  if (quantizer->with_rht) {
+    // bf16 only for now
+    NVTE_CHECK(input.dtype() == DType::kBFloat16, "NVFP4 multi_quantize: RHT is only supported for bfloat16 input");
+    if (quantizer->with_post_rht_amax) {
+      // We need:
+      // 1. Rowwise amax = amax for input
+      // 2. Columnwise amax = amax for RHT(input.t)
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_multi_hadamard_transform_amax(
+            input.data(),
+            reinterpret_cast<NVTETensor*>(nvte_tensor_output_list.data()),
+            split_sections.data(),
+            num_tensors,
+            0,
+            quantizer->rht_matrix_random_sign_mask_t,
+            stream);
+      });
+    }else {
+      NVTE_CHECK(false, "NVFP4 multi_quantize: Pre-RHT amax is not supported yet");
+    }
+  }else {
+    // TODO: implement this too when we disable RHT
+    NVTE_CHECK(false, "NVFP4 multi_quantize: RHT is not supported when RHT is disabled for now");
+  }
+
+  // start with quantize, with or without RHT
+  if (quantizer->with_rht) {
+    // check the availablibilty of RHT matrix definition for best perf
+    NVTE_CHECK(quantizer->rht_matrix.defined() && quantizer->rht_matrix.numel() > 0,
+                "NVFP4 multi_quantize: RHT matrix is not set");
+    auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer->rht_matrix);
+
+    NVTE_SCOPED_GIL_RELEASE({
+      for (size_t i = 0; i < num_tensors; i++) {
+        if (quantizer->rowwise_usage) {
+          TensorWrapper out_identity(output_list[i].scaling_mode());
+          auto out_identity_data = output_list[i].get_rowwise_data();
+          auto out_identity_scale_inv = output_list[i].get_rowwise_scale_inv();
+          auto out_identity_amax = output_list[i].get_amax();
+          out_identity.set_rowwise_data(out_identity_data.data_ptr,
+                                        static_cast<DType>(out_identity_data.dtype),
+                                        out_identity_data.shape);
+          out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
+                                             static_cast<DType>(out_identity_scale_inv.dtype),
+                                             out_identity_scale_inv.shape);
+          out_identity.set_amax(out_identity_amax.data_ptr, static_cast<DType>(out_identity_amax.dtype),
+                                out_identity_amax.shape);
+    
+          NVTE_SCOPED_GIL_RELEASE(
+              { nvte_quantize_v2(input_list[i].data(), out_identity.data(), quant_config_list[i], stream); });
+        } 
+
+        // already eligible for RHT columnwise cast fusion after the dimension check
+        if (quantizer->columnwise_usage) {
+          // Get the output columnwise data, scale_inv, and amax
+          auto out_columnwise_data = output_list[i].get_columnwise_data();
+          auto out_columnwise_scale_inv = output_list[i].get_columnwise_scale_inv();
+          // NOTE: should already be populated.
+          auto out_columnwise_amax = output_list[i].get_columnwise_amax();
+
+          // Create a wrapper for the columnwise output, as the rowwise output.
+          // The reason is due to the input `rht_output_t` is already in the transposed layout.
+          // Thus, we only need a rowwise quantization to generate the columnwise output.
+          TensorWrapper out_transpose(output_list[i].scaling_mode());
+          auto colwise_data_shape = out_columnwise_data.shape;
+          std::vector<size_t> colwise_data_shape_2d;
+          colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
+          size_t last_dim = 1;
+          for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
+            last_dim *= colwise_data_shape.data[i];
+          }
+          colwise_data_shape_2d.push_back(last_dim);
+
+          out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
+                                        static_cast<DType>(out_columnwise_data.dtype),
+                                        colwise_data_shape_2d);
+          out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
+                                              static_cast<DType>(out_columnwise_scale_inv.dtype),
+                                              out_columnwise_scale_inv.shape);
+          out_transpose.set_amax(out_columnwise_amax.data_ptr,
+                                static_cast<DType>(out_columnwise_amax.dtype),
+                                out_columnwise_amax.shape);
+          nvte_hadamard_transform_cast_fusion_columnwise(
+                input_list[i].data(), out_transpose.data(), rht_matrix_nvte.data(), quant_config_list[i], stream);
+        }
+      }
+    });
+  } else {
+    NVTE_SCOPED_GIL_RELEASE({
+      for (size_t i = 0; i < num_tensors; i++) {
+        nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
+      }
+    });
+  }
+
 }
 
 void multi_tensor_quantize_impl(const TensorWrapper &single_input,
@@ -145,9 +280,11 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
   auto scaling_mode =
       quantizer_cpp_list.empty() ? NVTE_INVALID_SCALING : quantizer_cpp_list[0]->get_scaling_mode();
 
+  // check if split_sections is just a dummy input
+  bool valid_split_sections = split_sections.size() == num_tensors;
+  
   // Check scaling mode consistency across all tensors
   for (size_t i = 0; i < num_tensors; i++) {
-    // Support both Float8 and NVFP4 quantizers
     if (detail::IsFloat8Quantizers(quantizer_py_list[i].ptr())) {
       // for fp8 delayed scaling, only fp8 quantize transpose is supported
       if (nvte_tensor_data(output_list[i].data()) == nullptr ||
@@ -155,15 +292,29 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
         with_fused_kernel = false;
         break;
       }
+      // check if the scaling mode is fp8 delayed scaling for all quantizers 
       if (scaling_mode != NVTE_DELAYED_TENSOR_SCALING) {
         with_fused_kernel = false;
         break;
       }
     } else if (detail::IsNVFP4Quantizers(quantizer_py_list[i].ptr())) {
+      // check if the list of quantizers are all NVFP4 quantizers
       if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
         with_fused_kernel = false;
         break;
       }
+      // the nvfp4 fused kernels also have dimension limit for the split_sections
+      if (valid_split_sections) {
+        // break if each split_sections is not 64 multiple
+        if (split_sections[i] % 64 != 0) {
+          with_fused_kernel = false;
+          break;
+        } 
+      }else {
+        with_fused_kernel = false;
+        break;
+      }
+      
     } else {
       with_fused_kernel = false;
       break;
