@@ -482,6 +482,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 }
 
 // NVTE fused attention FWD with packed QKV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                                    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
@@ -595,6 +597,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   }
 }
 // NVTE fused attention BWD with packed QKV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_bwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
                                    const NVTETensor S, NVTETensor dP,
                                    const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
@@ -742,6 +746,8 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   }
 }
 // NVTE fused attention FWD with packed KV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, const NVTETensor SoftmaxOffset,
     NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
@@ -901,6 +907,8 @@ void nvte_fused_attn_fwd_kvpacked(
   }
 }
 // NVTE fused attention BWD with packed KV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_bwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
     const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,

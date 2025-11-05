@@ -216,6 +216,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
+ * \warning This API is **deprecated**.
+ *          Please use `nvte_fused_attn_fwd` with separate Q, K, V tensors instead.
+ *
  * Computes:
  *  - P = Q * Transpose(K) + Bias
  *  - S = ScaleMaskSoftmax(P)
@@ -276,6 +279,9 @@ void nvte_fused_attn_fwd_qkvpacked(
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
+ * \warning This API is **deprecated**.
+ *          Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
+ *
  * Support Matrix:
    \verbatim
    | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
@@ -334,6 +340,9 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
                                    bool deterministic, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with packed KV input.
+ *
+ * \warning This API is **deprecated**.
+ *          Please use `nvte_fused_attn_fwd` with separate Q, K, V tensors instead.
  *
  * Computes:
  *  - P = Q * Transpose(K) + Bias
@@ -405,6 +414,9 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
+ *
+ * \warning This API is **deprecated**.
+ *          Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
  *
  * Support Matrix:
    \verbatim
