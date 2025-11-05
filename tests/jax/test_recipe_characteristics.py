@@ -261,15 +261,20 @@ class TestFP8Functions(unittest.TestCase):
 
 
 class TestJaxprAndHlo:
-    """ Tests to verify Jaxpr and/or HLO of compiled modules apply expected recipe functionality and optimizations. """
+    """Tests to verify Jaxpr and/or HLO of compiled modules apply expected recipe functionality and optimizations."""
 
-    @pytest_parametrize_wrapper("quantization_recipe", [quantization_recipe for quantization_recipe in SUPPORTED_RECIPES if isinstance(quantization_recipe, NVFP4BlockScaling)])
+    @pytest_parametrize_wrapper(
+        "quantization_recipe",
+        [
+            quantization_recipe
+            for quantization_recipe in SUPPORTED_RECIPES
+            if isinstance(quantization_recipe, NVFP4BlockScaling)
+        ],
+    )
     def test_layernorm_mlp_reuses_amax_nvfp4(self, quantization_recipe):
-        """ Tests that layernorm_mlp reuses the amax computed in layernorm and the activation and does not recompute it during quantizaton. """
+        """Tests that layernorm_mlp reuses the amax computed in layernorm and the activation and does not recompute it during quantizaton."""
 
-        with te.autocast(
-            enabled=True, recipe=quantization_recipe, mesh_resource=te.MeshResource()
-        ):
+        with te.autocast(enabled=True, recipe=quantization_recipe, mesh_resource=te.MeshResource()):
             model = te_flax.LayerNormMLP(
                 layernorm_type="rmsnorm",
                 return_layernorm_output=False,
