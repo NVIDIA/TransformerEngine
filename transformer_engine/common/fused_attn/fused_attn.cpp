@@ -412,8 +412,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: Given combination of attention mask (non-causal) and "
-                   "max_seqlen_kv (> 1024) does not support cuda graph capture with "
-                   "fused attention for cuDNN 9.14.0."
+                   "max_seqlen_kv (> 1024) does not support fused attention for cuDNN 9.14.0. "
                    " Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
