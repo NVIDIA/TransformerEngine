@@ -104,6 +104,8 @@ class AttentionWrapper(nn.Module):
             x = attention(query, key, value, mask=attention_mask, deterministic=deterministic)
             # Reshape from [seq_len, batch, num_heads, head_dim] to [seq_len, batch, hidden_size]
             x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
+            x = te_flax.DenseGeneral(features=self.hidden_size, use_bias=True)(x)
+            x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
             return x
 
         else:
