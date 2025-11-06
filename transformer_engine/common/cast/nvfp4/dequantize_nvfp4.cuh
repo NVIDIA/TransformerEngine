@@ -39,6 +39,10 @@ __global__ void __launch_bounds__(512)
   const size_t x = thread_idx % M;
   const size_t y = thread_idx / M;
 
+  if (y >= N) {
+    return;
+  }
+
   union fp4vec {
     uint64_t vec;
     fp4e2m1x4 small_vec[4];
