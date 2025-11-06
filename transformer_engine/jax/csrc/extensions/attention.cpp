@@ -285,7 +285,8 @@ static void FusedAttnForwardImpl(
     // Q separate, KV packed in k: [batch*seqlen, 2, num_gqa_groups, dim]
     // Python passes: q=query, k=packed_kv, v=dummy
     // Extract V pointer from the packed k data
-    NVTE_CHECK(qk_head_dim == v_head_dim, "For KV packed layout, qk_head_dim must equal v_head_dim");
+    NVTE_CHECK(qk_head_dim == v_head_dim,
+               "For KV packed layout, qk_head_dim must equal v_head_dim");
     size_t stride = (typeToSize(dtype) * num_gqa_groups * qk_head_dim);
     q_ptr = q;
     k_ptr = k;
@@ -517,7 +518,8 @@ static void FusedAttnBackwardImpl(
     v_shape = q_shape;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     // Q separate, KV packed in k: [batch*seqlen, 2, num_gqa_groups, dim]
-    NVTE_CHECK(qk_head_dim == v_head_dim, "For KV packed layout, qk_head_dim must equal v_head_dim");
+    NVTE_CHECK(qk_head_dim == v_head_dim,
+               "For KV packed layout, qk_head_dim must equal v_head_dim");
     size_t stride = (typeToSize(dtype) * num_gqa_groups * qk_head_dim);
     q_ptr = q;
     k_ptr = k;
