@@ -1900,6 +1900,7 @@ def _get_module_fsdp_state(module):
         fsdp_state = module._te_cached_parent_fsdp_state
     else:
         from torch.distributed._composable_state import _module_state_mapping
+
         # Otherwise get the fsdp state of lca of module in the module hierarchy
         min_nodes_in_parent = float("inf")
         closest_parent_fsdp_mod = None
