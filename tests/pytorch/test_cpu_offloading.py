@@ -7,7 +7,7 @@ import contextlib
 import pytest
 import os
 import torch
-from typing import Optional
+from typing import Optional, List
 from transformer_engine.pytorch.cpu_offload import (
     get_cpu_offload_context,
     OffloadableLayerState,
@@ -27,7 +27,7 @@ fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_avai
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
 
-quantization_recipes: Optional[recipe.Recipe] = [None]
+quantization_recipes: List[Optional[recipe.Recipe]] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
 if fp8_block_scaling_available:
@@ -218,7 +218,6 @@ class TestsOffloadableLayerState:
         NUM_ITERATIONS = 10
 
         stream = torch.cuda.Stream()
-        random_num_tensors = True
 
         offload_layer_state = OffloadableLayerState(
             offload_stream=stream,
