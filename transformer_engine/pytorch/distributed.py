@@ -1885,20 +1885,22 @@ def allreduce(
     return inp, handle
 
 
-@lru_cache
 def _get_module_fsdp_state(module):
     """
     If module is an FSDP module, return its _FSDPState.
     Otherwise, return the _FSDPState of the closest parent FSDP module
     in the module hierarchy the module belongs to.
     """
-    from torch.distributed._composable_state import _module_state_mapping
 
-    # this will return correct fsdp state if module itself is an fsdp module
     if hasattr(module, "_get_fsdp_state"):
+        # this will return correct fsdp state if module itself is an fsdp module
         fsdp_state = module._get_fsdp_state()
-    # Otherwise get the fsdp state of lca of module in the module hierarchy
+    elif getattr(module, "_te_cached_parent_fsdp_state", None) is not None:
+        # See if we have cached the parent fsdp state of the module
+        fsdp_state = module._te_cached_parent_fsdp_state
     else:
+        from torch.distributed._composable_state import _module_state_mapping
+        # Otherwise get the fsdp state of lca of module in the module hierarchy
         min_nodes_in_parent = float("inf")
         closest_parent_fsdp_mod = None
         for fsdp_mod in _module_state_mapping.keys():
@@ -1913,6 +1915,9 @@ def _get_module_fsdp_state(module):
                 "Module is not FSDP-wrapped and does not have any FSDP-wrapped parent modules."
             )
         fsdp_state = closest_parent_fsdp_mod._get_fsdp_state()
+        # Cache the parent fsdp state of the module to avoid recomputing
+        # the closest parent fsdp module.
+        module._te_cached_parent_fsdp_state = fsdp_state
     return fsdp_state
 
 

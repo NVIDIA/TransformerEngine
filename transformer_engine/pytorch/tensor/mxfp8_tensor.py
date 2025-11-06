@@ -346,11 +346,13 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 if src._columnwise_data is not None and dst._columnwise_data is not None:
                     dst._columnwise_data.copy_(src._columnwise_data.detach())
                     dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
-                dst._quantizer = src._quantizer
                 return dst
 
-        # FSDP2 related functions. Currently shardin
+        # FSDP2 related functions.
         if func == aten.split.Tensor:
+            # This is called if entire model is initialized on CUDA device and
+            # then splitted. Finally the shard needed by the process is used
+            # and other splitted shards are discarded.
             if "dim" in kwargs:
                 dim_to_split = kwargs["dim"]
             else:
