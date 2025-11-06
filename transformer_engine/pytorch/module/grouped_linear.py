@@ -810,6 +810,14 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
+            if debug:
+                if self.no_debug_features_active(list(chain(*quantizers))):
+                    debug = False
+                    quantizers = self._get_quantizers()
+
+                if isinstance(weight_tensors, QuantizedTensorStorage):
+                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+            
             (
                 input_quantizers,
                 weight_quantizers,
@@ -818,15 +826,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_weight_quantizers,
                 grad_output_quantizers,
             ) = quantizers
-
-            if debug:
-                if self.no_debug_features_active(list(chain(*quantizers))):
-                    debug = False
-                    quantizers = self._get_quantizers()
-
-                if isinstance(weight_tensors, QuantizedTensorBase):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
-
+            
             if torch.is_grad_enabled():
                 linear_fn = _GroupedLinear.apply
                 args = []
