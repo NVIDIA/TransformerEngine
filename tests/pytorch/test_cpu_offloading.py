@@ -590,9 +590,11 @@ class TestTELayers:
                 "Cuda graphs are not yet supported with cpu offloading when"
                 " retain_pinned_cpu_buffers is False."
             )
-        
+
         if backend == "FusedAttention" and use_cuda_graphs:
-            pytest.skip("Fused attention + cuda graphs is temporarily broken, not because of cpu offloading")
+            pytest.skip(
+                "Fused attention + cuda graphs is temporarily broken, not because of cpu offloading"
+            )
 
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"

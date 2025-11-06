@@ -54,7 +54,7 @@ from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
     mark_activation_offload,
-    NVTE_CPU_OFFLOAD_V1
+    NVTE_CPU_OFFLOAD_V1,
 )
 from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
 
