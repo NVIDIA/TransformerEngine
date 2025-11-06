@@ -75,6 +75,16 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     Generate a dict to map logical axes to mesh axes.
     """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh is None or mesh.empty:
+        # If no mesh is defined, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
+    abstract_mesh = get_abstract_mesh()
+    if sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
+        # If all mesh axes are manual axes, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
     gsr = global_mesh_resource()
 
     is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
@@ -236,6 +246,19 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_num_devices_in_mesh(mesh=None):
+    """
+    Get the number of devices in the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return 1
+    return np.prod(list(mesh.shape.values()))
 
 
 def get_mesh_axis_size(axis, mesh=None):

@@ -9,9 +9,9 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.experimental import quantization
-from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage, Quantizer
+from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):
@@ -229,8 +229,8 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     _quantizer: Optional[Quantizer] = None
 
     @property
-    def experimental(self) -> bool:
-        """Flag to indicate this quantizer is using experimental Kitchen middleware."""
+    def custom(self) -> bool:
+        """Flag to indicate this quantized tensor is custom."""
         return True
 
     def prepare_for_saving(
@@ -362,8 +362,8 @@ class NVFP4QuantizerRef(Quantizer):
         self.with_random_sign_mask = with_random_sign_mask
 
     @property
-    def experimental(self) -> bool:
-        """Flag to indicate this quantizer is using experimental Kitchen middleware"""
+    def custom(self) -> bool:
+        """Flag to indicate this quantizer is custom."""
         return True
 
     @staticmethod

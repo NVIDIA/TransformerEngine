@@ -41,7 +41,7 @@ from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentSc
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
 from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from .tensor.quantized_tensor import QuantizedTensorStorage, QuantizedTensor, Quantizer
+from .quantized_tensor import QuantizedTensorStorage, QuantizedTensor, Quantizer
 from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage

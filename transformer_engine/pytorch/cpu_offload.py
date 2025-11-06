@@ -16,7 +16,7 @@ from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpu_offload_v1 as v1_code_path
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from .quantized_tensor import (
     restore_from_saved,
     prepare_for_saving,
 )
