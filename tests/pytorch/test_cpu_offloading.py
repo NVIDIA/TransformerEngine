@@ -422,8 +422,7 @@ class TestTELayers:
             num_layers=OFFLOAD_LAYERS,
             model_layers=NUM_LAYERS,
         )
-        offload_ctx = contextlib.nullcontext()
-        sync_function = lambda x: x
+        recipe_ctx = Utils.create_recipe_ctx(recipe)
         recipe_ctx = Utils.create_recipe_ctx(recipe)
         layers = [Utils.create_layer(layer_type) for _ in range(NUM_LAYERS)]
         inp = Utils.create_tensor(None)
