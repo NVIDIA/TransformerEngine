@@ -18,7 +18,6 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from utils import ModelConfig
 import transformer_engine_torch as tex
 
