@@ -430,7 +430,7 @@ class OffloadableLayerState:
         def get_tensor_size_mb(tensor):
             if tensor is None:
                 return 0
-            if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorStorage):
+            if isinstance(tensor, te.quantized_tensor.QuantizedTensorStorage):
                 return sum(get_tensor_size_mb(t) for t in tensor.get_data_tensors())
             return tensor.numel() * tensor.element_size() / (1024**2)
 

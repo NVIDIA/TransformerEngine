@@ -54,6 +54,7 @@ from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
     mark_activation_offload,
+    NVTE_CPU_OFFLOAD_V1
 )
 from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
 
@@ -1297,8 +1298,6 @@ class FusedAttnFunc(torch.autograd.Function):
         # used when some tensors are base tensors and loose the "dtype" attribute
         ctx.nominal_dtype = out_nominal_dtype
 
-        from transformer_engine.pytorch.cpu_offload import NVTE_CPU_OFFLOAD_V1
-
         if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_V1:
             if ctx.fp8:
                 tensor_list = fp8_tensors
@@ -1341,23 +1340,26 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
 
-        # If interleaved tensor is offloaded, reloaded tensor will be
-        # non-interleaved, so we need to modify the QKV layout
-        # for backward
-        if is_current_layer_offloaded() and is_cpu_offload_enabled():
-            reload_layout = ""
-            split_list = qkv_layout.split("_")
-            for split in split_list:
-                temp_layout = ""
-                rep_count = 1
-                for s in split:
-                    if s.isalpha():
-                        temp_layout = temp_layout + s
-                    else:
-                        rep_count = int(s)
-                for _ in range(rep_count):
-                    reload_layout = reload_layout + temp_layout + "_"
-            ctx.qkv_layout = reload_layout[:-1]
+        if NVTE_CPU_OFFLOAD_V1:
+            # If interleaved tensor is offloaded, reloaded tensor will be
+            # non-interleaved, so we need to modify the QKV layout
+            # for backward
+            if is_current_layer_offloaded() and is_cpu_offload_enabled():
+                reload_layout = ""
+                split_list = qkv_layout.split("_")
+                for split in split_list:
+                    temp_layout = ""
+                    rep_count = 1
+                    for s in split:
+                        if s.isalpha():
+                            temp_layout = temp_layout + s
+                        else:
+                            rep_count = int(s)
+                    for _ in range(rep_count):
+                        reload_layout = reload_layout + temp_layout + "_"
+                ctx.qkv_layout = reload_layout[:-1]
+            else:
+                ctx.qkv_layout = qkv_layout
         else:
             ctx.qkv_layout = qkv_layout
 

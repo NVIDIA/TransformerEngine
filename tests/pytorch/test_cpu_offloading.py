@@ -186,7 +186,7 @@ class Utils:
     def get_tensor_size_mb(tensor):
         if tensor is None:
             return 0
-        if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorStorage):
+        if isinstance(tensor, te.quantized_tensor.QuantizedTensorStorage):
             return sum(Utils.get_tensor_size_mb(t) for t in tensor.get_data_tensors())
         else:
             return tensor.numel() * tensor.element_size() / (1024**2)
@@ -590,6 +590,9 @@ class TestTELayers:
                 "Cuda graphs are not yet supported with cpu offloading when"
                 " retain_pinned_cpu_buffers is False."
             )
+        
+        if backend == "FusedAttention" and use_cuda_graphs:
+            pytest.skip("Fused attention + cuda graphs is temporarily broken, not because of cpu offloading")
 
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"
@@ -626,9 +629,13 @@ class TestTELayers:
                     if layer_type == "grouped_linear"
                     else {}
                 )
+                is_ops_layer = layer_type in ["linear_op", "layernorm_mlp_ops"]
                 for layer in self.layers:
                     with self.offload_ctx, recipe_ctx():
-                        x = layer(x, **m_splits)
+                        if is_ops_layer:
+                            x = layer(x, **m_splits)
+                        else:
+                            x = layer(x, is_first_microbatch=False, **m_splits)
                     if self.sync_function is not None:
                         x = self.sync_function(x)
                 return x
@@ -648,8 +655,8 @@ class TestTELayers:
             callable_offload = te.make_graphed_callables(
                 callable_offload,
                 (x,),
-                fp8_enabled=recipe is not None,
-                fp8_recipe=(Utils.create_recipe_ctx(recipe) if recipe is not None else None),
+                enabled=recipe is not None,
+                recipe=(Utils.create_recipe_ctx(recipe) if recipe is not None else None),
             )
 
         # warm up (for example to compute sf for delayed scaling)
