@@ -86,8 +86,6 @@ class _GroupedLinear(torch.autograd.Function):
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        # print("===========_GroupedLinear forward===========")
-        # print("fuse_wgrad_accumulation:", fuse_wgrad_accumulation)
         m_splits_on_devie = m_splits.is_cuda
         num_gemms = m_splits.size(0)
         weights = weights_and_biases[:num_gemms]
@@ -186,7 +184,6 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-        # print("===========fprop===========")
         # Perform GEMM
         _ = general_grouped_gemm(
             weights_fp8 if not m_splits_on_devie else inputmats,
@@ -409,8 +406,6 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                # torch.cuda.synchronize()
-                # print("===========dgrad===========")
                 general_grouped_gemm(
                     weights if not ctx.m_splits_on_devie else grad_output,
                     grad_output if not ctx.m_splits_on_devie else weights,
@@ -495,8 +490,6 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    # torch.cuda.synchronize()
-                    # print("===========wgrad no delay===========")
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:

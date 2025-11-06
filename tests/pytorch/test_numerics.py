@@ -1770,11 +1770,6 @@ def _test_grouped_linear_accuracy(
         device="cuda",
         requires_grad=True,
     )
-    # for i in range(config.max_seqlen_q):
-    #     for j in range(config.hidden_size):
-    #         inp_hidden_states[i, :, j] = 1
-    # print("inp_hidden_states:", inp_hidden_states)
-    # inp_hidden_states.requires_grad_()
     inp_hidden_states.retain_grad()
 
     if num_gemms > 1:
@@ -1786,13 +1781,11 @@ def _test_grouped_linear_accuracy(
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
-        # dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
         m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
         m_splits = m_splits * split_size
         assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
-    # print("m_splits:", m_splits)
 
     with autocast(enabled=fp8, recipe=recipe):
         if m_splits_on_device:
@@ -1808,10 +1801,6 @@ def _test_grouped_linear_accuracy(
                 ]
             )
     target = torch.rand_like(out, device=out.device, dtype=out.dtype)
-    # for i in range(out.shape[0]):
-    #     for j in range(out.shape[1]):
-    #         for k in range(out.shape[2]):
-    #             target[i, j, k] = 1
     loss = (out * target).sum()
     loss.backward()
     if delay_wgrad_compute:
@@ -1830,7 +1819,6 @@ def _test_grouped_linear_accuracy(
                 assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
             else:
                 outputs.append(p.grad)
-    # outputs = [out]
     return outputs
 
 
@@ -1880,8 +1868,6 @@ def test_grouped_linear_accuracy(
         random.shuffle(indices)
         for idx in indices[:num_unfuse_wgrad_accumulation]:
             wgrad_accumulation_mask[idx] = False
-    # print("fuse_wgrad_accumulation:", fuse_wgrad_accumulation)
-    # print("wgrad_accumulation_mask:", wgrad_accumulation_mask)
     with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
@@ -1923,8 +1909,7 @@ def test_grouped_linear_accuracy(
                 weight_i = getattr(grouped_linear, f"weight{i}")
                 weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
                 sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
-    import torch.cuda.nvtx as nvtx
-    nvtx.range_push("sequential_gemm")
+
     outputs_ref = _test_grouped_linear_accuracy(
         sequential_linear,
         num_gemms,
@@ -1937,9 +1922,7 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
         m_splits_on_device
     )
-    nvtx.range_pop()
-    torch.cuda.synchronize()
-    nvtx.range_push("grouped_gemm")
+
     outputs = _test_grouped_linear_accuracy(
         grouped_linear,
         num_gemms,
@@ -1952,7 +1935,6 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
         m_splits_on_device
     )
-    nvtx.range_pop()
    
 
     for o, o_ref in zip(outputs, outputs_ref):

@@ -230,12 +230,66 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
 
+/*! \brief Compute multiple pairs of matrix multiplication using cutlass device grouped gemm 
+ * this function is only used for moe fprop and dgrad.
+ *
+ * Computes:
+ *  - `D = AB` if both `bias` and `pre_gelu_out` are empty tensors
+ *  - `D = AB + bias` if `pre_gelu_out` is empty and `bias` is not empty
+ *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
+ *  Note: bias and GELU are not supported yet.
+ *
+ *  \param[in]     A                     The list of A matrices.
+ *  \param[in]     B_and_SF_addrs        The list of B and SF matrices addresses.
+ *  \param[in,out] D                     List of output matrices.
+ *  \param[in]     m_splits              List of m-dimension splits.
+ *  \param[in]     gemm_n                GEMM n dimension.
+ *  \param[in]     bias                  List of bias tensors.
+ *  \param[in,out] pre_gelu_out          List of output matrix before GELU activation.
+ *  \param[in]     num_gemms             Number of GEMMs to compute.
+ *  \param[in]     transa                Whether A matrix is transposed.
+ *  \param[in]     transb                Whether B matrix is transposed.
+ *  \param[in]     grad                  Whether this operation is part of the
+ *                                       gradient computation.
+ *  \param[out]    workspace             List of workspace tensors.
+ *  \param[in]     workspaceSize         Workspace size.
+ *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
+ *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
+ *  \param[in]     stream                CUDA stream to wait on.
+ */
 void nvte_device_cutlass_grouped_gemm(const NVTETensor* A, const void** B_and_SF_addrs, NVTETensor* D,
                                const int64_t* m_splits, const int gemm_n, const NVTETensor* bias,
                                NVTETensor* pre_gelu_out, const int num_gemms, bool transa,
                                bool transb, bool grad, NVTETensor* workspace, size_t workspaceSize,
                                bool use_split_accumulator, int math_sm_count,
                                cudaStream_t stream);
+
+/*! \brief Compute multiple pairs of matrix multiplication using cutlass device grouped gemm 
+ * this function is only used for moe wgrad
+ * Computes:
+ *  - `D = AB` if both `bias` and `pre_gelu_out` are empty tensors
+ *  - `D = AB + bias` if `pre_gelu_out` is empty and `bias` is not empty
+ *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
+ *  Note: bias and GELU are not supported yet.
+ *
+ *  \param[in]     A                     The list of A matrices.
+ *  \param[in]     B                     The list of B matrices.
+ *  \param[in,out] D                     List of output matrices addresses.
+ *  \param[in]     D_type                Output matrix dtype.
+ *  \param[in]     m_splits              List of m-dimension splits.
+ *  \param[in]     bias                  List of bias tensors.
+ *  \param[in,out] pre_gelu_out          List of output matrix before GELU activation.
+ *  \param[in]     num_gemms             Number of GEMMs to compute.
+ *  \param[in]     transa                Whether A matrix is transposed.
+ *  \param[in]     transb                Whether B matrix is transposed.
+ *  \param[out]    workspace             List of workspace tensors.
+ *  \param[in]     workspaceSize         Workspace size.
+ *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
+ *  \param[in]     accumulate_mask       Mask to indicate which GEMMs to accumulate.
+ *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
+ *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
+ *  \param[in]     stream                CUDA stream to wait on.
+ */
 
 void nvte_device_cutlass_grouped_gemm_wgrad(const NVTETensor* A, const NVTETensor* B, void** D,
                                      transformer_engine::DType D_type, const int64_t* m_splits, const NVTETensor* bias,
