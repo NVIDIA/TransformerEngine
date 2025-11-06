@@ -417,7 +417,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    " Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if ((cudnn_runtime_version >= 91300) && (cudnn_runtime_version <= 91500) && is_training &&
+    if ((cudnn_runtime_version <= 91500) && is_training &&
         (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
         (max_seqlen_kv % 128 != 0) && cuda_graph &&
         (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) &&
