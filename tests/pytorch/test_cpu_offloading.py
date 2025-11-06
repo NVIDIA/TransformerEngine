@@ -411,11 +411,15 @@ class TestTELayers:
     @pytest.mark.parametrize("recipe", quantization_recipes)
     def test_sanity(self, layer_type, recipe):
         Utils.memory_leak_check()
-        
+
         # Skip ops-based layers with Float8BlockScaling recipe
-        if layer_type in ["linear_op", "layernorm_mlp_ops"] and recipe is not None and recipe.float8_block_scaling():
+        if (
+            layer_type in ["linear_op", "layernorm_mlp_ops"]
+            and recipe is not None
+            and recipe.float8_block_scaling()
+        ):
             pytest.skip("Fusible operations do not support FP8 block scaling recipe")
-        
+
         recipe_ctx = Utils.create_recipe_ctx(recipe)
         init_cuda_memory = Utils.get_cuda_memory_mb()
         OFFLOAD_LAYERS = 6
@@ -449,11 +453,15 @@ class TestTELayers:
     @pytest.mark.parametrize("recipe", quantization_recipes)
     def test_memory(self, layer_type, recipe):
         Utils.memory_leak_check()
-        
+
         # Skip ops-based layers with Float8BlockScaling recipe
-        if layer_type in ["linear_op", "layernorm_mlp_ops"] and recipe is not None and recipe.float8_block_scaling():
+        if (
+            layer_type in ["linear_op", "layernorm_mlp_ops"]
+            and recipe is not None
+            and recipe.float8_block_scaling()
+        ):
             pytest.skip("Fusible operations do not support FP8 block scaling recipe")
-        
+
         offload_ctx, sync_function = get_cpu_offload_context(
             enabled=True,
             num_layers=1,
@@ -524,11 +532,15 @@ class TestTELayers:
     @pytest.mark.parametrize("recipe", quantization_recipes)
     def test_manual_synchronization(self, recipe, layer_type):
         Utils.memory_leak_check()
-        
+
         # Skip ops-based layers with Float8BlockScaling recipe
-        if layer_type in ["linear_op", "layernorm_mlp_ops"] and recipe is not None and recipe.float8_block_scaling():
+        if (
+            layer_type in ["linear_op", "layernorm_mlp_ops"]
+            and recipe is not None
+            and recipe.float8_block_scaling()
+        ):
             pytest.skip("Fusible operations do not support FP8 block scaling recipe")
-        
+
         offload_ctx, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True,
             model_layers=6,
@@ -594,9 +606,13 @@ class TestTELayers:
         retain_pinned_cpu_buffers,
     ):
         # Skip ops-based layers with Float8BlockScaling recipe
-        if layer_type in ["linear_op", "layernorm_mlp_ops"] and recipe is not None and recipe.float8_block_scaling():
+        if (
+            layer_type in ["linear_op", "layernorm_mlp_ops"]
+            and recipe is not None
+            and recipe.float8_block_scaling()
+        ):
             pytest.skip("Fusible operations do not support FP8 block scaling recipe")
-        
+
         recipe_ctx = Utils.create_recipe_ctx(recipe)
 
         if use_cuda_graphs and not retain_pinned_cpu_buffers:
