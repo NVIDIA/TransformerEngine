@@ -276,13 +276,13 @@ class _LayerNormLinear(torch.autograd.Function):
         # Prepare weight tensor
         # ------------------------------------------------------
         weightmat = weight
-        quantized_weight = False
+        is_weight_param_quantized = False
         if fp8 or debug:
-            quantized_weight = isinstance(weight, QuantizedTensorStorage)
+            is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
             # If weight is already quantized, no need to set quantizer states
-            if quantized_weight:
+            if is_weight_param_quantized:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
@@ -428,7 +428,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 fsdp_group,
                 mu,
                 rsigma,
-                weightmat if quantized_weight else None,
+                weightmat if is_weight_param_quantized else None,
                 ln_out if weight.requires_grad else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
@@ -458,7 +458,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
-            ctx.quantized_weight = quantized_weight
+            ctx.is_weight_param_quantized = is_weight_param_quantized
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -562,7 +562,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.fsdp_shapes,
                 mu,
                 rsigma,
-                weight if ctx.fp8 and ctx.quantized_weight else None,
+                weight if ctx.fp8 and ctx.is_weight_param_quantized else None,
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
