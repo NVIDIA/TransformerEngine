@@ -51,6 +51,16 @@ def generate_input_shapes(
             config.num_gqa_groups,
             config.head_dim_v,
         )
+        kv_compressed_shape = (
+            config.batch_size,
+            config.max_seqlen_kv,
+            config.kv_lora_rank or 0,
+        )
+        k_pos_emb_shape = (
+            config.batch_size,
+            config.max_seqlen_kv,
+            config.qk_pos_emb_head_dim or 0,
+        )
         attn_output_shape = (
             config.batch_size,
             config.max_seqlen_q,
@@ -79,6 +89,16 @@ def generate_input_shapes(
             config.num_gqa_groups,
             config.head_dim_v,
         )
+        kv_compressed_shape = (
+            config.max_seqlen_kv,
+            config.batch_size,
+            config.kv_lora_rank or 0,
+        )
+        k_pos_emb_shape = (
+            config.max_seqlen_kv,
+            config.batch_size,
+            config.qk_pos_emb_head_dim or 0,
+        )
         attn_output_shape = (
             config.max_seqlen_q,
             config.batch_size,
@@ -95,14 +115,22 @@ def generate_input_shapes(
             config.head_dim_qk,
         )
         k_input_shape = (
-            config.batch_size * config.max_seqlen_q,
+            config.batch_size * config.max_seqlen_kv,
             config.num_gqa_groups,
             config.head_dim_qk,
         )
         v_input_shape = (
-            config.batch_size * config.max_seqlen_q,
+            config.batch_size * config.max_seqlen_kv,
             config.num_gqa_groups,
             config.head_dim_v,
+        )
+        kv_compressed_shape = (
+            config.batch_size * config.max_seqlen_kv,
+            config.kv_lora_rank or 0,
+        )
+        k_pos_emb_shape = (
+            config.batch_size * config.max_seqlen_kv,
+            config.qk_pos_emb_head_dim or 0,
         )
         attn_output_shape = (
             config.batch_size * config.max_seqlen_q,
@@ -130,6 +158,8 @@ def generate_input_shapes(
         q_input_shape,
         k_input_shape,
         v_input_shape,
+        kv_compressed_shape,
+        k_pos_emb_shape,
         attn_output_shape,
         cu_seqlens_q,
         cu_seqlens_kv,
@@ -252,12 +282,15 @@ def run_dpa_with_cp(
     ).cuda()
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
+    mla_exchange_latent = config.kv_lora_rank is not None
 
     # generate attention inputs
     (
         q_input_shape,
         k_input_shape,
         v_input_shape,
+        kv_compressed_shape,
+        k_pos_emb_shape,
         attn_output_shape,
         cu_seqlens_q,
         cu_seqlens_kv,
@@ -265,8 +298,51 @@ def run_dpa_with_cp(
         cu_seqlens_kv_padded,
     ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend)
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
-    k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
-    v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+    if mla_exchange_latent:
+        kv_compressed_orig = torch.clamp(
+            torch.randn(kv_compressed_shape, dtype=dtypes[dtype]),
+            min=-1,
+            max=1,
+        ).cuda()
+        k_pos_emb_orig = torch.clamp(
+            torch.randn(k_pos_emb_shape, dtype=dtypes[dtype]),
+            min=-1,
+            max=1,
+        ).cuda()
+
+        head_dim_k_no_pe = config.head_dim_qk - config.qk_pos_emb_head_dim
+        linear = (
+            torch.nn.Linear(
+                config.kv_lora_rank,
+                config.num_heads * (head_dim_k_no_pe + config.head_dim_v),
+                bias=False,
+            )
+            .cuda()
+            .to(dtypes[dtype])
+        )
+
+        def kv_up_proj(kv_compressed, k_pos_emb):
+            kv = linear(kv_compressed).view(*kv_compressed.shape[:-1], config.num_heads, -1)
+            k_no_pe, v = torch.split(kv, [head_dim_k_no_pe, config.head_dim_v], dim=-1)
+            k_pos_emb = torch.unsqueeze(k_pos_emb, -2)
+            if k_pos_emb.ndim == 5:
+                k_pos_emb = k_pos_emb.expand(-1, -1, -1, config.num_heads, -1)
+            elif k_pos_emb.ndim == 4:
+                k_pos_emb = k_pos_emb.expand(-1, -1, config.num_heads, -1)
+            else:
+                assert k_pos_emb.ndim == 3, f"{k_pos_emb.shape=} is not supported!"
+                k_pos_emb = k_pos_emb.expand(-1, config.num_heads, -1)
+            k = torch.cat([k_no_pe, k_pos_emb], dim=-1)
+            return k, v
+
+        k_orig = None
+        v_orig = None
+    else:
+        kv_compressed_orig = None
+        k_pos_emb_orig = None
+        k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+        v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
+        kv_up_proj = None
     dout_orig = torch.clamp(
         torch.randn(attn_output_shape, dtype=dtypes[dtype]), min=-1, max=1
     ).cuda()
@@ -291,11 +367,20 @@ def run_dpa_with_cp(
             device="cuda",
         )
     qkv_layout = "_".join([qkv_format] * 3)
-    q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
+    q, k, v, kv_compressed, k_pos_emb, dout = [
+        x.clone().detach() if x is not None else None
+        for x in [q_orig, k_orig, v_orig, kv_compressed_orig, k_pos_emb_orig, dout_orig]
+    ]
+    if mla_exchange_latent:
+        kv_compressed.requires_grad = True
+        k_pos_emb.requires_grad = True
+        k, v = kv_up_proj(kv_compressed, k_pos_emb)
     if fp8_mha:
         q, k, v = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
-    for x in [q, k, v]:
-        x.requires_grad = True
+    q.requires_grad = True
+    if not mla_exchange_latent:
+        k.requires_grad = True
+        v.requires_grad = True
 
     if config.attn_bias_type not in ["no_bias", "alibi"]:
         attn_bias_shape = (1, 1, config.max_seqlen_q, config.max_seqlen_kv)
@@ -332,6 +417,10 @@ def run_dpa_with_cp(
         else:
             out.backward(dout)
     dq, dk, dv = q.grad, k.grad, v.grad
+    if mla_exchange_latent:
+        dkv_compressed, dk_pos_emb = kv_compressed.grad, k_pos_emb.grad
+    else:
+        dkv_compressed, dk_pos_emb = None, None
     d_softmax_offset = None
     if config.softmax_type != "vanilla":
         d_softmax_offset = core_attn.softmax_offset.grad
@@ -341,38 +430,60 @@ def run_dpa_with_cp(
 
     # set up inputs
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach()
+        x.clone().detach() if x is not None else None
         for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
+    if mla_exchange_latent:
+        kv_compressed_ = kv_compressed_orig.clone().detach()
+        k_pos_emb_ = k_pos_emb_orig.clone().detach()
+    else:
+        kv_compressed_ = None
+        k_pos_emb_ = None
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
-        q_, k_, v_, dout_ = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
+        q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                if x is not None
+                else None
             )
-            for x in [q_, k_, v_, dout_]
+            for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
-        q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
-        q_, k_, v_, dout_ = [
-            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
+        q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
+            x.index_select(seq_dim, seq_idx) if x is not None else None
+            for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
+        ]
+        q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
+            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) if x is not None else None
+            for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
         ]
     elif qkv_format == "thd":
         seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+            cu_seqlens_q_padded, q_input_shape[0], world_size, rank
         )
         seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+            cu_seqlens_kv_padded, k_input_shape[0], world_size, rank
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
-        k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
+        if config.kv_lora_rank is None:
+            k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
+        else:
+            kv_compressed_, k_pos_emb_ = [
+                x.index_select(0, seq_idx_kv) for x in [kv_compressed_, k_pos_emb_]
+            ]
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
-    q_, k_, v_, dout_ = [x.contiguous() for x in [q_, k_, v_, dout_]]
+    q_, k_, v_, kv_compressed_, k_pos_emb_, dout_ = [
+        x.contiguous() if x is not None else None
+        for x in [q_, k_, v_, kv_compressed_, k_pos_emb_, dout_]
+    ]
     if scaling_mode == "delayed":
         qkv_quantizer.scale.fill_(1.0)
         qkv_quantizer.amax.fill_(0.0)
@@ -380,7 +491,10 @@ def run_dpa_with_cp(
         dout_quantizer.amax.fill_(0.0)
     if fp8_mha:
         q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
-    q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
+    q_, k_, v_, kv_compressed_, k_pos_emb_ = [
+        x.requires_grad_() if x is not None else None
+        for x in [q_, k_, v_, kv_compressed_, k_pos_emb_]
+    ]
     if bias_ is not None:
         bias_ = bias_.view(
             *bias_.shape[:-2], 2 * world_size, bias_.shape[-2] // (2 * world_size), bias_.shape[-1]
@@ -418,6 +532,9 @@ def run_dpa_with_cp(
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
+            kv_compressed=kv_compressed_,
+            k_pos_emb=k_pos_emb_,
+            kv_up_proj_fn=kv_up_proj,
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
@@ -426,44 +543,93 @@ def run_dpa_with_cp(
             out_.backward(dout_fp8_)
         else:
             out_.backward(dout_)
-    dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
+    dq_ = q_.grad
+    if mla_exchange_latent:
+        dk_, dv_ = None, None
+        dkv_compressed_, dk_pos_emb_ = kv_compressed_.grad, k_pos_emb_.grad
+    else:
+        dk_, dv_ = k_.grad, v_.grad
+        dkv_compressed_, dk_pos_emb_ = None, None
     d_softmax_offset_ = None
     if config.softmax_type != "vanilla":
         d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
 
     # get outputs
-    tensors = [out, dq, dk, dv, out_, dq_, dk_, dv_]
+    tensors = [
+        out,
+        dq,
+        dk,
+        dv,
+        dkv_compressed,
+        dk_pos_emb,
+        out_,
+        dq_,
+        dk_,
+        dv_,
+        dkv_compressed_,
+        dk_pos_emb_,
+    ]
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
         for i, tensor in enumerate(tensors_to_deq):
             tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
-            tensors[0], tensors[4] = tensors_to_deq
+            tensors[0], tensors[6] = tensors_to_deq
     for tensor in tensors:
+        if tensor is None:
+            continue
         assert torch.all(~torch.isnan(tensor))
         assert torch.all(~torch.isinf(tensor))
-    out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
+    (
+        out,
+        dq,
+        dk,
+        dv,
+        dkv_compressed,
+        dk_pos_emb,
+        out_,
+        dq_,
+        dk_,
+        dv_,
+        dkv_compressed_,
+        dk_pos_emb_,
+    ) = tensors
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        dq, dk, dv, out = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
+        dq, dk, dv, dkv_compressed, dk_pos_emb, out = [
+            (
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                if x is not None
+                else None
             )
-            for x in [dq, dk, dv, out]
+            for x in [dq, dk, dv, dkv_compressed, dk_pos_emb, out]
         ]
-        dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
-        dq_, dk_, dv_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            for x in [dq_, dk_, dv_, out_]
+        dq, dk, dv, dkv_compressed, dk_pos_emb, out = [
+            x.index_select(seq_dim, seq_idx) if x is not None else None
+            for x in [dq, dk, dv, dkv_compressed, dk_pos_emb, out]
+        ]
+        dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_ = [
+            (
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                if x is not None
+                else None
+            )
+            for x in [dq_, dk_, dv_, dkv_compressed_, dk_pos_emb_, out_]
         ]
     elif qkv_format == "thd":
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-        dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
+        if mla_exchange_latent:
+            dkv_compressed, dk_pos_emb = [
+                x.index_select(0, seq_idx_kv).contiguous() for x in [dkv_compressed, dk_pos_emb]
+            ]
+        else:
+            dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
         cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
@@ -486,7 +652,12 @@ def run_dpa_with_cp(
         )
         cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
         num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-        for x in [dk, dv, dk_, dv_]:
+        tensors_to_check_padding = (
+            [dk, dv, dk_, dv_]
+            if not mla_exchange_latent
+            else [dkv_compressed, dk_pos_emb, dkv_compressed_, dk_pos_emb_]
+        )
+        for x in tensors_to_check_padding:
             assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
             for b in range(config.batch_size):
                 assert (

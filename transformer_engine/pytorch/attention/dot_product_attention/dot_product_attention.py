@@ -779,8 +779,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     def forward(
         self,
         query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
+        key_layer: Optional[torch.Tensor] = None,
+        value_layer: Optional[torch.Tensor] = None,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -799,6 +799,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        kv_compressed: Optional[torch.Tensor] = None,
+        k_pos_emb: Optional[torch.Tensor] = None,
+        kv_up_proj_fn: Optional[Callable] = None,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -975,6 +978,23 @@ class DotProductAttention(TransformerEngineBaseModule):
             Whether to enforce output to be in FP8 or not.
         """
 
+        if kv_compressed is not None:
+            mla_cp_exchange_latent = True
+            assert (
+                key_layer is None and value_layer is None
+            ), "key_layer and value_layer must be None for MLA CP exchanging latent!"
+            assert k_pos_emb is not None, "k_pos_emb must be provided for MLA CP exchanging latent!"
+            assert (
+                kv_up_proj_fn is not None
+            ), "kv_up_proj_fn must be provided for MLA CP exchanging latent!"
+        else:
+            mla_cp_exchange_latent = False
+            assert (
+                key_layer is not None and value_layer is not None
+            ), "key_layer and value_layer must be provided."
+            assert k_pos_emb is None, "k_pos_emb provided, but kv_compressed is None!"
+            assert kv_up_proj_fn is None, "kv_up_proj_fn provided, but kv_compressed is None!"
+
         with torch.cuda.device(query_layer.device), self.prepare_forward(
             query_layer,
             num_gemms=3,
@@ -1013,33 +1033,54 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
-            assert (
-                query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
-            ), "Queries, keys and values must have the same data type!"
-            assert (
-                key_layer.shape[:-1] == value_layer.shape[:-1]
-            ), "Keys and values must have the same batch size, sequence length and number of heads!"
-            num_attention_heads = query_layer.shape[-2]
-            num_gqa_groups = key_layer.shape[-2]
-            assert (
-                query_layer.shape[-1] == key_layer.shape[-1]
-            ), "Queries and keys must have the same head dimension!"
-            head_dim_qk, head_dim_v = query_layer.shape[-1], value_layer.shape[-1]
+            assert query_layer.is_cuda, "DotProductAttention only supports CUDA tensors."
+            head_dim_qk = query_layer.shape[-1]
             assert (
                 head_dim_qk == self.hidden_size_per_attention_head_k
             ), f"Keys have head_dim = {head_dim_qk}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
-            assert (
-                head_dim_v == self.hidden_size_per_attention_head_v
-            ), f"Values have head_dim = {head_dim_v}, "
-            "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
-            assert num_gqa_groups == self.num_gqa_groups_per_partition, (
-                "Keys and values must have num_gqa_group ="
-                f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
-            )
+            num_attention_heads = query_layer.shape[-2]
+            if mla_cp_exchange_latent:
+                assert (
+                    kv_compressed.is_cuda and k_pos_emb.is_cuda
+                ), "DotProductAttention only supports CUDA tensors."
+                assert (  # TODO: is it correct?
+                    query_layer.dtype == kv_compressed.dtype
+                    and query_layer.dtype == k_pos_emb.dtype
+                ), "Queries, keys and values must have the same data type!"
+                assert kv_compressed.shape[:-1] == k_pos_emb.shape[:-1], (
+                    "kv_compressed and k_pos_emb must have the same batch size and sequence"
+                    f" length! kv_compressed.shape: {kv_compressed.shape}, k_pos_emb.shape:"
+                    f" {k_pos_emb.shape}"
+                )
+                num_gqa_groups = self.num_gqa_groups_per_partition
+                head_dim_v = self.hidden_size_per_attention_head_v
+            else:
+                assert (
+                    key_layer.is_cuda and value_layer.is_cuda
+                ), "DotProductAttention only supports CUDA tensors."
+                assert (
+                    query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
+                ), "Queries, keys and values must have the same data type!"
+                assert key_layer.shape[:-1] == value_layer.shape[:-1], (
+                    "Keys and values must have the same batch size, sequence length and number of"
+                    f" heads! key_layer.shape: {key_layer.shape}, value_layer.shape:"
+                    f" {value_layer.shape}"
+                )
+                assert query_layer.shape[-1] == key_layer.shape[-1], (
+                    "Queries and keys must have the same head dimension! "
+                    f"query_layer.shape: {query_layer.shape}, key_layer.shape: {key_layer.shape}"
+                )
+                num_gqa_groups = key_layer.shape[-2]
+                head_dim_v = value_layer.shape[-1]
+                assert (
+                    head_dim_v == self.hidden_size_per_attention_head_v
+                ), f"Values have head_dim = {head_dim_v}, "
+                "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
+                assert num_gqa_groups == self.num_gqa_groups_per_partition, (
+                    "Keys and values must have num_gqa_group ="
+                    f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
+                )
 
             # checks for attention mask
             if attn_mask_type is None:
@@ -1067,21 +1108,45 @@ class DotProductAttention(TransformerEngineBaseModule):
             ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
             batch_size = None
             if qkv_format in ["sbhd", "bshd"]:
-                assert all(
-                    len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
-                ), f"Queries, keys and values must be 4D tensors when {qkv_format=}!"
+                assert (
+                    len(query_layer.shape) == 4
+                ), f"Queries must be 4D tensors when {qkv_format=}!"
+                if mla_cp_exchange_latent:
+                    assert all(
+                        len(x.shape) == 3 for x in (kv_compressed, k_pos_emb)
+                    ), f"Keys and values must be 3D tensors when {qkv_format=}!"
+                    if max_seqlen_kv is None:
+                        max_seqlen_kv = (
+                            kv_compressed.shape[0]
+                            if qkv_format == "sbhd"
+                            else kv_compressed.shape[1]
+                        )
+                else:
+                    assert all(
+                        len(x.shape) == 4 for x in (key_layer, value_layer)
+                    ), f"Keys and values must be 4D tensors when {qkv_format=}!"
+                    if max_seqlen_kv is None:
+                        max_seqlen_kv = (
+                            key_layer.shape[0] if qkv_format == "sbhd" else key_layer.shape[1]
+                        )
                 if qkv_format == "sbhd":
                     batch_size = query_layer.shape[1]
                     max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
                 else:
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
             if qkv_format == "thd":
-                assert all(
-                    len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
-                ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
+                assert (
+                    len(query_layer.shape) == 3
+                ), f"Queries must be 3D tensors when {qkv_format=}!"
+                if mla_cp_exchange_latent:
+                    assert all(
+                        len(x.shape) == 2 for x in (kv_compressed, k_pos_emb)
+                    ), f"Keys and values must be 2D tensors when {qkv_format=}!"
+                else:
+                    assert all(
+                        len(x.shape) == 3 for x in (key_layer, value_layer)
+                    ), f"Keys and values must be 3D tensors when {qkv_format=}!"
                 assert (
                     "padding" in attn_mask_type
                 ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
@@ -1125,6 +1190,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.fused_attention.attention_type = self.attention_type
                 self.unfused_attention.attention_type = self.attention_type
 
+                assert (
+                    not mla_cp_exchange_latent
+                ), "MLA CP exchanging latent is not supported for inference!"
+
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
                     for x in [query_layer, key_layer, value_layer]
@@ -1148,7 +1217,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+            if mla_cp_exchange_latent:
+                query_layer, key_layer, value_layer, kv_compressed, k_pos_emb = [
+                    x.contiguous() if (x is not None and not x.is_contiguous()) else x
+                    for x in [query_layer, key_layer, value_layer, kv_compressed, k_pos_emb]
+                ]
+                q_format = qkv_format
+                kv_format = qkv_format
+                qkv_layout = f"{q_format}_{kv_format}_{kv_format}"
+            elif all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
                 (
                     qkv_layout,
                     query_layer._data,
@@ -1187,6 +1264,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                 for group in self.cp_group:
                     cp_size *= get_distributed_world_size(group)
             context_parallel = cp_size > 1
+            if not context_parallel:
+                assert (
+                    not mla_cp_exchange_latent
+                ), "MLA CP exchanging latent is not supported for context parallel!"
+                assert (
+                    self.attention_type == "self"
+                ), "MLA CP exchanging latent is only supported for self-attention!"
             if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
                 if cu_seqlens_q is None:
@@ -1216,10 +1300,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                         else:
                             cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
                     else:
+                        kv_device = (kv_compressed if mla_cp_exchange_latent else key_layer).device
                         cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
-                            key_layer.device,
+                            kv_device,
                         )
 
             # set ALiBi attributes
@@ -1389,6 +1474,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
+                # Flash attention does not support CP, so we do not need to
+                # consider mla_cp_exchange_latent, kv_compressed, etc.
                 return self.flash_attention(
                     query_layer,
                     key_layer,
@@ -1461,6 +1548,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        mla_cp_exchange_latent=mla_cp_exchange_latent,
+                        kv_compressed=kv_compressed,
+                        k_pos_emb=k_pos_emb,
+                        kv_up_proj_fn=kv_up_proj_fn,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1491,6 +1582,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
+                    mla_cp_exchange_latent=mla_cp_exchange_latent,
+                    kv_compressed=kv_compressed,
+                    k_pos_emb=k_pos_emb,
+                    kv_up_proj_fn=kv_up_proj_fn,
                 )
 
             from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
@@ -1503,6 +1598,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if use_unfused_attention:
                 allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                # Unfused attention does not support CP, so we do not need to
+                # pass mla_cp_exchange_latent, kv_compressed, k_pos_emb, and kv_up_proj_fn.
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
