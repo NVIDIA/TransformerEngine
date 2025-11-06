@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
+from jax.ad_checkpoint import checkpoint_name
 
 import transformer_engine_jax
 
@@ -859,14 +860,7 @@ def _quantize_dbias_impl(
         if quantizer.stochastic_rounding_rng_state is not None:
             sr_rng_state = quantizer.stochastic_rounding_rng_state
 
-    (
-        rowwise_casted_output,
-        colwise_casted_output,
-        rowwise_scale_inv,
-        colwise_scale_inv,
-        updated_amax,
-        dbias,
-    ) = PrimitiveClass.outer_primitive.bind(
+    prim_outputs = PrimitiveClass.outer_primitive.bind(
         x.data,
         scale,
         amax,
@@ -887,6 +881,19 @@ def _quantize_dbias_impl(
         stochastic_rounding=sr_rng_state is not None,
         use_rht=use_rht,
     )
+
+    if quantizer.checkpoint_name is not None:
+        prim_outputs = checkpoint_name(prim_outputs, quantizer.checkpoint_name)
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+        dbias,
+    ) = prim_outputs
+
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
     if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv

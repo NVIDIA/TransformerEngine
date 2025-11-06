@@ -14,6 +14,7 @@ from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
+from jax.ad_checkpoint import checkpoint_name
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Norm_Type
@@ -1071,15 +1072,7 @@ def layernorm_fwd(
     # TE/common normalization doesn't support 2x delayed scaling
     if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
-    (
-        rowwise_casted_output,
-        colwise_casted_output,
-        rowwise_scale_inv,
-        colwise_scale_inv,
-        updated_amax,
-        mu,
-        rsigma,
-    ) = NormFwdPrimitive.outer_primitive.bind(
+    prim_outputs = NormFwdPrimitive.outer_primitive.bind(
         x,
         scale,
         amax,
@@ -1097,6 +1090,20 @@ def layernorm_fwd(
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
     )
+
+    if quantizer.checkpoint_name is not None:
+        prim_outputs = checkpoint_name(prim_outputs, quantizer.checkpoint_name)
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+        mu,
+        rsigma,
+    ) = prim_outputs
+
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
@@ -1325,15 +1332,7 @@ def rmsnorm_fwd(
     # TE/common normalization doesn't support 2x delayed scaling
     if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
-    (
-        rowwise_casted_output,
-        colwise_casted_output,
-        rowwise_scale_inv,
-        colwise_scale_inv,
-        updated_amax,
-        _,
-        rsigma,
-    ) = NormFwdPrimitive.outer_primitive.bind(
+    prim_outputs = NormFwdPrimitive.outer_primitive.bind(
         x,
         scale,
         amax,
@@ -1351,6 +1350,20 @@ def rmsnorm_fwd(
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
     )
+
+    if quantizer.checkpoint_name is not None:
+        prim_outputs = checkpoint_name(prim_outputs, quantizer.checkpoint_name)
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+        _,
+        rsigma,
+    ) = prim_outputs
+
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
