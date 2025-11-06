@@ -196,6 +196,10 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
 
     NVTE_SCOPED_GIL_RELEASE({
       for (size_t i = 0; i < num_tensors; i++) {
+        // skip this round if input is empty
+        if (input_list[i].numel() == 0) {
+          continue;
+        }
         if (quantizer->rowwise_usage) {
           TensorWrapper out_identity(output_list[i].scaling_mode());
           auto out_identity_data = output_list[i].get_rowwise_data();
@@ -252,6 +256,10 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
   } else {
     NVTE_SCOPED_GIL_RELEASE({
       for (size_t i = 0; i < num_tensors; i++) {
+        // skip this round if input is empty
+        if (input_list[i].numel() == 0) {
+          continue;
+        }
         nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
       }
     });

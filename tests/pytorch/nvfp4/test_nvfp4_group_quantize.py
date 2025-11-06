@@ -53,7 +53,7 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
 
     if M == 0 or N == 0:
         # all zeros 
-        split_sections = [0] * num_chunks
+        return [0] * num_chunks
     if edge_cases == "regular":
         split_sections = [avg_split] * num_chunks
     elif edge_cases == "zero_tokens_front":
@@ -113,6 +113,10 @@ def reference_group_quantize(
     return x_qx, x_sx, x_amax_rowwise, x_qx_t, x_sx_t, x_amax_colwise
 
 
+def assert_same_shape_and_dtype(x: torch.Tensor, y: torch.Tensor) -> None:
+    assert x.shape == y.shape
+    assert x.dtype == y.dtype
+
 
 def check_group_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype,
@@ -163,13 +167,15 @@ def check_group_quantization_nvfp4_versus_reference(
     x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
 
     for i in range(len(x_qx)):
-        # print()
-        # print(f"x_amax_rowwise[i]: {x_amax_rowwise[i]}")
-        # print(f"x_amax_rowwise_ref[i]: {x_amax_rowwise_ref[i]}")
-        # print()
-        torch.testing.assert_close(x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0)
-        torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
-        # torch.testing.assert_close(x_sx[i], x_sx_ref[i], atol=0.0, rtol=0.0)
+        if split_sections[i] == 0:
+            # then just assert the same same and dtype
+            assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
+            assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
+            assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
+        else:
+            torch.testing.assert_close(x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0)
+            torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
+            # TODO: take care of zero padding positions in scaling factors and then compare
     
     if return_transpose:
         x_qx_t = [output._columnwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
@@ -177,8 +183,14 @@ def check_group_quantization_nvfp4_versus_reference(
         x_amax_colwise = [output._amax_columnwise for output in split_quantize_outputs]
         # assert with zero tolerance 
         for i in range(len(x_qx_t)):
-            torch.testing.assert_close(x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0)
-            torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
+            if split_sections[i] == 0:
+                assert_same_shape_and_dtype(x_amax_colwise[i], x_amax_colwise_ref[i])
+                assert_same_shape_and_dtype(x_qx_t[i], x_qx_t_ref[i])
+                assert_same_shape_and_dtype(x_sx_t[i], x_sx_t_ref[i])
+            else:   
+                torch.testing.assert_close(x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0)
+                torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
+                # TODO: take care of zero padding positions in scaling factors and then compare 
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -186,7 +198,7 @@ def check_group_quantization_nvfp4_versus_reference(
     "M, N",
     [
         # edge case, zero tokens for all
-        # (0, 512),
+        (0, 512),
         # full tile cases
         (256, 1024),
         (1024, 256),
@@ -195,11 +207,8 @@ def check_group_quantization_nvfp4_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-# @pytest.mark.parametrize(
-#     "edge_cases", ["regular", "zero_tokens_front", "zero_tokens_end", "zero_tokens_middle", "random_uneven_split]
-# )
 @pytest.mark.parametrize(
-    "edge_cases", ["regular", "random_uneven_split"]
+    "edge_cases", ["regular", "zero_tokens_front", "zero_tokens_end", "zero_tokens_middle", "random_uneven_split"]
 )
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
