@@ -407,7 +407,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    " Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if ((cudnn_runtime_version == 91400) && (max_seqlen_kv > 1024) &&
+    if ((cudnn_runtime_version == 91400) && (max_seqlen_kv > 1024) && (window_size_left != -1) &&
         (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK) &&
         (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
