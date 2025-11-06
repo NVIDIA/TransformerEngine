@@ -384,6 +384,7 @@ def test_log_grouped_gemm(feature_dirs):
     assert "gemm_1" in output, "gemm1 not found in output"
     assert "gemm_2" in output, "gemm2 not found in output"
 
+
 def test_compute_max_blockwise_dynamic_range_direct():
     """Direct unit test for compute_max_blockwise_dynamic_range function.
 
