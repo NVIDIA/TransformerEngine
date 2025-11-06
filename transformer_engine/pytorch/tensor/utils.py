@@ -12,6 +12,7 @@ from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_sc
 
 from .quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
+from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
@@ -453,6 +454,80 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
 
+
+def cast_master_weights_to_nvfp4(
+    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+):
+    r"""Helper function to cast master weights to NVFP4 primary weights using partial shards.
+
+    Mirrors FP8 partial-cast: compute local amax per shard, all-reduce to global amax,
+    then cast only the shard slice into NVFP4 storages. Requires backend NVFP4 partial ops.
+    """
+
+    if fsdp_shard_model_weights is None:
+        use_fsdp_shard_model_weights = False
+        fsdp_shard_model_weights = [None] * len(model_weights)
+    else:
+        use_fsdp_shard_model_weights = True
+
+    if len(model_weights) == 0:
+        return
+
+    device = model_weights[0].device
+    packed_amaxes = torch.zeros(len(model_weights), dtype=torch.float32, device=device)
+
+    # Step 1: local amax per shard
+    for i, (model_weight, master_weight, start_offset, _) in enumerate(
+        zip(model_weights, master_weights, start_offsets, fsdp_shard_model_weights)
+    ):
+        if not isinstance(model_weight, NVFP4Tensor):
+            continue
+        if master_weight is None:
+            continue
+        h, w = model_weight.shape
+        try:
+            tex.nvfp4_compute_partial_amax(master_weight, packed_amaxes[i : i + 1], h, w, start_offset)
+        except AttributeError as e:
+            raise NotImplementedError(
+                "Missing NVFP4 partial amax kernel: tex.nvfp4_compute_partial_amax"
+            ) from e
+
+    # Step 2: all-reduce to global amax
+    torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    # Step 3: partial cast per shard
+    for i, (model_weight, master_weight, start_offset, model_weight_fragment) in enumerate(
+        zip(model_weights, master_weights, start_offsets, fsdp_shard_model_weights)
+    ):
+        if not isinstance(model_weight, NVFP4Tensor):
+            continue
+        if master_weight is None:
+            continue
+
+        quantizer = model_weight._get_quantizer()
+        if not isinstance(quantizer, NVFP4Quantizer):
+            raise ValueError(
+                f"cast_master_weights_to_nvfp4 expects NVFP4Quantizer, got {type(quantizer)}"
+            )
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        if hasattr(model_weight, "_reset_caches"):
+            model_weight._reset_caches()
+
+        dst_tensor = model_weight if not use_fsdp_shard_model_weights else model_weight_fragment
+        h, w = model_weight.shape
+        try:
+            tex.nvfp4_partial_cast(
+                master_weight,
+                dst_tensor,
+                packed_amaxes[i : i + 1],
+                h,
+                w,
+                start_offset,
+            )
+        except AttributeError as e:
+            raise NotImplementedError(
+                "Missing NVFP4 partial cast kernel: tex.nvfp4_partial_cast"
+            ) from e
 
 def is_experimental(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
     """Check if an environment or object is using experimental Kitchen middleware.

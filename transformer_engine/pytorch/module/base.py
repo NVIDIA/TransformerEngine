@@ -46,6 +46,7 @@ from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -656,6 +657,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        # NVFP4 reuses FP8 GlobalStateManager
+        self.primary_weights_in_nvfp4 = FP8GlobalStateManager.with_fp8_parameters()
         self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
@@ -1325,6 +1328,40 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param.clear_high_precision_init_val = MethodType(clear, param)
 
             setattr(self, name, param)
+
+            # NVFP4 primary weights path
+            if self.primary_weights_in_nvfp4 and fp8_meta_index is not None:
+
+                high_precision_init_val = None
+                if self.preserve_high_precision_init_val:
+                    high_precision_init_val = getattr(self, name).detach().cpu()
+
+                quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
+                if quantizer is None:
+                    raise RuntimeError("Weight quantizer has not been initialized")
+                if not isinstance(quantizer, NVFP4Quantizer):
+                    # Skip if this meta index is not NVFP4 (e.g., activations)
+                    pass
+                else:
+                    quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                    quantizer.internal = False
+                    nvfp4_param = quantizer(getattr(self, name))
+                    nvfp4_param = torch.nn.Parameter(nvfp4_param)
+                    if high_precision_init_val is not None:
+                        def get(self_):
+                            if hasattr(self_, "_high_precision_init_val"):
+                                return self_._high_precision_init_val
+                            return None
+
+                        def clear(self_):
+                            if hasattr(self_, "_high_precision_init_val"):
+                                del self_._high_precision_init_val
+
+                        nvfp4_param._high_precision_init_val = high_precision_init_val
+                        nvfp4_param.get_high_precision_init_val = MethodType(get, nvfp4_param)
+                        nvfp4_param.clear_high_precision_init_val = MethodType(clear, nvfp4_param)
+
+                    setattr(self, name, nvfp4_param)
 
     @abstractmethod
     def forward(self):
