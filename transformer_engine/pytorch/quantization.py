@@ -40,6 +40,7 @@ __all__ = [
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
     "get_default_recipe",
+    "get_align_size_for_quantization",
 ]
 
 
@@ -112,6 +113,15 @@ def get_default_fp8_recipe() -> Recipe:
 def get_default_recipe() -> Recipe:
     """Returns the default training recipe based on available device."""
     return get_default_fp8_recipe()
+
+
+def get_align_size_for_quantization(recipe: Recipe):
+    """Get the alignment size for quantization."""
+    if recipe.mxfp8():
+        return 32
+    elif recipe.nvfp4():
+        return 64
+    return 16
 
 
 def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.dtype:
