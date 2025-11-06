@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 import pytest
 import torch
 import random
+import math
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -75,6 +76,22 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
         assert split_section % least_multiple == 0, "The split_sections are not multiples of least_multiple"
 
     return split_sections
+
+
+# Calculate the shape of the scaling tensor for NVFP4 1D blockwise quantization without padding
+def get_nvfp4_scale_shape_no_padding(shape, columnwise):
+    M, K = 1, 1
+    M = math.prod(shape[:-1])
+    K = shape[-1]
+
+    if columnwise:
+        outer = K
+        inner = math.ceil(M / 16)
+        return (outer, inner)
+    # rowwise
+    outer = M
+    inner = math.ceil(K / 16)
+    return (outer, inner)
 
 
 def reference_group_quantize(
@@ -142,6 +159,8 @@ def check_group_quantization_nvfp4_versus_reference(
     x = torch.randn((M, N), dtype=x_dtype, device=device)
     num_chunks = len(split_sections)
 
+    x_splits = torch.split(x, split_sections)
+
     # Quantize
     quantizers = [
         NVFP4Quantizer(
@@ -168,14 +187,17 @@ def check_group_quantization_nvfp4_versus_reference(
 
     for i in range(len(x_qx)):
         if split_sections[i] == 0:
-            # then just assert the same same and dtype
+            # then just assert the same same and dtype because the buffer won't be zero out
             assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
             assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
             assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
         else:
             torch.testing.assert_close(x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0)
             torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
-            # TODO: take care of zero padding positions in scaling factors and then compare
+            valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, False)
+            x_sx_valid = x_sx[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+            x_sx_ref_valid = x_sx_ref[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+            torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
     
     if return_transpose:
         x_qx_t = [output._columnwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
@@ -184,13 +206,17 @@ def check_group_quantization_nvfp4_versus_reference(
         # assert with zero tolerance 
         for i in range(len(x_qx_t)):
             if split_sections[i] == 0:
+                # then just assert the same same and dtype because the buffer won't be zero out
                 assert_same_shape_and_dtype(x_amax_colwise[i], x_amax_colwise_ref[i])
                 assert_same_shape_and_dtype(x_qx_t[i], x_qx_t_ref[i])
                 assert_same_shape_and_dtype(x_sx_t[i], x_sx_t_ref[i])
             else:   
                 torch.testing.assert_close(x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0)
                 torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
-                # TODO: take care of zero padding positions in scaling factors and then compare 
+                valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, True)
+                x_sx_t_valid = x_sx_t[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+                x_sx_t_ref_valid = x_sx_t_ref[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+                torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
