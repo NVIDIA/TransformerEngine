@@ -270,7 +270,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-[[deprecated("nvte_fused_attn_fwd_qkvpacked() is deprecated. Please use nvte_fused_attn_fwd() with separate Q, K, V tensors instead.")]]
+[[deprecated(
+    "nvte_fused_attn_fwd_qkvpacked() is deprecated. Please use nvte_fused_attn_fwd() with separate "
+    "Q, K, V tensors instead.")]]
 void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                                    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
@@ -332,7 +334,9 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-[[deprecated("nvte_fused_attn_bwd_qkvpacked() is deprecated. Please use nvte_fused_attn_bwd() with separate Q, K, V tensors instead.")]]
+[[deprecated(
+    "nvte_fused_attn_bwd_qkvpacked() is deprecated. Please use nvte_fused_attn_bwd() with separate "
+    "Q, K, V tensors instead.")]]
 void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
                                    const NVTETensor S, NVTETensor dP,
                                    const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
@@ -407,7 +411,9 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-[[deprecated("nvte_fused_attn_fwd_kvpacked() is deprecated. Please use nvte_fused_attn_fwd() with separate Q, K, V tensors instead.")]]
+[[deprecated(
+    "nvte_fused_attn_fwd_kvpacked() is deprecated. Please use nvte_fused_attn_fwd() with separate "
+    "Q, K, V tensors instead.")]]
 void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, const NVTETensor SoftmaxOffset,
     NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
@@ -475,7 +481,9 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-[[deprecated("nvte_fused_attn_bwd_kvpacked() is deprecated. Please use nvte_fused_attn_bwd() with separate Q, K, V tensors instead.")]]
+[[deprecated(
+    "nvte_fused_attn_bwd_kvpacked() is deprecated. Please use nvte_fused_attn_bwd() with separate "
+    "Q, K, V tensors instead.")]]
 void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
     const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,
