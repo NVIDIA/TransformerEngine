@@ -6,7 +6,7 @@
 
 import torch
 
-import transformer_engine.common.triton.cross_entropy as triton_cross_entropy
+import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
 __all__ = [
     "parallel_cross_entropy",
