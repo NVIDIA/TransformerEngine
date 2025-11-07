@@ -21,8 +21,8 @@
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#include "transformer_engine/comm_gemm.h"          // cuBlasMp-based overlap
 #include "transformer_engine/comm_gemm_overlap.h"  // Userbuffer-based overlap
-#include "transformer_engine/comm_gemm.h"  // cuBlasMp-based overlap
 
 namespace transformer_engine {
 namespace jax {

@@ -278,8 +278,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     }
     NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
                ", out_shape[1]=", out_shape[1]);
-    auto ctx = CollectiveGemmPlanRegistry::getInstance().get_context(
-        buffer_shape, buffer_dtype, collective_op);
+    auto ctx = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, buffer_dtype,
+                                                                     collective_op);
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
 #ifndef NVTE_WITH_CUBLASMP
       auto ubuf_out_ = TensorWrapper(ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
@@ -291,15 +291,14 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                  " elements ", to_string_like(output->dimensions()));
 
       // Launch GEMM+RS
-      ctx->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_,
-                                 pre_gelu_, workspace_, grad, false, use_split_accumulator, out_,
-                                 stream);
+      ctx->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_, pre_gelu_,
+                            workspace_, grad, false, use_split_accumulator, out_, stream);
 #else
       // GEMM dims in column-major order
       const int m = (transa) ? rhs_shape[0] : rhs_shape[1];
       const int n = (transb) ? lhs_shape[1] : lhs_shape[0];
       const int k = (transa) ? rhs_shape[1] : rhs_shape[0];
-      
+
       k *= ctx->nranks;  // convert contracting dimension to global size
       NVTE_CHECK_CUBLASMP(
           nvte_gemm_reduce_scatter(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),

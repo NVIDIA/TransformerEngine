@@ -157,7 +157,8 @@ int GetCgemmNumMaxStreams() {
   return config.num_max_streams;
 }
 
-CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> buffer_shape, DType dtype,
+CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> buffer_shape,
+                                                           DType dtype,
                                                            JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
@@ -201,8 +202,9 @@ CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> b
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
       cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 #else
-  ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(), comm_handler.num_total_devices,
-                                  comm_handler.get_global_rank(), te::cuda::current_device());
+  ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(),
+                                  comm_handler.num_total_devices, comm_handler.get_global_rank(),
+                                  te::cuda::current_device());
 #endif
 
   CollectiveGemmCtx *ctx_ptr = ctx.get();
