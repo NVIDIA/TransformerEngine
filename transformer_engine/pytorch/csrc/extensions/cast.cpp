@@ -202,7 +202,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     }
   } else {
     // TODO: implement this too when we disable RHT
-    NVTE_CHECK(false, "NVFP4 multi_quantize: RHT is not supported when RHT is disabled for now");
+    NVTE_CHECK(false, "NVFP4 multi_quantize: multi-amax without RHT is not supported for now");
   }
 
   // start with quantize, with or without RHT
