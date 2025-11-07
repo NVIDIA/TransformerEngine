@@ -263,23 +263,16 @@ class TestFP8Functions(unittest.TestCase):
 class TestJaxprAndHlo:
     """Tests to verify Jaxpr and/or HLO of compiled modules apply expected recipe functionality and optimizations."""
 
-    @pytest_parametrize_wrapper(
-        "quantization_recipe",
-        [
-            quantization_recipe
-            for quantization_recipe in SUPPORTED_RECIPES
-            if isinstance(quantization_recipe, NVFP4BlockScaling)
-        ],
-    )
-    def test_layernorm_mlp_reuses_amax_nvfp4(self, quantization_recipe):
-        """Tests that layernorm_mlp reuses the amax computed in layernorm and the activation and does not recompute it during quantizaton."""
-
+    def _generate_jaxpr_for_layernorm_mlp_fwd_bwd(self, quantization_recipe, ln_mlp_kwargs=None):
+        """Generates the jaxpr for a forward and backward pass of LayerNormMLP under the given quantization recipe."""
+        ln_mlp_kwargs = ln_mlp_kwargs or {}
         with te.autocast(enabled=True, recipe=quantization_recipe, mesh_resource=te.MeshResource()):
             model = te_flax.LayerNormMLP(
                 layernorm_type="rmsnorm",
                 return_layernorm_output=False,
                 intermediate_dropout_rate=0.0,
                 dtype=jnp.bfloat16,
+                **ln_mlp_kwargs,
             )
 
             var_collect = model.init(
@@ -292,29 +285,84 @@ class TestJaxprAndHlo:
 
             x = jax.random.normal(jax.random.PRNGKey(0), (128, 128), dtype=jnp.bfloat16)
             rngs = {"sr_rng": jax.random.PRNGKey(1), "dropout": jax.random.PRNGKey(2)}
-            jaxpr = jax.make_jaxpr(jax.value_and_grad(loss_fn))(x, rngs=rngs)
+            return jax.make_jaxpr(jax.value_and_grad(loss_fn))(x, rngs=rngs)
 
-            rht_amax_eqns = [
-                eqn for eqn in jaxpr.jaxpr.eqns if eqn.primitive.name == "te_rht_amax_ffi_wrapper"
-            ]
+    @pytest_parametrize_wrapper(
+        "quantization_recipe",
+        [
+            quantization_recipe
+            for quantization_recipe in SUPPORTED_RECIPES
+            if isinstance(quantization_recipe, NVFP4BlockScaling)
+        ],
+    )
+    def test_layernorm_mlp_reuses_amax_nvfp4(self, quantization_recipe):
+        """Tests that layernorm_mlp reuses the amax computed in layernorm and the activation and does not recompute it during quantizaton."""
 
-            assert len(rht_amax_eqns) == 4, f"Expected 4 rht_amax_eqns, got {len(rht_amax_eqns)}"
+        jaxpr = self._generate_jaxpr_for_layernorm_mlp_fwd_bwd(quantization_recipe)
 
-            def assert_param(index, tensor_name, expected_value: bool):
-                if expected_value:
-                    assert rht_amax_eqns[index].params["produce_regular_amax"] == True, (
-                        f"Expected produce_regular_amax for {tensor_name} to be True, indicating no"
-                        " reuse of amax as this tensor does not have a previous operation to fuse"
-                        " with"
-                    )
-                else:
-                    assert rht_amax_eqns[index].params["produce_regular_amax"] == False, (
-                        f"Expected produce_regular_amax for {tensor_name} to be False, indicating"
-                        " reuse of amax"
-                    )
+        rht_amax_eqns = [
+            eqn for eqn in jaxpr.jaxpr.eqns if eqn.primitive.name == "te_rht_amax_ffi_wrapper"
+        ]
 
-            assert_param(0, "fwd ln+q", False)
-            assert_param(1, "fwd act+q", False)
-            # No previous op before incoming dgrad in the backward so amax is not reused
-            assert_param(2, "bwd dgrad", True)
-            assert_param(3, "bwd dact+q", False)
+        assert len(rht_amax_eqns) == 4, f"Expected 4 rht_amax_eqns, got {len(rht_amax_eqns)}"
+
+        def assert_param(index, tensor_name, expected_value: bool):
+            if expected_value:
+                assert rht_amax_eqns[index].params["produce_regular_amax"] == True, (
+                    f"Expected produce_regular_amax for {tensor_name} to be True, indicating no"
+                    " reuse of amax as this tensor does not have a previous operation to fuse"
+                    " with"
+                )
+            else:
+                assert rht_amax_eqns[index].params["produce_regular_amax"] == False, (
+                    f"Expected produce_regular_amax for {tensor_name} to be False, indicating"
+                    " reuse of amax"
+                )
+
+        assert_param(0, "fwd ln+q", False)
+        assert_param(1, "fwd act+q", False)
+        # No previous op before incoming dgrad in the backward so amax is not reused
+        assert_param(2, "bwd dgrad", True)
+        assert_param(3, "bwd dact+q", False)
+
+    @pytest_parametrize_wrapper("quantization_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper(
+        "quantization_checkpoint_name",
+        [None, "quantization", "some_arbitrary_user_checkpoint_name"],
+    )
+    def test_recipe_supports_quantization_checkpointing(
+        self, quantization_recipe, quantization_checkpoint_name
+    ):
+        """Tests that all supported quantization recipes correctly use checkpoint_name."""
+
+        kwargs = {
+            "quantization_checkpoint_name": quantization_checkpoint_name,
+        }
+        jaxpr = self._generate_jaxpr_for_layernorm_mlp_fwd_bwd(quantization_recipe, kwargs)
+
+        checkpoint_name_eqns = [
+            eqn
+            for eqn in jaxpr.jaxpr.eqns
+            if eqn.primitive.name == "name" and eqn.params["name"] == quantization_checkpoint_name
+        ]
+
+        if quantization_checkpoint_name is None:
+            assert len(checkpoint_name_eqns) == 0, (
+                "Expected 0 checkpoint_name eqns when quantization_checkpoint_name is None, got"
+                f" {len(checkpoint_name_eqns)}"
+            )
+            return
+
+        # 36 checkpointed values:
+        # - Fwd pass:
+        #   - Input RMSNorm+Q -> 6 possible output tensors
+        #   - Kernel Q -> 6 possible output tensors
+        #   - Input Activation+Q -> 6 possible output tensors
+        #   - Kernel Q -> 6 possible output tensors
+        # - Backward pass: These are wrapped in checkpoint_name for simplicity, but are ignored by JAX since they are already in the backward pass
+        #   - 6 dgrad Q -> 6 possible output tensors
+        #   - 6 dact+Q -> 6 possible output tensors
+        assert len(checkpoint_name_eqns) == 36, (
+            "Expected 36 checkpoint_name eqns when quantization_checkpoint_name is set, got"
+            f" {len(checkpoint_name_eqns)}"
+        )
