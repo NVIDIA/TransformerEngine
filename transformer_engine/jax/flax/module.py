@@ -213,7 +213,7 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         # use default jax based implementation
         else:
             warnings.warn(
-                "Using unfused JAX softmax implementation instead of TE fused primitives. "
+                "Using unfused JAX softmax implementation instead of TE fused primitives. ",
                 UserWarning,
                 stacklevel=2
             )

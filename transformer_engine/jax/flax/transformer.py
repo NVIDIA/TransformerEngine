@@ -235,7 +235,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
-        def convert_to_softmax_type(attn_mask_type, mask):
+        def convert_to_softmax_fusion_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusionType"""
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
@@ -256,7 +256,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_fusion_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_fusion_type, mask = convert_to_softmax_fusion_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(
             softmax_fusion_type=softmax_fusion_type,
