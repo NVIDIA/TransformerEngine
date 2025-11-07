@@ -138,8 +138,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
-                                                                  JAXX_Collective_Op::ALL_GATHER);
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, DType::kFloat32,
+                                                                 JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -157,9 +157,8 @@ int GetCgemmNumMaxStreams() {
   return config.num_max_streams;
 }
 
-CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
-                                                          DType dtype,
-                                                          JAXX_Collective_Op collective_op) {
+CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> buffer_shape, DType dtype,
+                                                           JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -191,8 +190,9 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
                "(2) num_devices_per_process == 1 (single device per process)");
   }
 
-  std::unique_ptr<CommOverlapCore> executor;
-  executor = std::make_unique<CommOverlapP2PBase>(
+  std::unique_ptr<CollectiveGemmCtx> ctx;
+#ifndef NVTE_WITH_CUBLASMP
+  ctx = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
       comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
       comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
@@ -200,10 +200,14 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
       cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
       cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+#else
+  ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(), comm_handler.num_total_devices,
+                                  comm_handler.get_global_rank(), te::cuda::current_device());
+#endif
 
-  CommOverlapCore *executor_ptr = executor.get();
-  plan_map[plan_id] = std::move(executor);
-  return executor_ptr;
+  CollectiveGemmCtx *ctx_ptr = ctx.get();
+  plan_map[plan_id] = std::move(ctx);
+  return ctx_ptr;
 }
 
 void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
