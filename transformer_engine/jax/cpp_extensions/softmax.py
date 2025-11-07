@@ -15,7 +15,7 @@ from .attention import AttnSoftmaxType
 
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
-from ..softmax import SoftmaxFusion
+from ..softmax import SoftmaxFusionType
 
 
 __all__ = [
@@ -33,7 +33,7 @@ __all__ = [
 
 
 def is_softmax_kernel_available(
-    softmax_fusion: SoftmaxFusion,
+    softmax_fusion_type: SoftmaxFusionType,
     softmax_type: AttnSoftmaxType,
     batch: int,
     heads: int,
@@ -45,15 +45,15 @@ def is_softmax_kernel_available(
     if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
         return False
 
-    if softmax_fusion is SoftmaxFusion.SCALED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED:
         return ScaledSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_fusion is SoftmaxFusion.SCALED_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         return ScaledMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_fusion is SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
         return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )

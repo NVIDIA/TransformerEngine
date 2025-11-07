@@ -33,7 +33,7 @@ from ..attention import (
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
-from ..softmax import SoftmaxFusion
+from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -236,7 +236,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             return new_mask
 
         def convert_to_softmax_type(attn_mask_type, mask):
-            """Convert the attn_mask_type to SoftmaxFusion"""
+            """Convert the attn_mask_type to SoftmaxFusionType"""
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
@@ -246,20 +246,20 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if mask is not None:
-                return SoftmaxFusion.SCALED_MASKED, mask
+                return SoftmaxFusionType.SCALED_MASKED, mask
             if attn_mask_type is AttnMaskType.CAUSAL_MASK:
-                return SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED, mask
+                return SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type is AttnMaskType.NO_MASK:
-                return SoftmaxFusion.SCALED, mask
+                return SoftmaxFusionType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_fusion, mask = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_fusion_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(
-            softmax_fusion=softmax_fusion,
+            softmax_fusion_type=softmax_fusion_type,
             softmax_type=self.softmax_type,
             scale_factor=fused_scale_factor,
         )(attn_weights, mask, bias, softmax_offset=softmax_offset).astype(input_dtype)

@@ -18,7 +18,7 @@ from utils import assert_allclose
 
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
 from transformer_engine.jax.cpp_extensions.attention import AttnSoftmaxType
-from transformer_engine.jax.softmax import SoftmaxFusion, softmax
+from transformer_engine.jax.softmax import SoftmaxFusionType, softmax
 from transformer_engine.jax.flax.module import Softmax
 
 
@@ -51,7 +51,7 @@ class SoftmaxRunner:
     max_seqlen_kv: int
     num_heads: int
     scale_factor: float
-    softmax_fusion: SoftmaxFusion
+    softmax_fusion_type: SoftmaxFusionType
     dtype: DTypeLike
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
@@ -70,7 +70,7 @@ class SoftmaxRunner:
 
     def _is_support(self):
         return is_softmax_kernel_available(
-            self.softmax_fusion,
+            self.softmax_fusion_type,
             self.softmax_type,
             self.batch_size,
             self.num_heads,
@@ -88,22 +88,22 @@ class SoftmaxRunner:
 
         self.logits = jax.random.uniform(logits_key, logits_shape, self.dtype, -1.0)
 
-        match self.softmax_fusion:
-            case SoftmaxFusion.SCALED:
+        match self.softmax_fusion_type:
+            case SoftmaxFusionType.SCALED:
                 self.mask = None
-            case SoftmaxFusion.SCALED_MASKED:
+            case SoftmaxFusionType.SCALED_MASKED:
                 self.mask = jax.random.bernoulli(mask_key, shape=mask_shape).astype(jnp.uint8)
-            case SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED:
+            case SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
                 self.mask = (1.0 - jnp.tril(jnp.ones_like(self.logits))).astype(jnp.uint8)
             case _:
-                raise ValueError(f"Unknown {self.softmax_fusion=}")
+                raise ValueError(f"Unknown {self.softmax_fusion_type=}")
 
     def test_forward(self):
         """
         Test transformer_engine.jax.softmax.softmax fwd rule
         """
         self._setup_inputs()
-        primitive_out = softmax(self.logits, self.mask, self.scale_factor, self.softmax_fusion)
+        primitive_out = softmax(self.logits, self.mask, self.scale_factor, self.softmax_fusion_type)
         reference_out = __class__.reference_softmax(self.logits, self.mask, self.scale_factor)
         assert_allclose(primitive_out, reference_out, dtype=self.dtype)
 
@@ -120,7 +120,7 @@ class SoftmaxRunner:
         args = [self.logits, self.mask]
         kwargs = {
             "scale_factor": self.scale_factor,
-            "softmax_fusion": self.softmax_fusion,
+            "softmax_fusion_type": self.softmax_fusion_type,
         }
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
@@ -178,7 +178,7 @@ class SoftmaxModuleRunner:
         rng = jax.random.PRNGKey(0)
         softmax_module = Softmax(
             scale_factor=runner.scale_factor,
-            softmax_fusion=runner.softmax_fusion,
+            softmax_fusion_type=runner.softmax_fusion_type,
         )
         softmax_vars = softmax_module.init(rng, runner.logits, runner.mask)
         module_out = softmax_module.apply(softmax_vars, runner.logits, runner.mask)
@@ -197,11 +197,11 @@ class SoftmaxModuleRunner:
 )
 @pytest.mark.parametrize("scale_factor", [0.125])
 @pytest.mark.parametrize(
-    "softmax_fusion",
+    "softmax_fusion_type",
     [
-        pytest.param(SoftmaxFusion.SCALED, id="SCALED"),
-        pytest.param(SoftmaxFusion.SCALED_MASKED, id="SCALED_MASKED"),
-        pytest.param(SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
+        pytest.param(SoftmaxFusionType.SCALED, id="SCALED"),
+        pytest.param(SoftmaxFusionType.SCALED_MASKED, id="SCALED_MASKED"),
+        pytest.param(SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
     ],
 )
 @pytest.mark.parametrize(
@@ -217,19 +217,19 @@ class TestSoftmaxPrimitives:
     """
 
     @staticmethod
-    def test_forward(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype):
+    def test_forward(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype):
         """
         Test forward with parameterized configs
         """
-        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype)
+        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
         runner.test_forward()
 
     @staticmethod
-    def test_backward(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype):
+    def test_backward(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype):
         """
         Test forward with parameterized configs
         """
-        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype)
+        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
         runner.test_backward()
 
 
@@ -246,11 +246,11 @@ class TestSoftmaxPrimitives:
 )
 @pytest.mark.parametrize("scale_factor", [0.125])
 @pytest.mark.parametrize(
-    "softmax_fusion",
+    "softmax_fusion_type",
     [
-        pytest.param(SoftmaxFusion.SCALED, id="SCALED"),
-        pytest.param(SoftmaxFusion.SCALED_MASKED, id="SCALED_MASKED"),
-        pytest.param(SoftmaxFusion.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
+        pytest.param(SoftmaxFusionType.SCALED, id="SCALED"),
+        pytest.param(SoftmaxFusionType.SCALED_MASKED, id="SCALED_MASKED"),
+        pytest.param(SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
     ],
 )
 @pytest.mark.parametrize(
@@ -266,11 +266,11 @@ class TestSoftmaxModule:
     """
 
     @staticmethod
-    def test_forward(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype):
+    def test_forward(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype):
         """
         Test forward with parameterized configs
         """
-        module_runner = SoftmaxRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion, dtype)
+        module_runner = SoftmaxRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
         bias = None
         runner = SoftmaxModuleRunner(module_runner, bias)
         runner.test_forward()

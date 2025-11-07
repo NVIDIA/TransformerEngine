@@ -2741,7 +2741,9 @@ def fused_attn_fwd(
         assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Softmax type {softmax_type} is not supported when softmax_offset is None"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             num_heads = qkv[0].shape[-2]
-            # Create tensor [1, h, 1, 1] filled with zeros
+            # Create tensor [1, h, 1, 1] filled with zeros (logit value = 0)
+            # This adds exp(0 - x_max) = exp(-x_max) to the denominator,
+            # which contributes exactly 1 after normalization, giving: exp(x_i) / (sum(exp(x_j)) + 1)
             softmax_offset = jnp.zeros((1, num_heads, 1, 1), dtype=jnp.float32)
             # Shard by heads dimension
             softmax_offset = with_sharding_constraint_by_logical_axes(
