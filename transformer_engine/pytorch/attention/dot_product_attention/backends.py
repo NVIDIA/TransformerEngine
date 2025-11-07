@@ -66,6 +66,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch import export
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.graph import is_graph_capturing
 
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
@@ -1216,6 +1217,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
                 softmax_offset,
+                cuda_graph=is_graph_capturing(),
             )
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1293,6 +1295,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 rng_gen,
                 softmax_offset,
                 return_max_logit,
+                is_graph_capturing(),
             )
             out = out_
             out_ret = out_
@@ -1532,6 +1535,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.softmax_type,
                         ctx.window_size,
                         ctx.deterministic,
+                        is_graph_capturing(),
                     )
 
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1596,6 +1600,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.softmax_type,
                         ctx.window_size,
                         ctx.deterministic,
+                        is_graph_capturing(),
                     )
 
         d_bias = None
