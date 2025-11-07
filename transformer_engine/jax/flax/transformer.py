@@ -235,13 +235,6 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
-        attn_mask_type = self.attn_mask_type
-
-        # If PRE_SCALE_BIAS was used, bias was already added to attn_weights above,
-        # so we need to set bias to None to avoid adding it again in Softmax module
-        if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
-            bias = None
-
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusion"""
             # mask is ignored for no_mask and causal_mask without sliding window
@@ -263,7 +256,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_fusion, mask = convert_to_softmax_type(attn_mask_type, mask)
+        softmax_fusion, mask = convert_to_softmax_type(self.attn_mask_type, mask)
 
         attn_weights = Softmax(
             softmax_fusion=softmax_fusion,
@@ -1069,16 +1062,17 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Deprecated. Please refer `fuse_qkv_params`
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
-    softmax_type: str = {'vanilla', 'off_by_one', 'learnable'}, default = 'vanilla'
-        Softmax type as described in this paper:
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        softmax type as described in this paper:
         `Efficient Streaming Language Models with Attention Sinks
-        <https://arxiv.org/abs/2309.17453>`_.
-
-        * vanilla: Standard softmax normalization.
-        * off_by_one: Adds a learnable scalar offset column (initialized to zero) before softmax,
-          modifying the denominator to :math:`1 + \sum exp(logits)`.
-        * learnable: Adds a learnable vector offset column (one value per head) before softmax,
-          modifying the denominator to :math:`exp(\\alpha_h) + \sum exp(logits)`.
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+        For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+        'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+        'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+        'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+        where alpha is a learnable parameter in shape [h].
+        'off-by-one' and 'learnable' softmax types are also called sink attention
+        ('zero sink' and 'learnable sink').
     """
 
     head_dim: int

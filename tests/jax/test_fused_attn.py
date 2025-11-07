@@ -747,9 +747,13 @@ class FusedAttnRunner:
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
         # Softmax offset sharding (1, num_heads, 1, 1)
-        self.softmax_offset_pspec = PartitionSpec(
-            None, self.mesh_resource.tpsp_resource, None, None
+        # Use the same logic as HEAD_AXES: tpsp_resource if enabled, else tp_resource
+        head_resource = (
+            self.mesh_resource.tpsp_resource
+            if self.mesh_resource.tpsp_resource is not None
+            else self.mesh_resource.tp_resource
         )
+        self.softmax_offset_pspec = PartitionSpec(None, head_resource, None, None)
         self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
 
         self.dropout_rng_pspec = PartitionSpec(

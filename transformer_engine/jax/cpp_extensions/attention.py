@@ -128,9 +128,9 @@ class FusedAttnHelper:
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
             self.qkv_layout.value,
-            self.softmax_type.value,
             self.attn_bias_type.value,
             self.attn_mask_type.value,
+            self.softmax_type.value,
             self.dropout_probability,
             self.q_num_heads,
             self.kv_num_heads,
@@ -383,8 +383,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.dropout_probability,
             config.attn_bias_type.value,
             config.attn_mask_type.value,
-            config.qkv_layout.value,
             config.softmax_type.value,
+            config.qkv_layout.value,
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             config.max_segments_per_seq,
@@ -802,8 +802,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.dropout_probability,
             config.attn_bias_type.value,
             config.attn_mask_type.value,
-            config.qkv_layout.value,
             config.softmax_type.value,
+            config.qkv_layout.value,
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             deterministic,
@@ -821,11 +821,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         )
 
         # Validate incoming softmax_offset shape and dtype
-        assert softmax_offset_aval.dtype == jnp.float32
+        assert softmax_offset_aval.dtype == jnp.float32, f"Incorrect softmax_offset dtype: {softmax_offset_aval.dtype}, expected: {jnp.float32}"
         if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
-            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
+            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1), f"Incorrect softmax_offset shape for {config.softmax_type}: {softmax_offset_aval.shape}, expected: (1, {attn_heads}, 1, 1)"
         else:
-            assert softmax_offset_aval.shape == (0,)
+            assert softmax_offset_aval.shape == (0,), f"Incorrect softmax_offset shape for {config.softmax_type}: {softmax_offset_aval.shape}, expected: (0,)"
 
         if config.softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
             dsoftmax_offset_aval = q_aval.update(
@@ -2738,7 +2738,7 @@ def fused_attn_fwd(
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
-        assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Unknown {softmax_type=}"
+        assert softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX, f"Softmax type {softmax_type} is not supported when softmax_offset is None"
         if softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
             num_heads = qkv[0].shape[-2]
             # Create tensor [1, h, 1, 1] filled with zeros
