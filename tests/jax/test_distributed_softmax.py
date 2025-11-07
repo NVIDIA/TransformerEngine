@@ -57,7 +57,9 @@ class TestDistributedSoftmax:
 
     @staticmethod
     def target_func(x, mask, scale_factor=1.0, softmax_fusion_type=SoftmaxFusionType.SCALED):
-        return jnp.mean(softmax(x, mask, scale_factor=scale_factor, softmax_fusion_type=softmax_fusion_type))
+        return jnp.mean(
+            softmax(x, mask, scale_factor=scale_factor, softmax_fusion_type=softmax_fusion_type)
+        )
 
     @staticmethod
     def ref_func(x, mask, scale_factor=1.0, dtype=jnp.float16):
@@ -97,7 +99,12 @@ class TestDistributedSoftmax:
         ref_func = partial(self.ref_func, scale_factor=scale_factor, dtype=dtype)
 
         (x, mask), (x_pspec, mask_pspec) = self.generate_inputs(
-            data_shape, mesh_resource, softmax_fusion_type, dtype, bad_sharding, broadcast_batch_mask
+            data_shape,
+            mesh_resource,
+            softmax_fusion_type,
+            dtype,
+            bad_sharding,
+            broadcast_batch_mask,
         )
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
@@ -178,7 +185,9 @@ class TestDistributedSoftmax:
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("softmax_fusion_type", [SoftmaxFusionType.SCALED, SoftmaxFusionType.SCALED_MASKED])
+    @pytest.mark.parametrize(
+        "softmax_fusion_type", [SoftmaxFusionType.SCALED, SoftmaxFusionType.SCALED_MASKED]
+    )
     @pytest.mark.parametrize("bad_sharding", [False, True])
     @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
     def test_softmax_gspmd(

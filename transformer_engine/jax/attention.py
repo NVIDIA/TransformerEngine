@@ -78,14 +78,14 @@ class AttnMaskType(Enum):
 class AttnSoftmaxType(Enum):
     """
     VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
-    
+
     OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)),
         Implemented using offset=0.0 (logit value), which adds exp(0-x_max) to the denominator,
         contributing exactly 1 after normalization.
-    
+
     LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
         where alpha[j] is a learnable offset parameter (logit value) in shape [H].
-    
+
     Note: The offset parameter represents a LOGIT value, not the direct exponential contribution.
           To add value V to the denominator, use offset = log(V).
     """

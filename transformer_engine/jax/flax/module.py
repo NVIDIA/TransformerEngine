@@ -200,7 +200,13 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
 
         # use primitives
         if is_softmax_kernel_available(
-            self.softmax_fusion_type, self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
+            self.softmax_fusion_type,
+            self.softmax_type,
+            batch,
+            heads,
+            q_seqlen,
+            k_seqlen,
+            input_dtype,
         ):
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
@@ -215,9 +221,9 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             warnings.warn(
                 "Using unfused JAX softmax implementation instead of TE fused primitives. ",
                 UserWarning,
-                stacklevel=2
+                stacklevel=2,
             )
-            
+
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
@@ -231,8 +237,8 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
                 )
             else:
                 raise ValueError(
-                    f"Unsupported softmax fusion: {self.softmax_fusion_type}. softmax_fusion_type must be"
-                    " [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                    f"Unsupported softmax fusion: {self.softmax_fusion_type}. softmax_fusion_type"
+                    " must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
                 )
         assert input_dtype == outputs.dtype
         return outputs
