@@ -407,9 +407,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         variable:
 
         * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention (default).
-        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If the required cuDNN fused attention
-          kernel is not available on the system, a warning will be issued, and the module will
-          automatically fall back to the unfused backend.
+        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If fused attention kernel support
+          exists, the default is to use fused attention. However, if the required cuDNN fused
+          attention kernel is not available on the system, a warning will be issued, and the module
+          will automatically fall back to the unfused backend.
 
     .. note::
         The DotProductAttention default setting enables non-deterministic kernels for reduced
@@ -601,7 +602,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         else:
             assert bias is not None
 
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+        # Use fused attn (if kernel check below passes) by default
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         seqlen_q = query.shape[sequence_dim]
