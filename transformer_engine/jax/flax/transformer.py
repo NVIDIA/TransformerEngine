@@ -406,7 +406,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Users can select between these two backends via the :attr:`NVTE_FUSED_ATTN` environment
         variable:
 
-        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention (default).
+        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention.
         * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention (default). If the required cuDNN fused
           attention kernel is not available on the system, a warning will be issued, and the module
           will automatically fall back to the unfused backend.
