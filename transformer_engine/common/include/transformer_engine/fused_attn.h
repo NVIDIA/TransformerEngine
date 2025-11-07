@@ -340,16 +340,14 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 [[deprecated(
     "nvte_fused_attn_bwd_qkvpacked() is deprecated. Please use nvte_fused_attn_bwd() with separate "
     "Q, K, V tensors instead.")]]
-void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
-                                   const NVTETensor S, NVTETensor dP,
-                                   const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
-                                   NVTETensor dBias, NVTETensor dSoftmaxOffset,
-                                   const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
-                                   size_t max_seqlen, float attn_scale, float dropout,
-                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                   NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   bool deterministic, bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_bwd_qkvpacked(
+    const NVTETensor QKV, const NVTETensor O, const NVTETensor dO, const NVTETensor S,
+    NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV, NVTETensor dBias,
+    NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
+    size_t max_seqlen, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool deterministic, bool cuda_graph,
+    NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with packed KV input.
  *
