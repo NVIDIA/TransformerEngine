@@ -37,10 +37,11 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *tp_group) {
   numranks = tp_group->getSize();
   pgs.insert({"tp", tp_group});
   initialized = true;
-}. // TP group constructor for NVTE_WITH_CUBLASMP=1
+}
+.  // TP group constructor for NVTE_WITH_CUBLASMP=1
 
-CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     c10d::ProcessGroup *intra_domain_group) {
+    CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
+                                         c10d::ProcessGroup *intra_domain_group) {
 #if defined(NVTE_UB_WITH_MPI)
   NVTE_ERROR("Internal TE error: CommOverlapHelper(world, intra_domain) is not supported with ",
              "NVTE_UB_WITH_MPI=1!");
@@ -135,36 +136,34 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
  * CommOverlap
  **************************************************************************************************/
 
-
-CommOverlapManager::CommOverlapManager(
-    transformer_engine::CommOverlapMethod method, transformer_engine::CommOverlapType comm_type,
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
-    int tp_size, int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
-    int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool aggregate_ag,
-    bool rs_overlap_first_gemm) {
+CommOverlapManager::CommOverlapManager(transformer_engine::CommOverlapMethod method,
+                                       transformer_engine::CommOverlapType comm_type,
+                                       const std::vector<size_t> &buffer_shape,
+                                       at::ScalarType buffer_dtype, CommOverlapHelper *helper,
+                                       int tp_size, int num_splits, int num_max_streams,
+                                       int comm_cga_size, int gemm_priority, int comm_priority,
+                                       int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
+                                       bool aggregate_ag, bool rs_overlap_first_gemm) {
 #ifdef NVTE_WITH_CUBLASMP
-  _ctx = nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(helper->get_comm_ptr("tp"),
-                                   helper->numranks, helper->myrank, te::cuda::current_device()));
+  _ctx = nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(
+      helper->get_comm_ptr("tp"), helper->numranks, helper->myrank, te::cuda::current_device()));
 #else
   if (method == te::CommOverlapMethod::RING_EXCHANGE) {
-    _ctx = reinterpret_cast<te::CommOverlapCore*>(
-        new te::CommOverlapP2PBase(
-            buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
-            helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
-            tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-            std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-            comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-            atomic_gemm, aggregate));
+    _ctx = reinterpret_cast<te::CommOverlapCore *>(new te::CommOverlapP2PBase(
+        buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
+        helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
+        tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
+        comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
+        atomic_gemm, aggregate));
   } else {
-    _ctx = reinterpret_cast<te::CommOverlapCore*>(
-      new te::CommOverlapBase(
-            buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
-            helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
-            tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-            std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
-            num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
-            set_sm_margin, atomic_gemm, rs_overlap_first_gemm)
-    )
+    _ctx = reinterpret_cast<te::CommOverlapCore *>(new te::CommOverlapBase(
+        buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
+        helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
+        tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
+        comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, atomic_gemm,
+        rs_overlap_first_gemm))
   }
 #endif
 }
@@ -192,13 +191,13 @@ void CommOverlapManager::copy_into_buffer(const at::Tensor &input, bool local_ch
     void *dst_ptr;
     if (local_chunk) {
       NVTE_CHECK(_ubufs[_tp_id].numel() == input_size,
-                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
-                "(input_size=", input_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+                 "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+                 "(input_size=", input_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
       dst_ptr = _ubufs[_tp_id].dptr();
     } else {
       NVTE_CHECK(_ubuf.numel() == input_size,
-                "Tried to copy an invalid tensor into a Userbuffers buffer ",
-                "(input_size=", input_size, ", ubuf_size=", _ubuf.numel(), ")");
+                 "Tried to copy an invalid tensor into a Userbuffers buffer ",
+                 "(input_size=", input_size, ", ubuf_size=", _ubuf.numel(), ")");
       dst_ptr = _ubuf.dptr();
     }
 
@@ -211,14 +210,15 @@ void CommOverlapManager::copy_into_buffer(const at::Tensor &input, bool local_ch
     void *dst_ptr = _ubuf.dptr();
     if (local_chunk) {
       NVTE_CHECK(input_size * _tp_size == ubuf_size,
-                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
-                "(input_size=", input_size, ", tensor_parallel_size=", _tp_size,
-                ", ubuf_size=", ubuf_size, ")");
-      dst_ptr = (reinterpret_cast<char *>(dst_ptr) + (ubuf_size / _tp_size) * _tp_id * element_size);
+                 "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+                 "(input_size=", input_size, ", tensor_parallel_size=", _tp_size,
+                 ", ubuf_size=", ubuf_size, ")");
+      dst_ptr =
+          (reinterpret_cast<char *>(dst_ptr) + (ubuf_size / _tp_size) * _tp_id * element_size);
     } else {
       NVTE_CHECK(input_size == ubuf_size,
-                "Tried to copy an invalid tensor into a Userbuffers buffer ",
-                "(input_size=", input_size, ", ubuf_size=", ubuf_size, ")");
+                 "Tried to copy an invalid tensor into a Userbuffers buffer ",
+                 "(input_size=", input_size, ", ubuf_size=", ubuf_size, ")");
     }
 
     // Copy data
@@ -231,7 +231,8 @@ void CommOverlapManager::copy_into_buffer(const at::Tensor &input, bool local_ch
 #endif
 }
 
-at::Tensor CommOverlapManager::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+at::Tensor CommOverlapManager::get_buffer(bool local_chunk,
+                                          std::optional<std::vector<int64_t>> shape) {
 #ifndef NVTE_WITH_CUBLASMP
   at::Tensor buffer_tensor;
   if (_method == te::CommOverlapMethod::RING_EXCHANGE) {
@@ -241,12 +242,12 @@ at::Tensor CommOverlapManager::get_buffer(bool local_chunk, std::optional<std::v
       if (local_chunk) {
         NVTE_CHECK(requested_size == _ubufs[_tp_id].numel(),
 
-        "Invalid shape for local chunk of a Userbuffers buffer (requested shape=", *shape,
-                  ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+                   "Invalid shape for local chunk of a Userbuffers buffer (requested shape=",
+                   *shape, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
       } else {
         NVTE_CHECK(requested_size == _ubuf.numel(),
-                  "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
-                  ", ubuf_size=", _ubuf.numel(), ")");
+                   "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
+                   ", ubuf_size=", _ubuf.numel(), ")");
       }
     } else {
       int64_t dim0 = _ubuf.size(0);
@@ -270,12 +271,12 @@ at::Tensor CommOverlapManager::get_buffer(bool local_chunk, std::optional<std::v
       const size_t requested_size = transformer_engine::pytorch::product(*shape);
       if (local_chunk) {
         NVTE_CHECK(requested_size * _tp_size == ubuf_size,
-                  "Invalid shape for local chunk of a Userbuffers buffer (requested shape=", *shape,
-                  ", tensor_parallel_size=", _tp_size, ", ubuf_size=", ubuf_size, ")");
+                   "Invalid shape for local chunk of a Userbuffers buffer (requested shape=",
+                   *shape, ", tensor_parallel_size=", _tp_size, ", ubuf_size=", ubuf_size, ")");
       } else {
         NVTE_CHECK(requested_size == ubuf_size,
-                  "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
-                  ", ubuf_size=", ubuf_size, ")");
+                   "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
+                   ", ubuf_size=", ubuf_size, ")");
       }
     } else {
       int64_t dim0 = _ubuf.size(0);
@@ -310,19 +311,19 @@ at::Stream CommOverlapManager::get_communication_stream() {
   return at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device());
 }
 
-void CommOverlapManager::execute(
-    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
-    TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
-    bool accumulate, bool use_split_accumulator, te::CommOverlapType comm_type,
-    TensorWrapper &aux_out, cudaStream_t stream) {
+void CommOverlapManager::execute(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                 bool accumulate, bool use_split_accumulator,
+                                 te::CommOverlapType comm_type, TensorWrapper &aux_out,
+                                 cudaStream_t stream) {
 #ifdef NVTE_WITH_CUBLASMP
   if (_method == te::CommOverlapMethod::BULK) {
     NVTE_ERROR("Bulk overlap is not supported with cuBlasMp.");
   } else {
     cublasMpMatmulAlgoType_t algo = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT;
     if (_method == te::CommOverlapMethod::RING_EXCHANGE) {
-      algo = (_use_atomic_gemm) ? CUBLASMP_MATMUL_ALGO_ATOMIC_P2P
-                                : CUBLASMP_MATMUL_ALGO_SPLIT_P2P;
+      algo = (_use_atomic_gemm) ? CUBLASMP_MATMUL_ALGO_ATOMIC_P2P : CUBLASMP_MATMUL_ALGO_SPLIT_P2P;
     } else if (_method == te::CommOverlapMethod::PIPELINE) {
       algo = (_use_atomic_gemm) ? CUBLASMP_MATMUL_ALGO_ATOMIC_MULTICAST
                                 : CUBLASMP_MATMUL_ALGO_SPLIT_MULTICAST;
@@ -343,16 +344,14 @@ void CommOverlapManager::execute(
 
     if (comm_type == te::CommOverlapType::AG) {
       n *= _ctx->nranks;  // convert all-gathered dimension to global size
-      NVTE_CHECK_CUBLASMP(
-          nvte_all_gather_gemm(_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                               pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                               stream, algo));
+      NVTE_CHECK_CUBLASMP(nvte_all_gather_gemm(_ctx, m, n, k, A.data(), B.data(), D.data(),
+                                               bias.data(), pre_gelu_out.data(), transa, transb,
+                                               grad, accumulate, _num_comm_sm, stream, algo));
     } else {
       k *= _ctx->nranks;  // convert contracting dimension to global size
-      NVTE_CHECK_CUBLASMP(
-        nvte_gemm_reduce_scatter(_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                                 pre_gelu_out.data(), transa, transb, grad, accumulate,
-                                 _num_comm_sm, stream, algo));
+      NVTE_CHECK_CUBLASMP(nvte_gemm_reduce_scatter(_ctx, m, n, k, A.data(), B.data(), D.data(),
+                                                   bias.data(), pre_gelu_out.data(), transa, transb,
+                                                   grad, accumulate, _num_comm_sm, stream, algo));
     }
   }
 #else

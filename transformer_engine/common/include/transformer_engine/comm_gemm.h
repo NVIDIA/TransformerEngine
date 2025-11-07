@@ -46,9 +46,9 @@ enum NVTECommGemmAlgoType {
 
 bool nvte_built_with_cublasmp() {
 #ifdef NVTE_WITH_CUBLASMP
-    return true;
+  return true;
 #else
-    return false;
+  return false;
 #endif
 }
 

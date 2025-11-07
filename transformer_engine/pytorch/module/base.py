@@ -233,9 +233,9 @@ def initialize_ub(
                 elif torch.distributed.is_gloo_available():
                     bootstrap_backend = "gloo"
         elif tex.nvte_built_with_cublasmp():
-            assert bootstrap_backend == "nccl", (
-                "Comm+GEMM overlap w/ cuBlasMp needs `bootstrap_backend=\"nccl\"`."
-            )
+            assert (
+                bootstrap_backend == "nccl"
+            ), 'Comm+GEMM overlap w/ cuBlasMp needs `bootstrap_backend="nccl"`.'
         else:
             assert bootstrap_backend in [
                 "gloo",
@@ -423,7 +423,11 @@ def initialize_ub(
             )
 
         _ub_communicators[(name, quantization_mode)] = tex.CommOverlapManager(
-            tex.CommOverlapMethod.RING_EXCHANGE if method == "ring_exchange" else tex.CommOverlapMethod.PIPELINE,
+            (
+                tex.CommOverlapMethod.RING_EXCHANGE
+                if method == "ring_exchange"
+                else tex.CommOverlapMethod.PIPELINE
+            ),
             tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
             shape,
             torch.uint8 if (use_fp8 and fp8_buf) else dtype,

@@ -267,7 +267,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                               te_pre_gelu_out, te_workspace, grad, accumulate,
                               use_split_accumulator, comm_type.value(), extra_output_tensor,
                               main_stream);
-        });
+      });
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
