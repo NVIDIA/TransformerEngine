@@ -1875,6 +1875,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2089,6 +2092,8 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         # Ring attention doesn't use dsoftmax_offset, but we need to return it for arity matching
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (
             dq_sharding,
@@ -2375,6 +2380,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2515,7 +2523,11 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
-        arg_shardings = tuple(arg.sharding for arg in arg_infos)
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
         # dq, dk, dv, dbias, dsoftmax_offset sharding = q, k, v, bias, softmax_offset sharding
         out_shardings = tuple(arg.sharding for arg in arg_infos[:5])
 
