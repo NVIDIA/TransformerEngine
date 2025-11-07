@@ -25,6 +25,7 @@ import math
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
+
 def generate_random_multiples_sum(total=8192, n=4, multiple=64):
     if total % multiple != 0:
         raise ValueError(f"Total ({total}) must be a multiple of {multiple}")
@@ -38,12 +39,13 @@ def generate_random_multiples_sum(total=8192, n=4, multiple=64):
     cuts = sorted(random.sample(range(1, total_units), n - 1))
 
     # convert to segment lengths
-    parts = [cuts[0]] + \
-            [cuts[i] - cuts[i-1] for i in range(1, len(cuts))] + \
-            [total_units - cuts[-1]]
+    parts = (
+        [cuts[0]] + [cuts[i] - cuts[i - 1] for i in range(1, len(cuts))] + [total_units - cuts[-1]]
+    )
 
     # convert back to multiples
     return [p * multiple for p in parts]
+
 
 def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
     least_multiple = 64
@@ -53,7 +55,7 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
     avg_split = M // num_chunks
 
     if M == 0 or N == 0:
-        # all zeros 
+        # all zeros
         return [0] * num_chunks
     if edge_cases == "regular":
         split_sections = [avg_split] * num_chunks
@@ -73,7 +75,9 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
 
     # make sure every split_section is a multiple of least_multiple
     for split_section in split_sections:
-        assert split_section % least_multiple == 0, "The split_sections are not multiples of least_multiple"
+        assert (
+            split_section % least_multiple == 0
+        ), "The split_sections are not multiples of least_multiple"
 
     return split_sections
 
@@ -175,8 +179,8 @@ def check_group_quantization_nvfp4_versus_reference(
         )
         for _ in range(len(split_sections))
     ]
-    x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = reference_group_quantize(
-        x, quantizers, split_sections, return_transpose
+    x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
+        reference_group_quantize(x, quantizers, split_sections, return_transpose)
     )
 
     split_quantize_outputs = tex.split_quantize(x, split_sections, quantizers)
@@ -195,27 +199,31 @@ def check_group_quantization_nvfp4_versus_reference(
             torch.testing.assert_close(x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0)
             torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
             valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, False)
-            x_sx_valid = x_sx[i][:valid_scale_shape[0], :valid_scale_shape[1]]
-            x_sx_ref_valid = x_sx_ref[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+            x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+            x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
             torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
-    
+
     if return_transpose:
-        x_qx_t = [output._columnwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
+        x_qx_t = [
+            output._columnwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs
+        ]
         x_sx_t = [output._columnwise_scale_inv for output in split_quantize_outputs]
         x_amax_colwise = [output._amax_columnwise for output in split_quantize_outputs]
-        # assert with zero tolerance 
+        # assert with zero tolerance
         for i in range(len(x_qx_t)):
             if split_sections[i] == 0:
                 # then just assert the same same and dtype because the buffer won't be zero out
                 assert_same_shape_and_dtype(x_amax_colwise[i], x_amax_colwise_ref[i])
                 assert_same_shape_and_dtype(x_qx_t[i], x_qx_t_ref[i])
                 assert_same_shape_and_dtype(x_sx_t[i], x_sx_t_ref[i])
-            else:   
-                torch.testing.assert_close(x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0)
+            else:
+                torch.testing.assert_close(
+                    x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0
+                )
                 torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
                 valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, True)
-                x_sx_t_valid = x_sx_t[i][:valid_scale_shape[0], :valid_scale_shape[1]]
-                x_sx_t_ref_valid = x_sx_t_ref[i][:valid_scale_shape[0], :valid_scale_shape[1]]
+                x_sx_t_valid = x_sx_t[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                x_sx_t_ref_valid = x_sx_t_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
                 torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
 
 
@@ -234,7 +242,14 @@ def check_group_quantization_nvfp4_versus_reference(
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize(
-    "edge_cases", ["regular", "zero_tokens_front", "zero_tokens_end", "zero_tokens_middle", "random_uneven_split"]
+    "edge_cases",
+    [
+        "regular",
+        "zero_tokens_front",
+        "zero_tokens_end",
+        "zero_tokens_middle",
+        "random_uneven_split",
+    ],
 )
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
@@ -263,5 +278,3 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         with_post_rht_amax=True,
         with_random_sign_mask=with_random_sign_mask,
     )
-
-

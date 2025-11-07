@@ -146,11 +146,6 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     nvte_tensor_input_list.push_back(input_list[i].data());
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
-  
-  // stochastic rounding support for multi tensor
-  if (quantizer->stochastic_rounding) {
-    // TODO: implement stochastic rounding support for multi tensor
-  }
 
   // Get a list of QuantizationConfigWrapper quant_config
   std::vector<QuantizationConfigWrapper> quant_config_list;
@@ -158,31 +153,54 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     quant_config_list.emplace_back(QuantizationConfigWrapper());
   }
 
+  // stochastic rounding support for multi tensor
+  std::vector<TensorWrapper> te_rng_state_list;
+  at::Tensor rng_states_tensor;
+
+  // assumes one quantizer doing RS means all quantizers doing RS
+  if (quantizer->stochastic_rounding) {
+    // TODO(zhongbo): remove the for loop of generating rng states with a single call
+    // with rng_elts_per_thread = 1024 * num_tensors
+    // Change to the bulk generate rng states api when grouped quantize is available
+    const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
+    auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    rng_states_tensor = torch::empty({2 * num_tensors}, opts);
+
+    for (size_t i = 0; i < num_tensors; ++i) {
+      auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+          std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+      at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+      int64_t *rng_state_ptr = static_cast<int64_t *>(rng_states_tensor.data_ptr()) + i * 2;
+      philox_unpack(philox_args, rng_state_ptr);
+      te_rng_state_list.push_back(makeTransformerEngineTensor(
+          static_cast<void *>(rng_state_ptr), std::vector<size_t>{2}, DType::kInt64));
+      quant_config_list[i].set_rng_state(te_rng_state_list[i].data());
+      quant_config_list[i].set_stochastic_rounding(true);
+    }
+  }
+
   // with or without RHT, use nvte_multi_hadamard_transform_amax
   // out.amax is the rowwise amax, out.columnwise_amax is the columnwise amax
-  // rowwise amax will be the amax of original amax(input) 
+  // rowwise amax will be the amax of original amax(input)
   // columnwise amax will be the amax of the amax(RHT(input.t))
   if (quantizer->with_rht) {
     // bf16 only for now
-    NVTE_CHECK(input.dtype() == DType::kBFloat16, "NVFP4 multi_quantize: RHT is only supported for bfloat16 input");
+    NVTE_CHECK(input.dtype() == DType::kBFloat16,
+               "NVFP4 multi_quantize: RHT is only supported for bfloat16 input");
     if (quantizer->with_post_rht_amax) {
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
       NVTE_SCOPED_GIL_RELEASE({
         nvte_multi_hadamard_transform_amax(
-            input.data(),
-            reinterpret_cast<NVTETensor*>(nvte_tensor_output_list.data()),
-            split_sections.data(),
-            num_tensors,
-            0,
-            quantizer->rht_matrix_random_sign_mask_t,
+            input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+            split_sections.data(), num_tensors, 0, quantizer->rht_matrix_random_sign_mask_t,
             stream);
       });
-    }else {
+    } else {
       NVTE_CHECK(false, "NVFP4 multi_quantize: Pre-RHT amax is not supported yet");
     }
-  }else {
+  } else {
     // TODO: implement this too when we disable RHT
     NVTE_CHECK(false, "NVFP4 multi_quantize: RHT is not supported when RHT is disabled for now");
   }
@@ -191,7 +209,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
   if (quantizer->with_rht) {
     // check the availablibilty of RHT matrix definition for best perf
     NVTE_CHECK(quantizer->rht_matrix.defined() && quantizer->rht_matrix.numel() > 0,
-                "NVFP4 multi_quantize: RHT matrix is not set");
+               "NVFP4 multi_quantize: RHT matrix is not set");
     auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer->rht_matrix);
 
     NVTE_SCOPED_GIL_RELEASE({
@@ -211,12 +229,15 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
           out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
                                              static_cast<DType>(out_identity_scale_inv.dtype),
                                              out_identity_scale_inv.shape);
-          out_identity.set_amax(out_identity_amax.data_ptr, static_cast<DType>(out_identity_amax.dtype),
+          out_identity.set_amax(out_identity_amax.data_ptr,
+                                static_cast<DType>(out_identity_amax.dtype),
                                 out_identity_amax.shape);
-    
-          NVTE_SCOPED_GIL_RELEASE(
-              { nvte_quantize_v2(input_list[i].data(), out_identity.data(), quant_config_list[i], stream); });
-        } 
+
+          NVTE_SCOPED_GIL_RELEASE({
+            nvte_quantize_v2(input_list[i].data(), out_identity.data(), quant_config_list[i],
+                             stream);
+          });
+        }
 
         // already eligible for RHT columnwise cast fusion after the dimension check
         if (quantizer->columnwise_usage) {
@@ -240,16 +261,17 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
           colwise_data_shape_2d.push_back(last_dim);
 
           out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
-                                        static_cast<DType>(out_columnwise_data.dtype),
-                                        colwise_data_shape_2d);
+                                         static_cast<DType>(out_columnwise_data.dtype),
+                                         colwise_data_shape_2d);
           out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
                                               static_cast<DType>(out_columnwise_scale_inv.dtype),
                                               out_columnwise_scale_inv.shape);
           out_transpose.set_amax(out_columnwise_amax.data_ptr,
-                                static_cast<DType>(out_columnwise_amax.dtype),
-                                out_columnwise_amax.shape);
-          nvte_hadamard_transform_cast_fusion_columnwise(
-                input_list[i].data(), out_transpose.data(), rht_matrix_nvte.data(), quant_config_list[i], stream);
+                                 static_cast<DType>(out_columnwise_amax.dtype),
+                                 out_columnwise_amax.shape);
+          nvte_hadamard_transform_cast_fusion_columnwise(input_list[i].data(), out_transpose.data(),
+                                                         rht_matrix_nvte.data(),
+                                                         quant_config_list[i], stream);
         }
       }
     });
@@ -264,7 +286,6 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
       }
     });
   }
-
 }
 
 void multi_tensor_quantize_impl(const TensorWrapper &single_input,
@@ -290,7 +311,7 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
 
   // check if split_sections is just a dummy input
   bool valid_split_sections = split_sections.size() == num_tensors;
-  
+
   // Check scaling mode consistency across all tensors
   for (size_t i = 0; i < num_tensors; i++) {
     if (detail::IsFloat8Quantizers(quantizer_py_list[i].ptr())) {
@@ -300,7 +321,7 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
         with_fused_kernel = false;
         break;
       }
-      // check if the scaling mode is fp8 delayed scaling for all quantizers 
+      // check if the scaling mode is fp8 delayed scaling for all quantizers
       if (scaling_mode != NVTE_DELAYED_TENSOR_SCALING) {
         with_fused_kernel = false;
         break;
@@ -317,12 +338,12 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
         if (split_sections[i] % 64 != 0) {
           with_fused_kernel = false;
           break;
-        } 
-      }else {
+        }
+      } else {
         with_fused_kernel = false;
         break;
       }
-      
+
     } else {
       with_fused_kernel = false;
       break;

@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_align_size_for_quantization
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    get_align_size_for_quantization,
+)
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
