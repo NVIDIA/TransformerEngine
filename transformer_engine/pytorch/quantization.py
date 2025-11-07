@@ -119,7 +119,7 @@ def get_align_size_for_quantization(recipe: Recipe):
     """Get the alignment size for quantization."""
     if recipe.mxfp8():
         return 32
-    elif recipe.nvfp4():
+    if recipe.nvfp4():
         return 64
     return 16
 
