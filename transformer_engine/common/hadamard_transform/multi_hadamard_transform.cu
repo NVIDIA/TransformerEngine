@@ -198,6 +198,28 @@ __global__ void MultiZeroAmaxKernel(MultiAmaxArgs args) {
   }
 }
 
+// args: the mult-tensor amax arguments
+__global__ void MultiAmaxMemcpyD2DKernelPreRHT(MultiAmaxArgs args) {
+  int num_tensors = args.num_tensors;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (; tid < num_tensors; tid += stride) {
+    float* output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tid]);
+    float* output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tid]);
+    float* output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tid]);
+    if (output_pre_rht_amax_ptr != nullptr) {
+      float pre_rht_amax = *output_pre_rht_amax_ptr;
+      if (output_identity_amax_ptr != nullptr) {
+        *output_identity_amax_ptr = pre_rht_amax;
+      }
+      if (output_transpose_amax_ptr != nullptr) {
+        *output_transpose_amax_ptr = pre_rht_amax;
+      }
+    }
+  }
+}
+
 template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM_X, int BUFF_DIM_Y,
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
@@ -361,10 +383,13 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
 
 }  // namespace
 
+// broadcast_pre_rht_amax: when it's true, hadamard transform will be disabled
+// if at this time, the amax buffers for output expects both amax_rowwise and amax_colwise
+// then call MultiAmaxMemcpyD2DKernelPreRHT to D2D copy the amax values
 void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
                                    const int* split_sections, size_t num_tensors,
                                    uint16_t random_sign_mask, uint16_t random_sign_mask_t,
-                                   cudaStream_t stream) {
+                                   bool broadcast_pre_rht_amax, cudaStream_t stream) {
   NVTE_API_CALL(multi_hadamard_transform_amax);
 #if CUDA_VERSION >= 12080
 
@@ -428,12 +453,19 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
   NVTE_CHECK(!all_return_identity_amax,
              "Currently RHT transform should only be applied to transposed input");
 
+  if (broadcast_pre_rht_amax) {
+    NVTE_CHECK(all_return_pre_rht_amax,
+               "broadcast_pre_rht_amax is only supported when we compute pre-RHT amax");
+    // if all_return_identity_amax and all_return_transposed_amax both are false, there is no need to broadcast anything
+    broadcast_pre_rht_amax &= (all_return_identity_amax || all_return_transposed_amax);
+  }
+
   // Multi zero out multiple amaxes if needed
   // Curretly don't support multi-launch when num_tensors is larger than kMaxTensorsPerKernel
   // let the number of threads equal to number of tensors, use 1 block, kMaxTensorsPerKernel threads per block
-  dim3 block_zero_amax(kMaxTensorsPerKernel);
-  dim3 grid_zero_amax(1);
-  MultiZeroAmaxKernel<<<grid_zero_amax, block_zero_amax, 0, stream>>>(kernel_args);
+  dim3 block_setup_amax(kMaxTensorsPerKernel);
+  dim3 grid_setup_amax(1);
+  MultiZeroAmaxKernel<<<grid_setup_amax, block_setup_amax, 0, stream>>>(kernel_args);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   checkCuDriverContext(stream);
@@ -482,10 +514,10 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
   dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      all_return_transposed_amax, kReturnTransposedAmax,
+      (all_return_transposed_amax && !broadcast_pre_rht_amax), kReturnTransposedAmax,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          all_return_identity_amax, kReturnIdentityAmax,
+          (all_return_identity_amax && !broadcast_pre_rht_amax), kReturnIdentityAmax,
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               all_return_pre_rht_amax, kReturnPreRhtAmax,
@@ -507,7 +539,11 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
 
               kernel<<<grid, block, shmem_bytes, stream>>>(tensor_map_input, kernel_args,
                                                            random_sign_mask, random_sign_mask_t,
-                                                           num_rows, row_length);)));
+                                                           num_rows, row_length);
+              if (broadcast_pre_rht_amax) {
+                MultiAmaxMemcpyD2DKernelPreRHT<<<grid_setup_amax, block_setup_amax, 0, stream>>>(
+                    kernel_args);
+              })));
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
@@ -544,5 +580,22 @@ void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
   // Call the multi-tensor Hadamard transform amax implementation.
   multi_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors,
                                 static_cast<uint16_t>(random_sign_mask),
-                                static_cast<uint16_t>(random_sign_mask_t), stream);
+                                static_cast<uint16_t>(random_sign_mask_t), false, stream);
+}
+
+// Multi-tensor amax without doing hadamard transform
+void nvte_multi_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
+                            const size_t num_tensors, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_hadamard_transform_amax);
+  using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+
+  Tensor* input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor*> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+
+  multi_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors, 0, 0, true,
+                                stream);
 }

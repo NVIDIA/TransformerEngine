@@ -79,6 +79,20 @@ void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream);
 
+/*!
+ * \brief Perform multi-tensor absolute maximum reduction (amax) without Hadamard transform.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  \param[in]      input           Input tensor, assumed contiguous in memory and split on dimension 0.
+ *  \param[in,out]  outputs         Array of output tensors.
+ *  \param[in]      split_sections  Array specifying splits in dimension 0 for each output tensor.
+ *  \param[in]      num_tensors     Number of output tensors, must be > 0.
+ *  \param[in]      stream          CUDA stream used for the operation.
+ */
+void nvte_multi_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
+                            const size_t num_tensors, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

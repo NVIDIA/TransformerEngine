@@ -149,7 +149,6 @@ def check_group_quantization_nvfp4_versus_reference(
     with_post_rht_amax: bool = True,
     with_random_sign_mask: bool = True,
 ) -> None:
-    assert with_rht and with_post_rht_amax, "RHT and post-RHT amax reduction must be enabled."
 
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -257,6 +256,7 @@ def check_group_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
+@pytest.mark.parametrize("with_rht", [True, False], ids=["with_rht", "no_rht"])
 def test_rht_with_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -264,9 +264,13 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     edge_cases: str,
     return_transpose: bool,
     with_random_sign_mask: bool,
+    with_rht: bool,
 ) -> None:
 
     split_sections = generate_split_sections(M, N, edge_cases)
+
+    # currently disable pre-RHT amax
+    with_post_rht_amax = with_rht
 
     check_group_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
@@ -274,7 +278,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         N=N,
         return_transpose=return_transpose,
         split_sections=split_sections,
-        with_rht=True,
-        with_post_rht_amax=True,
+        with_rht=with_rht,
+        with_post_rht_amax=with_post_rht_amax,
         with_random_sign_mask=with_random_sign_mask,
     )

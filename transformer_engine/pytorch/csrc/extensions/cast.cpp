@@ -198,11 +198,20 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
             stream);
       });
     } else {
+      // RHT is enabled, but amax is pre-RHT amax
+      // Kernel for this ready, but still disable this case since we need to verify recipe convergence first
       NVTE_CHECK(false, "NVFP4 multi_quantize: Pre-RHT amax is not supported yet");
     }
   } else {
-    // TODO: implement this too when we disable RHT
-    NVTE_CHECK(false, "NVFP4 multi_quantize: multi-amax without RHT is not supported for now");
+    // We need:
+    // 1. Rowwise amax = amax for input
+    // 2. Columnwise amax = amax for input too
+    // Columnwise amax will be filled with a fused D2D copy from rowwise amax
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_amax(input.data(),
+                             reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+                             split_sections.data(), num_tensors, stream);
+    });
   }
 
   // start with quantize, with or without RHT
