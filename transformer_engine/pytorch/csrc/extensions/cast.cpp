@@ -164,7 +164,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     // Change to the bulk generate rng states api when grouped quantize is available
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-    rng_states_tensor = torch::empty({2 * num_tensors}, opts);
+    rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
 
     for (size_t i = 0; i < num_tensors; ++i) {
       auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
