@@ -102,6 +102,7 @@ def reference_group_quantize(
     x: torch.Tensor,
     quantizers: list[NVFP4Quantizer],
     split_sections: list[int],
+    return_identity: bool,
     return_transpose: bool,
 ) -> torch.Tensor:
     x_view = x.reshape(-1, x.size(-1))
@@ -119,9 +120,14 @@ def reference_group_quantize(
     for i in range(len(x_chunks)):
         x_chunk = x_chunks[i]
         x_nvfp4_res = quantizers[i](x_chunk)
-        x_qx.append(x_nvfp4_res._rowwise_data.view(dtype=torch.uint8))
-        x_sx.append(x_nvfp4_res._rowwise_scale_inv)
-        x_amax_rowwise.append(x_nvfp4_res._amax_rowwise)
+        if return_identity:
+            x_qx.append(x_nvfp4_res._rowwise_data.view(dtype=torch.uint8))
+            x_sx.append(x_nvfp4_res._rowwise_scale_inv)
+            x_amax_rowwise.append(x_nvfp4_res._amax_rowwise)
+        else:
+            x_qx.append(None)
+            x_sx.append(None)
+            x_amax_rowwise.append(None)
         if return_transpose:
             x_qx_t.append(x_nvfp4_res._columnwise_data.view(dtype=torch.uint8))
             x_sx_t.append(x_nvfp4_res._columnwise_scale_inv)
@@ -143,6 +149,7 @@ def check_group_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,
     N: int,
+    return_identity: bool,
     return_transpose: bool,
     split_sections: list[int],
     with_rht: bool = True,
@@ -168,7 +175,7 @@ def check_group_quantization_nvfp4_versus_reference(
     quantizers = [
         NVFP4Quantizer(
             fp4_dtype=te_dtype,
-            rowwise=True,
+            rowwise=return_identity,
             columnwise=return_transpose,
             with_amax_reduction=False,
             amax_reduction_group=None,
@@ -179,28 +186,31 @@ def check_group_quantization_nvfp4_versus_reference(
         for _ in range(len(split_sections))
     ]
     x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
-        reference_group_quantize(x, quantizers, split_sections, return_transpose)
+        reference_group_quantize(x, quantizers, split_sections, return_identity, return_transpose)
     )
 
     split_quantize_outputs = tex.split_quantize(x, split_sections, quantizers)
 
-    x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
-    x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
-    x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
+    if return_identity:
+        x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
+        x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
+        x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
 
-    for i in range(len(x_qx)):
-        if split_sections[i] == 0:
-            # then just assert the same same and dtype because the buffer won't be zero out
-            assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
-            assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
-            assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
-        else:
-            torch.testing.assert_close(x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0)
-            torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
-            valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, False)
-            x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-            x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-            torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
+        for i in range(len(x_qx)):
+            if split_sections[i] == 0:
+                # then just assert the same same and dtype because the buffer won't be zero out
+                assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
+                assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
+                assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
+            else:
+                torch.testing.assert_close(
+                    x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0
+                )
+                torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
+                valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, False)
+                x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
 
     if return_transpose:
         x_qx_t = [
@@ -251,7 +261,7 @@ def check_group_quantization_nvfp4_versus_reference(
     ],
 )
 @pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
+    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
 )
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
@@ -262,7 +272,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     M: int,
     N: int,
     edge_cases: str,
-    return_transpose: bool,
+    quantize_mode: str,
     with_random_sign_mask: bool,
     with_rht: bool,
 ) -> None:
@@ -272,10 +282,23 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     # currently disable pre-RHT amax
     with_post_rht_amax = with_rht
 
+    if quantize_mode == "quantize":
+        return_identity = True
+        return_transpose = False
+    elif quantize_mode == "quantize_transpose":
+        return_identity = True
+        return_transpose = True
+    elif quantize_mode == "quantize_colwise_only":
+        return_identity = False
+        return_transpose = True
+    else:
+        raise ValueError(f"Invalid quantize mode: {quantize_mode}")
+
     check_group_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
         N=N,
+        return_identity=return_identity,
         return_transpose=return_transpose,
         split_sections=split_sections,
         with_rht=with_rht,

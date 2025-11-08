@@ -207,11 +207,25 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     // 1. Rowwise amax = amax for input
     // 2. Columnwise amax = amax for input too
     // Columnwise amax will be filled with a fused D2D copy from rowwise amax
+    // Note that the multi compute amax API expects rowwise amax pointer to be not null
+    // So we need to set the pointer accordingly to make colwise-only quantization work
+    std::vector<void *> orig_amax_ptr_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
+      orig_amax_ptr_list.push_back(rowwise_amax_ptr);
+      auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
+      void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+      output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+    }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_multi_tensor_amax(input.data(),
                              reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                              split_sections.data(), num_tensors, stream);
     });
+    for (size_t i = 0; i < num_tensors; i++) {
+      output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
+    }
   }
 
   // start with quantize, with or without RHT
