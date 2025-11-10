@@ -29,12 +29,14 @@ except ImportError:
 
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
 from . import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,
     needs_quantized_gemm,
 )
+
 from .constants import dist_group_type
 from .quantization import FP8GlobalStateManager, autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -46,7 +48,6 @@ from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from .triton.pad import pad_columnwise_scale_inv
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 

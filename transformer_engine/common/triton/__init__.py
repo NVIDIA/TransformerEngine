@@ -2,4 +2,4 @@
 #
 # See LICENSE for license information.
 
-"""PyTorch wrappers for Triton kernels."""
+"""Kernels written with OpenAI Triton."""
