@@ -45,7 +45,6 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.common import recipe
 
 GEMM_CASES = [
     (256, 256, 512),

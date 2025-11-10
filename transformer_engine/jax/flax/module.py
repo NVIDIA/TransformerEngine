@@ -597,7 +597,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
-    return_layernorm_output: bool, default = True
+    return_layernorm_output: bool, default = False
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     enable_low_rank_adaptation: bool, default = False
@@ -644,7 +644,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
-    return_layernorm_output: bool = True
+    return_layernorm_output: bool = False
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
@@ -891,10 +891,10 @@ class LayerNormMLP(TransformerEngineBase):
         The name of axes used to shard bias with a corresponding mesh  for
         the weight of the second dense layer transformation.
         Only used when :attr:`use_bias=True`.
-    return_layernorm_output: bool, default = True
+    return_layernorm_output: bool, default = False
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
-    activations: Sequence[Union[str, Callable]], default = ('relu',)
+    activations: Sequence[Union[str, Callable]], default = ('gelu',)
         The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
     activation_params: dict, default = None
@@ -903,7 +903,7 @@ class LayerNormMLP(TransformerEngineBase):
         need additional parameters.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
-    intermediate_dropout_rate: float, default = 0.1
+    intermediate_dropout_rate: float, default = 0.0
         Dropout probability for the dropout op after the :attr:`activations`.
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden
@@ -959,11 +959,11 @@ class LayerNormMLP(TransformerEngineBase):
     bias_init: Initializer = nn.initializers.zeros
     bias_axes_1: Tuple[str, ...] = ("act", "mlp")
     bias_axes_2: Tuple[str, ...] = ("embed",)
-    return_layernorm_output: bool = True
-    activations: Sequence[Union[str, Callable]] = ("relu",)
+    return_layernorm_output: bool = False
+    activations: Sequence[Union[str, Callable]] = ("gelu",)
     activation_params: dict = None
     intermediate_dropout_rng_name: str = "dropout"
-    intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_rate: float = 0.0
     intermediate_hidden_dropout_dims: Sequence[int] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32

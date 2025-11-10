@@ -389,6 +389,7 @@ class TestDistributedLayernormMLP:
                     intermediate_dim=INTERMEDIATE,
                     activations=activation_type,
                     use_bias=use_bias,
+                    return_layernorm_output=True,
                 )
                 params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
                 mlp_out_single, ln_out_single = ln_mlp_single.apply(
@@ -417,6 +418,7 @@ class TestDistributedLayernormMLP:
                     dot_1_input_axes=DOT_1_INPUT_AXES,
                     dot_2_input_axes=DOT_2_INPUT_AXES,
                     name="mlp",
+                    return_layernorm_output=True,
                 )
                 params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
                 mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(

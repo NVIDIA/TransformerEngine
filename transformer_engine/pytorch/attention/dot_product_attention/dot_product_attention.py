@@ -1314,6 +1314,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
+                cuda_graph=is_graph_capturing(),
             )
             global _attention_backends
             if is_in_onnx_export_mode():
