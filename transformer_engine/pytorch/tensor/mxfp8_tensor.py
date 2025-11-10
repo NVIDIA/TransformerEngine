@@ -339,17 +339,19 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
-            if (
-                isinstance(src, MXFP8Tensor)
-                and isinstance(dst, MXFP8Tensor)
-                and (src._rowwise_data is not None or dst._rowwise_data is None)
-                and (src._columnwise_data is not None or dst._columnwise_data is None)
-            ):
-                if dst._rowwise_data is not None:
+            rowwise_usage, columnwise_usage = False, False
+            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
+                if src._rowwise_data is not None and dst._rowwise_data is not None:
                     dst._rowwise_data.copy_(src._rowwise_data.detach())
-                if dst._columnwise_data is not None:
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
+                    rowwise_usage = True
+                if src._columnwise_data is not None and dst._columnwise_data is not None:
                     dst._columnwise_data.copy_(src._columnwise_data.detach())
-                return dst
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                    columnwise_usage = True
+                if rowwise_usage or columnwise_usage:
+                    return dst
+                # Otherwise default to base class behavior
 
         # FSDP2 related functions.
         if func == aten.split.Tensor:
