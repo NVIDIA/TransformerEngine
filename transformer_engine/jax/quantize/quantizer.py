@@ -168,7 +168,7 @@ class Quantizer(ABC):
         is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
         is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
 
-        if (is_rowwise and is_colwise) or self.is_2x2x():
+        if (is_rowwise and is_colwise) or self.q_layout.is_rowwise_colwise:
             rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
             colwise_tensor = self._quantize_func(
                 x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis
