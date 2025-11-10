@@ -15,10 +15,10 @@ import warnings
 import jax
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
-from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
+from .misc import QuantizeLayout
 from .hadamard import apply_rht
 from .tensor import (
     ScaledTensor,
@@ -37,7 +37,6 @@ from .device_utils import is_fp8_gemm_with_all_layouts_supported
 from ..sharding import get_num_devices_in_mesh
 
 __all__ = [
-    "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
     "CurrentScaleQuantizer",
@@ -118,14 +117,6 @@ class Quantizer(ABC):
         """Update quantizer state (no-op in base class)."""
         del args, kwargs
 
-    def is_2x2x(self) -> bool:
-        """Check if quantizer uses both row-wise and column-wise quantization.
-
-        Returns:
-            True if using both row-wise and column-wise quantization
-        """
-        return self.q_layout == QuantizeLayout.ROWWISE_COLWISE
-
     def get_data_layout(self) -> str:
         """Get the data data_layout string.
 
@@ -135,11 +126,11 @@ class Quantizer(ABC):
         Raises:
             ValueError: If quantization axis is invalid
         """
-        if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
+        if self.q_layout.is_rowwise_colwise:
             return self.data_layout
-        if self.q_layout == QuantizeLayout.ROWWISE:
+        if self.q_layout.is_rowwise_only:
             return self.data_layout[0]
-        if self.q_layout == QuantizeLayout.COLWISE:
+        if self.q_layout.is_colwise_only:
             return self.data_layout[1]
         raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
@@ -174,16 +165,8 @@ class Quantizer(ABC):
         """
         del kwargs
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
 
         if (is_rowwise and is_colwise) or self.is_2x2x():
             rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
@@ -299,16 +282,8 @@ class CurrentScaleQuantizer(Quantizer):
             flatten_axis += x.ndim
         assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
 
         rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
         colwise_tensor = None
@@ -974,16 +949,8 @@ class GroupedQuantizer(Quantizer):
             flatten_axis += x.ndim
         assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
         assert is_rowwise or is_colwise, "No quantization layout is specified"
 
         original_shape = x.shape

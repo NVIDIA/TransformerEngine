@@ -176,11 +176,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
       .export_values();
 
-  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
-                                                           pybind11::module_local())
-      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
-      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
-      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+  pybind11::enum_<JAXX_Quantize_Layout>(m, "JAXX_Quantize_Layout", pybind11::module_local())
+      .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
+      .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
+      .value("ROWWISE_COLWISE", JAXX_Quantize_Layout::ROWWISE_COLWISE)
       .export_values();
 
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
