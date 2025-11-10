@@ -84,15 +84,12 @@ class Quantizer(ABC):
         q_dtype: The data type for quantized values
         scaling_mode: The scaling mode to use for quantization
         q_layout: The quantization axis (row-wise, column-wise, or both)
-        data_layout: The data layout string (e.g., "NT")
-        checkpoint_name: Optional name for checkpointing quantization state
     """
 
     q_dtype: jnp.dtype
     scaling_mode: ScalingMode
     q_layout: QuantizeLayout
     data_layout: str
-    checkpoint_name: Optional[str] = None
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -101,13 +98,7 @@ class Quantizer(ABC):
             Tuple of (children, aux_data) for tree operations
         """
         children = ()
-        aux_data = (
-            self.q_dtype,
-            self.scaling_mode,
-            self.q_layout,
-            self.data_layout,
-            self.checkpoint_name,
-        )
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
         return (children, aux_data)
 
     @classmethod
@@ -371,13 +362,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.scale, self.amax_history)
-        aux_data = (
-            self.q_dtype,
-            self.scaling_mode,
-            self.q_layout,
-            self.data_layout,
-            self.checkpoint_name,
-        )
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
         return (children, aux_data)
 
     def _quantize_func(
@@ -628,14 +613,7 @@ class NVFP4Quantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.stochastic_rounding_rng_state,)
-        aux_data = (
-            self.q_dtype,
-            self.scaling_mode,
-            self.q_layout,
-            self.data_layout,
-            self.checkpoint_name,
-            self.use_rht,
-        )
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.use_rht)
         return (children, aux_data)
 
     @classmethod
@@ -914,14 +892,7 @@ class GroupedQuantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.quantizers,)
-        aux_data = (
-            self.q_dtype,
-            self.scaling_mode,
-            self.q_layout,
-            self.data_layout,
-            self.checkpoint_name,
-            self.n_groups,
-        )
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.n_groups)
         return (children, aux_data)
 
     def __post_init__(self):
@@ -1103,7 +1074,6 @@ class QuantizerFactory:
         q_dtype: jnp.dtype = None,
         q_layout: QuantizeLayout = None,
         n_groups: int = None,
-        checkpoint_name: Optional[str] = None,
         **kwargs,
     ) -> Quantizer:
         """Create one or more quantizers with specified parameters.
@@ -1115,7 +1085,6 @@ class QuantizerFactory:
             q_layout: Quantization axis
             flatten_axis: The quantization axis for the tensor
             n_groups: Number of quantizers if GroupedQuantizer
-            checkpoint_name: Optional name for checkpointing quantizations
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -1139,11 +1108,7 @@ class QuantizerFactory:
             for _ in range(n_quantizers):
                 quantizers.append(
                     quantizer_type(
-                        q_dtype=q_dtype,
-                        scaling_mode=scaling_mode,
-                        q_layout=q_layout,
-                        checkpoint_name=checkpoint_name,
-                        **kwargs,
+                        q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout, **kwargs
                     )
                 )
         return quantizers[0] if len(quantizers) == 1 else tuple(quantizers)
@@ -1157,7 +1122,6 @@ class QuantizerFactory:
         bwd_dtype,
         is_2x2x,
         n_groups,
-        checkpoint_name: Optional[str] = None,
         **kwargs,
     ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
@@ -1170,7 +1134,6 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass
             is_2x2x: Whether to use 2x2x quantization
             n_groups
-            checkpoint_name: Optional name for checkpointing quantizations
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -1193,32 +1156,12 @@ class QuantizerFactory:
         else:
             args_x = args_kernel = args_grad = {}
 
-        q_x = QuantizerFactory.create(
-            1,
-            x_scaling_mode,
-            fwd_dtype,
-            q_layout_x,
-            n_groups,
-            checkpoint_name=checkpoint_name,
-            **args_x,
-        )
+        q_x = QuantizerFactory.create(1, x_scaling_mode, fwd_dtype, q_layout_x, n_groups, **args_x)
         q_kernel = QuantizerFactory.create(
-            1,
-            kernel_scaling_mode,
-            fwd_dtype,
-            q_layout_kernel,
-            n_groups,
-            checkpoint_name=checkpoint_name,
-            **args_kernel,
+            1, kernel_scaling_mode, fwd_dtype, q_layout_kernel, n_groups, **args_kernel
         )
         q_dgrad = QuantizerFactory.create(
-            1,
-            grad_scaling_mode,
-            bwd_dtype,
-            q_layout_dgrad,
-            n_groups,
-            checkpoint_name=checkpoint_name,
-            **args_grad,
+            1, grad_scaling_mode, bwd_dtype, q_layout_dgrad, n_groups, **args_grad
         )
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
@@ -1230,7 +1173,6 @@ class QuantizerFactory:
         bwd_dtype: jnp.dtype = None,
         is_2x2x: bool = None,
         n_groups: int = None,
-        checkpoint_name: Optional[str] = None,
         # TODO(jberchtold): rename fp8_recipe to quantization_recipe
         fp8_recipe: Optional[recipe.Recipe] = None,
         **kwargs,
@@ -1244,7 +1186,6 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass, default is get_quantize_config().BWD_DTYPE
             is_2x2x: Whether to use 2x2x quantization, default is get_quantize_config().IF_QUANTIZE_2X
             n_groups:
-            checkpoint_name: Optional name for checkpointing quantizations
             fp8_recipe: Recipe to use for quantization. Scaling mode can be specified directly via the scaling_mode parameter or indirectly via recipe. Recipe is preferred as it will support additional recipes in future where scaling mode differs between x, kernel, and grad in the quantizer set.
             **kwargs: Additional arguments for quantizer initialization
 
@@ -1300,7 +1241,6 @@ class QuantizerFactory:
                     bwd_dtype=bwd_dtype,
                     is_2x2x=is_2x2x,
                     n_groups=n_groups,
-                    checkpoint_name=checkpoint_name,
                     **kwargs,
                 )
             )

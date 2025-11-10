@@ -12,7 +12,6 @@ import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
-from jax.ad_checkpoint import checkpoint_name
 
 import numpy as np
 import transformer_engine_jax
@@ -1341,7 +1340,13 @@ def act_lu(
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
-    prim_outputs = ActLuPrimitive.outer_primitive.bind(
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+    ) = ActLuPrimitive.outer_primitive.bind(
         x,
         scale,
         amax,
@@ -1357,17 +1362,6 @@ def act_lu(
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
     )
-
-    if quantizer.checkpoint_name is not None:
-        prim_outputs = checkpoint_name(prim_outputs, quantizer.checkpoint_name)
-
-    (
-        rowwise_casted_output,
-        colwise_casted_output,
-        rowwise_scale_inv,
-        colwise_scale_inv,
-        updated_amax,
-    ) = prim_outputs
 
     quantizer.update(updated_amax)
 
@@ -1547,7 +1541,14 @@ def quantize_dact_dbias(
         )
         return out, dbias
 
-    prim_outputs = PrimitiveClass.outer_primitive.bind(
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+        dbias,
+    ) = PrimitiveClass.outer_primitive.bind(
         dz,
         x,
         scale,
@@ -1565,18 +1566,6 @@ def quantize_dact_dbias(
         output_amax_when_no_scaling=output_amax_when_no_scaling,
         is_outer=True,
     )
-
-    if quantizer.checkpoint_name is not None:
-        prim_outputs = checkpoint_name(prim_outputs, quantizer.checkpoint_name)
-
-    (
-        rowwise_casted_output,
-        colwise_casted_output,
-        rowwise_scale_inv,
-        colwise_scale_inv,
-        updated_amax,
-        dbias,
-    ) = prim_outputs
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
     if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
