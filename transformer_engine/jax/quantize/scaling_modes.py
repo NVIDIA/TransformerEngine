@@ -745,21 +745,20 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             rowwise_scale = input_spec.copy()
             rowwise_scale[-1] = rowwise_var
         else:
-            rowwise_out = BATCHING + f"{unique_var}_rowwise_output"
-            rowwise_scale = BATCHING + f"{unique_var}_rowwise_scale_inv"
+            rowwise_out = [BATCHING + f"{unique_var}_rowwise_output",]
+            rowwise_scale = [BATCHING + f"{unique_var}_rowwise_scale_inv",]
 
         if is_colwise:
-            from ..cpp_extensions.misc import multidim_transpose
-
             colwise_out = input_spec.copy()
             colwise_scale = input_spec.copy()
             colwise_scale[flatten_axis - 1] = colwise_var
             if is_colwise_transposed:
+                from ..cpp_extensions.misc import multidim_transpose
                 colwise_out = multidim_transpose(colwise_out, transpose_axis=flatten_axis)
                 colwise_scale = multidim_transpose(colwise_scale, transpose_axis=flatten_axis)
         else:
-            colwise_out = BATCHING + f"{unique_var}_colwise_output"
-            colwise_scale = BATCHING + f"{unique_var}_colwise_scale_inv"
+            colwise_out = [BATCHING + f"{unique_var}_colwise_output", ]
+            colwise_scale = [BATCHING + f"{unique_var}_colwise_scale_inv", ]
 
         return QuantizeShardyRules(
             tuple(input_spec),

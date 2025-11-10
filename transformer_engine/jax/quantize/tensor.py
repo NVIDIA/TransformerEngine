@@ -299,8 +299,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
 
         data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
 
-        if self.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            # TODO(Phuong): Handle padding !?
+        if self.scaling_mode.is_1d_block_scaling:   # Both MXFP8 and NVFP4
             scale_inv = with_sharding_constraint_by_logical_axes(self.scale_inv, axis_names)
         else:
             scale_inv = self.scale_inv
