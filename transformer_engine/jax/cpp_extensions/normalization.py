@@ -663,7 +663,7 @@ class NormFwdPrimitive(BasePrimitive):
         beta = (BATCHING + prefix + "_beta",)
 
         return SdyShardingRule(
-            (tuple(input_spec), scale, amax, gamma, beta),
+            (input_spec, scale, amax, gamma, beta),
             (
                 scale_rules.rowwise_out_spec,
                 scale_rules.colwise_out_spec,

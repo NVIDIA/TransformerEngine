@@ -663,7 +663,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         rht_matrix = (BATCHING + prefix + "_rht_matrix_1", BATCHING + prefix + "_rht_matrix_2")
 
         return SdyShardingRule(
-            (tuple(input_spec), scale, amax, sr_rng_state, post_rht_amax, rht_matrix),
+            (input_spec, scale, amax, sr_rng_state, post_rht_amax, rht_matrix),
             (
                 scale_rules.rowwise_out_spec,
                 scale_rules.colwise_out_spec,

@@ -408,34 +408,21 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        del flatten_axis, broadcast_2d_scale_shape_to_1d
+        del broadcast_2d_scale_shape_to_1d
         input_spec = tuple(f"{unique_var}x_{i}" for i in range(len(input_shape)))
-        output_spec = input_spec.copy()
-        colwise_output_spec = BATCHING + f"{unique_var}_colwise_output"
+        output_spec = input_spec
+        colwise_output_spec = (BATCHING + f"{unique_var}_colwise_output",)
 
         if q_layout.has_colwise:
             from ..cpp_extensions.misc import multidim_transpose
 
-            colwise_output_spec = input_spec.copy()
+            colwise_output_spec = input_spec
             if is_colwise_transposed:
                 colwise_output_spec = multidim_transpose(
                     colwise_output_spec, transpose_axis=flatten_axis
                 )
-        scale = BATCHING + unique_var + "_scale_inv"
-        return QuantizeShardyRules(
-            tuple(input_spec),
-            tuple(output_spec),
-            tuple(
-                scale,
-            ),
-            tuple(
-                colwise_output_spec,
-            ),
-            tuple(
-                scale,
-            ),
-            {},
-        )
+        scale = (BATCHING + unique_var + "_scale_inv",)
+        return QuantizeShardyRules(input_spec, output_spec, scale, colwise_output_spec, scale, {})
 
 
 class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
@@ -758,8 +745,8 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             rowwise_scale = input_spec.copy()
             rowwise_scale[-1] = rowwise_var
         else:
-            rowwise_out = f"{unique_var}_rowwise_output"
-            rowwise_scale = f"{unique_var}_rowwise_scale_inv"
+            rowwise_out = BATCHING + f"{unique_var}_rowwise_output"
+            rowwise_scale = BATCHING + f"{unique_var}_rowwise_scale_inv"
 
         if is_colwise:
             from ..cpp_extensions.misc import multidim_transpose
@@ -771,8 +758,8 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
                 colwise_out = multidim_transpose(colwise_out, transpose_axis=flatten_axis)
                 colwise_scale = multidim_transpose(colwise_scale, transpose_axis=flatten_axis)
         else:
-            colwise_out = f"{unique_var}_colwise_output"
-            colwise_scale = f"{unique_var}_colwise_scale_inv"
+            colwise_out = BATCHING + f"{unique_var}_colwise_output"
+            colwise_scale = BATCHING + f"{unique_var}_colwise_scale_inv"
 
         return QuantizeShardyRules(
             tuple(input_spec),
