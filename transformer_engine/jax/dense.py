@@ -480,6 +480,7 @@ def _grouped_dense_fwd_rule(
             )
             kernel_shape = global_ctx_kernel_data.shape
 
+            # pylint: disable=unexpected-keyword-arg
             ctx_kernel = ScaledTensorFactory.create_1x(
                 global_ctx_kernel_data.reshape(-1),
                 ctx_kernel.scale_inv,
@@ -498,6 +499,7 @@ def _grouped_dense_fwd_rule(
                 grouped_gemm_kernel = ctx_kernel
             else:
                 grouped_gemm_kernel_data = global_ctx_kernel_data.transpose(0, 2, 1)
+                # pylint: disable=unexpected-keyword-arg
                 grouped_gemm_kernel = ScaledTensorFactory.create_1x(
                     grouped_gemm_kernel_data.reshape(-1),
                     ctx_kernel.scale_inv,

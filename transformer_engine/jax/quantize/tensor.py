@@ -9,7 +9,7 @@ both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
 from dataclasses import dataclass
-from typing import Callable, Tuple, Optional
+from typing import Callable, Tuple
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
@@ -521,8 +521,8 @@ class ScaledTensorFactory:
     quantized tensors with various configurations.
     """
 
-    @staticmethod
     @wrap_in_checkpoint_name
+    @staticmethod
     def create_1x(
         data,
         scale_inv,
@@ -619,8 +619,8 @@ class ScaledTensorFactory:
             has_rht_applied=has_rht_applied,
         )
 
-    @staticmethod
     @wrap_in_checkpoint_name
+    @staticmethod
     def create_2x(
         data,
         scale_inv,
@@ -696,8 +696,8 @@ class ScaledTensorFactory:
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
-    @staticmethod
     @wrap_in_checkpoint_name
+    @staticmethod
     def create(
         data: jnp.ndarray,
         scale_inv: jnp.ndarray,

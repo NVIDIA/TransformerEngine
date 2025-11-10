@@ -1365,6 +1365,7 @@ def act_lu(
 
     quantizer.update(updated_amax)
 
+    # pylint: disable=unexpected-keyword-arg
     return ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1574,6 +1575,7 @@ def quantize_dact_dbias(
 
     quantizer.update(updated_amax)
 
+    # pylint: disable=unexpected-keyword-arg
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,

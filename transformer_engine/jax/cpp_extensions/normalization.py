@@ -1120,6 +1120,7 @@ def layernorm_fwd(
             : reduce(operator.mul, colwise_unpadded_shape)
         ].reshape(colwise_unpadded_shape)
 
+    # pylint: disable=unexpected-keyword-arg
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1375,6 +1376,7 @@ def rmsnorm_fwd(
             : reduce(operator.mul, colwise_unpadded_shape)
         ].reshape(colwise_unpadded_shape)
 
+    # pylint: disable=unexpected-keyword-arg
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,

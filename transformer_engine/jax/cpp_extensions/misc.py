@@ -249,6 +249,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     colwise_data = jnp.transpose(
         rowwise.data, (*range(flatten_axis, rowwise.data.ndim), *range(flatten_axis))
     )
+    # pylint: disable=unexpected-keyword-arg
     output_2x = ScaledTensorFactory.create(
         data=rowwise.data,
         scale_inv=rowwise.scale_inv,

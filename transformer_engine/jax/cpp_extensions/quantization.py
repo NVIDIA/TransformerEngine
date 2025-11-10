@@ -903,6 +903,7 @@ def _quantize_dbias_impl(
     if quantizer.scaling_mode.is_nvfp4_scaling and is_dbias:
         dbias = _jax_dbias(x, flatten_axis=flatten_axis)
 
+    # pylint: disable=unexpected-keyword-arg
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1271,6 +1272,7 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             quantizer_i.update(updated_amax[i].reshape((1,)))
 
+    # pylint: disable=unexpected-keyword-arg
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
