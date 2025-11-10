@@ -843,6 +843,16 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = False
         if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
             use_flash_attn_3 = True
+        # Enforce FA3 when num_splits is provided
+        if num_splits is not None and not use_flash_attn_3:
+            if not fa_utils.v3_is_installed:
+                raise ValueError(
+                    "num_splits is only supported with FlashAttention-3, which is not installed. "
+                )
+            raise ValueError(
+                "num_splits is only supported with FlashAttention-3. "
+                "Please adjust configuration to enable FA3 for these inputs."
+            )
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):

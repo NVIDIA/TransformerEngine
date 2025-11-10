@@ -117,7 +117,7 @@ model_configs_base = {
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, num_splits=None
 ):
     """Test DotProductAttention module"""
 
@@ -244,6 +244,7 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
+            num_splits=num_splits,
         )
 
     # Compare results
@@ -301,11 +302,18 @@ model_configs_max_logit = {
 @pytest.mark.parametrize("model_configs", [model_configs_max_logit])
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
 @pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
-def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
+@pytest.mark.parametrize("num_splits", [None, 2])
+def test_dpa_max_logit(dtype, model_configs, model, qkv_layout, num_splits):
     """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
     config.return_max_logit = True
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    # Minimal guard: if num_splits is requested, require FA3 be installed
+    if num_splits is not None:
+        if not FlashAttentionUtils.v3_is_installed:
+            pytest.skip("num_splits requires FlashAttention-3.")
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, qkv_layout, False, False, num_splits=num_splits
+    )
 
 
 model_configs_softmax = {
@@ -848,6 +856,7 @@ def _run_dot_product_attention(
     workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
+    num_splits=None,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
     # Set RNG and environment varables
@@ -1152,6 +1161,8 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        # Only pass num_splits when exercising the FlashAttention path
+        num_splits=(num_splits if backend == "FlashAttention" else None),
     )
     max_logit = None
     if config.return_max_logit:
