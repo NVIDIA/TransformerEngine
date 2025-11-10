@@ -340,7 +340,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             if (
-                isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor)
+                isinstance(src, MXFP8Tensor)
+                and isinstance(dst, MXFP8Tensor)
                 and (src._rowwise_data is not None or dst._rowwise_data is None)
                 and (src._columnwise_data is not None or dst._columnwise_data is None)
             ):
