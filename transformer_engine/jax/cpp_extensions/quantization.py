@@ -840,7 +840,10 @@ def _quantize_dbias_impl(
     # It is faster to use 1x quantization for tensor scaling and 2D NVFP4_1D_SCALING
     is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
     force_1x_quantization = (
-        (quantizer.scaling_mode.is_tensor_scaling() or quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING)
+        (
+            quantizer.scaling_mode.is_tensor_scaling()
+            or quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING
+        )
         and quantizer.q_layout.is_rowwise_colwise
         and is_1x_kernel_supported
     )
@@ -896,7 +899,10 @@ def _quantize_dbias_impl(
                 rowwise_casted_output, (*range(flatten_axis, x.ndim), *range(flatten_axis))
             )
 
-    if quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING and quantizer.q_layout.is_rowwise_colwise:
+    if (
+        quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING
+        and quantizer.q_layout.is_rowwise_colwise
+    ):
         assert q_layout.is_rowwise_only
         # Quantizer requires 2x quantization, but we are using 1x quantization
         # for performance reasons, so we need to generate the colwise data in JAX
@@ -909,24 +915,27 @@ def _quantize_dbias_impl(
         flatten_axis = (flatten_axis + x.ndim) % x.ndim
         ## Split the dim before the flatten_axis to (its size / block_size, block_size)
         colwise_scale_inv = rowwise_scale_inv.reshape(
-            *scale_shape[:flatten_axis - 1],
+            *scale_shape[: flatten_axis - 1],
             int(scale_shape[flatten_axis - 1] / 16),
-            16, # <-- block_dim
+            16,  # <-- block_dim
             *scale_shape[flatten_axis:],
         )
         # now flatten_axis = flatten_axis + 1
-        colwise_scale_inv = jnp.transpose(colwise_scale_inv,
-                                          (*range(flatten_axis + 1, colwise_scale_inv.ndim),
-                                           flatten_axis, # <-- block_dim after transpose
-                                           *range(0, flatten_axis)),
-                                          )
+        colwise_scale_inv = jnp.transpose(
+            colwise_scale_inv,
+            (
+                *range(flatten_axis + 1, colwise_scale_inv.ndim),
+                flatten_axis,  # <-- block_dim after transpose
+                *range(0, flatten_axis),
+            ),
+        )
         block_dim = colwise_scale_inv.ndim - flatten_axis - 1
         assert block_dim >= 1
         # Merge the block_dim back
         colwise_scale_inv = colwise_scale_inv.reshape(
-            *colwise_scale_inv.shape[:block_dim - 1],
+            *colwise_scale_inv.shape[: block_dim - 1],
             -1,
-            *colwise_scale_inv.shape[block_dim + 1:],
+            *colwise_scale_inv.shape[block_dim + 1 :],
         )
     quantizer.update(updated_amax)
     if quantizer.scaling_mode.is_nvfp4_scaling and is_dbias:
