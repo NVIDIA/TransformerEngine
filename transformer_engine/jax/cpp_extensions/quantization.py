@@ -916,6 +916,7 @@ def _quantize_dbias_impl(
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
         colwise_has_rht_applied=use_rht,
+        checkpoint_name=quantizer.checkpoint_name,
     )
     return out, dbias.astype(dq_dtype)
 
@@ -1283,6 +1284,7 @@ def grouped_quantize(
         group_sizes=group_sizes,
         original_shape=original_shape,
         group_axis=group_axis,
+        checkpoint_name=quantizer.checkpoint_name,
     )
     return out
 

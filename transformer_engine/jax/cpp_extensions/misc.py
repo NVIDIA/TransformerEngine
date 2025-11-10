@@ -259,6 +259,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
         q_layout=QuantizeLayout.ROWWISE_COLWISE,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
+        checkpoint_name=quantizer.checkpoint_name,
     )
     if other_outputs is not None:
         return (output_2x,) + other_outputs

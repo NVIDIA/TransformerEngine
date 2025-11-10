@@ -1129,6 +1129,7 @@ def layernorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
+        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return scaled_tensor, mu, rsigma
@@ -1383,6 +1384,7 @@ def rmsnorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
+        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return scaled_tensor, rsigma

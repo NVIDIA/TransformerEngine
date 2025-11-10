@@ -491,6 +491,7 @@ def _grouped_dense_fwd_rule(
                 group_sizes=ctx_kernel.group_sizes,
                 original_shape=kernel_shape,
                 group_axis=ctx_kernel.group_axis,
+                checkpoint_name=quantizer_set.kernel.checkpoint_name,
             )
 
             if is_fp8_gemm_with_all_layouts_supported():
@@ -508,6 +509,7 @@ def _grouped_dense_fwd_rule(
                     group_sizes=ctx_kernel.group_sizes,
                     original_shape=kernel_shape,
                     group_axis=ctx_kernel.group_axis,
+                    checkpoint_name=quantizer_set.kernel.checkpoint_name,
                 )
         else:
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)

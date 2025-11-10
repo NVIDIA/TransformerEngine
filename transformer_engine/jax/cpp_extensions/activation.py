@@ -1374,6 +1374,7 @@ def act_lu(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
+        checkpoint_name=quantizer.checkpoint_name,
     )
 
 
@@ -1583,6 +1584,7 @@ def quantize_dact_dbias(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=-2,  # as output has act axis
+        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return out, dbias

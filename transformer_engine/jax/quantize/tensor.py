@@ -9,11 +9,12 @@ both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Tuple, Optional
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
+from jax.ad_checkpoint import checkpoint_name as jax_checkpoint_name
 
 from transformer_engine_jax import QuantizeLayout
 
@@ -500,6 +501,18 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
 
+def wrap_in_checkpoint_name(f):
+    """Decorator to optionally wrap function outputs with named checkpoints."""
+
+    def checkpointed_f(*args, checkpoint_name=None, **kwargs):
+        out = f(*args, **kwargs)
+        if checkpoint_name is not None:
+            out = jax_checkpoint_name(out, name=checkpoint_name)
+        return out
+
+    return checkpointed_f
+
+
 @dataclass
 class ScaledTensorFactory:
     """Factory class for creating scaled tensor instances.
@@ -509,6 +522,7 @@ class ScaledTensorFactory:
     """
 
     @staticmethod
+    @wrap_in_checkpoint_name
     def create_1x(
         data,
         scale_inv,
@@ -538,6 +552,7 @@ class ScaledTensorFactory:
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
             has_rht_applied: Whether the tensor had the Randomized Hadamard Transform (RHT) applied during quantization (default: False)
+            checkpoint_name: Optional name for checkpointing (default: None)
 
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
@@ -605,6 +620,7 @@ class ScaledTensorFactory:
         )
 
     @staticmethod
+    @wrap_in_checkpoint_name
     def create_2x(
         data,
         scale_inv,
@@ -639,6 +655,7 @@ class ScaledTensorFactory:
             group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the column-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            checkpoint_name: Optional name for checkpointing (default: None)
 
         Returns:
             A ScaledTensor2x instance
@@ -680,6 +697,7 @@ class ScaledTensorFactory:
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
     @staticmethod
+    @wrap_in_checkpoint_name
     def create(
         data: jnp.ndarray,
         scale_inv: jnp.ndarray,
@@ -715,6 +733,7 @@ class ScaledTensorFactory:
             group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            checkpoint_name: Optional name for checkpointing (default: None)
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout

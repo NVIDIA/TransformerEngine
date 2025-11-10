@@ -362,7 +362,15 @@ class TestJaxprAndHlo:
         # - Backward pass: These are wrapped in checkpoint_name for simplicity, but are ignored by JAX since they are already in the backward pass
         #   - 6 dgrad Q -> 6 possible output tensors
         #   - 6 dact+Q -> 6 possible output tensors
-        assert len(checkpoint_name_eqns) == 36, (
-            "Expected 36 checkpoint_name eqns when quantization_checkpoint_name is set, got"
-            f" {len(checkpoint_name_eqns)}"
+        expected_checkpoint_eqn_count = 36
+
+        if isinstance(quantization_recipe, DelayedScaling) or isinstance(
+            quantization_recipe, Float8CurrentScaling
+        ):
+            # For DelayedScaling and Float8CurrentScaling, we do 1x quantization and use JAX to transpose the result so we have fewer checkpointed tensors
+            expected_checkpoint_eqn_count = 18
+
+        assert len(checkpoint_name_eqns) == expected_checkpoint_eqn_count, (
+            f"Expected {expected_checkpoint_eqn_count} checkpoint_name eqns when"
+            f" quantization_checkpoint_name is set, got {len(checkpoint_name_eqns)}"
         )
