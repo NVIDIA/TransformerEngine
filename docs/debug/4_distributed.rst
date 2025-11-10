@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Distributed training
-===================
+====================
 
 Nvidia-Pytorch-Inspect with Transformer Engine supports multi-GPU training. This guide describes how to run it and how the supported features work in the distributed setting.
 
@@ -14,7 +14,8 @@ To use precision debug tools in multi-GPU training, one needs to:
 2. If one wants to log stats, one may want to invoke ``debug_api.set_tensor_reduction_group`` with a proper reduction group.
 
 Behavior of the features
------------------------
+------------------------
+
 
 In a distributed setting, **DisableFP8GEMM** and **DisableFP8Layer** function similarly to the single-GPU case, with no notable differences. 
 
@@ -28,7 +29,8 @@ In a distributed setting, **DisableFP8GEMM** and **DisableFP8Layer** function si
 Logging-related features are more complex and will be discussed further in the next sections.
 
 Reduction groups
---------------
+----------------
+
 
 In setups with tensor, data, or pipeline parallelism, some tensors are distributed across multiple GPUs, requiring a reduction operation to compute statistics for these tensors.
 
@@ -65,7 +67,8 @@ Below, we illustrate configurations for a 4-node setup with tensor parallelism s
 
 
 Microbatching
------------
+-------------
+
 
 Let's dive into how statistics collection works with microbatching. By microbatching, we mean invoking multiple ``forward()`` calls for each ``debug_api.step()``. The behavior is as follows:
 
@@ -73,7 +76,7 @@ Let's dive into how statistics collection works with microbatching. By microbatc
 - For other tensors, the stats are accumulated.
 
 Logging to files and TensorBoard
-------------------------------
+--------------------------------
 
 In a single-node setup with ``default_logging_enabled=True``, all logs are saved by default to ``log_dir/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log``. In multi-GPU training, each node writes its reduced statistics to its unique file, named ``log_dir/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-i.log`` for rank i. Because these logs contain reduced statistics, the logged values are identical for all nodes within a reduction group.
 

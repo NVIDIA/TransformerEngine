@@ -350,7 +350,7 @@ def _get_freqs_on_this_cp_rank(
     """Get the position embedding on the current context parallel rank.
 
     Args:
-        freqs: torch.Tensor. Positional embedding tensor in shape `[s2, 1, 1, d2]`.
+        freqs: torch.Tensor. Positional embedding tensor of shape `[s2, 1, 1, d2]`.
         seqlen: int. Length of the current sequence.
         cp_size: int. Context parallel world size.
         cp_rank: int. Context parallel rank.

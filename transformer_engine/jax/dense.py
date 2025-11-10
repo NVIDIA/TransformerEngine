@@ -15,12 +15,12 @@ import warnings
 import jax
 import jax.numpy as jnp
 
+from transformer_engine_jax import QuantizeLayout
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
     ScalingMode,
-    QuantizeLayout,
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,

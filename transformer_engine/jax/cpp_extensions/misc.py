@@ -15,9 +15,10 @@ import jax.numpy as jnp
 from jax.interpreters.mlir import dtype_to_ir_type
 
 import transformer_engine_jax
+from transformer_engine_jax import QuantizeLayout
 
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..quantize import ScaledTensorFactory, QuantizeLayout
+from ..quantize import ScaledTensorFactory
 
 TEDType = transformer_engine_jax.DType
 
@@ -116,7 +117,7 @@ def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis=-1):
         transpose. Note, transpose_axis should be greater than static_axis_boundary
 
     examples:
-        X in shape (dim0, dim1, dim2, dim3, dim4)
+        X of shape (dim0, dim1, dim2, dim3, dim4)
 
         static_axis_boundary == -1, transpose_axis == 2
             Xt = (dim2, dim3, dim4, dim0, dim1)

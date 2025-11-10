@@ -49,11 +49,11 @@ class QuantizedTensorStorage:
 
         Parameters
         ----------
-        rowwise_usage : Optional[bool[, default = `None`
+        rowwise_usage : Optional[bool[, default = None
                         Whether to create or keep the data needed for using the tensor
                         in rowwise fashion (e.g. as B argument in TN GEMM). Leaving it as `None`
                         preserves the original value in the tensor.
-        columnwise_usage : Optional[bool], default = `None`
+        columnwise_usage : Optional[bool], default = None
                            Whether to create or keep the data needed for using the tensor
                            in columnwise fashion (e.g. as A argument in TN GEMM). Leaving it as
                            `None` preserves the original value in the tensor.
