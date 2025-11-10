@@ -1382,15 +1382,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                     backend_name = (
                         f"FlashAttention ({str(flash_attention_backend)})"
                         if use_flash_attention
-                        else ("FusedAttention" if use_fused_attention else "UnfusedDotProductAttention")
+                        else (
+                            "FusedAttention"
+                            if use_fused_attention
+                            else "UnfusedDotProductAttention"
+                        )
                     )
                     if not dpa_utils.FlashAttentionUtils.v3_is_installed:
                         raise ValueError(
-                            "num_splits is only supported with FlashAttention-3, which is not installed. "
+                            "num_splits is only supported with FlashAttention-3, which is not"
+                            " installed. "
                         )
                     raise ValueError(
-                        f"num_splits is only supported with FlashAttention-3. Selected backend is {backend_name}. "
-                        "Please adjust configuration to enable FA3 for these inputs."
+                        "num_splits is only supported with FlashAttention-3. Selected backend is"
+                        f" {backend_name}. Please adjust configuration to enable FA3 for these"
+                        " inputs."
                     )
 
             # raise exception if no backend is available
