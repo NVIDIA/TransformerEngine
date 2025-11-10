@@ -66,7 +66,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         for 1D-sharding tensor parallelism.
 
     .. warning::
-        Please make sure ShardingResource is set via fp8_autocast before calling this function.
+        Please make sure ShardingResource is set via autocast before calling this function.
 
     .. note::
         This function is only needed when using TransformerLayer. For  other modules, such as
@@ -197,6 +197,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             fused_scale_factor = scale_factor
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
+                bias = None
 
         def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""

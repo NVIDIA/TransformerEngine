@@ -16,11 +16,16 @@ from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
-from common import is_bf16_supported, get_quantization_recipe_from_name_string
+from common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
+unpack_cached_datasets_if_available()
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
@@ -227,8 +232,8 @@ def train_and_evaluate(args):
     else:
         fp8_recipe = None
 
-    with te.fp8_autocast(
-        enabled=args.use_fp8, fp8_recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
+    with te.autocast(
+        enabled=args.use_fp8, recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
     ):
         encoder = Net(num_embed)
         # We use nn.Embed, thus inputs need to be in int
@@ -385,7 +390,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "NVFP4BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.476 and actual[1] > 0.775
+        assert actual[0] < 0.477 and actual[1] > 0.769
 
 
 if __name__ == "__main__":

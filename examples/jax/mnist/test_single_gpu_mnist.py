@@ -22,7 +22,13 @@ from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMo
 
 DIR = str(Path(__file__).resolve().parents[1])
 sys.path.append(str(DIR))
-from encoder.common import is_bf16_supported, get_quantization_recipe_from_name_string
+from encoder.common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
+
+unpack_cached_datasets_if_available()
 
 IMAGE_H = 28
 IMAGE_W = 28
@@ -193,8 +199,8 @@ def train_and_evaluate(args):
     else:
         fp8_recipe = None
 
-    with te.fp8_autocast(
-        enabled=args.use_fp8, fp8_recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
+    with te.autocast(
+        enabled=args.use_fp8, recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
     ):
         cnn = Net(args.use_te)
         var_collect = cnn.init(init_rngs, jnp.empty(input_shape, dtype=jnp.bfloat16))

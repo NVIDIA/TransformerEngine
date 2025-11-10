@@ -19,12 +19,17 @@ from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
-from common import is_bf16_supported, get_quantization_recipe_from_name_string
+from common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
+unpack_cached_datasets_if_available()
 
 DEVICE_DP_AXIS = "data"
 PARAMS_KEY = "params"
@@ -264,11 +269,9 @@ def train_and_evaluate(args):
         fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu,))
-    with jax.sharding.Mesh(
-        devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)
-    ) as mesh, te.fp8_autocast(
+    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)) as mesh, te.autocast(
         enabled=args.use_fp8,
-        fp8_recipe=fp8_recipe,
+        recipe=fp8_recipe,
         mesh_resource=te.MeshResource(dp_resource=DEVICE_DP_AXIS),
     ):
 
@@ -282,7 +285,7 @@ def train_and_evaluate(args):
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        # Add TE logical axis rules to our Flax logical axis rule context. This must be done inside fp8_autocast
+        # Add TE logical axis rules to our Flax logical axis rule context. This must be done inside autocast
         sharding_rules = te_flax.extend_logical_axis_rules(tuple())
         with flax.linen.logical_axis_rules(sharding_rules):
             encoder = Net(num_embed)

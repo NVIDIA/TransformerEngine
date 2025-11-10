@@ -32,7 +32,7 @@ from common import (
 )
 
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.quantize import fp8_autocast
+from transformer_engine.jax.quantize import autocast
 from transformer_engine.jax.cpp_extensions.gemm import CollectiveOp
 from transformer_engine.jax.sharding import MeshResource
 
@@ -109,9 +109,9 @@ def run_gemm_tests(args, mesh=None):
         else CollectiveOp.REDUCE_SCATTER
     )
 
-    with mesh, fp8_autocast(
+    with mesh, autocast(
         enabled=False,
-        fp8_recipe=None,
+        recipe=None,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
         print(f"Device mesh: {mesh}")
