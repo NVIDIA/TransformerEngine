@@ -16,7 +16,7 @@ import torch
 # import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorBase
+from ..quantized_tensor import QuantizedTensorStorage
 
 # from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ..quantized_tensor import Quantizer
@@ -39,7 +39,7 @@ class _FromNVFP4Func(torch.autograd.Function):
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: NVFP4TensorBase,
+        tensor: NVFP4TensorStorage,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -89,7 +89,7 @@ class _FromNVFP4Func(torch.autograd.Function):
         return grad, None
 
 
-class NVFP4TensorBase(QuantizedTensorBase):
+class NVFP4TensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of NVFP4Tensor.
 
     NVFP4Tensor inherits from the PyTorch tensor class and this mixin
@@ -161,7 +161,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
             self._rowwise_data,
@@ -267,7 +267,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
             new_columnwise_data = self._columnwise_data.view(byte_shape)
 
         # Construct tensor
-        return NVFP4TensorBase(
+        return NVFP4TensorStorage(
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=self._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
@@ -282,7 +282,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         data_rowwise = self.dequantize()
 
         return (
-            "NVFP4TensorBase("
+            "NVFP4TensorStorage("
             f"rowwise_scaled_data={data_rowwise},"
             f"rowwise_scale_inv={self._rowwise_scale_inv},"
             f"amax_rowwise={self._amax_rowwise},"

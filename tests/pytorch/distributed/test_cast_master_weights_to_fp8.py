@@ -8,15 +8,15 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch import is_fp8_available, is_fp8_block_scaling_available
 
 
 if torch.cuda.device_count() < 2:
     pytest.skip("cast_master_weights_to_fp8 test needs at least 2 GPUs.")
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scaling_available(
+    return_reason=True
 )
 
 TEST_ROOT = Path(__file__).parent.resolve()

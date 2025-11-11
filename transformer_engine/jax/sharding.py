@@ -131,7 +131,22 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     # We want to exclude the axes that already used by shard_map and shard_map
     # only sets those in the abstract_mesh, not the physical one
     manual_axis_names = get_abstract_mesh().manual_axes
-    cleaned_axis_names = tuple(name if name not in manual_axis_names else None for name in pspec)
+
+    # Multiple mesh axes can be mapped to a single shape axis, so we need to unpack and process tuples here too
+    def filter_manual_axes(name_or_tuple):
+        if isinstance(name_or_tuple, tuple):
+            out = tuple(n for n in name_or_tuple if n not in manual_axis_names)
+            if len(out) == 0:
+                return None
+            return out
+        if name_or_tuple in manual_axis_names:
+            return None
+        return name_or_tuple
+
+    cleaned_axis_names = tuple(filter_manual_axes(name_or_tuple) for name_or_tuple in pspec)
+
+    if cleaned_axis_names == (None,) * len(cleaned_axis_names):
+        return x
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
@@ -221,6 +236,19 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_num_devices_in_mesh(mesh=None):
+    """
+    Get the number of devices in the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return 1
+    return np.prod(list(mesh.shape.values()))
 
 
 def get_mesh_axis_size(axis, mesh=None):
@@ -346,6 +374,21 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     Returns:
         Reduced tensor
     """
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+
+
+def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh):
+    """Perform all-reduce sum operation along data parallelism and sequence parallelism axes.
+
+    Args:
+        x: Input tensor to reduce
+        mesh: JAX mesh for distributed computation
+
+    Returns:
+        Reduced tensor
+    """
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().tpsp_resource, mesh)
     x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 

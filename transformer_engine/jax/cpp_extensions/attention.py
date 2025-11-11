@@ -1820,7 +1820,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
@@ -2306,7 +2306,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
@@ -2739,10 +2739,13 @@ def fused_attn_bwd(
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
-    if 100 in get_all_device_compute_capability():
+    # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
+    # sm100+
+    compute_capabilities = get_all_device_compute_capability()
+    if any(x >= 100 for x in compute_capabilities):
         assert not (
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
-        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+        ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

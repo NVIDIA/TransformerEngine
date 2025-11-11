@@ -51,7 +51,8 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 
   // Set scaling factor for quantized tensors
   if (scaling_mode != JAXX_Scaling_Mode::NO_SCALING) {
-    NVTE_CHECK(typeToSize(input_dtype) == 1, "Quantized GEMM requires 8-bit operands.");
+    NVTE_CHECK(is_nvfp4_scaling(scaling_mode) || typeToSize(input_dtype) == 1,
+               "Quantized GEMM requires 4-bit or 8-bit operands.");
     NVTE_CHECK(scale_inv.element_count() > 0, "Missing inverse scaling factor for quantized GEMM.");
 
     std::vector<size_t> scale_shape = {1};
@@ -74,7 +75,8 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
-                                 Buffer_Type gelu_input, Result_Type output, Result_Type bias_grad,
+                                 Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
+                                 Result_Type output, Result_Type bias_grad,
                                  Result_Type pre_gelu_out, Result_Type workspace,
                                  JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                                  int64_t rhs_axis_boundary, bool lhs_transposed,
@@ -119,6 +121,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Arg<Buffer_Type>()  // rhs_scale_inv
                                   .Arg<Buffer_Type>()  // bias
                                   .Arg<Buffer_Type>()  // gelu_input
+                                  .Arg<Buffer_Type>()  // alpha
+                                  .Arg<Buffer_Type>()  // beta
                                   .Ret<Buffer_Type>()  // output
                                   .Ret<Buffer_Type>()  // bias_grad
                                   .Ret<Buffer_Type>()  // pre_gelu_out
@@ -136,11 +140,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
-                   Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
-                   Result_Type workspace, JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
-                   int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
-                   bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
-                   JAXX_Collective_Op collective_op) {
+                   Buffer_Type alpha, Buffer_Type beta, Result_Type output, Result_Type bias_grad,
+                   Result_Type pre_gelu_out, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
+                   int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
+                   bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
+                   bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
@@ -158,18 +162,18 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Bias input to forward pass or bias gradient output from backward pass
   void *bias_ptr = nullptr;
-  std::vector<size_t> bias_shape = {0};
+  size_t bias_size = 0;
   DType bias_dtype = out_dtype;
   if (fuse_bias) {
-    if (!grad) {
+    if (grad) {
       NVTE_CHECK(bias_grad->untyped_data() == bias.untyped_data(),
                  "Missing operand-output aliasing in GemmPrimitive: bias <-> bias_grad");
     }
-    bias_ptr = bias_grad->untyped_data();
-    bias_shape.at(0) = bias_grad->dimensions().front();
-    bias_dtype = convert_ffi_datatype_to_te_dtype(bias_grad->element_type());
+    bias_ptr = bias.untyped_data();
+    bias_size = product(bias.dimensions());
+    bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
   }
-  auto bias_ = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
+  auto bias_ = TensorWrapper(bias_ptr, std::vector<size_t>{bias_size}, bias_dtype);
 
   // Pre-GeLU output from forward pass or input to backward pass
   void *pre_gelu_ptr = nullptr;
@@ -192,9 +196,30 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   std::vector<size_t> workspace_shape = {static_cast<size_t>(workspace->element_count()) - 256};
   auto workspace_ = TensorWrapper(workspace_ptr, workspace_shape, DType::kByte);
-
-  // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+
+  float one = 1.;
+  float zero = 0.;
+  // alpha, beta
+  float *alpha_ptr = &one, *beta_ptr = &zero;
+  if (is_nvfp4_scaling(scaling_mode)) {
+    NVTE_CHECK(alpha.element_count() == 1 &&
+               convert_ffi_datatype_to_te_dtype(alpha.element_type()) == DType::kFloat32);
+    alpha_ptr = reinterpret_cast<float *>(alpha.untyped_data());
+    NVTE_CHECK(beta.element_count() == 1 &&
+               convert_ffi_datatype_to_te_dtype(beta.element_type()) == DType::kFloat32);
+    beta_ptr = reinterpret_cast<float *>(beta.untyped_data());
+  }
+
+  // Construct GEMM config
+  transformer_engine::MatmulConfigWrapper config;
+  config.set_use_split_accumulator(use_split_accumulator);
+  config.set_sm_count(num_math_sm);
+  if (fuse_bias) config.set_bias_tensor(bias_.data());
+  if (fuse_gelu) {
+    config.set_with_gelu_epilogue(true);
+    config.set_epilogue_aux_tensor(pre_gelu_.data());
+  }
 
   if (collective_op == JAXX_Collective_Op::NONE) {
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -202,10 +227,13 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
                to_string_like(out_shape), " but got ", output->element_count(), " elements ",
                to_string_like(output->dimensions()));
+    NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
+               ", out_shape[1]=", out_shape[1]);
 
-    nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_.data(),
-                     rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
-                     use_split_accumulator, num_math_sm, stream);
+    // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
+    nvte_cublas_gemm_v2(rhs_transposed /*transa*/, lhs_transposed /*transb*/, alpha_ptr,
+                        rhs_.data() /*A*/, lhs_.data() /*B*/, beta_ptr, out_.data() /*C*/,
+                        out_.data() /*D*/, workspace_.data(), config, stream);
   } else {
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
@@ -220,6 +248,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       buffer_shape[1] = out_shape[1];
       out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
+    NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
+               ", out_shape[1]=", out_shape[1]);
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, collective_op);
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
@@ -264,6 +294,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_scale_inv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // gelu_input
+                                  .Arg<Buffer_Type>()      // alpha
+                                  .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // bias_grad
                                   .Ret<Buffer_Type>()      // pre_gelu_out
@@ -280,12 +312,71 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
+size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *dev_group_sizes,
+                                int32_t *host_group_sizes) {
+  static std::once_flag init_flag;
+  static cudaEvent_t d2h_event;
+  static size_t host_num_gemms;
+  static const size_t max_num_gemms = 1024;
+  //static int32_t host_group_sizes_internal[max_num_gemms];
+  static int32_t *host_group_sizes_internal = nullptr;
+  auto init = [&]() {
+    NVTE_CHECK_CUDA(cudaEventCreate(&d2h_event));
+    NVTE_CHECK_CUDA(cudaMallocHost(&host_group_sizes_internal, sizeof(int32_t) * max_num_gemms));
+  };
+  std::call_once(init_flag, init);
+
+  NVTE_CHECK(dev_group_sizes == nullptr || host_group_sizes == nullptr,
+             "Only one of dev_group_sizes and host_group_sizes can be non-nullptr.");
+
+  if (dev_group_sizes != nullptr) {
+    NVTE_CHECK(num_gemms <= max_num_gemms, "num_gemms ", num_gemms, " exceeds the maximum ",
+               "supported number ", max_num_gemms, " to be downloaded in advance.");
+    host_num_gemms = num_gemms;
+    // Wait for current compute stream to finish
+    cudaStream_t compute_stream_0 = nvte_get_compute_stream(0);
+    NVTE_CHECK_CUDA(cudaEventRecord(d2h_event, stream));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_stream_0, d2h_event));
+    // Async copy group_sizes from device to host
+    size_t copy_bytes = sizeof(int32_t) * num_gemms;
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(host_group_sizes_internal, dev_group_sizes, copy_bytes,
+                                    cudaMemcpyDeviceToHost, compute_stream_0));
+    NVTE_CHECK_CUDA(cudaEventRecord(d2h_event, compute_stream_0));
+    return num_gemms;
+  }
+
+  if (host_group_sizes != nullptr) {
+    if (host_num_gemms == 0) return 0;
+    NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
+               " does not match the previous value ", host_num_gemms, ".");
+    // Wait for the async copy to finish, then copy group_sizes to user buffer
+    // Note: This may break cudaGraph.
+    NVTE_CHECK_CUDA(cudaEventSynchronize(d2h_event));
+    memcpy(host_group_sizes, host_group_sizes_internal, sizeof(int32_t) * host_num_gemms);
+    return host_num_gemms;
+  }
+}
+
+Error_Type GroupedGemmD2HGroupSizesFFI(cudaStream_t stream, Buffer_Type group_sizes,
+                                       Result_Type dummy_output, size_t num_gemms) {
+  int32_t *dev_group_sizes = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
+  GroupedGemmGetGroupSizes(stream, num_gemms, dev_group_sizes, nullptr);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler, GroupedGemmD2HGroupSizesFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Ret<Buffer_Type>()      // dummy_output
+                                  .Attr<int64_t>("num_gemms"));
+
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
                           Buffer_Type group_sizes, Buffer_Type group_offset, Result_Type output,
                           Result_Type workspace, size_t m, size_t n, size_t k, bool lhs_is_trans,
                           bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
-                          bool is_grouped_dense_wgrad) {
+                          bool is_grouped_dense_wgrad, bool use_async_d2h_group_sizes) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -406,11 +497,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
   std::vector<int32_t> dim_list_host(num_gemms);
-  auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-  cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                  stream);
-  // Note: This may break cudaGraph.
-  cudaStreamSynchronize(stream);
+  size_t host_num_gemms = 0;
+  if (use_async_d2h_group_sizes) {
+    host_num_gemms = GroupedGemmGetGroupSizes(stream, num_gemms, nullptr, dim_list_host.data());
+    NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
+               " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
+  } else {
+    auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
+    cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    // Note: This may break cudaGraph.
+    cudaStreamSynchronize(stream);
+  }
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
   if (!is_grouped_dense_wgrad) {
     NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
@@ -529,9 +627,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       // point to swizzled scale_inv data (store on workspace, only used for GEMM).
       // Note: even if is_empty_gemm is true, sinv are still non-empty, need to move the pointers
       auto lhs_sinv_shape_i =
-          get_mxfp8_scale_shape(lhs_shape_i[0], lhs_shape_i[1], lhs_use_colwise);
+          get_block_scale_shape(scaling_mode, lhs_shape_i[0], lhs_shape_i[1], lhs_use_colwise);
       auto rhs_sinv_shape_i =
-          get_mxfp8_scale_shape(rhs_shape_i[0], rhs_shape_i[1], rhs_use_colwise);
+          get_block_scale_shape(scaling_mode, rhs_shape_i[0], rhs_shape_i[1], rhs_use_colwise);
       lhs_sinv_size_i = lhs_sinv_shape_i[0] * lhs_sinv_shape_i[1];
       rhs_sinv_size_i = rhs_sinv_shape_i[0] * rhs_sinv_shape_i[1];
       if (lhs_use_colwise) {
@@ -669,7 +767,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
-                                  .Attr<bool>("is_grouped_dense_wgrad"));
+                                  .Attr<bool>("is_grouped_dense_wgrad")
+                                  .Attr<bool>("use_async_d2h_group_sizes"));
 
 }  // namespace jax
 }  // namespace transformer_engine

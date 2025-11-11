@@ -21,7 +21,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.fp8 import (
+from transformer_engine.pytorch.quantization import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,
@@ -30,7 +30,7 @@ from transformer_engine.pytorch.fp8 import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
@@ -91,26 +91,26 @@ _alibi_cache = {
 This feature is **experimental** and subject to change.
 
 Some models may use different FP8 recipes for their linear layers and attention layers. To support this,
-users can either use multiple, nested fp8_autocast() contexts to assign a distinct recipe for each layer,
-or use a single fp8_autocast() for the non-attention layers and configure the recipe for the attention
+users can either use multiple, nested autocast() contexts to assign a distinct recipe for each layer,
+or use a single autocast() for the non-attention layers and configure the recipe for the attention
 layers as follows.
 
 +-------------------+-----------+-----------------------------------------------------------------------------------+
 | Linear            | Attention | Configuration                                                                     |
 +===================+===========+===================================================================================+
-| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to fp8_autocast();                                     |
+| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to autocast();                                     |
 |                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8DS     | Pass FP8DS to fp8_autocast();                                                     |
+| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                     |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8DS     | Pass FP8CS to fp8_autocast();                                                     |
+| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                     |
 |                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8DS     | Pass NVFP4 to fp8_autocast();                                                     |
+| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                     |
 |                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
@@ -118,19 +118,19 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8CS     | Pass FP8DS to fp8_autocast();                                                     |
+| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                     |
 |                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
 |                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8CS     | Pass FP8CS to fp8_autocast();                                                     |
+| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                     |
 |                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
 |                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8CS     | Pass NVFP4 to fp8_autocast();                                                     |
+| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                     |
 |                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
 |                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
@@ -255,6 +255,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                  where alpha is a learnable parameter in shape [h].
                  'off-by-one' and 'learnable' softmax types are also called sink attention
                  ('zero sink' and 'learnable sink').
+    return_max_logit: Optional[bool], default = `False`
+                     If true, returns the maximum attention score that can be used in a Muon optimizer to
+                     rescale the Q and K projection weights (see `Muon is Scalable for LLM Training
+                     <https://arxiv.org/pdf/2502.16982>`_).
+                     max_logit = max(S), where S = mask(Q*K^T*softmax_scale + bias) in shape [b, h, s_q, s_kv],
+                     and max_logit is in shape [h].
 
     Parallelism parameters
     ----------------------
@@ -311,6 +317,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -394,6 +401,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
+        self.return_max_logit = return_max_logit
 
         self.softmax_type = softmax_type
         if self.softmax_type == "vanilla":
@@ -431,6 +439,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             deterministic=self.deterministic,
             **attn_kwargs,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -439,6 +448,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             **attn_kwargs,
             layer_number=layer_number,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
@@ -544,8 +554,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
-        # global recipe set in fp8_autocast()
+        # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.custom():
+            return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
         # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
@@ -558,7 +570,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe_dpa = fp8_recipe
         fp8_recipes = fp8_recipe
         if _dpa_fp8_recipe == "F16":
-            # ignore the recipe from fp8_autocast, set fp8_dpa = False, fp8_mha = False
+            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
         elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
@@ -597,9 +609,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe in (
-            "",
-            "Float8CurrentScaling",
+        elif (
+            fp8_recipe.float8_current_scaling()
+            and _dpa_fp8_recipe in ("", "Float8CurrentScaling")
+            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
         ):
             # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
@@ -1300,6 +1313,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
+                return_max_logit=self.return_max_logit,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1499,6 +1513,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         qkv_layout=qkv_layout,
                         cu_seqlens_q=cu_seqlens_q,
                         cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
@@ -1520,6 +1536,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     qkv_layout=qkv_layout,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,

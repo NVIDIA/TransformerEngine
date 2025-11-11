@@ -15,7 +15,7 @@ from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
 from utils import pytest_parametrize_wrapper
 
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
@@ -66,18 +66,19 @@ class TestDistributedLayernorm:
         self, mesh_resource, ln_type, shape, dtype, mesh_axes, fp8_recipe
     ):
         jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
+        # TODO(Phuong) is_dp_enabled = dp mesh axis size > 1
         is_dp_enabled = mesh_resource.dp_resource is not None
+        is_tpsp_enabled = mesh_resource.tpsp_resource is not None
         assert ln_type in ["layernorm", "rmsnorm"]
-        all_reduce_loss_bytes = 4  # 1 * FP32
-        # for loss, dgamma and dbeta
-        # TODO(Jeremy): debug this check because layernorm should always have 2x weights regardless of dp
-        weight_count = 2 if (ln_type == "layernorm" and "dp" in mesh_axes) else 1
-        allreduce_total_bytes = (
-            all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
-        )
-        other_bytes = 0
+        # loss, 1 FP32
+        allreduce_total_bytes = 4 if is_dp_enabled else 0
+        # dgamma and dbeta
+        weight_count = 2 if ln_type == "layernorm" else 1
+        allreduce_total_bytes += weight_count * shape[-1] * jax_dtype.itemsize
         return generate_collectives_count(
-            allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
+            allreduce=allreduce_total_bytes * int(is_dp_enabled or is_tpsp_enabled),
+            allgather=0,
+            other=0,
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
@@ -132,10 +133,13 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
-            x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
-            beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
+        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
+            x_named_sharding = NamedSharding(mesh, x_pspec)
+            g_named_sharding = NamedSharding(mesh, g_pspec)
+            b_named_sharding = NamedSharding(mesh, b_pspec)
+            x_ = jax.device_put(x, x_named_sharding)
+            gamma_ = jax.device_put(gamma, g_named_sharding)
+            beta_ = jax.device_put(beta, b_named_sharding)
 
             with warnings.catch_warnings(record=True) as warns:
                 try:
@@ -147,8 +151,11 @@ class TestDistributedLayernorm:
                         grad_args=(0, 1, 2),
                         metric_fwd_dtype=q_dtype,
                         metric_bwd_dtype=q_dtype,
-                        in_shardings=(x_pspec, g_pspec, b_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec, b_pspec)),
+                        in_shardings=(x_named_sharding, g_named_sharding, b_named_sharding),
+                        out_shardings=(
+                            None,
+                            (x_named_sharding, g_named_sharding, b_named_sharding),
+                        ),
                     )
                 except AssertionError as err:
                     # Layernorm should still produce the correct numerical result with
@@ -208,9 +215,11 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
-            x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
-            gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
+        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
+            x_named_sharding = NamedSharding(mesh, x_pspec)
+            g_named_sharding = NamedSharding(mesh, g_pspec)
+            x_ = jax.device_put(x, x_named_sharding)
+            gamma_ = jax.device_put(gamma, g_named_sharding)
 
             with warnings.catch_warnings(record=True) as warns:
                 try:
@@ -222,8 +231,8 @@ class TestDistributedLayernorm:
                         grad_args=(0, 1),
                         metric_fwd_dtype=q_dtype,
                         metric_bwd_dtype=q_dtype,
-                        in_shardings=(x_pspec, g_pspec),
-                        out_shardings=(None, (x_pspec, g_pspec)),
+                        in_shardings=(x_named_sharding, g_named_sharding),
+                        out_shardings=(None, (x_named_sharding, g_named_sharding)),
                     )
                 except AssertionError as err:
                     # RmsNorm should still produce the correct numerical result with

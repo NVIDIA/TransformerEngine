@@ -16,6 +16,7 @@
 #endif
 
 #if !defined(__CUDACC_RTC__)
+#include <cassert>
 #include <cstdint>
 #else
 // Importing C++ standard headers is a pain with NVRTC

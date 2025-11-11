@@ -102,6 +102,8 @@ inline static size_t te_dtype_bytes(const DType& type) {
       return 1;
     case DType::kFloat8E8M0:
       return 1;
+    case DType::kFloat4E2M1:
+      return 1;
     default:
       NVTE_ERROR("Unsupported DType: ", static_cast<int>(type));
   }

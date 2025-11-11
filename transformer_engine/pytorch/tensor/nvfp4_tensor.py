@@ -21,7 +21,7 @@ from ..utils import (
     round_up_to_nearest_multiple,
 )
 
-from ._internal.nvfp4_tensor_base import NVFP4TensorBase, _FromNVFP4Func
+from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 
 aten = torch.ops.aten
@@ -172,6 +172,10 @@ class NVFP4Quantizer(Quantizer):
         tex.quantize(src, self, dst, noop_flag)
 
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -332,7 +336,7 @@ class NVFP4Quantizer(Quantizer):
         return NVFP4BlockScaling
 
 
-class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
+class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
     """Quantized tensor class with FP4 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -365,7 +369,7 @@ class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
         Nominal tensor datatype, used in dequantize.
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a NVFP4TensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a NVFP4TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,
