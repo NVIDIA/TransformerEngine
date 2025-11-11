@@ -14,7 +14,9 @@ from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.custom_recipes.quantization import MMParams
-from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import CurrentScalingQuantizerRef
+from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import (
+    CurrentScalingQuantizerRef,
+)
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -759,11 +761,18 @@ class TestFP8CurrentScalingNativeVsRef:
     def _make_quantizers(rowwise=True, columnwise=True):
         # TE native FP8 current scaling quantizer
         te_quant = te.Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda"), rowwise=rowwise, columnwise=columnwise
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=torch.device("cuda"),
+            rowwise=rowwise,
+            columnwise=columnwise,
         )
         # Reference quantizer
         ref_quant = CurrentScalingQuantizerRef(
-            dtype=torch.float8_e4m3fn, rowwise=rowwise, columnwise=columnwise, pow_2_scales=False, eps=0.0
+            dtype=torch.float8_e4m3fn,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            pow_2_scales=False,
+            eps=0.0,
         )
         return te_quant, ref_quant
 
