@@ -14,8 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from .base import (
     get_dummy_wgrad,
-    get_multi_stream_cublas_workspace,
-    get_cutlass_grouped_gemm_workspace,
+    get_general_grouped_gemm_workspace,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -137,7 +136,7 @@ class _GroupedLinear(torch.autograd.Function):
         else:
             assert fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8(), "Only MXFP8 is supported when m_splits is on devie"
             # Cannot split because the m_splits is not available on host.
-            inputmats = tex.split_quantize(inp_view, [inp_view.size(0)], input_quantizers[:1])
+            inputmats = [input_quantizers[0](inp_view)]
         # Initialize weights
         weights_fp8: list
         if fp8:
@@ -190,7 +189,7 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats if not m_splits_on_devie else weights_fp8,
             [out],
             activation_dtype,
-            get_multi_stream_cublas_workspace() if not m_splits_on_devie else get_cutlass_grouped_gemm_workspace(),
+            get_general_grouped_gemm_workspace(m_splits_on_devie),
             single_output=True,
             layout="TN" if not m_splits_on_devie else "NT",
             m_splits=m_splits,
@@ -359,11 +358,7 @@ class _GroupedLinear(torch.autograd.Function):
                             ctx.grad_output_quantizers,
                         )
                     else:
-                        grad_output = tex.split_quantize(
-                            grad_output_view,
-                            [grad_output_view.size(0)],
-                            ctx.grad_output_quantizers[:1],
-                        )
+                        grad_output = [ctx.grad_output_quantizers[0](grad_output_view)]
             else:
                 # Only split grad output. Grad bias is fused with
                 # wgrad GEMM.
@@ -411,7 +406,7 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output if not ctx.m_splits_on_devie else weights,
                     [dgrad],
                     ctx.activation_dtype,
-                    get_multi_stream_cublas_workspace() if not ctx.m_splits_on_devie else get_cutlass_grouped_gemm_workspace(),
+                    get_general_grouped_gemm_workspace(ctx.m_splits_on_devie),
                     single_output=True,
                     layout="NN",
                     m_splits=ctx.m_splits,
@@ -466,11 +461,11 @@ class _GroupedLinear(torch.autograd.Function):
                     else:
                         assert ctx.fp8 and ctx.fp8_recipe.mxfp8(), "Only MXFP8 is supported when m_splits is on devie"
                         # Cannot split because the m_splits is not available on host.
-                        inputmats = tex.split_quantize(inp_view, [inp_view.size(0)], ctx.input_quantizers[:1])
+                        inputmats = [ctx.input_quantizers[0](inp_view)]
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     out_dtype=ctx.activation_dtype,
-                    workspaces=get_multi_stream_cublas_workspace() if not ctx.m_splits_on_devie else get_cutlass_grouped_gemm_workspace(),
+                    workspaces=get_general_grouped_gemm_workspace(ctx.m_splits_on_devie),
                     layout="NT" if not ctx.m_splits_on_devie else "TN",
                     grad=True,
                     wgrad=True, # For cutlass backend
