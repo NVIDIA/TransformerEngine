@@ -85,7 +85,7 @@ class _GroupedLinear(torch.autograd.Function):
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        m_splits_on_devie = m_splits.is_cuda
+        m_splits_on_device = m_splits.is_cuda
         num_gemms = m_splits.size(0)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -93,7 +93,7 @@ class _GroupedLinear(torch.autograd.Function):
         weight_requires_grad = weights[0].requires_grad
 
         # TODO: Support partial accumulate for cublas backend
-        if not m_splits_on_devie:
+        if not m_splits_on_device:
             assert wgrad_accumulation_mask is None, "when use cublas backend, partial accumulate is not supported"
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -128,13 +128,13 @@ class _GroupedLinear(torch.autograd.Function):
             )
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-        if not m_splits_on_devie:
+        if not m_splits_on_device:
             if fp8:
                 inputmats = tex.split_quantize(inp_view, m_splits.tolist(), input_quantizers)
             else:
                 inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits.tolist())
         else:
-            assert fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8(), "Only MXFP8 is supported when m_splits is on devie"
+            assert fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8(), "Only MXFP8 is supported when m_splits is on device"
             # Cannot split because the m_splits is not available on host.
             inputmats = [input_quantizers[0](inp_view)]
         # Initialize weights
@@ -163,7 +163,7 @@ class _GroupedLinear(torch.autograd.Function):
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
 
         # Initialize output tensor
-        if not m_splits_on_devie:
+        if not m_splits_on_device:
             out = torch.empty(
                 [sum(m_splits), weights_fp8[0].size(0)],
                 dtype=activation_dtype,
@@ -185,15 +185,15 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         _ = general_grouped_gemm(
-            weights_fp8 if not m_splits_on_devie else inputmats,
-            inputmats if not m_splits_on_devie else weights_fp8,
+            weights_fp8 if not m_splits_on_device else inputmats,
+            inputmats if not m_splits_on_device else weights_fp8,
             [out],
             activation_dtype,
-            get_general_grouped_gemm_workspace(m_splits_on_devie),
+            get_general_grouped_gemm_workspace(m_splits_on_device),
             single_output=True,
-            layout="TN" if not m_splits_on_devie else "NT",
+            layout="TN" if not m_splits_on_device else "NT",
             m_splits=m_splits,
-            m_splits_on_devie=m_splits_on_devie,
+            m_splits_on_device=m_splits_on_device,
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
@@ -214,7 +214,7 @@ class _GroupedLinear(torch.autograd.Function):
             # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
                 if save_original_input:
-                    inputmats = [None] * num_gemms if not m_splits_on_devie else [None]
+                    inputmats = [None] * num_gemms if not m_splits_on_device else [None]
                     inputmats[0] = inp
                 else:
                     for inputmat in inputmats:
@@ -270,7 +270,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
-            ctx.m_splits_on_devie = m_splits_on_devie
+            ctx.m_splits_on_device = m_splits_on_device
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -302,7 +302,7 @@ class _GroupedLinear(torch.autograd.Function):
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-            if not ctx.m_splits_on_devie:
+            if not ctx.m_splits_on_device:
                 inputmats = saved_tensors[:N]
                 weights = saved_tensors[N : 2 * N]
                 origin_weights = saved_tensors[2 * N : 3 * N]
@@ -331,7 +331,7 @@ class _GroupedLinear(torch.autograd.Function):
             grad_biases = [None] * ctx.num_gemms
             if ctx.fp8:
                 if ctx.use_bias:
-                    assert not ctx.m_splits_on_devie, "bias is not supported when m_splits is on devie"
+                    assert not ctx.m_splits_on_device, "bias is not supported when m_splits is on devie"
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits.tolist())
                     recipe = ctx.fp8_recipe
                     if recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8():
@@ -351,7 +351,7 @@ class _GroupedLinear(torch.autograd.Function):
                             ctx.grad_output_quantizers,
                         )
                 else:
-                    if not ctx.m_splits_on_devie:
+                    if not ctx.m_splits_on_device:
                         grad_output = tex.split_quantize(
                             grad_output_view,
                             ctx.m_splits.tolist(),
@@ -382,7 +382,7 @@ class _GroupedLinear(torch.autograd.Function):
                         dgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
-                if not ctx.m_splits_on_devie:
+                if not ctx.m_splits_on_device:
                     dgrad = torch.empty(
                         (sum(ctx.m_splits), ctx.weights_shape_1),
                         dtype=ctx.activation_dtype,
@@ -402,15 +402,15 @@ class _GroupedLinear(torch.autograd.Function):
                             columnwise_usage=quantizer.columnwise_usage,
                         )
                 general_grouped_gemm(
-                    weights if not ctx.m_splits_on_devie else grad_output,
-                    grad_output if not ctx.m_splits_on_devie else weights,
+                    weights if not ctx.m_splits_on_device else grad_output,
+                    grad_output if not ctx.m_splits_on_device else weights,
                     [dgrad],
                     ctx.activation_dtype,
-                    get_general_grouped_gemm_workspace(ctx.m_splits_on_devie),
+                    get_general_grouped_gemm_workspace(ctx.m_splits_on_device),
                     single_output=True,
                     layout="NN",
                     m_splits=ctx.m_splits,
-                    m_splits_on_devie=ctx.m_splits_on_devie,
+                    m_splits_on_device=ctx.m_splits_on_device,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 )
@@ -451,7 +451,7 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if not ctx.m_splits_on_devie:
+                    if not ctx.m_splits_on_device:
                         if ctx.fp8:
                             inputmats = tex.split_quantize(inp_view, ctx.m_splits.tolist(), ctx.input_quantizers)
                         else:
@@ -459,18 +459,18 @@ class _GroupedLinear(torch.autograd.Function):
                                 cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits.tolist()
                             )
                     else:
-                        assert ctx.fp8 and ctx.fp8_recipe.mxfp8(), "Only MXFP8 is supported when m_splits is on devie"
+                        assert ctx.fp8 and ctx.fp8_recipe.mxfp8(), "Only MXFP8 is supported when m_splits is on device"
                         # Cannot split because the m_splits is not available on host.
                         inputmats = [ctx.input_quantizers[0](inp_view)]
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     out_dtype=ctx.activation_dtype,
-                    workspaces=get_general_grouped_gemm_workspace(ctx.m_splits_on_devie),
-                    layout="NT" if not ctx.m_splits_on_devie else "TN",
+                    workspaces=get_general_grouped_gemm_workspace(ctx.m_splits_on_device),
+                    layout="NT" if not ctx.m_splits_on_device else "TN",
                     grad=True,
                     wgrad=True, # For cutlass backend
                     m_splits=ctx.m_splits,
-                    m_splits_on_devie=ctx.m_splits_on_devie,
+                    m_splits_on_device=ctx.m_splits_on_device,
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,

@@ -163,7 +163,7 @@ def general_grouped_gemm(
     workspaces: List[torch.Tensor],
     layout: str = "TN",
     m_splits: Optional[torch.Tensor] = None,
-    m_splits_on_devie: bool = False,
+    m_splits_on_device: bool = False,
     gelu: bool = False,
     grad=False,
     wgrad=False,
@@ -210,7 +210,7 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    if not m_splits_on_devie:
+    if not m_splits_on_device:
         bias = tex.te_general_grouped_gemm(
             A,
             transa,
