@@ -21,7 +21,6 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 import torch.nn.functional as F
 from torch import nn, optim
-from torch.profiler import profile, ProfilerActivity
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
@@ -38,10 +37,10 @@ def dist_print(msg):
 
 def _parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(description="Toy example for debugging fully_shard()")
-    parser.add_argument("--num-heads", type=int, default=16, help="Number of attn. heads")
-    parser.add_argument("--head-dim", type=int, default=1024, help="Attention head size")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size of input")
-    parser.add_argument("--seq-length", type=int, default=1024, help="Sequence length of input")
+    parser.add_argument("--num-heads", type=int, default=8, help="Number of attn. heads")
+    parser.add_argument("--head-dim", type=int, default=64, help="Attention head size")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size of input")
+    parser.add_argument("--seq-length", type=int, default=128, help="Sequence length of input")
     parser.add_argument("--params-dtype", type=str, default="float32", help="Parameter dtype.")
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -49,7 +48,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--recipe",
         type=str,
-        default="delayed_scaling",
+        default="mx_fp8_block_scaling",
         help="Quantizer type.",
         choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
     )
@@ -325,31 +324,17 @@ def _train(args):
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        with_stack=True,
-    ) as prof:
-        for iteration in range(args.iter):
-            # Zero the parameter gradients
-            optimizer.zero_grad()
-            input_data = torch.randn(inp_shape).to(device)
-            with te.autocast(enabled=True, recipe=fp8_recipe):
-                output = model(input_data)
-            target = torch.randn(out_shape).to(device)
-            loss = F.mse_loss(output, target)
-            loss.backward()
-            optimizer.step()
-            dist_print(
-                f"Memory after training iteration {iteration} on device {args.device}:"
-                f" {torch.cuda.memory_allocated(device)/1e6} MB"
-            )
-
-            dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
-
-    # Save profiler results only for rank 0
-    if LOCAL_RANK == 0:
-        prof.export_chrome_trace(f"fsdp2_trace_fp8_{args.fp8_init}.json")
-        dist_print(f"Profiler trace saved to fsdp2_trace_fp8_{args.fp8_init}.json")
+    for iteration in range(args.iter):
+        # Zero the parameter gradients
+        optimizer.zero_grad()
+        input_data = torch.randn(inp_shape).to(device)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            output = model(input_data)
+        target = torch.randn(out_shape).to(device)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
 
     # Some of the FSDP states are lazy initialized during FSDP forward pass
     # so testing fp8 allgather at the end of the training loop.
