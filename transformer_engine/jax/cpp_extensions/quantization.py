@@ -824,7 +824,7 @@ def _quantize_dbias_impl(
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
             )
-        scale = compute_scale_from_amax(amax, quantizer.q_dtype)
+        scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=quantizer.margin)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
         # Make sure to reset amax to zeros for DelayedScaling

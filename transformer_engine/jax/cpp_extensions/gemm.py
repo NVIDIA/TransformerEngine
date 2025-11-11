@@ -38,7 +38,6 @@ from ..quantize import (
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
-    get_quantize_config,
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
@@ -1241,7 +1240,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
-    use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
+    use_split_accumulator: bool = None,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
 ) -> Tuple[jax.Array, ...]:
@@ -1252,6 +1251,16 @@ def _te_gemm(
             " future",
             DeprecationWarning,
         )
+
+    if use_split_accumulator is None:
+        use_split_accumulator = False
+        # TODO(jberchtold) Does this only apply to FP8? If so, set this as an attribute on the quantizers themselves that then get passed thru the scaled tensors so it can be used here?
+        # TODO(jberchtold): FP8_2X_ACC_FPROP, FP8_2X_ACC_DGRAD, and FP8_2X_ACC_WGRAD don't seem to be properly extracted from the recipe when converting to a quantization config
+        # global_recipe = get_global_quantize_recipe()
+        # if global_recipe is not None:
+        #     use_split_accumulator = global_recipe.FP8_2X_ACC_FPROP
+        # else:
+        #     use_split_accumulator = False
 
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -1717,7 +1726,7 @@ def _jax_gemm(
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                 jax.lax.Precision.HIGHEST
-                if get_quantize_config().FP8_2X_ACC_FPROP
+                if get_quantize_config().FP8_2X_ACC_FPROP  # TODO(jberchtold): this needs to know which GEMM we are in, fwd, dgrad, wgrad and apply the right config
                 else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)

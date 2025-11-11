@@ -26,7 +26,6 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
-    get_quantize_config,
 )
 
 
@@ -94,7 +93,7 @@ def dense(
     if transpose_batch_sequence:
         warnings.warn("transpose_batch_sequence is not well tested, use with caution!")
 
-    if not get_quantize_config().is_fp8_enabled():
+    if quantizer_set == noop_quantizer_set:
         input_dtype = x.dtype
         kernel = kernel.astype(input_dtype)
 
