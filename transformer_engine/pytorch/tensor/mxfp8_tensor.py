@@ -423,7 +423,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     shape=(
                         splitted_tensor_data[0].size()
                         if splitted_tensor_data[0] is not None
-                        else None
+                        else splitted_tensor_data[1].size()
                     ),
                     dtype=tensor.dtype,
                     rowwise_data=splitted_tensor_data[0],
