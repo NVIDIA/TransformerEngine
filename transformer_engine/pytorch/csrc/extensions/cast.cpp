@@ -37,7 +37,18 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
   // Convert input tensor to C++ object
   auto input_contiguous = tensor.contiguous();
-  const auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  // Set amax if use_existing_amax = true (only valid for CS)
+  bool use_existing_amax = false;
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    use_existing_amax = quantizer.attr("use_existing_amax").cast<bool>();
+    if (use_existing_amax) {
+      const at::Tensor &amax = quantizer.attr("amax").cast<at::Tensor>();
+      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                         getTensorShape(amax));
+    }
+  }
 
   // Initialize output tensor
   TensorWrapper output_cpp;
@@ -57,7 +68,12 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   // Perform quantization
-  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  if (use_existing_amax) {
+    auto *quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+    quantizer_cs->quantize_with_amax(input_cpp, output_cpp, noop_flag_cpp);
+  } else {
+    quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  }
 
   return output_py;
 }
@@ -205,11 +221,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    // in the case where full buffer is empty because local rank receives no tokens for all the experts
-    // then the data_ptr is nullptr, we need to return an empty tensor instead of calling from_blob
-    // but in the case where some experts receive tokens, some not, we want to leverage from_blob
-    // as much as possible to avoid CPU overhead
-    if (buffer->data_ptr<uint8_t>() == nullptr) {
+    bool is_empty_shape = product(shape) == 0;
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
     return at::from_blob(
@@ -359,11 +372,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    // in the case where full buffer is empty because local rank receives no tokens for all the experts
-    // then the data_ptr is nullptr, we need to return an empty tensor instead of calling from_blob
-    // but in the case where some experts receive tokens, some not, we want to leverage from_blob
-    // as much as possible to avoid CPU overhead
-    if (buffer->data_ptr<uint8_t>() == nullptr) {
+    bool is_empty_shape = product(shape) == 0;
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
     return at::from_blob(

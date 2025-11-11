@@ -13,6 +13,8 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.utils import is_experimental
+from ..experimental.gemm import experimental_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
@@ -76,6 +78,24 @@ def general_gemm(
     if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
+
+    # If A or B are experimental tensors -> dispatch to quantizers's qgemm implementation
+    if is_experimental(A) or is_experimental(B):
+        return experimental_gemm(
+            A,
+            B,
+            workspace,
+            out_dtype,
+            quantization_params,
+            gelu,
+            gelu_in,
+            accumulate,
+            layout,
+            out,
+            bias,
+            use_split_accumulator,
+            grad,
+        )
 
     debug_quantizer = None
     if isinstance(quantization_params, DebugQuantizer):

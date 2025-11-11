@@ -39,11 +39,14 @@ from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
+from .tensor.nvfp4_tensor import NVFP4Quantizer
 from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from .tensor.quantized_tensor import QuantizedTensor, Quantizer
+from .tensor.quantized_tensor import QuantizedTensorBase, QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from .tensor._internal.nvfp4_tensor_base import NVFP4TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from .triton.pad import pad_columnwise_scale_inv
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 
@@ -1204,6 +1207,245 @@ def _all_gather_fp8_blockwise(
     return out, handle
 
 
+def _swap_first_dims(tensor: torch.Tensor, world_size: int):
+    """
+    Swap first 2 dimensions of a tensor to fix interleaved
+    data format after gathering transposed data.
+
+    For more than 2 dimensions, we squash the trailing dimensions,
+    instead of the first few dimensions, that's because the shape
+    passed in this function is already transposed.
+    """
+
+    shape = tensor.shape
+    assert tensor.ndim >= 2, "Wrong number of dimensions for fixing interleave."
+    first_dim = shape[0]
+    flattened_trailing = math.prod(shape[1:])
+    assert first_dim % world_size == 0, "Wrong dimensions for fixing interleave."
+    tensor = tensor.reshape(world_size, first_dim // world_size, flattened_trailing)
+    tensor = tex.swap_first_dims(tensor, out=None)
+    return tensor.reshape(first_dim // world_size, flattened_trailing * world_size)
+
+
+def _post_process_nvfp4_gather(
+    out: NVFP4TensorBase,
+    columnwise_data_interleaved: torch.Tensor,
+    columnwise_scale_inv_interleaved: torch.Tensor,
+    world_size: int,
+    handle: Optional[torch.distributed.Work] = None,
+) -> NVFP4TensorBase:
+    """Post-process FP8 blockwise gather."""
+    if handle is not None:
+        handle.wait()
+        handle = None
+
+    # Fix the interleaved transposed data from gathering along first dim.
+    out._columnwise_scale_inv = _swap_first_dims(columnwise_scale_inv_interleaved, world_size)
+    out._columnwise_data = _swap_first_dims(columnwise_data_interleaved, world_size)
+
+    # Optionally pad the scaling inverse if needed.
+    out._columnwise_scale_inv = pad_columnwise_scale_inv(out._columnwise_scale_inv)
+
+
+@dataclass
+class _NVFP4AllGatherAsyncHandle:
+    """Handle for asynchronous NVFP4 all-gather."""
+
+    output: NVFP4TensorBase
+    columnwise_data_interleaved: torch.Tensor
+    columnwise_scale_inv_interleaved: torch.Tensor
+    world_size: int
+    async_handle: torch.distributed.Work
+    _synchronized: bool = False
+
+    def wait(self) -> None:
+        """Wait for the async operation to complete and post-process the tensor."""
+        if self._synchronized:
+            return
+        self.async_handle.wait()
+        _post_process_nvfp4_gather(
+            self.output,
+            self.columnwise_data_interleaved,
+            self.columnwise_scale_inv_interleaved,
+            self.world_size,
+        )
+        self._synchronized = True
+
+
+def _all_gather_nvfp4(
+    inp: torch.Tensor,
+    process_group: dist_group_type,
+    *,
+    async_op: bool = False,
+    quantizer: NVFP4Quantizer,
+    out_shape: Optional[list[int]] = None,
+) -> tuple[NVFP4TensorBase, Optional[torch.distributed.Work]]:
+    """All-gather NVFP4 tensor along first dimension."""
+
+    # Input tensor attributes
+    in_shape: Iterable[int] = None
+    in_shape_t: Iterable[int] = None
+    device: torch.device
+    dtype: torch.dtype
+
+    # Construct packed shapes for input and input_t.
+    if isinstance(inp, torch.Tensor) and not isinstance(inp, NVFP4TensorBase):
+        # High-precision tensor.
+        in_shape = NVFP4Quantizer.convert_shape_for_fp4(inp.size())
+        in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
+            NVFP4Quantizer.get_columnwise_shape(inp.size())
+        )
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, NVFP4TensorBase):
+        if inp._rowwise_data is not None:
+            in_shape = inp._rowwise_data.size()
+            device = inp._rowwise_data.device
+        if inp._columnwise_data is not None:
+            in_shape_t = inp._columnwise_data.size()
+            device = inp._columnwise_data.device
+        dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or NVFP4TensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+
+    assert in_shape is not None or in_shape_t is not None, "No data found."
+
+    world_size = get_distributed_world_size(process_group)
+
+    if out_shape is None:
+        out_shape = [in_shape[0] * world_size] + in_shape[1:]
+
+    # For cases where inp has dimensions that cannot be quantized,
+    # we gather in high precision followed by a cast to NVFP4.
+    if (
+        not isinstance(inp, NVFP4TensorBase)
+        and quantizer is not None
+        and not quantizer.is_quantizable(inp)
+    ):
+        out = torch.empty(
+            out_shape,
+            dtype=dtype,
+            device=device,
+            memory_format=torch.contiguous_format,
+        )
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
+        out = quantizer(out)
+        return out, None
+
+    # Cast input tensor to NVFP4 with required data
+    if not isinstance(inp, NVFP4TensorBase):
+        inp = quantizer(inp)
+    elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
+        quantizer.columnwise_usage and inp._columnwise_data is None
+    ):
+        warnings.warn(
+            "Input and quantizer do not have matching usages. "
+            "Dequantizing and requantizing to NVFP4."
+        )
+        inp = quantizer(inp.dequantize())
+
+    # Construct NVFP4 output tensor
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
+    # Coalesce NCCL collectives for gathering data and scale inverses.
+    with torch.distributed._coalescing_manager(
+        group=process_group,
+        device=device,
+        async_ops=async_op,
+    ) as gather_coalescing_manager:
+
+        # Gather NVFP4 data for row-wise usage
+        if quantizer.rowwise_usage:
+
+            # Remove padding from NVFP4 scale-inverses
+            assert in_shape is not None, "Shape not found."
+            in_scale_inv = inp._rowwise_scale_inv
+            out_scale_inv = out._rowwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1])
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_data,
+                inp._rowwise_data,
+                group=process_group,
+            )
+
+            # Transfer amax to output.
+            out._amax_rowwise = inp._amax_rowwise
+
+        # Gather the transposed NVFP4 data along first dimension. Fix format later.
+        if quantizer.columnwise_usage:
+
+            # Remove padding from NVFP4 scale-inverses
+            # For doing an all-gather on transposed scale inverses,
+            # we need to remove padding from both dimension.
+            in_scale_inv = inp._columnwise_scale_inv
+            # take caution that for in_shape_t, flatten in the trailing dimensions!
+            flattened_in_shape0 = in_shape_t[0]
+            flattened_in_shape1 = math.prod(in_shape_t[1:])
+
+            # Remove dim0 padding
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+
+            # Remove dim1 padding (pack first).
+            unpadded_dim1 = flattened_in_shape1 * 2 // 16
+            if in_scale_inv.size(1) != unpadded_dim1:
+                in_scale_inv = in_scale_inv[:, :unpadded_dim1].contiguous()
+
+            # Construct tensor to gather transposed scale_inv (interleaved) and launch AG.
+            out_scale_inv = torch.empty(
+                [flattened_in_shape0 * world_size] + [in_scale_inv.shape[1]],
+                dtype=in_scale_inv.dtype,
+                layout=in_scale_inv.layout,
+                device=in_scale_inv.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+
+            # Construct tensor to gather transposed data (interleaved) and launch AG.
+            out_columnwise_data = torch.empty(
+                [inp._columnwise_data.shape[0] * world_size] + list(inp._columnwise_data.shape[1:]),
+                dtype=inp._columnwise_data.dtype,
+                layout=inp._columnwise_data.layout,
+                device=inp._columnwise_data.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out_columnwise_data,
+                inp._columnwise_data,
+                group=process_group,
+            )
+
+            # Transfer amax to output.
+            out._amax_columnwise = inp._amax_columnwise
+
+    handle = gather_coalescing_manager if async_op else None
+
+    # Fixes interleaved data for transposed tensor/scale inv and pads scale inv if needed.
+    if async_op and quantizer.columnwise_usage:
+        handle = _NVFP4AllGatherAsyncHandle(
+            out, out_columnwise_data, out_scale_inv, world_size, handle
+        )
+    elif quantizer.columnwise_usage:
+        _post_process_nvfp4_gather(out, out_columnwise_data, out_scale_inv, world_size, handle)
+
+    return out, handle
+
+
 def _all_gather_mxfp8(
     inp: torch.Tensor,
     process_group: dist_group_type,
@@ -1291,7 +1533,6 @@ def _all_gather_mxfp8(
             flattened_in_shape0 = math.prod(in_shape[:-1])
             if in_scale_inv.size(0) != flattened_in_shape0:
                 in_scale_inv = in_scale_inv[:flattened_in_shape0]
-                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
                 out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
             # Launch all-gathers
@@ -1315,7 +1556,6 @@ def _all_gather_mxfp8(
             flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
             if in_scale_inv.size(0) != flattened_in_shape0:
                 in_scale_inv = in_scale_inv[:flattened_in_shape0]
-                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
                 out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
             # Launch all-gathers
@@ -1347,7 +1587,7 @@ def gather_along_first_dim(
     # Return immediately if no communication is required
     world_size = get_distributed_world_size(process_group)
     if world_size == 1:
-        if quantizer is not None and not isinstance(inp, QuantizedTensor):
+        if quantizer is not None and not isinstance(inp, QuantizedTensorBase):
             inp = quantizer(inp)
         return inp, None
 
@@ -1426,13 +1666,24 @@ def gather_along_first_dim(
             out_shape=out_shape,
         )
 
+    # NVFP4 case
+    if isinstance(inp, NVFP4TensorBase) or isinstance(quantizer, NVFP4Quantizer):
+        assert isinstance(quantizer, NVFP4Quantizer)
+        return _all_gather_nvfp4(
+            inp,
+            process_group,
+            async_op=async_op,
+            quantizer=quantizer,
+            out_shape=out_shape,
+        )
+
     # High-precision communication for quantized tensors
     if quantizer is not None:
         warnings.warn(
             "Attempting to all-gather an unsupported quantized tensor. "
             "Falling back to high-precision all-gather."
         )
-        if isinstance(inp, QuantizedTensor):
+        if isinstance(inp, QuantizedTensorBase):
             inp = inp.dequantize()
         # Falling back to high-precision all-gather for Float8BlockQuantizer
         # means that it should directly output GEMM_READY format
@@ -1450,7 +1701,7 @@ def gather_along_first_dim(
         return out, None
 
     # Dequantize quantized tensor if not supported
-    if isinstance(inp, QuantizedTensor):
+    if isinstance(inp, QuantizedTensorBase):
         warnings.warn(
             "Attempting to all-gather an unsupported quantized tensor. "
             "Falling back to high-precision all-gather."

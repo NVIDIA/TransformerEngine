@@ -11,4 +11,4 @@ from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
 from .fp8_padding import Fp8Padding
 from .fp8_unpadding import Fp8Unpadding
-from .base import initialize_ub, destroy_ub
+from .base import initialize_ub, destroy_ub, UserBufferQuantizationMode

@@ -119,6 +119,9 @@ def read_log(log_dir: str) -> str:
 
 
 def test_sanity(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     log_all_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(all_stats))
     with debug_session(log_all_stats_config, feature_dirs) as log_dir:
         model = te.Linear(128, 128, params_dtype=torch.bfloat16)
@@ -164,8 +167,8 @@ def test_numerics(fp8_recipe, feature_dirs):
             num_quantizers=3,
         )
 
-        tensor = torch.zeros(1024, 1024).cuda()
-        tensor[0, :] = 1000
+        tensor = torch.randn(1024, 1024).cuda()
+        tensor[0, 100:200] = -0.0
         quantizer = recipe_state.make_quantizers()[0]
         quantized_tensor = quantizer(tensor)
 
@@ -188,15 +191,13 @@ def test_numerics(fp8_recipe, feature_dirs):
         if "underflows%" in line:
             underflows = float(line.split("value=")[1])
             expected = (
-                ((dequantized_tensor == 0).sum() - (tensor == 0).sum())
-                / dequantized_tensor.numel()
-                * 100
+                ((dequantized_tensor == 0).sum() - (tensor == 0).sum()) / tensor.numel() * 100
             )
             assert underflows == pytest.approx(expected.cpu(), abs=1e-4)
         if "mse" in line:
             mse = float(line.split("value=")[1])
             expected = torch.nn.functional.mse_loss(dequantized_tensor, tensor, reduction="mean")
-            assert mse == pytest.approx(expected.cpu(), abs=1e-6)
+            assert mse == pytest.approx(expected.cpu(), abs=1e-4)
         if "overflows%" in line:
             overflows = float(line.split("value=")[1])
             expected = (
@@ -207,6 +208,9 @@ def test_numerics(fp8_recipe, feature_dirs):
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     # If layer does not invoke any feature in current iteration,
     # then it changed into non-debug mode.
     # This test checks whether this works correctly -

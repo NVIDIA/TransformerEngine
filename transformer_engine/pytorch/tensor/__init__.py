@@ -54,6 +54,7 @@ def get_all_tensor_types():
         Float8BlockwiseQTensor,
         Float8BlockwiseQTensorBase,
     )
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Tensor, NVFP4TensorBase
 
     all_tensor_types = [
         torch.Tensor,
@@ -64,5 +65,7 @@ def get_all_tensor_types():
         MXFP8TensorBase,
         Float8BlockwiseQTensor,
         Float8BlockwiseQTensorBase,
+        NVFP4Tensor,
+        NVFP4TensorBase,
     ]
     return all_tensor_types

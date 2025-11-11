@@ -87,5 +87,31 @@ constexpr struct Alignment {
 
 std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
 
+template <typename T, typename... Rest>
+void hash_combine(int64_t &seed, const T &v, Rest... rest) {
+  seed ^= std::hash<T>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  (hash_combine(seed, rest), ...);
+}
+
+enum class JAXX_Collective_Op : int64_t {
+  NONE = 0,
+  ALL_GATHER = 1,
+  REDUCE_SCATTER = 2,
+};
+
+static CommOverlapType get_nvte_collective_op(const JAXX_Collective_Op &op) {
+  switch (op) {
+    case JAXX_Collective_Op::ALL_GATHER:
+      return CommOverlapType::AG;
+      break;
+    case JAXX_Collective_Op::REDUCE_SCATTER:
+      return CommOverlapType::RS;
+      break;
+    default:
+      NVTE_ERROR("Invalid Collective Op ", static_cast<int>(op));
+      break;
+  }
+}
+
 }  // namespace jax
 }  // namespace transformer_engine

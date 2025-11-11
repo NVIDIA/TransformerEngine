@@ -364,6 +364,7 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -398,6 +399,7 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -491,6 +493,7 @@ void GatedActivationKernelLauncher(const InputType *input, OutputType *output, c
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -602,6 +605,7 @@ void DGatedActivationKernelLauncher(const InputType *grad, const InputType *inpu
         break;
       }
     }
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

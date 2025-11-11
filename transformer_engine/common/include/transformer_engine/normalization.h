@@ -24,7 +24,7 @@ extern "C" {
  * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}} \gamma + \beta
  * @f]
  *
- * Calling this function with workspace set to empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     x                   Input tensor of shape [N, H].
@@ -55,8 +55,8 @@ void nvte_layernorm_fwd(const NVTETensor x, const NVTETensor gamma, const NVTETe
  * else
  * with respect to \f$x\f$, \f$\gamma\f$ and \f$\beta\f$.
  *
- * Calling this function with workspace set to empty tensor will not perform the operation,
- * but instead set the shape and type of these tensors to the required values.
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
+ * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
  *  \param[in]     x                   Forward input tensor of shape [N, H].
@@ -90,9 +90,8 @@ void nvte_layernorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETenso
  * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  *
- * Calling this function with workspace and barrier set to empty tensor will not
- * perform the operation, but instead set the shape and type of the workspace
- * and barrier tensors to the required values.
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
+ * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     x                   Input tensor of shape [N, H].
  *  \param[in]     gamma               Gamma tensor of shape [H].
@@ -121,9 +120,8 @@ void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float ep
  * @f]
  * with respect to \f$x\f$ and \f$gamma\f$.
  *
- * Calling this function with workspace, barrier, dgamma_part set
- * to empty tensor will not perform the operation, but instead set the shape and type
- * of these tensors to the required values.
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
+ * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
  *  \param[in]     x                   Forward input tensor of shape [N, H].
@@ -141,6 +139,29 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
                       const NVTETensor gamma, NVTETensor dx, NVTETensor dgamma,
                       NVTETensor workspace, const int multiprocessorCount,
                       const bool zero_centered_gamma, cudaStream_t stream);
+
+/*! \brief Compute backward of RMSNorm and add additional tensor to output gradient
+ *
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
+ * but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
+ *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     add                 Additional tensor to add to output gradient [N, H].
+ *  \param[in]     rsigma              Reciprocal of the root mean square of the input
+ *                                     calculated over the last dimension. Shape: [N].
+ *  \param[in]     gamma               Gamma tensor of shape [H].
+ *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[in]     multiprocessorCount Number of SMs in the device.
+ *  \param[in]     zero_centered_gamma Multiply normalized values by @f$ \gamma+1 @f$ instead of @f$ \gamma @f$
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_rmsnorm_bwd_add(const NVTETensor dz, const NVTETensor x, const NVTETensor add,
+                          const NVTETensor rsigma, const NVTETensor gamma, NVTETensor dx,
+                          NVTETensor dgamma, NVTETensor workspace, const int multiprocessorCount,
+                          const bool zero_centered_gamma, cudaStream_t stream);
 
 /*! \brief Helper to enable cuDNN backend for normalization
  *

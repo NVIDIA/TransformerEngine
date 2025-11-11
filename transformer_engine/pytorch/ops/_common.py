@@ -29,7 +29,9 @@ def maybe_dequantize(
     if is_quantized_tensor(tensor):
         return tensor.dequantize(dtype=dtype)
     if dtype is not None and tensor.dtype != dtype:
-        return tensor.to(dtype)
+        tensor = tensor.to(dtype)
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
     return tensor
 
 

@@ -91,6 +91,7 @@ void prepare_flash_attn_fwd(Tensor qkvi, Tensor qkv, cudaStream_t stream) {
       prepare_kernel_fwd<dtype><<<grid, threads, 0, stream>>>(
           reinterpret_cast<dtype *>(qkvi.data.dptr), reinterpret_cast<dtype *>(qkv.data.dptr),
           shape[1], shape[2], shape[3], shape[4]););
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream_t stream) {
@@ -129,6 +130,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
           reinterpret_cast<dtype *>(q.data.dptr), reinterpret_cast<dtype *>(k.data.dptr),
           reinterpret_cast<dtype *>(v.data.dptr), reinterpret_cast<dtype *>(qkv.data.dptr),
           q_shape[0], q_shape[1], q_shape[2], q_shape[3]););
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace flash_attention

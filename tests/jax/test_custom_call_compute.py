@@ -31,6 +31,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
@@ -182,7 +183,7 @@ ACTIVATION_TYPES = {
 
 class TestActivation:
     def ref_act(self, x, activation_type):
-        return _jax_act_lu(x, activation_type)
+        return _jax_act_lu(x, activation_type).data
 
     def value_n_grad_ref_func(self, x, activation_type):
         jitted_reference = jit(
@@ -337,8 +338,8 @@ class TestNorm:
                 ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
             else:
                 ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-            # if isinstance(ln_out, ScaledTensor):
-            #     ln_out = ln_out.dequantize()
+            # This is a no-op for non-quantized data
+            ln_out = ln_out.dequantize()
             return ln_out
 
         key = jax.random.PRNGKey(0)
@@ -464,14 +465,23 @@ class TestNorm:
                 x, gamma, beta, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_mu, ref_rsigma = _jax_layernorm(
-                x, gamma, beta, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                beta,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
             )
         else:
             output, rsigma = tex.rmsnorm_fwd(
                 x, gamma, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_rsigma = _jax_rmsnorm(
-                x, gamma, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
             )
             ref_mu = None
 
@@ -765,12 +775,20 @@ class TestFusedQuantize:
                 te_output, jax_output, precise_comparison=precise_comparison
             )
         else:
-            assert_allclose(te_output, jax_output)
+            assert isinstance(te_output, NoScaleTensor)
+            assert isinstance(jax_output, NoScaleTensor)
+            assert_allclose(te_output.data, jax_output.data)
 
         if is_dbias:
-            # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
             precise_comparison = not (
-                in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling()
+                # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
+                (in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling())
+                # Due to the amax dependency, current scaling is unfused. In TE we store the activation results in bf16 which reduces precision compared to JAX implementation which will implicitly promote to float32 for the intermediate results when JIT'd. This only produces a tolerance issue when using squared_relu currently.
+                or (
+                    activation_type == ("squared_relu",)
+                    and in_dtype == jnp.bfloat16
+                    and scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+                )
             )
             assert_allclose(
                 te_dbias, jax_dbias, dtype=in_dtype if precise_comparison else out_dtype
@@ -1020,8 +1038,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
         ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
     else:
         ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-    if isinstance(ln_out, ScaledTensor):
-        ln_out = ln_out.dequantize()
+    ln_out = ln_out.dequantize()
     return ln_out
 
 
@@ -1177,7 +1194,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(linear_1_out, activation_type)
+            x = _jax_act_lu(linear_1_out, activation_type).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape

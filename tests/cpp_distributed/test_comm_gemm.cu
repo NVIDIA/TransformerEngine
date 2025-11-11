@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-#include "../test_common.h"
+#include "../cpp/test_common.h"
 #include "common.h"
 
 using transformer_engine::DType;

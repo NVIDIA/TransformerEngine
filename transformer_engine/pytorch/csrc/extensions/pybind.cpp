@@ -32,6 +32,9 @@ PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
+PyTypeObject *NVFP4TensorPythonClass = nullptr;
+PyTypeObject *NVFP4TensorBasePythonClass = nullptr;
+PyTypeObject *NVFP4QuantizerClass = nullptr;
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -86,10 +89,26 @@ void init_float8blockwise_extension() {
              "Internal error: could not initialize pyTorch float8blockwise extension.");
 }
 
+void init_nvfp4_extensions() {
+  if (NVFP4TensorPythonClass) return;
+  auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
+  NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Quantizer"));
+  NVFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Tensor"));
+  auto nvfp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor._internal.nvfp4_tensor_base");
+  NVFP4TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(nvfp4_base_module.ptr(), "NVFP4TensorBase"));
+  NVTE_CHECK(NVFP4TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch NVFP4 extension.");
+}
+
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
   init_float8blockwise_extension();
+  init_nvfp4_extensions();
 }
 
 }  // namespace transformer_engine::pytorch
@@ -113,38 +132,53 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
-        py::arg("quantizer"));
-  m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("geglu", transformer_engine::pytorch::geglu, "GeGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
+        py::arg("quantizer"));
   m.def("qgeglu", transformer_engine::pytorch::qgeglu, "QuickGeGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* ReLU and variants */
+  m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("reglu", transformer_engine::pytorch::reglu, "ReGLU activation", py::arg("input"),
         py::arg("quantizer"));
-  m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
-        py::arg("quantizer"));
-  m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
-        py::arg("quantizer"));
   m.def("srelu", transformer_engine::pytorch::srelu, "Squared ReLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("sreglu", transformer_engine::pytorch::sreglu, "Squared ReGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* SwiGLU and variants */
+  m.def("silu", transformer_engine::pytorch::silu, "SiLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dgeglu", transformer_engine::pytorch::dgeglu, "Backward of GeGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dqgeglu", transformer_engine::pytorch::dqgeglu, "Backward of QuickGeGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  /* Backward of ReLU and variants */
+  m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dreglu", transformer_engine::pytorch::dreglu, "Backward of ReGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
-  m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dsrelu", transformer_engine::pytorch::dsrelu, "Backward of Squared ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsreglu", transformer_engine::pytorch::dsreglu, "Backward of Squared ReGLU",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  /* Backward of SiLU and variants */
+  m.def("dsilu", transformer_engine::pytorch::dsilu, "Backward of SiLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dbias_dsilu", transformer_engine::pytorch::dbias_dsilu, "DSiLU + DBias + Quantize",
@@ -202,6 +236,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
+  m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
+        "Fused backward of RMSNorm + add");
   m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
@@ -261,6 +297,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_rope_backward", &transformer_engine::pytorch::fused_rope_backward,
         "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_qkv_rope_forward", &transformer_engine::pytorch::fused_qkv_rope_forward,
+        "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
+        "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",
@@ -287,6 +327,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_moe_aux_loss_bwd", &transformer_engine::pytorch::fused_moe_aux_loss_bwd,
         py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_rows"),
         py::arg("num_cols"), py::arg("grad_aux_loss"), "Fused aux loss bwd");
+
+  // Dropout
+  m.def("dropout_fwd", transformer_engine::pytorch::dropout_fwd, "Dropout forward with 8-bit RNG",
+        py::arg("input"), py::arg("dropout_probability"), py::arg("out") = std::nullopt);
+  m.def("dropout_bwd", transformer_engine::pytorch::dropout_bwd, "Dropout backward with 8-bit RNG",
+        py::arg("grad_output"), py::arg("mask"), py::arg("dropout_probability"),
+        py::arg("grad_input") = std::nullopt);
 
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,

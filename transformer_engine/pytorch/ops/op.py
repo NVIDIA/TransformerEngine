@@ -65,6 +65,13 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
 
+    def pre_fuser_forward(
+        self,
+        *,
+        requires_grad: bool,  # pylint: disable=unused-argument
+    ) -> None:
+        """Preprocessing before fuser forward pass"""
+
     def get_input_quantizer(self) -> Optional[Quantizer]:
         """Get builder class for quantized input tensor"""
 
@@ -709,6 +716,10 @@ class FusedOperation(FusibleOperation):
     def pre_first_fuser_forward(self) -> None:
         for op in self.basic_ops:
             op.pre_first_fuser_forward()
+
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        for op in self.basic_ops:
+            op.pre_fuser_forward(requires_grad=requires_grad)
 
     def forward(
         self,

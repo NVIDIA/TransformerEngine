@@ -76,8 +76,6 @@ class TestDistributedLayernorm:
             all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
         )
         other_bytes = 0
-        if fp8_recipe == recipe.Float8CurrentScaling():
-            allreduce_total_bytes += jax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
         )

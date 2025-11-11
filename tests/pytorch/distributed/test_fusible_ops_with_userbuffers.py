@@ -506,7 +506,13 @@ def main() -> None:
                 model_config.num_heads * model_config.head_dim,
             ],
             torch.distributed.get_world_size(group),
-            use_fp8=model_config.quantization is not None,
+            quantization_modes=[
+                (
+                    te.module.base.UserBufferQuantizationMode.FP8
+                    if model_config.quantization is not None
+                    else te.module.base.UserBufferQuantizationMode.NONE
+                )
+            ],
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,

@@ -598,6 +598,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
             ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
+
         // const size_t scale_idx_gate = scale_idx + scale_stride_colwise / 2;
         const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
@@ -828,6 +829,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ptx::mul_cvt_2x(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
           }
         }
+
         const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
         const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
@@ -947,19 +949,21 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
+
           const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
-          cudaFuncSetAttribute(
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
           cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
               tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows,
-              cols););  // NOLINT(*)
-  );                    // NOLINT(*)
+              cols);
+          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                              // NOLINT(*)
 }
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
@@ -1082,11 +1086,11 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, true, false,
                                                         THREADS_PER_CHUNK_NON_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     true, false, THREADS_PER_CHUNK_NON_COLWISE>
@@ -1096,13 +1100,14 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, false, true,
                                                         THREADS_PER_CHUNK_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     false, true, THREADS_PER_CHUNK_COLWISE>
@@ -1112,13 +1117,14 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::BIDIMENSIONAL:
-              cudaFuncSetAttribute(
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType,
                                                         OType, true, true,
                                                         THREADS_PER_CHUNK_NON_COLWISE>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
               mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                                     true, true, THREADS_PER_CHUNK_NON_COLWISE>
@@ -1128,6 +1134,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
+              NVTE_CHECK_CUDA(cudaGetLastError());
               break;
           });  // NOLINT(*)
   );           // NOLINT(*)
@@ -1256,7 +1263,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
       }
     }
-  } else if (is_mxfp_scaling(output->scaling_mode)) {
+  } else if (is_mxfp8_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {

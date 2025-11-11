@@ -7,13 +7,31 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 
+#include <type_traits>
+
 #include "../../utils.cuh"
 #include "../common.h"
 
 namespace transformer_engine {
 namespace normalization {
 
-template <typename Ktraits>
+struct maybe_not_t {};
+
+template <typename T, bool Enabled>
+using maybe_t = std::conditional_t<Enabled, T, maybe_not_t>;
+
+template <typename Ivec, typename Ovec, bool FusedAdd>
+union dx_add_t {
+  using add_t = maybe_t<Ovec, FusedAdd>;
+  using dx_t = Ivec;
+  struct {
+    char _padding[sizeof(dx_t) > sizeof(add_t) ? sizeof(dx_t) - sizeof(add_t) : 0];
+    add_t add;
+  };
+  dx_t dx;
+};
+
+template <typename Ktraits, bool FusedAdd>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_kernel(
     BackwardKernelParams params) {
   enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
@@ -111,10 +129,19 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
       }
     }
 
+    dx_add_t<Ivec, Ovec, FusedAdd> temp[LDGS];
+    if constexpr (FusedAdd) {
+      idx = row * Ktraits::VEC_COLS + c;
+#pragma unroll
+      for (int it = 0; it < LDGS; it++) {
+        temp[it].add.load_from(params.add, idx);
+        idx += Ktraits::VEC_COLS_PER_LDG;
+      }
+    }
+
     reduce_t result = reducer.allreduce({0, mdyy_local}, sum);
     mdyy_local = Get<1>::of<reduce_t, compute_t>(result) * rn;
 
-    Ivec dx[LDGS];
     idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
     for (int it = 0; it < LDGS; it++) {
@@ -123,9 +150,13 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         compute_t dy_tmp = dy[it * NUM_ELTS + jt];
         compute_t y_tmp = y[it * NUM_ELTS + jt];
         compute_t dx_tmp = rs_r * (dy_tmp - (mdyy_local * y_tmp));
-        dx[it].data.elt[jt] = dx_tmp;
+        if constexpr (FusedAdd) {
+          compute_t add_tmp = temp[it].add.data.elt[jt];
+          dx_tmp += add_tmp;
+        }
+        temp[it].dx.data.elt[jt] = dx_tmp;
       }
-      dx[it].store_to(params.dx, idx);
+      temp[it].dx.store_to(params.dx, idx);
       idx += Ktraits::VEC_COLS_PER_LDG;
     }
   }  // end: grid stride loop
@@ -274,7 +305,7 @@ __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void rmsnorm_bwd_fi
   }
 }
 
-template <typename Ktraits>
+template <typename Ktraits, bool FusedAdd>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_kernel(
     BackwardKernelParams params) {
   enum { LDGS = Ktraits::LDGS };
@@ -379,14 +410,22 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
 #pragma unroll
     for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
          it++, col += gdimn * NUM_ELTS) {
-      Ivec dx;
+      dx_add_t<Ivec, Ovec, FusedAdd> temp;
+      if constexpr (FusedAdd) {
+        temp.add.load_from_elts(params.add, row * params.cols + col, params.cols - col);
+      }
 #pragma unroll
       for (int jt = 0; jt < NUM_ELTS; jt++) {
         compute_t dy_ij = dy[it].data.elt[jt];
         compute_t y_ij = y[it].data.elt[jt];
-        dx.data.elt[jt] = rs * (dy_ij - (mdyy * y_ij));
+        compute_t dx_ij = rs * (dy_ij - (mdyy * y_ij));
+        if constexpr (FusedAdd) {
+          compute_t add_ij = temp.add.data.elt[jt];
+          dx_ij += add_ij;
+        }
+        temp.dx.data.elt[jt] = dx_ij;
       }
-      dx.store_to_elts(params.dx, row * params.cols + col, params.cols - col);
+      temp.dx.store_to_elts(params.dx, row * params.cols + col, params.cols - col);
     }
   }
 

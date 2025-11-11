@@ -199,6 +199,15 @@ STATS = {
     ),
 }
 
+FP8_NEGATIVE_ZERO = 128  # represnts -0.0 in fp8
+
+
+def count_nonzero_fp8(fp8_data: torch.Tensor) -> torch.Tensor:
+    """Count the number of non-zero elements in the fp8 data."""
+    fp8_data = fp8_data.view(dtype=torch.uint8)
+    zero_vals = torch.tensor([0, FP8_NEGATIVE_ZERO], device=fp8_data.device, dtype=torch.uint8)
+    return fp8_data.numel() - torch.isin(fp8_data, zero_vals).sum()
+
 
 def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     """Register *both* underflow stats (num and %) for the given recipe."""
@@ -212,22 +221,23 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     stats_to_num[stat_pct] = len(stats_to_num)
 
     STATS[stat_num] = (
-        lambda x, aux_dict: (
+        lambda x, aux_dict: x.count_nonzero()
+        - count_nonzero_fp8(
             aux_dict[recipe_name].get_data_tensors(
                 rowwise_data=not columnwise, columnwise_data=columnwise
             )
-            == 0
-        ).sum()
-        - (x == 0).sum(),
+        ),
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
     STATS[stat_pct] = (
         lambda x, aux_dict: (
-            aux_dict[recipe_name].get_data_tensors(
-                rowwise_data=not columnwise, columnwise_data=columnwise
+            x.count_nonzero()
+            - count_nonzero_fp8(
+                aux_dict[recipe_name].get_data_tensors(
+                    rowwise_data=not columnwise, columnwise_data=columnwise
+                )
             )
-            == 0
-        ).sum()
+        )
         / aux_dict[recipe_name].numel()
         * 100,
         lambda buffers, _sn_num=stat_num: 100

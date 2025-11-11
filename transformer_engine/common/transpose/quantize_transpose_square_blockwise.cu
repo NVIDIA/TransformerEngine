@@ -70,10 +70,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
                                        const size_t scale_stride_y, const size_t scale_t_stride_x,
                                        const size_t scale_t_stride_y, const float epsilon,
                                        const __grid_constant__ CUtensorMap tensor_map_output_t,
-                                       bool pow_2_scaling) {
+                                       bool pow_2_scaling, const float* noop_ptr) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
+
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
 
   // shared mem for amax reduction in entire block, each warp produces one amax, there are
   // NUM_WARPS_IN_BLOCK amax to reduce
@@ -249,10 +253,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
-    bool pow_2_scaling) {
+    bool pow_2_scaling, const float* noop_ptr) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
+
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
 
   // shared mem for amax reduction in entire block, each warp produces one amax, there are
   // NUM_WARPS_IN_BLOCK amax to reduce
@@ -473,7 +481,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                                          SimpleTensor& scale_inv_t, SimpleTensor& output,
                                          SimpleTensor& output_t, const float epsilon,
                                          const bool return_transpose, const bool pow_2_scale,
-                                         cudaStream_t stream) {
+                                         const SimpleTensor& noop_tensor, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_square_blockwise);
   checkCuDriverContext(stream);
 
@@ -493,6 +501,8 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
 
   size_t scale_t_stride_x = 0;
   size_t scale_t_stride_y = 0;
+
+  const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
   if (return_transpose) {
     NVTE_CHECK(output_t.shape.size() == input.shape.size(),
@@ -541,7 +551,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         reinterpret_cast<float*>(scale_inv.dptr),
                         reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                        tensor_map_output_trans, pow_2_scale);
+                        tensor_map_output_trans, pow_2_scale, noop_ptr);
               } else {
                 block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
                                                               OutputType>
@@ -552,7 +562,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         reinterpret_cast<float*>(scale_inv.dptr),
                         reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                        pow_2_scale);
+                        pow_2_scale, noop_ptr);
               }  // full-tile
               )  // return_transpose
           )      // OutputType

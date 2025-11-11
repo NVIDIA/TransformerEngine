@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from importlib.metadata import version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -234,15 +234,18 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    version = cuda_version()
-    if os.getenv("NVTE_CUDA_ARCHS") is None:
+    archs = os.getenv("NVTE_CUDA_ARCHS")
+    if archs is None:
+        version = cuda_version()
         if version >= (13, 0):
-            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+            archs = "75;80;89;90;100;100a;103a;120"
+        elif version >= (12, 9):
+            archs = "70;80;89;90;100;100a;103a;120"
         elif version >= (12, 8):
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+            archs = "70;80;89;90;100;100a;120"
         else:
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
-    return os.getenv("NVTE_CUDA_ARCHS")
+            archs = "70;80;89;90"
+    return archs
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -269,7 +272,7 @@ def cuda_version() -> Tuple[int, ...]:
         return tuple(int(v) for v in version)
 
     try:
-        version_str = version("nvidia-cuda-runtime-cu12")
+        version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:

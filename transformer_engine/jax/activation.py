@@ -14,7 +14,7 @@ import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 
-from .quantize.tensor import ScaledTensor
+from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
 
@@ -22,7 +22,7 @@ def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-) -> Union[jnp.ndarray, ScaledTensor]:
+) -> jnp.ndarray:
     """Apply activation functions to input tensor with optional quantization.
 
     This function applies a sequence of activation functions to the input tensor.
@@ -72,8 +72,8 @@ def _activation_fwd_rule(x, activation_type, quantizer):
         Tuple of (output, context) for backward pass
     """
     fwd_output = tex.act_lu(x, activation_type, quantizer)
-    if isinstance(fwd_output, ScaledTensor):
-        fwd_output = fwd_output.dequantize()
+    # This is a no-op for higher-precision tensors
+    fwd_output = fwd_output.dequantize()
     return fwd_output, (x, quantizer)
 
 
@@ -91,6 +91,10 @@ def _activation_bwd_rule(activation_type, ctx, g):
     (x, _) = ctx
     assert x.dtype == g.dtype
     dx = tex.dact_lu(g, x, activation_type)
+    # No quantization is used in this VJP backward, so the output should
+    # always be a NoScaleTensor
+    assert isinstance(dx, NoScaleTensor)
+    dx = dx.data
     return (dx, None)
 
 

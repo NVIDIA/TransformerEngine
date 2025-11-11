@@ -118,7 +118,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
         convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
         std::vector<size_t>{
             product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
-            scale_inv_buf->dimensions().back()});
+            static_cast<size_t>(scale_inv_buf->dimensions().back())});
   }
 
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
@@ -135,7 +135,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
         convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
         std::vector<size_t>{product(colwise_scale_inv_buf->dimensions(), 0,
                                     colwise_scale_inv_buf->dimensions().size() - 1),
-                            colwise_scale_inv_buf->dimensions().back()});
+                            static_cast<size_t>(colwise_scale_inv_buf->dimensions().back())});
   }
 
   if (_norm_type == NVTE_Norm_Type::LayerNorm) {
@@ -179,6 +179,42 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("is_2x"),
                               FFI_CudaGraph_Traits);
+
+Error_Type NormForwardInitializeFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
+                                    Buffer_Type gamma_buf, Buffer_Type beta_buf,
+                                    Result_Type output_buf, Result_Type colwise_output_buf,
+                                    Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                                    Result_Type amax_buf, Result_Type mu_buf,
+                                    Result_Type rsigma_buf, Result_Type wkspace_buf, int norm_type,
+                                    bool zero_centered_gamma, double epsilon, int64_t sm_margin,
+                                    JAXX_Scaling_Mode scaling_mode, bool is_2x) {
+  return wrapInStreamCapture(
+      std::function(NormForwardFFI), stream, x_buf, scale_buf, gamma_buf, beta_buf, output_buf,
+      colwise_output_buf, scale_inv_buf, colwise_scale_inv_buf, amax_buf, mu_buf, rsigma_buf,
+      wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin, scaling_mode, is_2x);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise_output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // colwise_scale_inv
+                                  .Ret<Buffer_Type>()      // amax
+                                  .Ret<Buffer_Type>()      // mu
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("epsilon")
+                                  .Attr<int64_t>("sm_margin")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<bool>("is_2x"));
 
 pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
                                               DType w_dtype, NVTE_Norm_Type norm_type,
@@ -304,6 +340,33 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardHandler, NormBackwardFFI,
                                   .Attr<bool>("zero_centered_gamma")
                                   .Attr<int64_t>("sm_margin"),
                               FFI_CudaGraph_Traits);
+
+Error_Type NormBackwardInitializeFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type x_buf,
+                                     Buffer_Type mu_buf, Buffer_Type rsigma_buf,
+                                     Buffer_Type gamma_buf, Result_Type xgrad_buf,
+                                     Result_Type wgrad_buf, Result_Type dbeta_buf,
+                                     Result_Type wkspace_buf, int64_t norm_type,
+                                     bool zero_centered_gamma, int64_t sm_margin) {
+  return wrapInStreamCapture(std::function(NormBackwardFFI), stream, dz_buf, x_buf, mu_buf,
+                             rsigma_buf, gamma_buf, xgrad_buf, wgrad_buf, dbeta_buf, wkspace_buf,
+                             norm_type, zero_centered_gamma, sm_margin);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardInitializeHandler, NormBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // dz
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // mu
+                                  .Arg<Buffer_Type>()      // rsigma
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // xgrad
+                                  .Ret<Buffer_Type>()      // wgrad
+                                  .Ret<Buffer_Type>()      // dbeta
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<int64_t>("sm_margin"));
 
 }  // namespace jax
 }  // namespace transformer_engine
