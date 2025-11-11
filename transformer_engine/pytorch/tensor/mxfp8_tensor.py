@@ -344,8 +344,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
             columnwise_matches = src._columnwise_data is not None or dst._columnwise_data is None
             if (
-                isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor)
-                and rowwise_matches and columnwise_matches
+                isinstance(src, MXFP8Tensor)
+                and isinstance(dst, MXFP8Tensor)
+                and rowwise_matches
+                and columnwise_matches
             ):
                 if dst._rowwise_data is not None:
                     dst._rowwise_data.copy_(src._rowwise_data.detach())
