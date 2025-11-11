@@ -575,8 +575,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         sharded_tensors = (self._rowwise_data, rowwise_scale_inv)
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
-        # based on whether its forward or backward pass. If weights are not resharded after forward pass,
-        # weights allgathered in forward are used in backward and pre/post allgather methods wont be called.
+        # based on whether its forward or backward pass for the allgathered weights.
+        # If not resharded after forward pass, the same weights allgathered in forward
+        # are used again in backward. And hence if we need the columnwise data/scale_inv,
+        # we need to send them as well for allgather in forward pass itself.
         if reshard_after_forward:
             training_state = fsdp_state._fsdp_param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
