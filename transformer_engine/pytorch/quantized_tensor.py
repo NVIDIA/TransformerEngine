@@ -7,7 +7,6 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
-import copy
 import warnings
 
 import torch
@@ -283,10 +282,6 @@ class Quantizer(abc.ABC):
             self.rowwise_usage = rowwise
         if columnwise is not None:
             self.columnwise_usage = columnwise
-
-    def copy(self) -> Quantizer:
-        """Create shallow copy"""
-        return copy.copy(self)
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""

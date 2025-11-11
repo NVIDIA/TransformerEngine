@@ -20,7 +20,6 @@ from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
-    get_workspace,
     _ub_communicators,
     get_ub,
     TransformerEngineBaseModule,
@@ -45,6 +44,7 @@ from ..utils import (
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
+    get_nvtx_range_context,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -169,54 +169,60 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_bias: torch.Tensor,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
-        eps: float,
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        fuse_wgrad_accumulation: bool,
-        fc1_input_quantizer: Optional[Quantizer],
-        fc1_weight_quantizer: Optional[Quantizer],
-        fc1_output_quantizer: Optional[Quantizer],
-        fc1_grad_input_quantizer: Optional[Quantizer],
-        fc1_grad_weight_quantizer: Optional[Quantizer],
-        fc1_grad_output_quantizer: Optional[Quantizer],
-        fc2_input_quantizer: Optional[Quantizer],
-        fc2_weight_quantizer: Optional[Quantizer],
-        fc2_output_quantizer: Optional[Quantizer],
-        fc2_grad_input_quantizer: Optional[Quantizer],
-        fc2_grad_weight_quantizer: Optional[Quantizer],
-        fc2_grad_output_quantizer: Optional[Quantizer],
-        cpu_offloading: bool,
-        tp_group: Union[dist_group_type, None],
-        tp_size: int,
-        sequence_parallel: bool,
-        tensor_parallel: bool,
-        activation_dtype: torch.dtype,
-        return_layernorm_output: bool,
-        return_layernorm_output_gathered: bool,
-        bias_gelu_fusion: bool,
-        set_parallel_mode: bool,
-        is_grad_enabled: bool,
-        fwd_ln_sm_margin: int,
-        bwd_ln_sm_margin: int,
-        zero_centered_gamma: bool,
-        activation: str,
-        activation_params: Optional[dict],
-        normalization: str,
-        ub_overlap_ag: bool,
-        ub_overlap_rs: bool,
-        ub_overlap_rs_dgrad: bool,
-        ub_bulk_wgrad: bool,
-        ub_bulk_dgrad: bool,
-        gemm_gelu_fusion: bool,
-        fsdp_group: Union[dist_group_type, None],
-        module: torch.nn.Module,
-        skip_fp8_weight_update: bool,
-        symmetric_ar_type: str,
-        debug: Optional[bool] = False,
+        non_tensor_args: Tuple,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
+
+        # Reduce number of arguments to autograd function in order
+        # to reduce CPU overhead due to pytorch arg checking.
+        (
+            eps,
+            is_first_microbatch,
+            fp8,
+            fp8_calibration,
+            wgrad_store,
+            fuse_wgrad_accumulation,
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc1_output_quantizer,
+            fc1_grad_input_quantizer,
+            fc1_grad_weight_quantizer,
+            fc1_grad_output_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            fc2_output_quantizer,
+            fc2_grad_input_quantizer,
+            fc2_grad_weight_quantizer,
+            fc2_grad_output_quantizer,
+            cpu_offloading,
+            tp_group,
+            tp_size,
+            sequence_parallel,
+            tensor_parallel,
+            activation_dtype,
+            return_layernorm_output,
+            return_layernorm_output_gathered,
+            bias_gelu_fusion,
+            set_parallel_mode,
+            is_grad_enabled,
+            fwd_ln_sm_margin,
+            bwd_ln_sm_margin,
+            zero_centered_gamma,
+            activation,
+            activation_params,
+            normalization,
+            ub_overlap_ag,
+            ub_overlap_rs,
+            ub_overlap_rs_dgrad,
+            ub_bulk_wgrad,
+            ub_bulk_dgrad,
+            gemm_gelu_fusion,
+            fsdp_group,
+            module,
+            skip_fp8_weight_update,
+            symmetric_ar_type,
+            debug,
+        ) = non_tensor_args
 
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
@@ -426,7 +432,6 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
-            get_workspace(),
             quantization_params=(
                 fc2_input_quantizer
                 if gemm_gelu_fusion
@@ -510,7 +515,6 @@ class _LayerNormMLP(torch.autograd.Function):
         gemm_out, *_, reduce_scatter_out = general_gemm(
             fc2_weight_final,
             act_out,
-            get_workspace(),
             out_dtype=activation_dtype,
             bias=fc2_bias,
             quantization_params=fc2_output_quantizer,
@@ -685,7 +689,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
-        with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
+        with get_nvtx_range_context("_LayerNormMLP_backward"):
             saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
@@ -855,7 +859,6 @@ class _LayerNormMLP(torch.autograd.Function):
             gemm_output, *_ = general_gemm(
                 fc2_weight,
                 grad_output,
-                get_workspace(),
                 layout="NN",
                 grad=True,
                 quantization_params=(
@@ -949,7 +952,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Arguments to include in wgrad GEMM closure
                 fc2_wgrad_gemm_kwargs = {
-                    "workspace": get_workspace(),
                     "out_dtype": (
                         origin_fc2_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
@@ -1119,7 +1121,6 @@ class _LayerNormMLP(torch.autograd.Function):
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 fc1_weight,
                 dact,
-                get_workspace(),
                 out=gemm_out,
                 out_dtype=ctx.activation_dtype,
                 quantization_params=ctx.fc1_grad_input_quantizer,
@@ -1198,7 +1199,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Arguments to include in wgrad GEMM closure
                 fc1_wgrad_gemm_kwargs = {
-                    "workspace": get_workspace(),
                     "out_dtype": (
                         origin_fc1_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
@@ -1380,52 +1380,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
             fc2_bias_grad,
-            None,  # eps
-            None,  # is_first_microbatch
-            None,  # fp8
-            None,  # fp8_calibration
-            None,  # wgrad_store
-            None,  # fuse_wgrad_accumulation
-            None,  # fc1_input_quantizer,
-            None,  # fc1_weight_quantizer,
-            None,  # fc1_output_quantizer,
-            None,  # fc1_grad_input_quantizer,
-            None,  # fc1_grad_weight_quantizer,
-            None,  # fc1_grad_output_quantizer,
-            None,  # fc2_input_quantizer,
-            None,  # fc2_weight_quantizer,
-            None,  # fc2_output_quantizer,
-            None,  # fc2_grad_input_quantizer,
-            None,  # fc2_grad_weight_quantizer,
-            None,  # fc2_grad_output_quantizer,
-            None,  # cpu_offloading
-            None,  # tp_group
-            None,  # tp_size
-            None,  # sequence_parallel
-            None,  # tensor_parallel
-            None,  # activation_dtype
-            None,  # return_layernorm_output
-            None,  # return_layernorm_output_gathered
-            None,  # bias_gelu_fusion
-            None,  # set_parallel_mode
-            None,  # is_grad_enabled
-            None,  # fwd_ln_sm_margin
-            None,  # bwd_ln_sm_margin
-            None,  # zero_centered_gamma
-            None,  # activation
-            None,  # activation_params
-            None,  # normalization
-            None,  # ub_overlap_ag
-            None,  # ub_overlap_rs
-            None,  # ub_overlap_rs_dgrad
-            None,  # ub_bulk_dgrad
-            None,  # ub_bulk_wgrad
-            None,  # gemm_gelu_fusion
-            None,  # fsdp_group
-            None,  # module
-            None,  # skip_fp8_weight_update
-            None,  # symmetric_ar_type
-            None,  # debug
+            None,
         )
 
 
@@ -1808,8 +1763,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        is_grad_enabled = torch.is_grad_enabled()
+
         if is_in_onnx_export_mode():
-            return self.onnx_forward(inp)
+            return self.onnx_forward(inp, is_grad_enabled)
 
         debug = self.is_debug_iter()
 
@@ -1825,19 +1782,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(inp, num_gemms=2) as inp:
+        with self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
-                self._get_quantizers(fp8_output)
+                self._get_quantizers(fp8_output, is_grad_enabled)
                 if not debug
-                else self._get_debug_quantizers(fp8_output)
+                else self._get_debug_quantizers(fp8_output, is_grad_enabled)
             )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False
-                    quantizers = self._get_quantizers(fp8_output)
+                    quantizers = self._get_quantizers(fp8_output, is_grad_enabled)
 
             # Get quantizers
             (
@@ -1869,20 +1824,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.bias_gelu_nvfusion = False
 
-            if torch.is_grad_enabled():
+            if is_grad_enabled:
                 fwd_fn = _LayerNormMLP.apply
-                args = []
+                autograd_ctx = []
             else:
                 fwd_fn = _LayerNormMLP.forward
-                args = [None]
-            args += (
-                inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
-                fc1_weight,
-                fc1_bias,
-                fc2_weight,
-                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
+                autograd_ctx = [None]
+
+            non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1911,8 +1860,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.return_layernorm_output_gathered,
                 self.bias_gelu_nvfusion and not self.fp8 and not debug,
                 self.set_parallel_mode,
-                torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
+                is_grad_enabled,
+                self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,
@@ -1930,7 +1879,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
             )
-            out = fwd_fn(*args)
+            out = fwd_fn(
+                *autograd_ctx,
+                inp,
+                self.layer_norm_weight,
+                self.layer_norm_bias,
+                fc1_weight,
+                fc1_bias,
+                fc2_weight,
+                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
+                non_tensor_args,
+            )
 
         if self.return_layernorm_output:
             out, ln_out = out
@@ -1946,7 +1905,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return out, ln_out
         return out
 
-    def _get_quantizers(self, fp8_output):
+    def _get_quantizers(self, fp8_output, is_grad_enabled):
         (
             fc1_input_quantizer,
             fc1_output_quantizer,
@@ -1976,7 +1935,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
                 ]
-            if torch.is_grad_enabled():
+            if is_grad_enabled:
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
@@ -2001,7 +1960,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         )
 
-    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    def onnx_forward(
+        self, inp: torch.Tensor, is_grad_enabled: bool
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         ONNX-compatible version of the forward function that provides numerical equivalence
         while only using operations that have defined ONNX symbolic translations.
@@ -2018,7 +1979,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_quantizer,
             output_quantizer,
             *_,
-        ) = self._get_quantizers(False)
+        ) = self._get_quantizers(False, is_grad_enabled)
         inp_dtype = inp.dtype
 
         fc1_weight, fc2_weight = self._get_weight_tensors()
@@ -2103,10 +2064,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return fc2_out, fc2_bias.to(inp_dtype)
         return fc2_out
 
-    def _get_debug_quantizers(self, fp8_output):
+    def _get_debug_quantizers(self, fp8_output, is_grad_enabled):
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-        base_quantizers = list(self._get_quantizers(fp8_output))
+        base_quantizers = list(self._get_quantizers(fp8_output, is_grad_enabled))
         assert TEDebugState.debug_enabled
 
         def make_debug(prefix, offset):
@@ -2249,7 +2210,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         if not self.need_backward_dw():
             return
-        with torch.cuda.nvtx.range("_LayerNormMLP_wgrad"):
+        with get_nvtx_range_context("_LayerNormMLP_wgrad"):
             (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()
             if self.use_bias and self.fc1_bias.grad is None:
                 (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
