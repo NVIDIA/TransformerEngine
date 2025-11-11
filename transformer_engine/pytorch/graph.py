@@ -839,7 +839,14 @@ def _make_graphed_callables(
             if need_backward_dw:
                 bwd_dw_graph.replay()
 
+        # Attach reset as an attribute to the graphed callable.
+        def reset(fwd_graph=fwd_graphs[i], bwd_graph=bwd_graphs[i], bwd_dw_graph=bwd_dw_graphs[i]):
+            fwd_graph.reset()
+            bwd_graph.reset()
+            bwd_dw_graph.reset()
+
         setattr(ret[-1], "backward_dw", backward_dw)
+        setattr(ret[-1], "reset", reset)
 
     if just_one_callable:
         return ret[0]
