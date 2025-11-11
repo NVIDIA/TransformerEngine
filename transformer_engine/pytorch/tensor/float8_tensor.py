@@ -4,10 +4,10 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
-
 import torch
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -299,14 +299,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
             )
-
         # Construct FP8 tensor
         return Float8Tensor(
             shape=shape,
@@ -534,9 +532,36 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         self._transpose = None
 
     @classmethod
-    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+    def make_like(
+        cls,
+        tensor: QuantizedTensor,
+        *,
+        shape: Optional[Iterable[int]] = None,
+        dtype: Optional[torch.dtype] = None,
+        requires_grad: bool = False,
+        data: Optional[torch.Tensor] = None,
+        data_transpose: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensor:
+        """Create new quantized tensor
 
-        # View op
+        By default, new tensor has the same attributes and underlying
+        data.
+
+        """
+        if shape is None and data is not None:
+            shape = data.shape
+        new_tensor = super().make_like(
+            tensor, shape=shape, dtype=dtype, requires_grad=requires_grad
+        )
+        if data is not None:
+            new_tensor._data = data
+        if data_transpose is not None:
+            new_tensor._transpose = data_transpose
+            new_tensor._transpose_invalid = False
+        return new_tensor
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
         if func == aten.view.default:
             tensor = args[0]
             data = tensor._data
@@ -555,6 +580,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     or out_transpose_shape[1:] != out_shape[:-1]
                 ):
                     out_transpose = None
+                else:
+                    view_shape_for_transpose = [out_shape[-1]] + list(out_shape[:-1])
+                    out_transpose = out_transpose.view(*view_shape_for_transpose)
             return Float8Tensor(
                 shape=out_shape,
                 dtype=tensor.dtype,
@@ -587,11 +615,37 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return [
-                Float8Tensor.make_like(tensor, data=split_tensor, shape=split_tensor.shape)
-                for split_tensor in func_out
+            t_func_out = [None] * len(func_out)
+            # Compute corresponding split of the transpose cache if available
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                ndim = data.dim()
+                # Figure out the original split dim
+                if "dim" in kwargs:
+                    dim_to_split = kwargs["dim"]
+                else:
+                    dim_to_split = args[2] if len(args) > 2 else 0
+                # Dimension along which transpose needs to be split
+                t_dim = 0 if dim_to_split == ndim - 1 else dim_to_split + 1
+                t_func_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, args[1], t_dim],
+                    kwargs,
+                )
+            outs = [
+                Float8Tensor.make_like(
+                    tensor,
+                    data=split_tensor,
+                    data_transpose=split_transpose_tensor,
+                    shape=split_tensor.shape,
+                )
+                for split_tensor, split_transpose_tensor in zip(func_out, t_func_out)
             ]
+            return outs
+
         if func == aten.new_zeros.default:
+            # create fresh new tensor with zeros.
             tensor = args[0]
             data = tensor._data
             func_out = data.__torch_dispatch__(
@@ -600,17 +654,63 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
+            func_transposed_out = None
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                size = args[1]
+                t_shape = [size[-1]] + list(size[:-1])
+                func_transposed_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, t_shape] + list(args[2:]),
+                    kwargs,
+                )
+            # deep copy the scale inverse tensor and quantizer as well.
+            scale_inv = tensor._scale_inv.detach().clone()
+            quantizer = tensor._quantizer.copy()
+            out_tensor = Float8Tensor(
+                data=func_out,
+                shape=func_out.shape,
+                dtype=tensor.dtype,
+                fp8_dtype=tensor._fp8_dtype,
+                fp8_scale_inv=scale_inv,
+                data_transpose=func_transposed_out,
+                quantizer=quantizer,
+            )
+            return out_tensor
+
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
+            # Apply as_strided to the primary uint8 data
             func_out = data.__torch_dispatch__(
                 func,
                 types,
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
+            func_transposed_out = None
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                size = args[1]
+                stride = args[2]
+                if "storage_offset" in kwargs:
+                    storage_offset = kwargs["storage_offset"]
+                else:
+                    storage_offset = args[3] if len(args) > 3 else 0
+                # Shape and strided needed for transpose matrix
+                t_size = [size[-1]] + list(size[:-1])
+                t_stride = [stride[-1]] + list(stride[:-1])
+                func_transposed_out = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, t_size, t_stride, storage_offset] + list(args[4:]),
+                    kwargs,
+                )
+            return Float8Tensor.make_like(
+                tensor, data=func_out, data_transpose=func_transposed_out, shape=func_out.shape
+            )
+
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
         if func == torch.ops.aten.clone.default:
@@ -632,8 +732,104 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             )
         else:
             pass
-
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Functions FSDP2 calls before all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
+            to shard the weights.
+            orig_size (torch.Size): Original size of the weight tensor.(For us same as self.shape)
+            contiguous_orig_stride (Tuple[int]): Original stride of the weight tensor
+            (For us same as self.stride())
+            module (FSDPModule): FSDP module. FSDP wrapped module wrapped using fully_shard
+            that contains this FP8 tensor.
+            mp_policy (MixedPrecisionPolicy): Mixed precision policy used by FSDP2.
+
+        Returns:
+            shareded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
+            that need to be all-gathered.(In this case uint8 data tensor)
+            metadata: Tuple[Any]: Metadata needed for reconstructing the
+            Float8Tensor after all-gather.
+        """
+        # pylint: disable=unused-argument
+        # Importing here to avoid circular imports
+        from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
+        if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
+            # When sharded weight is updated after reduce scattering the gradients in FSDP2,
+            # we need to do amax reduction across the mesh to make sure all weight shards are
+            # updated with same scale inverse. Setting the state below in the quantizer will make
+            # sure that updated Quantized weight tensor have same scale inverse across all shards.
+            self._quantizer.amax_reduction_group = mesh.get_group()
+            self._quantizer.with_amax_reduction = True
+        quantizer = self._quantizer.copy()  # quantizer to be used for allgathered weights
+        fsdp_state = _get_module_fsdp_state(module)
+        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        # If weights are resharded after forward pass, then its enough to set the quantizer usages
+        # based on whether its forward or backward pass for the allgathered weights.
+        # If not resharded after forward pass, the same weights allgathered in forward
+        # are used again in backward and so we dont change the quantizer usages which might need
+        # both rowwise and columnwise usages.
+        if reshard_after_forward:
+            training_state = fsdp_state._fsdp_param_group._training_state
+            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
+            # In case of hopper/L40, only one of data/transpose is needed
+            # based on forward or backward pass. So setting the quantizer usages appropriately.
+            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
+        sharded_tensors = (self._data,)
+        metadata = (self._scale_inv, self._fp8_dtype, quantizer)
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[Float8Tensor] = None,
+    ):
+        """Functions FSDP2 calls after all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
+            are all-gathered and received here as a tuple.
+            metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the Float8Tensor.
+            param_dtype (torch.dtype): high precision dtype of the Float8Tensor.
+            out (Optional[torch.Tensor], optional): _description_. Defaults to None.
+
+        Returns:
+            Tuple[Float8Tensor, Tuple[torch.Tensor, ...]]: Allgathered Float8Tensor and tuple of internal tensors
+            used by the Float8Tensor that was being computed after allgather.
+        """
+
+        (data,) = all_gather_outputs
+        (fp8_scale_inv, fp8_dtype, quantizer) = metadata
+        orig_shape = data.size()
+        # Quantizer has only columnwise usage set for backward pass
+        # In Blackwell+ architectures, transpose is not needed at all,
+        # even if columnwise usage is set. and is going to be handled
+        # internally in the update_usage method.
+        if out is not None:
+            out._data = data
+        else:
+            fp8_args = {
+                "shape": orig_shape,
+                "dtype": param_dtype,
+                "fp8_scale_inv": fp8_scale_inv,
+                "fp8_dtype": fp8_dtype,
+                "quantizer": quantizer,
+                "requires_grad": False,
+                "data": data,
+            }
+            out = Float8Tensor(**fp8_args)
+
+        out.update_usage(
+            rowwise_usage=quantizer.rowwise_usage,
+            columnwise_usage=quantizer.columnwise_usage,
+        )
+        return out, all_gather_outputs
 
     @classmethod
     def _make_in_reduce_ex(
@@ -752,6 +948,9 @@ class _ViewFunc(torch.autograd.Function):
             out_transpose_shape = out_transpose.size()
             if out_transpose_shape[0] != out_shape[-1] or out_transpose_shape[1:] != out_shape[:-1]:
                 out_transpose = None
+            else:
+                view_shape_for_transpose = [shape[-1]] + list(shape[:-1])
+                out_transpose = out_transpose.view(*view_shape_for_transpose)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
@@ -796,6 +995,9 @@ class _ReshapeFunc(torch.autograd.Function):
             out_transpose_shape = out_transpose.size()
             if out_transpose_shape[0] != out_shape[-1] or out_transpose_shape[1:] != out_shape[:-1]:
                 out_transpose = None
+            else:
+                reshape_shape_for_transpose = [shape[-1]] + list(shape[:-1])
+                out_transpose = out_transpose.reshape(*reshape_shape_for_transpose)
         return Float8Tensor(
             shape=out_shape,
             dtype=tensor.dtype,
