@@ -1270,14 +1270,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
                 param = torch.empty_like(param, device="cuda")
-                if is_dtensor:
-                    dtensor_param = DTensor.from_local(
-                        param,
-                        device_mesh=dtensor_param.device_mesh,
-                        placements=dtensor_param.placements,
-                        shape=dtensor_param.size(),
-                        stride=dtensor_param.stride(),
-                    )
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
@@ -1323,7 +1315,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             if is_dtensor:
-                dtensor_param._local_tensor = param
+                # recreate the DTensor from the parameter.
+                dtensor_param = DTensor.from_local(
+                    param,
+                    device_mesh=dtensor_param.device_mesh,
+                    placements=dtensor_param.placements,
+                    shape=dtensor_param.size(),
+                    stride=dtensor_param.stride(),
+                )
                 dtensor_param = torch.nn.Parameter(dtensor_param)
             else:
                 param = torch.nn.Parameter(param)
