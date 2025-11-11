@@ -250,7 +250,12 @@ class CurrentScalingQuantizerRef(Quantizer):
             pow_2_scales=pow_2_scales,
         )
 
-    def _quantize(self, tensor: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _quantize(self, tensor: torch.Tensor) -> Tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
         """
         Python implementation of quantization (c++ kernel can be used as an option instead).
 
@@ -270,7 +275,9 @@ class CurrentScalingQuantizerRef(Quantizer):
         """
         # Handle amax reduction if enabled
         if self.with_amax_reduction:
-            assert self.amax_reduction_group is not None, "amax_reduction_group must be set when with_amax_reduction is True"
+            assert (
+                self.amax_reduction_group is not None
+            ), "amax_reduction_group must be set when with_amax_reduction is True"
 
             # Compute local amax
             if tensor.numel() == 0:
@@ -344,9 +351,11 @@ class CurrentScalingQuantizerRef(Quantizer):
             original_shape=original_shape,
         )
 
-    def dequantize(self, tensor: torch.Tensor, scale: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    def dequantize(
+        self, tensor: torch.Tensor, scale: torch.Tensor, dtype: Optional[torch.dtype] = None
+    ) -> torch.Tensor:
         """Dequantize the quantized tensor"""
-        tensor = (tensor.to(torch.float32) * scale)
+        tensor = tensor.to(torch.float32) * scale
         if dtype is None:
             return tensor
         return tensor.to(dtype)
@@ -381,9 +390,7 @@ class CurrentScalingQuantizerRef(Quantizer):
 
         # cublas fp8 gemm does not support fp32 bias
         use_bias_in_gemm = (
-            bias is not None
-            and out_dtype != torch.float32
-            and bias.dtype != torch.float32
+            bias is not None and out_dtype != torch.float32 and bias.dtype != torch.float32
         )
 
         # Run quantized gemm: y = qw * qx
@@ -412,9 +419,7 @@ class CurrentScalingQuantizerRef(Quantizer):
 
         return y
 
-    def transpose_qresult(
-        self, qresult: CurrentScalingTensorRef
-    ) -> CurrentScalingTensorRef:
+    def transpose_qresult(self, qresult: CurrentScalingTensorRef) -> CurrentScalingTensorRef:
         qx = qresult.data
         scale = qresult.scale
         assert qresult.data_t is None
@@ -471,12 +476,12 @@ class CurrentScalingQuantizerRef(Quantizer):
         return dst
 
     def make_empty(
-            self,
-            shape: Iterable[int],
-            *,
-            dtype: torch.dtype = torch.float32,
-            device: Optional[torch.device] = None,
-            requires_grad: bool = False,
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
     ) -> CurrentScalingTensorRef:
         assert len(shape) == 2, "shape is not 2d"
 
