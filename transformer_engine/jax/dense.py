@@ -490,6 +490,16 @@ def _grouped_dense_fwd_rule(
                 group_sizes=ctx_kernel.group_sizes,
                 original_shape=kernel_shape,
                 group_axis=ctx_kernel.group_axis,
+                rowwise_use_split_accumulator=(
+                    quantizer_set.kernel.rowwise_use_split_accumulator
+                    if hasattr(quantizer_set.kernel, "rowwise_use_split_accumulator")
+                    else False
+                ),
+                colwise_use_split_accumulator=(
+                    quantizer_set.kernel.colwise_use_split_accumulator
+                    if hasattr(quantizer_set.kernel, "colwise_use_split_accumulator")
+                    else False
+                ),
             )
 
             if is_fp8_gemm_with_all_layouts_supported():
@@ -507,6 +517,16 @@ def _grouped_dense_fwd_rule(
                     group_sizes=ctx_kernel.group_sizes,
                     original_shape=kernel_shape,
                     group_axis=ctx_kernel.group_axis,
+                    rowwise_use_split_accumulator=(
+                        quantizer_set.kernel.rowwise_use_split_accumulator
+                        if hasattr(quantizer_set.kernel, "rowwise_use_split_accumulator")
+                        else False
+                    ),
+                    colwise_use_split_accumulator=(
+                        quantizer_set.kernel.colwise_use_split_accumulator
+                        if hasattr(quantizer_set.kernel, "colwise_use_split_accumulator")
+                        else False
+                    ),
                 )
         else:
             grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)

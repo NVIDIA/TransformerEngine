@@ -232,11 +232,32 @@ class CurrentScaleQuantizer(Quantizer):
         scaling_mode: Set to NVTE_DELAYED_TENSOR_SCALING
         q_layout: Quantization axis (default: ROWWISE_COLWISE)
         data_layout: Data layout string (default: "NT")
+        rowwise_use_split_accumulator: Whether to use split accumulator for additional precision on Hopper and Ada for row-wise quantization
+        colwise_use_split_accumulator: Whether to use split accumulator for additional precision on Hopper and Ada for column-wise quantization
     """
 
     scaling_mode: ScalingMode = ScalingMode.CURRENT_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
     data_layout: str = "NT"
+    rowwise_use_split_accumulator: bool = True
+    colwise_use_split_accumulator: bool = True
+
+    def tree_flatten(self):
+        """Flatten the quantizer for JAX tree operations.
+
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = ()
+        aux_data = (
+            self.q_dtype,
+            self.scaling_mode,
+            self.q_layout,
+            self.data_layout,
+            self.rowwise_use_split_accumulator,
+            self.colwise_use_split_accumulator,
+        )
+        return (children, aux_data)
 
     def _quantize_func(
         self,
@@ -274,6 +295,11 @@ class CurrentScaleQuantizer(Quantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=flatten_axis,
+            use_split_accumulator=(
+                self.colwise_use_split_accumulator
+                if is_colwise
+                else self.rowwise_use_split_accumulator
+            ),
         )
 
     def quantize(
@@ -323,6 +349,7 @@ class CurrentScaleQuantizer(Quantizer):
                 is_colwise=True,
                 data_layout="T",
                 flatten_axis=flatten_axis,
+                use_split_accumulator=self.colwise_use_split_accumulator,
             )
 
         if is_colwise and is_rowwise:
@@ -354,18 +381,14 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
     scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
-    margin: float = None
-    amax_compute_algo: AmaxComputeAlgo = None
-    amax_history_len: int = None
+    margin: float = 0.0
+    amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX
+    amax_history_len: int = 1024
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
     amax_history: jnp.ndarray = None
 
     def __post_init__(self):
-        assert self.margin is not None, "margin must be specified"
-        assert self.amax_compute_algo is not None, "amax_compute_algo must be specified"
-        assert self.amax_history_len is not None, "amax_history_len must be specified"
-
         self.amax_history = jnp.zeros((self.amax_history_len,), dtype=jnp.float32)
 
     def tree_flatten(self):
@@ -380,6 +403,8 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             self.scaling_mode,
             self.q_layout,
             self.data_layout,
+            self.rowwise_use_split_accumulator,
+            self.colwise_use_split_accumulator,
             self.margin,
             self.amax_compute_algo,
             self.amax_history_len,
@@ -424,6 +449,11 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
             flatten_axis=flatten_axis,
+            use_split_accumulator=(
+                self.colwise_use_split_accumulator
+                if is_colwise
+                else self.rowwise_use_split_accumulator
+            ),
         )
 
     @staticmethod
@@ -960,6 +990,8 @@ class GroupedQuantizer(Quantizer):
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            rowwise_use_split_accumulator=tensor_list[0].rowwise_use_split_accumulator,
+            colwise_use_split_accumulator=tensor_list[0].colwise_use_split_accumulator,
         )
 
     def _quantize_func(self, *args, **kwargs):

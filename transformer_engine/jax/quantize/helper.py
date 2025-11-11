@@ -288,8 +288,8 @@ class BaseQuantizeConfig(ABC):
     FWD_DTYPE: DType = None
     BWD_DTYPE: DType = None
     FP8_2X_ACC_FPROP: bool = False
-    FP8_2X_ACC_DGRAD: bool = False
-    FP8_2X_ACC_WGRAD: bool = False
+    FP8_2X_ACC_DGRAD: bool = True
+    FP8_2X_ACC_WGRAD: bool = True
     INFERENCE_MODE: bool = False
 
     # DelayedScaling
@@ -435,9 +435,6 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
         }
         self.AMAX_COMPUTE_ALGO = string_to_amax_compute_algo[fp8_recipe.amax_compute_algo]
 
-        self.FP8_2X_ACC_DGRAD = True
-        self.FP8_2X_ACC_WGRAD = True
-
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.DELAYED_TENSOR_SCALING
@@ -499,6 +496,9 @@ class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
         """
         super().initialize_from_recipe(fp8_recipe)
         self.AMAX_HISTORY_LEN = 0
+        self.FP8_2X_ACC_FPROP = fp8_recipe.fp8_gemm_fprop.use_split_accumulator
+        self.FP8_2X_ACC_DGRAD = fp8_recipe.fp8_gemm_dgrad.use_split_accumulator
+        self.FP8_2X_ACC_WGRAD = fp8_recipe.fp8_gemm_wgrad.use_split_accumulator
 
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
@@ -523,7 +523,21 @@ class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
         Returns:
             The quantization metadata for the specified module and tensor. It can be empty if no metadata is needed.
         """
-        return QuantizeMeta()
+        if tensor_source == TensorSource.X:
+            rowwise_use_split_accumulator = self.FP8_2X_ACC_FPROP
+            colwise_use_split_accumulator = self.FP8_2X_ACC_WGRAD
+        elif tensor_source == TensorSource.KERNEL:
+            rowwise_use_split_accumulator = self.FP8_2X_ACC_DGRAD
+            colwise_use_split_accumulator = self.FP8_2X_ACC_FPROP
+        elif tensor_source == TensorSource.DGRAD:
+            rowwise_use_split_accumulator = self.FP8_2X_ACC_DGRAD
+            colwise_use_split_accumulator = self.FP8_2X_ACC_WGRAD
+        else:
+            raise ValueError(f"Unknown tensor source: {tensor_source}")
+        return QuantizeMeta(
+            rowwise_use_split_accumulator=rowwise_use_split_accumulator,
+            colwise_use_split_accumulator=colwise_use_split_accumulator,
+        )
 
 
 class BlockScalingQuantizeConfig(BaseQuantizeConfig):

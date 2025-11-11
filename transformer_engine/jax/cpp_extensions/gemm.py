@@ -1229,6 +1229,33 @@ def gemm_uses_jax_dot() -> bool:
     return not GemmPrimitive.enabled()
 
 
+def should_use_split_accumulator(
+    lhs_q: Union[jax.Array, ScaledTensor], rhs_q: Union[jax.Array, ScaledTensor]
+) -> bool:
+    """Decide whether to use split accumulator for the cuBLAS GEMM based on the quantized operands."""
+    if isinstance(lhs_q, ScaledTensor):
+        assert isinstance(rhs_q, ScaledTensor), (
+            "cuBLAS GEMM with quantized LHS and non-quantized RHS operands requires a valid "
+            "`Quantizer` object to quantize the RHS operand."
+        )
+        if hasattr(lhs_q, "fp8_2x_accumulator") or hasattr(rhs_q, "fp8_2x_accumulator"):
+            assert hasattr(lhs_q, "fp8_2x_accumulator"), (
+                "Mismatched FP8 2x accumulator settings, rhs_q has fp8_2x_accumulator but lhs_q"
+                " does not."
+            )
+            assert hasattr(rhs_q, "fp8_2x_accumulator"), (
+                "Mismatched FP8 2x accumulator settings, lhs_q has fp8_2x_accumulator but rhs_q"
+                " does not."
+            )
+            assert lhs_q.fp8_2x_accumulator == rhs_q.fp8_2x_accumulator, (
+                "Mismatched FP8 2x accumulator settings between lhs_q and rhs_q."
+                f" lhs_q.fp8_2x_accumulator={lhs_q.fp8_2x_accumulator},"
+                f" rhs_q.fp8_2x_accumulator={rhs_q.fp8_2x_accumulator}."
+            )
+            return lhs_q.fp8_2x_accumulator
+    return False
+
+
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],
@@ -1252,16 +1279,6 @@ def _te_gemm(
             DeprecationWarning,
         )
 
-    if use_split_accumulator is None:
-        use_split_accumulator = False
-        # TODO(jberchtold) Does this only apply to FP8? If so, set this as an attribute on the quantizers themselves that then get passed thru the scaled tensors so it can be used here?
-        # TODO(jberchtold): FP8_2X_ACC_FPROP, FP8_2X_ACC_DGRAD, and FP8_2X_ACC_WGRAD don't seem to be properly extracted from the recipe when converting to a quantization config
-        # global_recipe = get_global_quantize_recipe()
-        # if global_recipe is not None:
-        #     use_split_accumulator = global_recipe.FP8_2X_ACC_FPROP
-        # else:
-        #     use_split_accumulator = False
-
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
     rhs_data = rhs
@@ -1274,6 +1291,9 @@ def _te_gemm(
 
     # Quantize operands (if necessary)
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
+
+    if use_split_accumulator is None:
+        use_split_accumulator = should_use_split_accumulator(lhs_q, rhs_q)
 
     lhs_amax = rhs_amax = None
     # Extract GEMM custom op inputs from quantized operands
@@ -1726,7 +1746,7 @@ def _jax_gemm(
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                 jax.lax.Precision.HIGHEST
-                if get_quantize_config().FP8_2X_ACC_FPROP  # TODO(jberchtold): this needs to know which GEMM we are in, fwd, dgrad, wgrad and apply the right config
+                if should_use_split_accumulator(lhs, rhs)
                 else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
