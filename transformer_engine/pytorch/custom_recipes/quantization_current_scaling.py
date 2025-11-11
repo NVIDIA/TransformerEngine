@@ -144,6 +144,7 @@ class CurrentScalingTensorRef(QuantizedTensorStorage):
         self.scale_t = self.scale
 
     def size(self, *args, **kwargs):
+        """Get the size of the quantized tensor"""
         if self.data is not None:
             return self.data.size(*args, **kwargs)
         size = self.data_t.size(*args, **kwargs)
@@ -224,6 +225,7 @@ class CurrentScalingQuantizerRef(Quantizer):
 
     @property
     def supports_allgather_fp8(self) -> bool:
+        """Flag to indicate this quantizer supports allgather fp8"""
         return True
 
     @classmethod
@@ -234,6 +236,7 @@ class CurrentScalingQuantizerRef(Quantizer):
         eps=0.0,
         pow_2_scales: bool = False,
     ):
+        """Compute the scale from the amax tensor"""
         # Use float32 for computation
         x_fp32 = x.to(torch.float32)
 
@@ -326,26 +329,26 @@ class CurrentScalingQuantizerRef(Quantizer):
 
     def quantize(
         self,
-        x: torch.Tensor,
-        **kwargs,
+        tensor: torch.Tensor,
+        **kwargs,  # pylint: disable=unused-argument
     ) -> CurrentScalingTensorRef:
         # sanity checks
-        assert x.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
+        assert tensor.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
 
         # Make it work with 3D tensors
-        original_shape = x.shape
-        if x.ndim > 2:
-            x = x.view(-1, x.shape[-1])
+        original_shape = tensor.shape
+        if tensor.ndim > 2:
+            tensor = tensor.view(-1, tensor.shape[-1])
 
-        qx, sx, qx_t, sx_t = self._quantize(x)
+        qx, sx, qx_t, sx_t = self._quantize(tensor)
 
         return CurrentScalingTensorRef(
             data=qx,
             scale=sx,
             data_t=qx_t,
             scale_t=sx_t,
-            dtype=x.dtype,
-            device=x.device,
+            dtype=tensor.dtype,
+            device=tensor.device,
             quant_dtype=self.dtype,
             _quantizer=self,
             original_shape=original_shape,
@@ -371,12 +374,13 @@ class CurrentScalingQuantizerRef(Quantizer):
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
-        qresult_x: QuantizedTensorStorage | None = None,
-        qresult_w: QuantizedTensorStorage | None = None,
+        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,  # pylint: disable=unused-argument
+        qresult_x: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
+        qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:
+        """Python implementation of quantized gemm."""
         M, K = qx.shape
-        N, K_B = qw.shape
+        N, _ = qw.shape
 
         if M == 0 or K == 0 or N == 0:
             if accumulate:
@@ -420,6 +424,7 @@ class CurrentScalingQuantizerRef(Quantizer):
         return y
 
     def transpose_qresult(self, qresult: CurrentScalingTensorRef) -> CurrentScalingTensorRef:
+        """Python implementation of transpose qresult."""
         qx = qresult.data
         scale = qresult.scale
         assert qresult.data_t is None
@@ -481,7 +486,7 @@ class CurrentScalingQuantizerRef(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False,
+        requires_grad: bool = False,  # pylint: disable=unused-argument
     ) -> CurrentScalingTensorRef:
         assert len(shape) == 2, "shape is not 2d"
 
