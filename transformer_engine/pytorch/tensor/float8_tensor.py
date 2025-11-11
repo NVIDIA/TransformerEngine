@@ -756,7 +756,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # pylint: disable=unused-argument
         # Importing here to avoid circular imports
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
-
         if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are
@@ -764,19 +763,19 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             self._quantizer.amax_reduction_group = mesh.get_group()
             self._quantizer.with_amax_reduction = True
-        # Allgathered weights might only need one of data or transpose based on
-        # L40/Hopper based on forward or backward pass in fsdp state.
         quantizer = self._quantizer.copy()  # quantizer to be used for allgathered weights
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
-        # based on whether its forward or backward pass. Otherwise, weights allgathered in forward
-        # are used in backward and pre/post allgather methods wont be called again in backward pass.
+        # based on whether its forward or backward pass for the allgathered weights.
+        # If not resharded after forward pass, the same weights allgathered in forward
+        # are used again in backward and so we dont change the quantizer usages which might need
+        # both rowwise and columnwise usages.
         if reshard_after_forward:
             training_state = fsdp_state._fsdp_param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # In case of hopper/L40, only one of data/transpose is needed
-            # based on forward or backward pass.
+            # based on forward or backward pass. So setting the quantizer usages appropriately.
             quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, self._fp8_dtype, quantizer)
@@ -813,10 +812,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # internally in the update_usage method.
         if out is not None:
             out._data = data
-            out.update_usage(
-                rowwise_usage=quantizer.rowwise_usage,
-                columnwise_usage=quantizer.columnwise_usage,
-            )
         else:
             fp8_args = {
                 "shape": orig_shape,
@@ -828,10 +823,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 "data": data,
             }
             out = Float8Tensor(**fp8_args)
-            out.update_usage(
-                rowwise_usage=quantizer.rowwise_usage,
-                columnwise_usage=quantizer.columnwise_usage,
-            )
+
+        out.update_usage(
+            rowwise_usage=quantizer.rowwise_usage,
+            columnwise_usage=quantizer.columnwise_usage,
+        )
         return out, all_gather_outputs
 
     @classmethod

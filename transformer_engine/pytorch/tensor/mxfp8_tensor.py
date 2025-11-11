@@ -420,7 +420,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 out_data.append(scale_inv_out)
             return [
                 MXFP8Tensor(
-                    shape=splitted_tensor_data[0].size(),
+                    shape=splitted_tensor_data[0].size() if splitted_tensor_data[0] is not None else None,
                     dtype=tensor.dtype,
                     rowwise_data=splitted_tensor_data[0],
                     rowwise_scale_inv=splitted_tensor_data[2],
