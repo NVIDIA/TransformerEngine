@@ -366,7 +366,8 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         assert self.amax_compute_algo is not None, "amax_compute_algo must be specified"
         assert self.amax_history_len is not None, "amax_history_len must be specified"
 
-        self.amax_history = jnp.zeros((self.amax_history_len,), dtype=jnp.float32)
+        if self.amax_history is None:
+            self.amax_history = jnp.zeros((self.amax_history_len,), dtype=jnp.float32)
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
