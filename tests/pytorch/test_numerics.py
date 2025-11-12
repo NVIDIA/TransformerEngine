@@ -1622,9 +1622,7 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-def test_layernorm_mlp_accuracy(
-    dtype, bs, model, activation, normalization, return_bias, bias
-):
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
     config = model_configs[model]
 
     te_ln_mlp = TestReturnBiasModule(
@@ -1699,7 +1697,11 @@ def test_layernorm_mlp_accuracy(
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, bias, fuse_wgrad_accumulation,
+    dtype,
+    bs,
+    model,
+    bias,
+    fuse_wgrad_accumulation,
 ):
     config = model_configs[model]
 
@@ -1749,12 +1751,16 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 def test_layernorm_mlp_accuracy_checkpoint(
-    dtype, bs, model, bias,
+    dtype,
+    bs,
+    model,
+    bias,
 ):
     config = model_configs[model]
 
@@ -1789,7 +1795,9 @@ def test_layernorm_mlp_accuracy_checkpoint(
             ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=False)
-    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
