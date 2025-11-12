@@ -350,6 +350,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         scale: Current scaling factor
         amax_history: History of maximum absolute values
     """
+
     amax_history: jnp.ndarray = None
 
     margin: float = 0.0
