@@ -325,7 +325,10 @@ def test_dpa_num_splits(dtype, model_configs, model):
     """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
     if not FlashAttentionUtils.v3_is_installed:
         pytest.skip("num_splits requires FlashAttention-3.")
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, num_splits=2)
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, None, False, False, num_splits=2
+    )
+
 
 model_configs_softmax = {
     # test: ModelConfig(b, sq, hq, dqk)
