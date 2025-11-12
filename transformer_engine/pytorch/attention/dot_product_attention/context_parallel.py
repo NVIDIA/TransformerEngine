@@ -24,6 +24,7 @@ from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.constants import (
     dist_group_type,
     TE_DType,
@@ -34,6 +35,7 @@ from transformer_engine.pytorch.distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
+
 from transformer_engine.pytorch.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
@@ -880,6 +882,7 @@ def cp_p2p_fwd_fused_attn(
         cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
         **fp8_meta_kwargs,
         return_max_logit=return_max_logit,
+        cuda_graph=is_graph_capturing(),
     )
 
     if fp8:
@@ -1142,6 +1145,7 @@ def cp_p2p_bwd_fused_attn(
         attn_mask_type=attn_mask_type_,
         attn_bias_type=attn_bias_type,
         deterministic=deterministic,
+        cuda_graph=is_graph_capturing(),
         **fp8_meta_kwargs,
     )
 
@@ -2937,6 +2941,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
                             window_size=window_size_per_step[i],
                             return_max_logit=return_max_logit,
+                            cuda_graph=is_graph_capturing(),
                         )
                         if return_max_logit:
                             max_logit_per_step[i] = max_logit_[0]
@@ -3151,6 +3156,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_bias_type=ctx.attn_bias_type,
                             window_size=window_size_per_step[i],
                             deterministic=ctx.deterministic,
+                            cuda_graph=is_graph_capturing(),
                         )
                     else:
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
@@ -3460,6 +3466,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 softmax_type=softmax_type,
                 softmax_offset=softmax_offset,
                 return_max_logit=return_max_logit,
+                cuda_graph=is_graph_capturing(),
             )
             if isinstance(out_, Float8Tensor):
                 out_fp8 = out_
@@ -3760,6 +3767,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 attn_bias_type=ctx.attn_bias_type,
                 window_size=ctx.window_size,
                 deterministic=ctx.deterministic,
+                cuda_graph=is_graph_capturing(),
                 **fp8_meta_kwargs,
                 softmax_type=ctx.softmax_type,
             )

@@ -197,6 +197,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             fused_scale_factor = scale_factor
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
+                bias = None
 
         def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""
@@ -406,10 +407,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Users can select between these two backends via the :attr:`NVTE_FUSED_ATTN` environment
         variable:
 
-        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention (default).
-        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If the required cuDNN fused attention
-          kernel is not available on the system, a warning will be issued, and the module will
-          automatically fall back to the unfused backend.
+        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention.
+        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention (default). If the required cuDNN fused
+          attention kernel is not available on the system, a warning will be issued, and the module
+          will automatically fall back to the unfused backend.
 
     .. note::
         The DotProductAttention default setting enables non-deterministic kernels for reduced
@@ -601,7 +602,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         else:
             assert bias is not None
 
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+        # Use fused attn (if kernel check below passes) by default
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         seqlen_q = query.shape[sequence_dim]
@@ -1618,7 +1620,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Dimensions that will share the same dropout mask for hidden
     attention_dropout: float, default = 0.1
         Dropout probability for the dropout op during multi-head attention.
-    intermediate_dropout: float, default = 0.1
+    intermediate_dropout: float, default = 0.0
         Dropout probability for the dropout op after FC1 layer.
     intermediate_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden after FC1 layer.
@@ -1633,7 +1635,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing weights of FC1 and FC2 layers.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
-    mlp_activations: Sequence[str], default = ('relu', )
+    mlp_activations: Sequence[str], default = ('gelu', )
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     mlp_activation_params: dict = None
@@ -1753,12 +1755,12 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     dropout_rng_name: str = "dropout"
     mha_kernel_init: Initializer = None
     mlp_kernel_init: Initializer = None
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     mlp_activation_params: dict = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros

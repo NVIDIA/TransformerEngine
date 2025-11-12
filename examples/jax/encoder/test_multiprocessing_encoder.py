@@ -27,13 +27,13 @@ from common import (
     is_mxfp8_supported,
     is_nvfp4_supported,
     get_quantization_recipe_from_name_string,
-    hf_login_if_available,
+    unpack_cached_datasets_if_available,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 
-hf_login_if_available()
+unpack_cached_datasets_if_available()
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
