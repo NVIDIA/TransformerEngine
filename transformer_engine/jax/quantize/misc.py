@@ -4,6 +4,7 @@
 """
 This module provides additional enum and utilities for quantizing tensors in JAX.
 """
+from dataclasses import dataclass
 from enum import Enum
 
 from transformer_engine_jax import JAXX_Quantize_Layout
@@ -13,6 +14,7 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True)
 class QuantizeLayout(Enum):
     "Wrapper for JAXX_Quantize_Layout"
 
