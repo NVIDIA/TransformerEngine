@@ -302,19 +302,23 @@ model_configs_max_logit = {
 @pytest.mark.parametrize("model_configs", [model_configs_max_logit])
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
 @pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
-@pytest.mark.parametrize("num_splits", [None, 2])
-def test_dpa_max_logit(dtype, model_configs, model, qkv_layout, num_splits):
+def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
     config.return_max_logit = True
-    # Minimal guard: if num_splits is requested, require FA3 be installed
-    if num_splits is not None:
-        if not FlashAttentionUtils.v3_is_installed:
-            pytest.skip("num_splits requires FlashAttention-3.")
-    test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, False, num_splits=num_splits
-    )
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_base])
+@pytest.mark.parametrize("model", ["base_1_0"])
+def test_dpa_num_splits(dtype, model_configs, model):
+    """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
+    if not FlashAttentionUtils.v3_is_installed:
+        pytest.skip("num_splits requires FlashAttention-3.")
+    # Reuse the main test, passing num_splits only to FlashAttention; others run normally
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, num_splits=2)
 
 model_configs_softmax = {
     # test: ModelConfig(b, sq, hq, dqk)
