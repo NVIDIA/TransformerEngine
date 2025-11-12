@@ -351,8 +351,6 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         amax_history: History of maximum absolute values
     """
 
-    amax_history: jnp.ndarray = None
-
     margin: float = 0.0
     amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX
     amax_history_len: int = 1024
@@ -367,6 +365,13 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
 
         if self.amax_history is None:
             self.amax_history = jnp.zeros((self.amax_history_len,), dtype=jnp.float32)
+
+        if type(self.amax_history).__name__ != "object":
+            # In one of the passes this becomes an opaque object with a pointer
+            assert self.amax_history.shape == (self.amax_history_len,), (
+                f"amax_history must have shape ({self.amax_history_len},) but got"
+                f" {self.amax_history.shape}"
+            )
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
