@@ -4,9 +4,6 @@
 """
 This module provides additional enum and utilities for quantizing tensors in JAX.
 """
-# from jax.tree_util import register_pytree_node_class
-# from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from enum import Enum
 
 from transformer_engine_jax import JAXX_Quantize_Layout
@@ -16,8 +13,6 @@ __all__ = [
 ]
 
 
-# @register_pytree_node_class
-@dataclass(frozen=True)
 class QuantizeLayout(Enum):
     "Wrapper for JAXX_Quantize_Layout"
 
