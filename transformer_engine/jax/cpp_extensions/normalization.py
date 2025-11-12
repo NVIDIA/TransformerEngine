@@ -1129,16 +1129,6 @@ def layernorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        rowwise_use_split_accumulator=(
-            quantizer.rowwise_use_split_accumulator
-            if hasattr(quantizer, "rowwise_use_split_accumulator")
-            else False
-        ),
-        colwise_use_split_accumulator=(
-            quantizer.colwise_use_split_accumulator
-            if hasattr(quantizer, "colwise_use_split_accumulator")
-            else False
-        ),
     )
 
     return scaled_tensor, mu, rsigma
@@ -1393,16 +1383,6 @@ def rmsnorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        rowwise_use_split_accumulator=(
-            quantizer.rowwise_use_split_accumulator
-            if hasattr(quantizer, "rowwise_use_split_accumulator")
-            else False
-        ),
-        colwise_use_split_accumulator=(
-            quantizer.colwise_use_split_accumulator
-            if hasattr(quantizer, "colwise_use_split_accumulator")
-            else False
-        ),
     )
 
     return scaled_tensor, rsigma

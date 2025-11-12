@@ -186,7 +186,6 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     data_layout: str
     flatten_axis: int
     has_rht_applied: bool
-    use_split_accumulator: bool
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -247,7 +246,6 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             self.data_layout,
             self.flatten_axis,
             self.has_rht_applied,
-            self.use_split_accumulator,
         )
         return (children, aux_data)
 
@@ -320,7 +318,6 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             data_layout=self.data_layout,
             flatten_axis=self.flatten_axis,
             has_rht_applied=self.has_rht_applied,
-            use_split_accumulator=self.use_split_accumulator,
         )
 
 
@@ -355,7 +352,6 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         data_layout,
         flatten_axis,
         original_shape,
-        use_split_accumulator,
         group_axis=0,
     ):
         self.flatten_axis = flatten_axis
@@ -374,7 +370,6 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             data_layout=data_layout,
             flatten_axis=flatten_axis,
             has_rht_applied=False,
-            use_split_accumulator=use_split_accumulator,
         )
 
     def __post_init__(self):
@@ -420,8 +415,6 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             self.is_colwise,
             self.data_layout,
             self.flatten_axis,
-            self.has_rht_applied,
-            self.use_split_accumulator,
             self.original_shape,
             self.group_axis,
         )
@@ -529,7 +522,6 @@ class ScaledTensorFactory:
         original_shape=None,
         group_axis=0,
         has_rht_applied=False,
-        use_split_accumulator=True,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -546,7 +538,6 @@ class ScaledTensorFactory:
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
             has_rht_applied: Whether the tensor had the Randomized Hadamard Transform (RHT) applied during quantization (default: False)
-            use_split_accumulator: Whether to use split accumulator (default: True)
 
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
@@ -593,7 +584,6 @@ class ScaledTensorFactory:
                 group_sizes=group_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
-                use_split_accumulator=use_split_accumulator,
             )
 
         # Handling attrs of transposed tensors
@@ -612,7 +602,6 @@ class ScaledTensorFactory:
             data_layout=data_layout,
             flatten_axis=flatten_axis,
             has_rht_applied=has_rht_applied,
-            use_split_accumulator=use_split_accumulator,
         )
 
     @staticmethod
@@ -632,8 +621,6 @@ class ScaledTensorFactory:
         group_axis=0,
         rowwise_has_rht_applied=False,
         colwise_has_rht_applied=False,
-        rowwise_use_split_accumulator=True,
-        colwise_use_split_accumulator=True,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -652,8 +639,6 @@ class ScaledTensorFactory:
             group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the column-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
-            rowwise_use_split_accumulator: Whether the row-wise tensor uses split accumulator (default: True)
-            colwise_use_split_accumulator: Whether the column-wise tensor uses split accumulator (default: True)
 
         Returns:
             A ScaledTensor2x instance
@@ -677,7 +662,6 @@ class ScaledTensorFactory:
             original_shape=original_shape,
             group_axis=group_axis,
             has_rht_applied=rowwise_has_rht_applied,
-            use_split_accumulator=rowwise_use_split_accumulator,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -692,7 +676,6 @@ class ScaledTensorFactory:
             original_shape=original_shape,
             group_axis=group_axis,
             has_rht_applied=colwise_has_rht_applied,
-            use_split_accumulator=colwise_use_split_accumulator,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -714,8 +697,6 @@ class ScaledTensorFactory:
         group_axis: int = 0,
         rowwise_has_rht_applied: bool = False,
         colwise_has_rht_applied: bool = False,
-        rowwise_use_split_accumulator: bool = True,
-        colwise_use_split_accumulator: bool = True,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -734,8 +715,6 @@ class ScaledTensorFactory:
             group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
-            rowwise_use_split_accumulator: Whether the row-wise tensor uses split accumulator (default: True)
-            colwise_use_split_accumulator: Whether the column-wise tensor uses split accumulator (default: True)
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
@@ -759,8 +738,6 @@ class ScaledTensorFactory:
                 group_axis=group_axis,
                 rowwise_has_rht_applied=rowwise_has_rht_applied,
                 colwise_has_rht_applied=colwise_has_rht_applied,
-                rowwise_use_split_accumulator=rowwise_use_split_accumulator,
-                colwise_use_split_accumulator=colwise_use_split_accumulator,
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
@@ -778,7 +755,6 @@ class ScaledTensorFactory:
                 original_shape=original_shape,
                 group_axis=group_axis,
                 has_rht_applied=colwise_has_rht_applied,
-                use_split_accumulator=colwise_use_split_accumulator,
             )
 
         return ScaledTensorFactory.create_1x(
@@ -794,7 +770,6 @@ class ScaledTensorFactory:
             original_shape=original_shape,
             group_axis=group_axis,
             has_rht_applied=rowwise_has_rht_applied,
-            use_split_accumulator=rowwise_use_split_accumulator,
         )
 
 

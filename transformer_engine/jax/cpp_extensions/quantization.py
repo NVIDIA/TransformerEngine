@@ -824,7 +824,7 @@ def _quantize_dbias_impl(
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
             )
-        scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=0.0)
+        scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=quantizer.margin)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
         # Make sure to reset amax to zeros for DelayedScaling
@@ -916,16 +916,6 @@ def _quantize_dbias_impl(
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
         colwise_has_rht_applied=use_rht,
-        rowwise_use_split_accumulator=(
-            quantizer.rowwise_use_split_accumulator
-            if hasattr(quantizer, "rowwise_use_split_accumulator")
-            else False
-        ),
-        colwise_use_split_accumulator=(
-            quantizer.colwise_use_split_accumulator
-            if hasattr(quantizer, "colwise_use_split_accumulator")
-            else False
-        ),
     )
     return out, dbias.astype(dq_dtype)
 
@@ -1241,7 +1231,7 @@ def grouped_quantize(
         )
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
-            tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype, margin=0.0)
+            tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)
             scale = scale.at[i].set(tmp_scale[0])
 
     is_tensor_scaling = quantizer.scaling_mode in (
@@ -1293,16 +1283,6 @@ def grouped_quantize(
         group_sizes=group_sizes,
         original_shape=original_shape,
         group_axis=group_axis,
-        rowwise_use_split_accumulator=(
-            quantizer.rowwise_use_split_accumulator
-            if hasattr(quantizer, "rowwise_use_split_accumulator")
-            else False
-        ),
-        colwise_use_split_accumulator=(
-            quantizer.colwise_use_split_accumulator
-            if hasattr(quantizer, "colwise_use_split_accumulator")
-            else False
-        ),
     )
     return out
 

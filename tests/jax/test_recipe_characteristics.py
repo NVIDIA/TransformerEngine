@@ -15,7 +15,6 @@ from flax import linen as nn
 from utils import assert_allclose, pytest_parametrize_wrapper
 from transformer_engine.common.recipe import (
     Recipe,
-    MMParams,
     DelayedScaling,
     MXFP8BlockScaling,
     Float8CurrentScaling,
@@ -177,36 +176,6 @@ class CurrentScalingRecipeAssertion(RecipeAssertionBase):
         self.assertEqual(quantizer.scaling_mode, ScalingMode.CURRENT_TENSOR_SCALING)
         assert_fp8_format(quantizer, tensor_source, ref_recipe.fp8_format)
 
-        if tensor_source == TensorSource.X:
-            self.assertEqual(
-                ref_recipe.fp8_gemm_fprop.use_split_accumulator,
-                quantizer.rowwise_use_split_accumulator,
-            )
-            self.assertEqual(
-                ref_recipe.fp8_gemm_wgrad.use_split_accumulator,
-                quantizer.colwise_use_split_accumulator,
-            )
-        elif tensor_source == TensorSource.KERNEL:
-            self.assertEqual(
-                ref_recipe.fp8_gemm_dgrad.use_split_accumulator,
-                quantizer.rowwise_use_split_accumulator,
-            )
-            self.assertEqual(
-                ref_recipe.fp8_gemm_fprop.use_split_accumulator,
-                quantizer.colwise_use_split_accumulator,
-            )
-        elif tensor_source == TensorSource.DGRAD:
-            self.assertEqual(
-                ref_recipe.fp8_gemm_dgrad.use_split_accumulator,
-                quantizer.rowwise_use_split_accumulator,
-            )
-            self.assertEqual(
-                ref_recipe.fp8_gemm_wgrad.use_split_accumulator,
-                quantizer.colwise_use_split_accumulator,
-            )
-        else:
-            raise ValueError(f"Unsupported tensor source: {tensor_source}")
-
 
 class MXFP8RecipeAssertion(RecipeAssertionBase):
 
@@ -347,23 +316,7 @@ class TestFP8Functions(unittest.TestCase):
             cls=CurrentScalingRecipeAssertion,
         )
         self._test_recipe(
-            quantization_recipe=Float8CurrentScaling(
-                margin=3.0,
-                fp8_format=FP8Format.HYBRID,
-                fp8_gemm_fprop=MMParams(use_split_accumulator=False),
-                fp8_gemm_wgrad=MMParams(use_split_accumulator=True),
-                fp8_gemm_dgrad=MMParams(use_split_accumulator=True),
-            ),
-            cls=CurrentScalingRecipeAssertion,
-        )
-        self._test_recipe(
-            quantization_recipe=Float8CurrentScaling(
-                margin=3.0,
-                fp8_format=FP8Format.HYBRID,
-                fp8_gemm_fprop=MMParams(use_split_accumulator=True),
-                fp8_gemm_wgrad=MMParams(use_split_accumulator=False),
-                fp8_gemm_dgrad=MMParams(use_split_accumulator=False),
-            ),
+            quantization_recipe=Float8CurrentScaling(margin=3.0, fp8_format=FP8Format.HYBRID),
             cls=CurrentScalingRecipeAssertion,
         )
 
