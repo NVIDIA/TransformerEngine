@@ -554,10 +554,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         # pylint: disable=unused-argument
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
-
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
-        quantizer = self._quantizer.copy()
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
         rowwise_scale_inv = self._rowwise_scale_inv
@@ -575,9 +573,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             if columnwise_scale_inv.size(0) != flattened_in_shape0:
                 columnwise_scale_inv = columnwise_scale_inv[:flattened_in_shape0]
 
-        sharded_tensors = (self._rowwise_data, rowwise_scale_inv)
-        # If weights are resharded after forward pass, then its enough to set the quantizer usages
-        # based on whether its forward or backward pass for the allgathered weights.
+        # If weights are resharded after forward pass, then its enough to send one row/col 
+        # usage based on whether its forward or backward pass for the allgathered weights.
         # If not resharded after forward pass, the same weights allgathered in forward
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
@@ -585,18 +582,24 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             training_state = fsdp_state._fsdp_param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
-            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
+            rowwise_usage = not is_backward_pass
+            columnwise_usage = is_backward_pass
             sharded_tensors = (
                 (self._columnwise_data, columnwise_scale_inv)
                 if is_backward_pass
-                else sharded_tensors
+                else (self._rowwise_data, rowwise_scale_inv)
             )
         else:
-            if quantizer.columnwise_usage:
+            # rowwise usage is always needed for forward pass.
+            rowwise_usage = True
+            sharded_tensors = (self._rowwise_data, rowwise_scale_inv)
+            columnwise_usage = self._quantizer.columnwise_usage
+            if columnwise_usage:
                 # If weights are not resharded after forward, then both
                 # rowwise and columnwise data/scale_inv need to be allgathered.
                 sharded_tensors += (self._columnwise_data, columnwise_scale_inv)
-        metadata = (self._fp8_dtype, quantizer)
+
+        metadata = (self._fp8_dtype, rowwise_usage, columnwise_usage)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -619,12 +622,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             Tuple[MXFP8Tensor, Tuple[torch.Tensor, ...]]: Allgathered MXFP8Tensor and tuple of internal tensors
             used by the MXFP8Tensor that was being computed after allgather.
         """
-        fp8_dtype, quantizer = metadata
+        fp8_dtype, rowwise_usage, columnwise_usage = metadata
         rowwise_data, rowwise_scale_inv = (
-            all_gather_outputs[:2] if quantizer.rowwise_usage else (None, None)
+            all_gather_outputs[:2] if rowwise_usage else (None, None)
         )
         columnwise_data, columnwise_scale_inv = (
-            all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
+            all_gather_outputs[-2:] if columnwise_usage else (None, None)
         )
 
         # Add padding to scale_inv tensors to be multiples of [128, 4]for rowwise and [4, 128] for columnwise
@@ -649,8 +652,15 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             out._rowwise_scale_inv = rowwise_scale_inv
             out._columnwise_data = columnwise_data
             out._columnwise_scale_inv = columnwise_scale_inv
-            out._quantizer = quantizer
         else:
+            # We ll be here when post all gather is called the first time.
+            # So need to make sure the we create a fresh copy of the quantizer.
+            # for the allgathered tensors since self._quantizer belongs
+            # to the sharded parameter. No need to set all_gathered_quantizer
+            # in out for the consequent iterations.
+            all_gathered_quantizer = self._quantizer.copy()
+            all_gathered_quantizer.rowwise_usage = rowwise_usage
+            all_gathered_quantizer.columnwise_usage = columnwise_usage
             out = MXFP8Tensor(
                 rowwise_data=rowwise_data,
                 rowwise_scale_inv=rowwise_scale_inv,
@@ -659,7 +669,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 fp8_dtype=fp8_dtype,
                 dtype=param_dtype,
                 shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
-                quantizer=quantizer,
+                quantizer=all_gathered_quantizer,
             )
 
         return out, all_gather_outputs
