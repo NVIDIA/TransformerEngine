@@ -651,7 +651,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # ------------------------------------------------------
 
             # Deallocate tensors if no longer needed, again, can safely deallocate
-            if checkpoint or not is_grad_enabled:  # same logic as lasy clear_tensor_data block
+            if checkpoint or not is_grad_enabled:  # same logic as last clear_tensor_data block
                 clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
 
             # Prepare output tensor
