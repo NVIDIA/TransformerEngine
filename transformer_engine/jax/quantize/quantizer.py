@@ -350,9 +350,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         scale: Current scaling factor
         amax_history: History of maximum absolute values
     """
-
-    scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
-    q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+    amax_history: jnp.ndarray = None
 
     margin: float = 0.0
     amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX
