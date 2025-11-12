@@ -185,13 +185,13 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         _ = general_grouped_gemm(
-            weights_fp8 if not m_splits_on_device else inputmats,
-            inputmats if not m_splits_on_device else weights_fp8,
+            weights_fp8,
+            inputmats,
             [out],
             activation_dtype,
             get_general_grouped_gemm_workspace(m_splits_on_device),
             single_output=True,
-            layout="TN" if not m_splits_on_device else "NT",
+            layout="TN",
             m_splits=m_splits,
             m_splits_on_device=m_splits_on_device,
             bias=biases,
@@ -402,8 +402,8 @@ class _GroupedLinear(torch.autograd.Function):
                             columnwise_usage=quantizer.columnwise_usage,
                         )
                 general_grouped_gemm(
-                    weights if not ctx.m_splits_on_device else grad_output,
-                    grad_output if not ctx.m_splits_on_device else weights,
+                    weights,
+                    grad_output,
                     [dgrad],
                     ctx.activation_dtype,
                     get_general_grouped_gemm_workspace(ctx.m_splits_on_device),
@@ -466,7 +466,7 @@ class _GroupedLinear(torch.autograd.Function):
                     general_grouped_gemm,
                     out_dtype=ctx.activation_dtype,
                     workspaces=get_general_grouped_gemm_workspace(ctx.m_splits_on_device),
-                    layout="NT" if not ctx.m_splits_on_device else "TN",
+                    layout="NT",
                     grad=True,
                     wgrad=True, # For cutlass backend
                     m_splits=ctx.m_splits,

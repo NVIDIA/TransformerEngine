@@ -283,9 +283,9 @@ void generic_moe_gemm_kernelLauncher(ElementInput *A, ElementSF *SFA, const void
 }
 
 // Only mxfp8 is supported for now
-// A is single Tensor, B is splited tensor list, D is single Tensor
-void nvte_device_cutlass_grouped_gemm(const NVTETensor *A, const void **B_and_SF_addrs,
-                                      NVTETensor *D, const int64_t *m_splits, const int gemm_n,
+// A is splited tensor list, B is single Tensor, D is single Tensor
+void nvte_device_cutlass_grouped_gemm(const void **A_and_SF_addrs, const NVTETensor *B,
+                                      NVTETensor *D, const int64_t *m_splits, const int gemm_m,
                                       const NVTETensor *bias, NVTETensor *pre_gelu_out,
                                       const int num_gemms, bool transa, bool transb, bool grad,
                                       NVTETensor *workspace, size_t workspaceSize,
@@ -294,15 +294,15 @@ void nvte_device_cutlass_grouped_gemm(const NVTETensor *A, const void **B_and_SF
   NVTE_API_CALL(nvte_device_cutlass_grouped_gemm);
   using namespace transformer_engine;
 
-  // Process A
-  const transformer_engine::Tensor *inputA = convertNVTETensor(A[0]);
-  if (transa) {
-    NVTE_CHECK(inputA->has_columnwise_data(), "Input A is missing column-wise usage");
+  // Process B
+  const transformer_engine::Tensor *inputB = convertNVTETensor(B[0]);
+  if (transb) {
+    NVTE_CHECK(inputB->has_columnwise_data(), "Input B is missing column-wise usage");
   } else {
-    NVTE_CHECK(inputA->has_data(), "Input A is missing row-wise usage");
+    NVTE_CHECK(inputB->has_data(), "Input B is missing row-wise usage");
   }
-  void *raw_inputA_ptr = transa ? inputA->columnwise_data.dptr : inputA->data.dptr;
-  void *raw_inputA_SF_ptr = transa ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
+  void *raw_inputB_ptr = transb ? inputB->columnwise_data.dptr : inputB->data.dptr;
+  void *raw_inputB_SF_ptr = transb ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
 
   // Process D
   const transformer_engine::Tensor *outputD = convertNVTETensor(D[0]);
@@ -310,7 +310,7 @@ void nvte_device_cutlass_grouped_gemm(const NVTETensor *A, const void **B_and_SF
   void *raw_outputD_ptr = outputD->data.dptr;
 
   // Get GEMM shape
-  const int gemm_k = transa ? inputA->flat_first_dim() : inputA->flat_last_dim();
+  const int gemm_k = transb ? inputB->flat_first_dim() : inputB->flat_last_dim();
 
   if ((gemm_k & 0x1F) != 0) {
     throw std::runtime_error("gemm_k of grouped gemm with variable M must be a multiple of 32.");
@@ -318,7 +318,7 @@ void nvte_device_cutlass_grouped_gemm(const NVTETensor *A, const void **B_and_SF
 
   // Dispatch
   using transformer_engine::DType;
-  const DType ab_dtype = transa ? inputA->columnwise_data.dtype : inputA->data.dtype;
+  const DType ab_dtype = transb ? inputB->columnwise_data.dtype : inputB->data.dtype;
   const DType d_dtype = outputD->data.dtype;
 
   auto workspace_ptr = convertNVTETensor(workspace[0])->data.dptr;
@@ -329,29 +329,30 @@ void nvte_device_cutlass_grouped_gemm(const NVTETensor *A, const void **B_and_SF
     using ABSFType = cutlass::float_ue8m0_t;
     using DType = decltype(d_dtype);
 
-    ABType *inputA_ptr = reinterpret_cast<ABType *>(raw_inputA_ptr);
-    ABSFType *inputA_SF_ptr = reinterpret_cast<ABSFType *>(raw_inputA_SF_ptr);
+    ABType *inputB_ptr = reinterpret_cast<ABType *>(raw_inputB_ptr);
+    ABSFType *inputB_SF_ptr = reinterpret_cast<ABSFType *>(raw_inputB_SF_ptr);
     DType *outputD_ptr = reinterpret_cast<DType *>(raw_outputD_ptr);
 
-    if (transb) {
+    // Swap A and B
+    if (transa) {
       if (grad) {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, true, true>(
-            inputA_ptr, inputA_SF_ptr, B_and_SF_addrs, B_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_n, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
       } else {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, false, true>(
-            inputA_ptr, inputA_SF_ptr, B_and_SF_addrs, B_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_n, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
       }
     } else {
       if (grad) {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, true, false>(
-            inputA_ptr, inputA_SF_ptr, B_and_SF_addrs, B_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_n, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
       } else {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, false, false>(
-            inputA_ptr, inputA_SF_ptr, B_and_SF_addrs, B_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_n, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
       }
     }
   };
@@ -829,32 +830,32 @@ void nvte_device_cutlass_grouped_gemm_wgrad(
   NVTE_API_CALL(nvte_device_cutlass_grouped_gemm_wgrad);
   using namespace transformer_engine;
 
-  NVTE_CHECK(transa && !transb, "wgrad grouped gemm currently only support TN layout.");
+  NVTE_CHECK(!transa && transb, "wgrad grouped gemm currently only support NT layout.");
 
   // Process A
   const transformer_engine::Tensor *inputA = convertNVTETensor(A[0]);
   if (transa) {
-    NVTE_CHECK(inputA->has_columnwise_data(), "Input A is missing column-wise usage");
-  } else {
     NVTE_CHECK(inputA->has_data(), "Input A is missing row-wise usage");
+  } else {
+    NVTE_CHECK(inputA->has_columnwise_data(), "Input A is missing column-wise usage");
   }
-  void *raw_inputA_ptr = transa ? inputA->columnwise_data.dptr : inputA->data.dptr;
-  void *raw_inputA_SF_ptr = transa ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
+  void *raw_inputA_ptr = transa ? inputA->data.dptr : inputA->columnwise_data.dptr;
+  void *raw_inputA_SF_ptr = transa ? inputA->scale_inv.dptr : inputA->columnwise_scale_inv.dptr;
 
   // Process B
   const transformer_engine::Tensor *inputB = convertNVTETensor(B[0]);
   if (transb) {
-    NVTE_CHECK(inputB->has_data(), "Input B is missing row-wise usage");
-  } else {
     NVTE_CHECK(inputB->has_columnwise_data(), "Input B is missing column-wise usage");
+  } else {
+    NVTE_CHECK(inputB->has_data(), "Input B is missing row-wise usage");
   }
-  void *raw_inputB_ptr = transb ? inputB->data.dptr : inputB->columnwise_data.dptr;
-  void *raw_inputB_SF_ptr = transb ? inputB->scale_inv.dptr : inputB->columnwise_scale_inv.dptr;
+  void *raw_inputB_ptr = transb ? inputB->columnwise_data.dptr : inputB->data.dptr;
+  void *raw_inputB_SF_ptr = transb ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
 
   // Get GEMM shape
-  const int gemm_m = transa ? inputA->flat_last_dim() : inputA->flat_first_dim();
-  const int gemm_n = transb ? inputB->flat_first_dim() : inputB->flat_last_dim();
-  const int total_gemm_k = transa ? inputA->flat_first_dim() : inputA->flat_last_dim();
+  const int gemm_m = transa ? inputA->flat_first_dim() : inputA->flat_last_dim();
+  const int gemm_n = transb ? inputB->flat_last_dim() : inputB->flat_first_dim();
+  const int total_gemm_k = transa ? inputA->flat_last_dim() : inputA->flat_first_dim();
 
   if ((gemm_m & 0x1F) != 0 || (gemm_n & 0xF) != 0) {
     throw std::runtime_error(
@@ -863,8 +864,8 @@ void nvte_device_cutlass_grouped_gemm_wgrad(
 
   // Dispatch
   using transformer_engine::DType;
-  const DType a_dtype = transa ? inputA->columnwise_data.dtype : inputA->data.dtype;
-  const DType b_dtype = transb ? inputB->data.dtype : inputB->columnwise_data.dtype;
+  const DType a_dtype = transa ? inputA->data.dtype : inputA->columnwise_data.dtype;
+  const DType b_dtype = transb ? inputB->columnwise_data.dtype : inputB->data.dtype;
   NVTE_CHECK(a_dtype == b_dtype, transformer_engine::concat_strings(
                                      "Input A/B dtypes mismatch for wgrad. A=",
                                      dtype_to_cstr(b_dtype), ", B=", dtype_to_cstr(b_dtype)));
