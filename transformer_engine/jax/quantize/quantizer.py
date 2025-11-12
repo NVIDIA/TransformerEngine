@@ -354,9 +354,9 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
     scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
-    margin: float = None
-    amax_compute_algo: AmaxComputeAlgo = None
-    amax_history_len: int = None
+    margin: float = 0.0
+    amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX
+    amax_history_len: int = 1024
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
     amax_history: jnp.ndarray = None
@@ -1227,7 +1227,7 @@ class QuantizerFactory:
             " scaling mode differs between x, kernel, and grad in the quantizer set."
         )
 
-        # TODO(jberchtold): Currently this is a limitation because we only support automatically populating quantizer fields based on a given recipe when using Flax. In the generic quantizer logic, we cannot assume Flax is being used, so we require the user to provide the quantize_meta_set created by quantize_config.get_quantize_flax_meta() if they are passing an recipe here directly.
+        # TODO(jberchtold): Currently this is a limitation because we only support automatically populating quantizer fields based on a given recipe when using Flax. In the generic quantizer logic, we cannot assume Flax is being used, so we require the user to provide the quantize_meta_set created by quantize_config.get_quantize_flax_meta() or the same data created by themselves if they are passing a recipe here directly.
         assert (
             fp8_recipe is None or "quantize_meta_set" in kwargs
         ), "When fp8_recipe is specified, quantize_meta_set must be provided in kwargs."
@@ -1248,6 +1248,11 @@ class QuantizerFactory:
                 x_scaling_mode = scaling_mode
                 kernel_scaling_mode = scaling_mode
                 grad_scaling_mode = scaling_mode
+            else:
+                # TODO(jberchtold): make a way to explicitly pass a no scaling recipe here if we need other quantization config attributes in the future since NoOpQuantizeConfig already exists, we just can't use it here with direct recipe passing because we cannot differentiate between fp8_recipe=None meaning no recipe specified vs explicitly no quantization desired.
+                x_scaling_mode = ScalingMode.NO_SCALING
+                kernel_scaling_mode = ScalingMode.NO_SCALING
+                grad_scaling_mode = ScalingMode.NO_SCALING
             is_inference_mode = False
 
         if is_2x2x is None:

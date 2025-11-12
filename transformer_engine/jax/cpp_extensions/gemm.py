@@ -43,6 +43,8 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
+    get_quantize_config_with_recipe,
+    get_global_quantize_recipe,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
@@ -1253,14 +1255,11 @@ def _te_gemm(
         )
 
     if use_split_accumulator is None:
-        use_split_accumulator = False
-        # TODO(jberchtold) Does this only apply to FP8? If so, set this as an attribute on the quantizers themselves that then get passed thru the scaled tensors so it can be used here?
-        # TODO(jberchtold): FP8_2X_ACC_FPROP, FP8_2X_ACC_DGRAD, and FP8_2X_ACC_WGRAD don't seem to be properly extracted from the recipe when converting to a quantization config
-        # global_recipe = get_global_quantize_recipe()
-        # if global_recipe is not None:
-        #     use_split_accumulator = global_recipe.FP8_2X_ACC_FPROP
-        # else:
-        #     use_split_accumulator = False
+        # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
+        # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
+        use_split_accumulator = get_quantize_config_with_recipe(
+            get_global_quantize_recipe()
+        ).FP8_2X_ACC_FPROP
 
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -1724,10 +1723,15 @@ def _jax_gemm(
             assert (
                 rhs.scaling_mode == lhs.scaling_mode
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+
+            # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
+            # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
+            use_split_accumulator = get_quantize_config_with_recipe(
+                get_global_quantize_recipe()
+            ).FP8_2X_ACC_FPROP
+
             precision = (
-                jax.lax.Precision.HIGHEST
-                if get_quantize_config().FP8_2X_ACC_FPROP  # TODO(jberchtold): this needs to know which GEMM we are in, fwd, dgrad, wgrad and apply the right config
-                else jax.lax.Precision.DEFAULT
+                jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
 

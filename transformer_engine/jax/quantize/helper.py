@@ -685,6 +685,8 @@ def get_quantize_config_class(
     Returns:
         The quantization config class corresponding to the given recipe.
     """
+    if fp8_recipe is None:
+        return NoOpQuantizeConfig
     if isinstance(fp8_recipe, DelayedScaling):
         return DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, MXFP8BlockScaling):
@@ -699,7 +701,8 @@ def get_quantize_config_class(
 def get_quantize_config_with_recipe(fp8_recipe: Recipe):
     """Get the quantization configuration object based on the FP8 recipe."""
     config = get_quantize_config_class(fp8_recipe)()
-    config.initialize_from_recipe(fp8_recipe)
+    if fp8_recipe is not None:
+        config.initialize_from_recipe(fp8_recipe)
     return config
 
 

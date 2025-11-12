@@ -824,7 +824,7 @@ def _quantize_dbias_impl(
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
             )
-        scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=quantizer.margin)
+        scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=0.0)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
         # Make sure to reset amax to zeros for DelayedScaling
@@ -1231,7 +1231,7 @@ def grouped_quantize(
         )
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
-            tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)
+            tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype, margin=0.0)
             scale = scale.at[i].set(tmp_scale[0])
 
     is_tensor_scaling = quantizer.scaling_mode in (
