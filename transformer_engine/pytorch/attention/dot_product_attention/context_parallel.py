@@ -306,7 +306,8 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
         (
             # 1st segment
             torch.arange(
-                seq_start + (cp_rank * slice_size), seq_start + ((cp_rank + 1) * slice_size),
+                seq_start + (cp_rank * slice_size),
+                seq_start + ((cp_rank + 1) * slice_size),
                 device=cu_seqlens.device,
             ),
             # 2nd segment
