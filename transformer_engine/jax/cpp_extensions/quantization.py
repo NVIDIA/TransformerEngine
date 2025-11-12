@@ -1113,7 +1113,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scale,
             group_sizes,
             scaling_mode=scaling_mode.value,
-            q_layout=q_layout,
+            q_layout=q_layout.value.value,
             flatten_axis=flatten_axis,
         )
 
@@ -1250,7 +1250,7 @@ def grouped_quantize(
         group_sizes,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_layout=q_layout.value,
+        q_layout=q_layout,
         flatten_axis=flatten_axis,
         group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
