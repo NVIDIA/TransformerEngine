@@ -554,6 +554,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
         # pylint: disable=unused-argument
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # Remove padding from scale inverses before allgather
@@ -573,7 +574,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             if columnwise_scale_inv.size(0) != flattened_in_shape0:
                 columnwise_scale_inv = columnwise_scale_inv[:flattened_in_shape0]
 
-        # If weights are resharded after forward pass, then its enough to send one row/col 
+        # If weights are resharded after forward pass, then its enough to send one row/col
         # usage based on whether its forward or backward pass for the allgathered weights.
         # If not resharded after forward pass, the same weights allgathered in forward
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
@@ -623,9 +624,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             used by the MXFP8Tensor that was being computed after allgather.
         """
         fp8_dtype, rowwise_usage, columnwise_usage = metadata
-        rowwise_data, rowwise_scale_inv = (
-            all_gather_outputs[:2] if rowwise_usage else (None, None)
-        )
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2] if rowwise_usage else (None, None)
         columnwise_data, columnwise_scale_inv = (
             all_gather_outputs[-2:] if columnwise_usage else (None, None)
         )
