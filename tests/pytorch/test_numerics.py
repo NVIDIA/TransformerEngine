@@ -1622,9 +1622,8 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_layernorm_mlp_accuracy(
-    dtype, bs, model, activation, normalization, return_bias, bias, checkpoint
+    dtype, bs, model, activation, normalization, return_bias, bias
 ):
     config = model_configs[model]
 
@@ -1638,7 +1637,6 @@ def test_layernorm_mlp_accuracy(
         return_bias=return_bias,
         bias=bias,
         device="cuda",
-        checkpoint=checkpoint,
     )
 
     torch_ln_mlp = (
@@ -1700,9 +1698,8 @@ def test_layernorm_mlp_accuracy(
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-@pytest.mark.parametrize("checkpoint", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, bias, fuse_wgrad_accumulation, checkpoint
+    dtype, bs, model, bias, fuse_wgrad_accumulation,
 ):
     config = model_configs[model]
 
@@ -1713,7 +1710,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         bias=bias,
         params_dtype=dtype,
         device="cuda",
-        checkpoint=checkpoint,
         delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
@@ -1748,6 +1744,52 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     te_outputs_ref = _test_granular_accuracy(
         ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
     )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", [2])
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("bias", all_boolean)
+def test_layernorm_mlp_accuracy_checkpoint(
+    dtype, bs, model, bias,
+):
+    config = model_configs[model]
+
+    ln_mlp = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        checkpoint=True,
+    ).eval()
+
+    ln_mlp_ref = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        checkpoint=False,
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
+        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
+        if bias:
+            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
+
+    te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=False)
+    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False)
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):

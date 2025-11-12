@@ -480,8 +480,7 @@ class TestFP8Recipe:
         [
             Linear,
             LayerNormLinear,
-            (LayerNormMLP, False),  # (module, checkpoint=False)
-            (LayerNormMLP, True),  # (module, checkpoint=True)
+            LayerNormMLP,
             GroupedLinear,
         ],
     )
@@ -495,11 +494,7 @@ class TestFP8Recipe:
             if module_class == GroupedLinear:
                 module = module_class(1, in_features, out_features).cuda()
             else:
-                if isinstance(module_class, tuple) and module_class[0] == LayerNormMLP:
-                    module_class, checkpoint = module_class
-                    module = module_class(in_features, out_features, checkpoint=checkpoint).cuda()
-                else:
-                    module = module_class(in_features, out_features).cuda()
+                module = module_class(in_features, out_features).cuda()
 
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)
