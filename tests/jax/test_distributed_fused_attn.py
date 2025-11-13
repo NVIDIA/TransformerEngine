@@ -280,7 +280,7 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
-    #TODO: Change the id to CPx2
+    # TODO: Change the id to CPx2
     pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
     # KL test code
@@ -362,7 +362,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
-            stripe_height=stripe_height
+            stripe_height=stripe_height,
         )
 
         def check_has_backend_for_mask(mask_type):
@@ -401,8 +401,8 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        #KL code
-        #runner.test_backward()
+        # KL code
+        # runner.test_backward()
         runner.test_forward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
@@ -602,6 +602,7 @@ REORDER_STRATEGY = [
     pytest.param(ReorderStrategy.Striped, 4, id="Striped-4"),
 ]
 
+
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
     @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
@@ -619,9 +620,8 @@ class TestReorderCausalLoadBalancing:
 
         if reorder_strategy == ReorderStrategy.Striped:
             seq_lens = shape[seq_dim]
-            if seq_lens < (cp_size*stripe_height):
+            if seq_lens < (cp_size * stripe_height):
                 pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_height=}")
-
 
         ref = tensor.copy()
 

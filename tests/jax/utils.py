@@ -1462,11 +1462,12 @@ def assert_allclose(
         desired = desired.astype(jnp.float32)
     # KL test code
     import sys
+
     mismatch_counter = 0
     has_nonzero = jnp.any(actual != 0)
     print(f"has_nonzero: {has_nonzero}")
     with np.printoptions(threshold=sys.maxsize):
-        mismatch_mask = ~np.isclose(actual, desired, **tols) # True means mismatch
+        mismatch_mask = ~np.isclose(actual, desired, **tols)  # True means mismatch
         diff_indices = np.argwhere(mismatch_mask)
         for idx in diff_indices:
             idx_tuple = tuple(idx)

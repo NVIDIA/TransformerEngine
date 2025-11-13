@@ -474,12 +474,16 @@ class FusedAttnRunner:
         token_numbers_k = range(self.max_seqlen_kv)
         for batch_idx in range(q_shape[0]):
             for token_idx in token_numbers_q:
-                q_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * (token_idx + 1)
+                q_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * (
+                    token_idx + 1
+                )
             for token_idx in token_numbers_k:
-                k_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * np.sqrt(self.head_dim_qk)
+                k_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * np.sqrt(
+                    self.head_dim_qk
+                )
             v_np = np.ones(v_shape, self.dtype)
             # Set cols at multiples
-            v_np[0,::4, 0, :] = np.arange(v_np.shape[3])
+            v_np[0, ::4, 0, :] = np.arange(v_np.shape[3])
             self.q = jnp.array(q_np)
             self.k = jnp.array(k_np)
             self.v = jnp.array(v_np)
@@ -541,7 +545,7 @@ class FusedAttnRunner:
                     min_segment_size = 1
                     if min_segment_len is not None:
                         min_segment_size = min_segment_len[i][seg_id]
-                    #KL test code
+                    # KL test code
                     min_segment_size = 4
                     segment_size = rng.integers(min_segment_size, max_segment_size + 1)
                     if current_pos + segment_size > sequence_length:
@@ -598,8 +602,16 @@ class FusedAttnRunner:
             )
             self.segment_pos_q = self.segment_pos_kv = None
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
-        print(f"self.segment_ids_q: {self.segment_ids_q}, \n self.segment_pos_q: {self.segment_pos_q}, \n self.pad_q: {self.pad_q}, \n self.seqlens_q: {self.seqlens_q}, \n self.offsets_q: { self.offsets_q} \n")
-        print(f"self.segment_ids_kv: {self.segment_ids_kv}, \n self.segment_pos_kv: {self.segment_pos_kv}, \n self.pad_kv: {self.pad_kv}, \n self.seqlens_kv: {self.seqlens_kv}, \n self.offsets_kv: { self.offsets_kv} \n")
+        print(
+            f"self.segment_ids_q: {self.segment_ids_q}, \n self.segment_pos_q:"
+            f" {self.segment_pos_q}, \n self.pad_q: {self.pad_q}, \n self.seqlens_q:"
+            f" {self.seqlens_q}, \n self.offsets_q: { self.offsets_q} \n"
+        )
+        print(
+            f"self.segment_ids_kv: {self.segment_ids_kv}, \n self.segment_pos_kv:"
+            f" {self.segment_pos_kv}, \n self.pad_kv: {self.pad_kv}, \n self.seqlens_kv:"
+            f" {self.seqlens_kv}, \n self.offsets_kv: { self.offsets_kv} \n"
+        )
 
         # For reference code
         self.mask = make_mask(
@@ -612,6 +624,7 @@ class FusedAttnRunner:
         )
         # KL tet code
         import sys
+
         with np.printoptions(threshold=sys.maxsize):
             print(f"self.mask: \n {self.mask}")
 
@@ -876,7 +889,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
-            #"stripe_height": self.stripe_height,
+            # "stripe_height": self.stripe_height,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
