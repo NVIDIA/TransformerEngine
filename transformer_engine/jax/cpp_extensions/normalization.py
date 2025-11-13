@@ -148,6 +148,10 @@ class NormFwdPrimitive(BasePrimitive):
             "Current tensor scaling is not supported for fused norm and quantization. Please do"
             " norm in higher-precision then quantize with current tensor scaling."
         )
+        assert scaling_mode.is_nvfp4_scaling, (
+            "NVFP4 block scaling is not yet supported for fused norm and quantization."
+            " Please do norm in higher-precision then quantize with current tensor scaling."
+        )
 
         mu_rsigama_dtype = jnp.float32
 

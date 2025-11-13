@@ -201,6 +201,10 @@ class ActLuPrimitive(BasePrimitive):
             "Current tensor scaling is not yet supported for fused activation and quantization."
             " Please do activation in higher-precision then quantize with current tensor scaling."
         )
+        assert scaling_mode.is_nvfp4_scaling, (
+            "NVFP4 block scaling is not yet supported for fused activation and quantization."
+            " Please do activation in higher-precision then quantize with current tensor scaling."
+        )
 
         out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
