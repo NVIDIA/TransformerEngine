@@ -103,6 +103,9 @@ def generate_input_shapes(
         # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
         if kernel_backend == "FusedAttention":
             cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+
+        # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
+        # will not be the same as `cu_seqlens_q` and `cu_seqlens_q_padded` respectively.
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
 
