@@ -756,6 +756,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # pylint: disable=unused-argument
         # Importing here to avoid circular imports
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
         if isinstance(self._quantizer, Float8CurrentScalingQuantizer) and mesh is not None:
             # When sharded weight is updated after reduce scattering the gradients in FSDP2,
             # we need to do amax reduction across the mesh to make sure all weight shards are

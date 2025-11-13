@@ -568,7 +568,9 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
                             state_scales[name].append(self._scales[p][name])
-                if isinstance(p, Float8Tensor) or (isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)):
+                if isinstance(p, Float8Tensor) or (
+                    isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
+                ):
                     p = p._local_tensor if isinstance(p, DTensor) else p
                     out_dtype = p._fp8_dtype
                     p_fp8_model.append(p._data.data)
