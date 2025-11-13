@@ -201,9 +201,12 @@ class ActLuPrimitive(BasePrimitive):
             "Current tensor scaling is not yet supported for fused activation and quantization."
             " Please do activation in higher-precision then quantize with current tensor scaling."
         )
-        assert scaling_mode.is_nvfp4_scaling, (
+        assert not ScalingMode(scaling_mode).is_nvfp4_scaling, (
             "NVFP4 block scaling is not yet supported for fused activation and quantization."
             " Please do activation in higher-precision then quantize with current tensor scaling."
+        )
+        assert not quantize_layout.is_colwise_only, (
+            "Fused activation with colwise-only quantization is not supported."
         )
 
         out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
@@ -484,6 +487,7 @@ class ActLuPrimitive(BasePrimitive):
             scale_inv_spec = out_spec
 
         if quantize_layout.is_rowwise_colwise:
+            assert not ScalingMode(scaling_mode).is_colwise_transposed, "Transpose layout scaling modes are not supported here yet"
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
