@@ -15,10 +15,10 @@ from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
 
-from transformer_engine_jax import QuantizeLayout
 
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
+from .misc import QuantizeLayout
 from ..sharding import (
     with_sharding_constraint_by_logical_axes as original_with_sharding_constraint_by_logical_axes,
 )
@@ -128,9 +128,7 @@ class NoScaleTensor(AbstractBaseTensor1x):
     def get_tensor(self, usage: TensorUsage):
         """Returns the tensor based on the tensor usage."""
         q_layout = ScalingMode.NO_SCALING.get_quantize_layout(usage)
-        assert (
-            q_layout == QuantizeLayout.ROWWISE
-        ), "Only ROWWISE layout is supported for NoScaleTensor"
+        assert q_layout.is_rowwise_only, "Only ROWWISE layout is supported for NoScaleTensor"
         return self
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
@@ -264,8 +262,8 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     def get_tensor(self, usage: TensorUsage):
         """Returns the tensor based on the tensor usage."""
         q_layout = self.scaling_mode.get_quantize_layout(usage)
-        colwise_usage_valid = q_layout == QuantizeLayout.COLWISE and self.is_colwise
-        rowwise_usage_valid = q_layout == QuantizeLayout.ROWWISE and not self.is_colwise
+        colwise_usage_valid = q_layout.is_colwise_only and self.is_colwise
+        rowwise_usage_valid = q_layout.is_rowwise_only and not self.is_colwise
 
         if colwise_usage_valid or rowwise_usage_valid:
             return self
@@ -301,16 +299,15 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
 
         data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
 
-        if self.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            # TODO(Phuong): Handle padding !?
+        if self.scaling_mode.is_block_scaling:  # Both MXFP8 and NVFP4
             scale_inv = with_sharding_constraint_by_logical_axes(self.scale_inv, axis_names)
         else:
             scale_inv = self.scale_inv
 
         return ScaledTensor1x(
             data=data,
-            scale_inv=scale_inv,
             amax=self.amax,
+            scale_inv=scale_inv,
             scaling_mode=self.scaling_mode,
             dq_dtype=self.dq_dtype,
             _dq_func=self._dq_func,
@@ -467,10 +464,10 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
         q_layout_rowwise = self.rowwise_tensor.scaling_mode.get_quantize_layout(usage)
         q_layout_colwise = self.colwise_tensor.scaling_mode.get_quantize_layout(usage)
 
-        if q_layout_rowwise == QuantizeLayout.ROWWISE:
+        if q_layout_rowwise.is_rowwise_only:
             return self.rowwise_tensor
 
-        if q_layout_colwise == QuantizeLayout.COLWISE:
+        if q_layout_colwise.is_colwise_only:
             return self.colwise_tensor
 
         raise ValueError(
@@ -548,13 +545,13 @@ class ScaledTensorFactory:
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
         if group_sizes is not None:
-            flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
+            flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
 
             # Handling attrs of transposed tensors
-            group_axis = len(original_shape) + group_axis if group_axis < 0 else group_axis
+            group_axis = (len(original_shape) + group_axis) % len(original_shape)
             if data_layout == "T":
                 if original_shape[0] == group_sizes.size:
                     original_shape = (
@@ -587,7 +584,7 @@ class ScaledTensorFactory:
             )
 
         # Handling attrs of transposed tensors
-        flatten_axis = data.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+        flatten_axis = (data.ndim + flatten_axis) % data.ndim
         if data_layout == "T":
             flatten_axis = data.ndim - flatten_axis
 
@@ -669,7 +666,7 @@ class ScaledTensorFactory:
             colwise_amax,
             scaling_mode,
             dq_dtype,
-            is_colwise=True,  # TODO(Phuong): set this correctly
+            is_colwise=True,
             data_layout=data_layout[1],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
@@ -721,7 +718,7 @@ class ScaledTensorFactory:
         """
         assert not rowwise_has_rht_applied, "RHT is not supported for rowwise quantization yet"
 
-        if q_layout == QuantizeLayout.ROWWISE_COLWISE:
+        if q_layout.is_rowwise_colwise:
             return ScaledTensorFactory.create_2x(
                 data,
                 scale_inv,
@@ -740,15 +737,14 @@ class ScaledTensorFactory:
                 colwise_has_rht_applied=colwise_has_rht_applied,
             )
 
-        is_colwise = q_layout == QuantizeLayout.COLWISE
-        if is_colwise:
+        if q_layout.is_colwise_only:
             return ScaledTensorFactory.create_1x(
                 colwise_data,
                 colwise_scale_inv,
                 colwise_amax if colwise_amax is not None else amax,
                 scaling_mode,
                 dq_dtype,
-                is_colwise=is_colwise,
+                is_colwise=True,
                 data_layout=data_layout[0],
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
@@ -763,7 +759,7 @@ class ScaledTensorFactory:
             amax,
             scaling_mode,
             dq_dtype,
-            is_colwise=is_colwise,
+            is_colwise=False,
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,

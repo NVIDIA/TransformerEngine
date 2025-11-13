@@ -11,7 +11,7 @@ import math
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -32,6 +32,7 @@ from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
+    global_mesh_resource,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -122,7 +123,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                     f" stochastic_rounding is True but received {sr_rng_state_aval.shape}"
                 )
 
-        if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if QuantizeLayout(q_layout).has_rowwise:
             rowwise_out_shape = out_shape
         else:
             rowwise_out_shape = (1,)
@@ -170,7 +171,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             broadcast_2d_scale_shape_to_1d=True,
         )
 
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if QuantizeLayout(q_layout).has_colwise:
             if ScalingMode(scaling_mode).is_colwise_transposed:
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
@@ -194,9 +195,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 jax_dtype_to_te_dtype(out_dtype),
                 jax_dtype_to_te_dtype(scale_dtype),
                 scaling_mode,
-                QuantizeLayout(
-                    q_layout
-                ),  # For now until we have auto-decoding for QuantizeLayout enum
+                q_layout.value,
             )
             wkspace_shape = wkspace_info[0]
             wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])
@@ -272,7 +271,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             post_rht_amax,
             rht_matrix,
             scaling_mode=scaling_mode.value,
-            q_layout=q_layout,
+            q_layout=q_layout.value.value,
             flatten_axis=flatten_axis,
             is_dbias=is_dbias,
             stochastic_rounding=stochastic_rounding,
@@ -335,7 +334,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
         )
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             colwise_scale_inv = jax.lax.slice(
                 colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
             )
@@ -424,7 +423,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             PartitionSpec(*x_spec),
             desc="BaseDBiasQuantizePrimitive.out_sharding",
         )
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             if ScalingMode(scaling_mode).is_colwise_transposed:
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
@@ -448,7 +447,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         if ScalingMode(scaling_mode).is_block_scaling:
             scale_inv_spec = x_spec
 
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             if (
                 ScalingMode(scaling_mode).is_block_scaling
                 and ScalingMode(scaling_mode).is_colwise_transposed
@@ -499,17 +498,31 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         x_spec = get_padded_spec(arg_infos[0])
         amax_spec = get_padded_spec(arg_infos[2])
+        out_spec = x_spec
+
+        # Optimization for NVFP4 2D 1x1x + FSDP
+        gsr = global_mesh_resource()
+        fsdp_all_gather_dim = None
+        # if ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING and q_layout.is_rowwise_only and gsr.fsdp_resource in out_spec:
+        if (
+            ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING
+            and q_layout.is_rowwise_only
+            and gsr.fsdp_resource == out_spec[0]
+        ):
+            fsdp_all_gather_dim = out_spec.index(gsr.fsdp_resource)
+            out_spec = tuple(s if s != gsr.fsdp_resource else None for s in out_spec)
+
         out_sharding = NamedSharding(
             mesh,
-            PartitionSpec(*x_spec),
+            PartitionSpec(*out_spec),
             desc="BaseDBiasQuantizePrimitive.out_sharding",
         )
 
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             if ScalingMode(scaling_mode).is_colwise_transposed:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=flatten_axis)
             else:
-                colwise_out_spec = x_spec
+                colwise_out_spec = out_spec
         else:
             colwise_out_spec = (None,)
         colwise_out_sharding = NamedSharding(
@@ -518,7 +531,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             desc="BaseDBiasQuantizePrimitive.colwise_out_sharding",
         )
 
-        dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
+        dbias_spec = out_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
@@ -527,9 +540,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            scale_inv_spec = x_spec
+            scale_inv_spec = out_spec
 
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             if (
                 ScalingMode(scaling_mode).is_block_scaling
                 and ScalingMode(scaling_mode).is_colwise_transposed
@@ -607,6 +620,14 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             else:
                 global_dbias = local_dbias
 
+            if fsdp_all_gather_dim is not None:
+                local_x = jax.lax.all_gather(
+                    local_x, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True
+                )
+                local_scale_inv = jax.lax.all_gather(
+                    local_scale_inv, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True
+                )
+
             return (
                 local_x,
                 local_colwise_x,
@@ -643,39 +664,37 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             result_types,
         )
 
-        prefix = "DBiasQuantize_"
+        prefix = "DBiasQuantize"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             value_types[0].shape,
-            unique_var=prefix + "x",
+            unique_var=prefix,
             flatten_axis=flatten_axis,
+            q_layout=q_layout,
             broadcast_2d_scale_shape_to_1d=True,
         )
 
-        x_axes = scale_rules.input_spec
+        input_spec = scale_rules.input_spec
+        dbias = input_spec[flatten_axis:] if is_dbias else (prefix + "_dbias",)
+        amax = (BATCHING + prefix + "_amax",)
+        scale = (BATCHING + prefix + "_scale",)
+        sr_rng_state = (
+            BATCHING + prefix + "_sr_rng_state_partition_axis",
+            BATCHING + prefix + "sr_rng_state_data_axis",
+        )
 
-        out = x_axes
-        colwise_out = (prefix + "out_colwise",)
-        colwise_scale_inv = (prefix + "colwise_scale_inv",)
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            colwise_scale_inv = scale_rules.colwise_rule
-            if ScalingMode(scaling_mode).is_colwise_transposed:
-                colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
-                colwise_scale_inv = tuple(
-                    multidim_transpose(colwise_scale_inv, transpose_axis=flatten_axis)
-                )
-            else:
-                colwise_out = x_axes
-
-        dbias = x_axes[flatten_axis:] if is_dbias else (prefix + "dbias",)
-        amax = (prefix + "amax",)
-        sr_rng_state = (prefix + "sr_rng_state_partition_axis", prefix + "sr_rng_state_data_axis")
-
-        post_rht_amax = (prefix + "post_rht_amax",)
-        rht_matrix = (prefix + "rht_matrix_1", prefix + "rht_matrix_2")
+        post_rht_amax = (BATCHING + prefix + "_post_rht_amax",)
+        rht_matrix = (BATCHING + prefix + "_rht_matrix_1", BATCHING + prefix + "_rht_matrix_2")
 
         return SdyShardingRule(
-            (x_axes, ("…1",), amax, sr_rng_state, post_rht_amax, rht_matrix),
-            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            (input_spec, scale, amax, sr_rng_state, post_rht_amax, rht_matrix),
+            (
+                scale_rules.rowwise_out_spec,
+                scale_rules.colwise_out_spec,
+                scale_rules.rowwise_scale_spec,
+                scale_rules.colwise_scale_spec,
+                amax,
+                dbias,
+            ),
             **scale_rules.factor_sizes,
         )
 
@@ -762,7 +781,7 @@ def _quantize_dbias_impl(
     # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
     # fall back on the native-JAX quantize implementation
     PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
-    is_unsupported = quantizer.q_layout == QuantizeLayout.COLWISE and not (
+    is_unsupported = quantizer.q_layout.is_colwise_only and not (
         quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
         and hasattr(quantizer, "use_rht")
         and quantizer.use_rht
@@ -841,11 +860,14 @@ def _quantize_dbias_impl(
     if amax is None:
         amax = jnp.zeros((1,), jnp.float32)
 
-    # It is faster to use 1x quantization for tensor scaling
+    # It is faster to use 1x quantization for tensor scaling and 2D NVFP4_1D_SCALING
     is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
     force_1x_quantization = (
-        quantizer.scaling_mode.is_tensor_scaling()
-        and quantizer.is_2x2x()
+        (
+            quantizer.scaling_mode.is_tensor_scaling()
+            or quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING
+        )
+        and quantizer.q_layout.is_rowwise_colwise
         and is_1x_kernel_supported
     )
     q_layout = quantizer.q_layout
@@ -879,7 +901,7 @@ def _quantize_dbias_impl(
         rht_matrix,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_layout=q_layout.value,
+        q_layout=q_layout,
         flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
         is_dbias=is_dbias if not quantizer.scaling_mode.is_nvfp4_scaling else False,
@@ -888,10 +910,10 @@ def _quantize_dbias_impl(
         use_rht=use_rht,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.q_layout.is_rowwise_colwise:
         colwise_scale_inv = rowwise_scale_inv
 
-        if q_layout == QuantizeLayout.ROWWISE:
+        if q_layout.is_rowwise_only:
             # Quantizer requires 2x quantization, but we are using 1x quantization
             # for performance reasons, so we need to generate the colwise data in JAX
             if flatten_axis < 0:
@@ -899,6 +921,45 @@ def _quantize_dbias_impl(
             colwise_casted_output = jnp.transpose(
                 rowwise_casted_output, (*range(flatten_axis, x.ndim), *range(flatten_axis))
             )
+
+    if (
+        quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING
+        and quantizer.q_layout.is_rowwise_colwise
+    ):
+        assert q_layout.is_rowwise_only
+        # Quantizer requires 2x quantization, but we are using 1x quantization
+        # for performance reasons, so we need to generate the colwise data in JAX
+        flatten_axis = (flatten_axis + x.ndim) % x.ndim
+        colwise_casted_output = jnp.transpose(
+            rowwise_casted_output, (*range(flatten_axis, x.ndim), *range(flatten_axis))
+        )
+        # Interleave + transpose the scale
+        scale_shape = rowwise_scale_inv.shape
+        flatten_axis = (flatten_axis + x.ndim) % x.ndim
+        ## Split the dim before the flatten_axis to (its size / block_size, block_size)
+        colwise_scale_inv = rowwise_scale_inv.reshape(
+            *scale_shape[: flatten_axis - 1],
+            int(scale_shape[flatten_axis - 1] / 16),
+            16,  # <-- block_dim
+            *scale_shape[flatten_axis:],
+        )
+        # now flatten_axis = flatten_axis + 1
+        colwise_scale_inv = jnp.transpose(
+            colwise_scale_inv,
+            (
+                *range(flatten_axis + 1, colwise_scale_inv.ndim),
+                flatten_axis,  # <-- block_dim after transpose
+                *range(0, flatten_axis),
+            ),
+        )
+        block_dim = colwise_scale_inv.ndim - flatten_axis - 1
+        assert block_dim >= 1
+        # Merge the block_dim back
+        colwise_scale_inv = colwise_scale_inv.reshape(
+            *colwise_scale_inv.shape[: block_dim - 1],
+            -1,
+            *colwise_scale_inv.shape[block_dim + 1 :],
+        )
     quantizer.update(updated_amax)
     if quantizer.scaling_mode.is_nvfp4_scaling and is_dbias:
         dbias = _jax_dbias(x, flatten_axis=flatten_axis)
@@ -1043,7 +1104,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
         )
 
-        if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_rowwise:
             rowwise_out_shape = out_shape
         else:
             rowwise_out_shape = (1,)
@@ -1052,7 +1113,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
 
         amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
 
-        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout.has_colwise:
             colwise_out_shape = out_shape
         else:
             colwise_out_shape = (1,)
@@ -1117,7 +1178,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scale,
             group_sizes,
             scaling_mode=scaling_mode.value,
-            q_layout=q_layout,
+            q_layout=q_layout.value.value,
             flatten_axis=flatten_axis,
         )
 
@@ -1240,7 +1301,7 @@ def grouped_quantize(
     )
     # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
     # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
-    apply_colwise_war = is_tensor_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
+    apply_colwise_war = is_tensor_scaling and quantizer.q_layout.is_colwise_only
     q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
     (
         rowwise_casted_output,
@@ -1254,7 +1315,7 @@ def grouped_quantize(
         group_sizes,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_layout=q_layout.value,
+        q_layout=q_layout,
         flatten_axis=flatten_axis,
         group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
@@ -1262,7 +1323,7 @@ def grouped_quantize(
 
     # For DelayedScaling2x and CurrentScaling2x, the scale buffer
     # is shared between rowwise and colwise
-    if is_tensor_scaling and quantizer.is_2x2x() or apply_colwise_war:
+    if is_tensor_scaling and quantizer.q_layout.is_rowwise_colwise or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
