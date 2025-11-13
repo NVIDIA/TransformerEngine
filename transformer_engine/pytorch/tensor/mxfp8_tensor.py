@@ -339,23 +339,21 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
-            # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
-            # If not, default to base class behavior.
-            rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
-            columnwise_matches = src._columnwise_data is not None or dst._columnwise_data is None
-            if (
-                isinstance(src, MXFP8Tensor)
-                and isinstance(dst, MXFP8Tensor)
-                and rowwise_matches
-                and columnwise_matches
-            ):
-                if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(src._rowwise_data.detach())
-                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
-                if dst._columnwise_data is not None:
-                    dst._columnwise_data.copy_(src._columnwise_data.detach())
-                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
-                return dst
+            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
+                # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
+                # If not, default to base class behavior.
+                rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
+                columnwise_matches = (
+                    src._columnwise_data is not None or dst._columnwise_data is None
+                )
+                if rowwise_matches and columnwise_matches:
+                    if dst._rowwise_data is not None:
+                        dst._rowwise_data.copy_(src._rowwise_data.detach())
+                        dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
+                    if dst._columnwise_data is not None:
+                        dst._columnwise_data.copy_(src._columnwise_data.detach())
+                        dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                    return dst
 
         # FSDP2 related functions.
         if func == aten.split.Tensor:
