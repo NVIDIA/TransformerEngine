@@ -96,8 +96,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
-    if cp_comm_type == "all_gather" and qkv_format == "thd":
-        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if qkv_format == "thd":
