@@ -160,8 +160,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
                    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
-  // cuBLAS workspace + (swizzle scales) + 256 alignment enforcement
-  uint8_t *lhs_swizzle_scale_ptr, *rhs_swizzle_scale_ptr;
+  // cuBLAS workspace + 256 alignment enforcement (+ swizzle scales)
+  uint8_t *lhs_swizzle_scale_ptr = nullptr, *rhs_swizzle_scale_ptr = nullptr;
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
