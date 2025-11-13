@@ -668,8 +668,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
                 quantizer=self._quantizer,
             )
-        out._quantizer.set_usage(rowwise=rowwise_usage,
-            columnwise=columnwise_usage)
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
 
     @classmethod

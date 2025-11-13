@@ -834,9 +834,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 "data": data,
             }
             out = Float8Tensor(**fp8_args)
-    
-        out._quantizer.set_usage(rowwise=rowwise_usage,
-            columnwise=columnwise_usage)
+
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         out.update_usage(
             rowwise_usage=rowwise_usage,
             columnwise_usage=columnwise_usage,
