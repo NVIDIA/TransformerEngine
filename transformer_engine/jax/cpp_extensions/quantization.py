@@ -504,7 +504,11 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         gsr = global_mesh_resource()
         fsdp_all_gather_dim = None
         # if ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING and q_layout.is_rowwise_only and gsr.fsdp_resource in out_spec:
-        if ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING and q_layout.is_rowwise_only and gsr.fsdp_resource == out_spec[0]:
+        if (
+            ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING
+            and q_layout.is_rowwise_only
+            and gsr.fsdp_resource == out_spec[0]
+        ):
             fsdp_all_gather_dim = out_spec.index(gsr.fsdp_resource)
             out_spec = tuple(s if s != gsr.fsdp_resource else None for s in out_spec)
 
@@ -617,9 +621,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 global_dbias = local_dbias
 
             if fsdp_all_gather_dim is not None:
-                local_x = jax.lax.all_gather(local_x, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True)
-                local_scale_inv = jax.lax.all_gather(local_scale_inv, gsr.fsdp_resource, axis=fsdp_all_gather_dim,
-                                                     tiled=True)
+                local_x = jax.lax.all_gather(
+                    local_x, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True
+                )
+                local_scale_inv = jax.lax.all_gather(
+                    local_scale_inv, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True
+                )
 
             return (
                 local_x,
