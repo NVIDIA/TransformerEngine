@@ -477,7 +477,6 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
         ).value
         return QuantizeMeta(
             margin=self.MARGIN,
-            amax_history_len=self.AMAX_HISTORY_LEN,
             amax_compute_algo=self.AMAX_COMPUTE_ALGO,
             scale=scale,
             amax_history=amax_history,

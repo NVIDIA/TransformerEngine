@@ -346,32 +346,20 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         data_layout: Data layout string (default: "NT")
         margin: Margin value for scale computation
         amax_compute_algo: Algorithm for computing amax
-        amax_history_len: Length of the amax history
         scale: Current scaling factor
         amax_history: History of maximum absolute values
     """
 
     margin: float = 0.0
     amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MAX
-    amax_history_len: int = 1024
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
-    amax_history: jnp.ndarray = None
+    amax_history: jnp.ndarray = field(default_factory=lambda: jnp.zeros((1024,), jnp.float32))
 
     def __post_init__(self):
         assert self.margin is not None, "margin must be specified"
         assert self.amax_compute_algo is not None, "amax_compute_algo must be specified"
-        assert self.amax_history_len is not None, "amax_history_len must be specified"
-
-        if self.amax_history is None:
-            self.amax_history = jnp.zeros((self.amax_history_len,), dtype=jnp.float32)
-
-        if type(self.amax_history).__name__ != "object":
-            # In one of the passes this becomes an opaque object with a pointer
-            assert self.amax_history.shape == (self.amax_history_len,), (
-                f"amax_history must have shape ({self.amax_history_len},) but got"
-                f" {self.amax_history.shape}"
-            )
+        assert self.amax_history is not None, "amax_history must be specified"
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -387,7 +375,6 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             self.data_layout,
             self.margin,
             self.amax_compute_algo,
-            self.amax_history_len,
         )
         return (children, aux_data)
 
@@ -1152,7 +1139,7 @@ class QuantizerFactory:
         bwd_dtype,
         is_2x2x,
         n_groups,
-        _is_inference_mode=False,
+        is_inference_mode=False,
         **kwargs,
     ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
@@ -1165,7 +1152,7 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass
             is_2x2x: Whether to use 2x2x quantization
             n_groups
-            _is_inference_mode: Whether to create quantizers for inference mode. This option is not fully supported yet
+            is_inference_mode: Whether to create quantizers for inference mode. This option is not fully supported yet
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -1177,7 +1164,7 @@ class QuantizerFactory:
             q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE
             if kernel_scaling_mode.is_1d_block_scaling():
                 q_layout_kernel = QuantizeLayout.COLWISE
-            if _is_inference_mode:
+            if is_inference_mode:
                 q_layout_dgrad = None
 
         if "quantize_meta_set" in kwargs:
@@ -1241,12 +1228,24 @@ class QuantizerFactory:
             fp8_recipe = get_global_quantize_recipe()
 
         if fp8_recipe is not None:
+            assert scaling_mode is None, (
+                "scaling_mode should not be specified when fp8_recipe is provided either directly"
+                " or through an autocast context."
+            )
+            assert fwd_dtype is None, (
+                "fwd_dtype should not be specified when fp8_recipe is provided either directly or"
+                " through an autocast context."
+            )
+            assert bwd_dtype is None, (
+                "bwd_dtype should not be specified when fp8_recipe is provided either directly or"
+                " through an autocast context."
+            )
             quantize_config = get_quantize_config_with_recipe(fp8_recipe)
             x_scaling_mode = quantize_config.get_scaling_mode(TensorSource.X)
             kernel_scaling_mode = quantize_config.get_scaling_mode(TensorSource.KERNEL)
             grad_scaling_mode = quantize_config.get_scaling_mode(TensorSource.DGRAD)
-            fwd_dtype = fwd_dtype or quantize_config.FWD_DTYPE
-            bwd_dtype = bwd_dtype or quantize_config.BWD_DTYPE
+            fwd_dtype = quantize_config.FWD_DTYPE
+            bwd_dtype = quantize_config.BWD_DTYPE
             is_inference_mode = quantize_config.INFERENCE_MODE
         else:
             if scaling_mode is not None:
@@ -1281,7 +1280,7 @@ class QuantizerFactory:
                     bwd_dtype=bwd_dtype,
                     is_2x2x=is_2x2x,
                     n_groups=n_groups,
-                    _is_inference_mode=is_inference_mode,
+                    is_inference_mode=is_inference_mode,
                     **kwargs,
                 )
             )

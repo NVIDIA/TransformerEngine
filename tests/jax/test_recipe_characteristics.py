@@ -156,7 +156,6 @@ class DelayedScalingRecipeAssertion(RecipeAssertionBase):
         self.assertEqual(quantizer.scaling_mode, ScalingMode.DELAYED_TENSOR_SCALING)
         self.assertEqual(quantizer.margin, ref_recipe.margin)
         self.assertEqual(quantizer.amax_compute_algo.value, ref_recipe.amax_compute_algo)
-        self.assertEqual(quantizer.amax_history_len, ref_recipe.amax_history_len)
         self.assertEqual(quantizer.amax_history.shape, (ref_recipe.amax_history_len,))
         assert_fp8_format(quantizer, tensor_source, ref_recipe.fp8_format)
 
