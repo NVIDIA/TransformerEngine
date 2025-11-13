@@ -354,7 +354,7 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, c
                           6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,
                           4.,  5.,  6.,  7.,  8.,  9., 10., 11., 12., 13., 14., 15.]
 
-        Note that the input sequences (x) are arrangd after A2A communication as if DualChunked
+        Note that the input sequences (x) are arranged after A2A communication as if DualChunked
         chunks on all the ranks are concatenated together in the `seq_dim`.
 
         e.g. [
