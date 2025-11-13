@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 200">
+  <defs>
+    <style>
+      /* Common styles loaded from diagram-colors.css: .hp, .fp8, .amax, .quantize, .text, .small-text, .title, .arrow */
+      .arrow {
+        stroke: #616161;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead);
+      }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 10 3, 0 6" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="450" y="30" class="title">Cast to FP8 Process</text>
+  
+  <!-- Step 1: High Precision Tensor -->
+  <rect x="30" y="80" width="140" height="70" class="hp" rx="6"/>
+  <text x="100" y="110" class="text">High Precision</text>
+  <text x="100" y="130" class="text">Tensor</text>
+  
+  <!-- Arrow 1 -->
+  <path d="M 170 115 L 220 115" class="arrow"/>
+  
+  <!-- Step 2: Compute Amax -->
+  <rect x="220" y="80" width="140" height="70" class="amax" rx="6"/>
+  <text x="290" y="110" class="text" style="font-weight: 600;">Compute</text>
+  <text x="290" y="130" class="text" style="font-weight: 600;">amax</text>
+  
+  <!-- Arrow 2 -->
+  <path d="M 360 115 L 410 115" class="arrow"/>
+  
+  <!-- Step 3: Apply Scale -->
+  <rect x="410" y="80" width="140" height="70" class="quantize" rx="6"/>
+  <text x="480" y="110" class="text" style="font-weight: 600;">Apply</text>
+  <text x="480" y="130" class="text" style="font-weight: 600;">Scale + cast</text>
+  
+  <!-- Arrow 3 -->
+  <path d="M 550 115 L 600 115" class="arrow"/>
+  
+  <!-- Step 4: FP8 Tensor -->
+  <rect x="600" y="80" width="140" height="70" class="fp8" rx="6"/>
+  <text x="670" y="110" class="text">FP8</text>
+  <text x="670" y="130" class="text">Tensor</text>
+  
+  <!-- Optional: Add small labels below -->
+  <text x="100" y="170" class="small-text">BF16/FP16/FP32</text>
+  <text x="290" y="170" class="small-text">max(|tensor|)</text>
+  <text x="480" y="170" class="small-text">tensor × scale</text>
+  <text x="670" y="170" class="small-text">E4M3 or E5M2</text>
+  
+</svg>
+

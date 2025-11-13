@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 580" width="850" height="580">
+  <defs>
+    <style>
+      /* Common styles loaded from diagram-colors.css: .hp, .fp8, .gemm, .quantize, .text, .small-text, .label, .title, .section-title, .arrow */
+      .forward-bg { fill: #fff8f0; stroke: #e0e0e0; stroke-width: 2; }
+      .backward-bg { fill: #f0f8ff; stroke: #e0e0e0; stroke-width: 2; }
+      .text-dark { font-family: 'Segoe UI', Arial, sans-serif; font-size: 15px; fill: #212121; text-anchor: middle; font-weight: 600; }
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .arrow-left { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead-left); }
+    </style>
+    
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#616161" />
+    </marker>
+    <marker id="arrowhead-left" markerWidth="8" markerHeight="8" refX="1" refY="3" orient="auto">
+      <polygon points="8 0, 0 3, 8 6" fill="#616161" />
+    </marker>
+  </defs>
+
+  <!-- Forward pass section background -->
+  <rect x="30" y="15" width="790" height="195" class="forward-bg" rx="8"/>
+  <text x="425" y="38" class="section-title" style="fill: #1565c0;">Forward pass</text>
+
+  <!-- Forward pass: Input label -->
+  <text x="15" y="107" class="small-text">High</text>
+  <text x="15" y="120" class="small-text">precision</text>
+  
+  <!-- Forward pass: Input to Cast arrow -->
+  <path d="M 40 112 L 75 112" class="arrow"/>
+
+  <!-- Forward pass: Cast box -->
+  <rect x="75" y="80" width="90" height="65" class="quantize" rx="6"/>
+  <text x="120" y="117" class="text-dark">Cast</text>
+
+  <!-- Forward pass: Cast to GEMM arrow with "rowwise" label -->
+  <path d="M 165 112 L 235 112" class="arrow"/>
+  <text x="200" y="105" class="label">rowwise</text>
+
+  <!-- Forward pass: GEMM box -->
+  <rect x="235" y="73" width="230" height="78" class="gemm" rx="6"/>
+  <text x="350" y="117" class="text-dark">Matrix multiply (fwd)</text>
+
+  <!-- Forward pass: GEMM to output arrow -->
+  <path d="M 465 112 L 805 112" class="arrow"/>
+
+  <!-- Forward pass: Output label -->
+  <text x="833" y="107" class="small-text">High</text>
+  <text x="833" y="120" class="small-text">precision</text>
+
+  <!-- Forward pass: Cast downward arrow with "columnwise" label -->
+  <path d="M 120 145 L 120 215" class="arrow"/>
+  <g transform="translate(107, 180) rotate(-90)">
+    <text x="0" y="0" class="label">columnwise</text>
+  </g>
+
+  <!-- Forward pass: Weights upward arrow with "rowwise" label -->
+  <path d="M 350 215 L 350 151" class="arrow"/>
+  <g transform="translate(363, 183) rotate(-90)">
+    <text x="0" y="0" class="label">rowwise</text>
+  </g>
+
+  <!-- Weights label (center) -->
+  <text x="425" y="244" class="section-title">Weights</text>
+
+  <!-- Backward pass section background -->
+  <rect x="30" y="270" width="790" height="295" class="backward-bg" rx="8"/>
+  <text x="425" y="553" class="section-title" style="fill: #c62828;">Backward pass</text>
+
+  <!-- Backward pass: Weights downward arrow with "columnwise" label -->
+  <path d="M 350 270 L 350 310" class="arrow"/>
+  <g transform="translate(337, 290) rotate(-90)">
+    <text x="0" y="0" class="label">columnwise</text>
+  </g>
+
+  <!-- Backward pass: dgrad GEMM box -->
+  <rect x="235" y="310" width="230" height="75" class="gemm" rx="6"/>
+  <text x="350" y="352" class="text-dark">Matrix multiply (dgrad)</text>
+
+  <!-- Backward pass: dgrad output arrow -->
+  <path d="M 235 347 L 40 347" class="arrow-left"/>
+  <text x="137" y="340" class="label">rowwise</text>
+
+  <!-- Backward pass: wgrad GEMM box -->
+  <rect x="235" y="415" width="230" height="75" class="gemm" rx="6"/>
+  <text x="350" y="457" class="text-dark">Matrix multiply (wgrad)</text>
+
+  <!-- Backward pass: Cast to wgrad arrow -->
+  <path d="M 120 452 L 235 452" class="arrow"/>
+  <text x="177" y="445" class="label">columnwise</text>
+
+  <!-- Backward pass: Cast box -->
+  <rect x="615" y="375" width="90" height="65" class="quantize" rx="6"/>
+  <text x="660" y="412" class="text-dark">Cast</text>
+
+  <!-- Backward pass: dgrad to Cast arrow -->
+  <path d="M 465 332 L 590 332 L 590 407 L 615 407" class="arrow"/>
+  <text x="527" y="325" class="label">rowwise</text>
+
+  <!-- Backward pass: wgrad to Cast arrow -->
+  <path d="M 465 437 L 590 437 L 590 407" class="arrow"/>
+  <text x="527" y="430" class="label">columnwise</text>
+
+  <!-- Backward pass: Cast to input arrow -->
+  <path d="M 705 407 L 805 407" class="arrow"/>
+
+  <!-- Backward pass: Input label -->
+  <text x="833" y="402" class="small-text">High</text>
+  <text x="833" y="415" class="small-text">precision</text>
+
+</svg>
+

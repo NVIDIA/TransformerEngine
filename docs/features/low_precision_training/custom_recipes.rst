@@ -119,57 +119,27 @@ Using custom recipes
 -------------------
 
 Create a :class:`~transformer_engine.common.recipe.CustomRecipe` with your factory 
-and use it with the appropriate autocast context manager:
+and use it with the :func:`~transformer_engine.pytorch.autocast` context manager:
 
-.. tabs::
+.. code-block:: python
 
-    .. tab:: PyTorch
+    import torch
+    import transformer_engine.pytorch as te
+    from transformer_engine.common import recipe
 
-        .. code-block:: python
+    # Define model
+    model = te.Linear(768, 3072, bias=True).cuda()
+    inp = torch.randn(32, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-            import torch
-            import transformer_engine.pytorch as te
-            from transformer_engine.common import recipe
+    # Create custom recipe
+    custom_recipe = recipe.CustomRecipe(qfactory=my_quantizer_factory)
 
-            # Define model
-            model = te.Linear(768, 3072, bias=True).cuda()
-            inp = torch.randn(32, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-
-            # Create custom recipe
-            custom_recipe = recipe.CustomRecipe(qfactory=my_quantizer_factory)
-
-            # Use with autocast
-            with te.autocast(enabled=True, recipe=custom_recipe):
-                output = model(inp)
-            
-            loss = output.sum()
-            loss.backward()
-
-    .. tab:: JAX
-
-        .. code-block:: python
-
-            import jax
-            import jax.numpy as jnp
-            import transformer_engine.jax as te
-            from transformer_engine.common import recipe
-
-            # Define model
-            layer = te.flax.DenseGeneral(features=3072)
-            
-            # Create custom recipe
-            custom_recipe = recipe.CustomRecipe(qfactory=my_quantizer_factory)
-            
-            # Initialize parameters
-            key = jax.random.PRNGKey(0)
-            inp = jax.random.normal(key, (32, 768))
-            variables = layer.init(key, inp)
-            
-            # Use with autocast
-            with te.autocast(enabled=True, recipe=custom_recipe):
-                output = layer.apply(variables, inp)
-            
-            loss = jnp.sum(output)
+    # Use with autocast
+    with te.autocast(enabled=True, recipe=custom_recipe):
+        output = model(inp)
+    
+    loss = output.sum()
+    loss.backward()
 
 Performance considerations
 -------------------------

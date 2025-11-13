@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380">
+  <defs>
+    <style>
+      /* Common styles loaded from diagram-colors.css: .hp, .fp8, .gemm, .text, .title, .label, .small-text */
+      /* Diagram-specific styles for arrows */
+      .arrow {
+        stroke: #616161;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead);
+      }
+      .input-group {
+        fill: none;
+        stroke: #90a4ae;
+        stroke-width: 1.5;
+        stroke-dasharray: 5,3;
+      }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 10 3, 0 6" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="450" y="30" class="title">FP8 Tensor Core Operation</text>
+  
+  <!-- Left Input Group A -->
+  <rect x="50" y="80" width="200" height="180" class="input-group" rx="8"/>
+  <text x="150" y="105" class="section-title">Input A</text>
+  
+  <!-- FP8 Tensor A -->
+  <rect x="70" y="120" width="160" height="50" class="fp8" rx="5"/>
+  <text x="150" y="145" class="text">chunk of FP8 Tensor A</text>
+  <text x="150" y="160" class="small-text">(E4M3 or E5M2)</text>
+  
+  <!-- Scaling Factor A -->
+  <rect x="85" y="190" width="130" height="40" class="hp" rx="5"/>
+  <text x="150" y="214" class="text">Scale a</text>
+  
+  <!-- Arrow from Input A to Tensor Core -->
+  <path d="M 250 170 L 320 200" class="arrow"/>
+  
+  <!-- Right Input Group B -->
+  <rect x="650" y="80" width="200" height="180" class="input-group" rx="8"/>
+  <text x="750" y="105" class="section-title">Input B</text>
+  
+  <!-- FP8 Tensor B -->
+  <rect x="670" y="120" width="160" height="50" class="fp8" rx="5"/>
+  <text x="750" y="145" class="text">chunk of FP8 Tensor B</text>
+  <text x="750" y="160" class="small-text">(E4M3 or E5M2)</text>
+  
+  <!-- Scaling Factor B -->
+  <rect x="685" y="190" width="130" height="40" class="hp" rx="5"/>
+  <text x="750" y="214" class="text">Scale b</text>
+  
+  <!-- Arrow from Input B to Tensor Core -->
+  <path d="M 650 170 L 580 200" class="arrow"/>
+  
+  <!-- Tensor Core (GEMM) -->
+  <rect x="320" y="170" width="260" height="80" class="gemm" rx="8"/>
+  <text x="450" y="205" class="text" style="font-weight: 600; font-size: 18px;">FP8 Tensor Core</text>
+  
+  <!-- Arrow to Output -->
+  <path d="M 450 250 L 450 300" class="arrow"/>
+  
+  <!-- Output -->
+  <rect x="350" y="300" width="200" height="60" class="hp" rx="5"/>
+  <text x="450" y="325" class="text">Chunk of output</text>
+  <text x="450" y="345" class="small-text">(Higher Precision: FP16/BF16/FP32)</text>
+  
+</svg>
+
