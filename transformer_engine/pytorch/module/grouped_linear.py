@@ -297,9 +297,9 @@ class _GroupedLinear(torch.autograd.Function):
                         origin_weights[i] = ctx.weight_objects[i]
                         ctx.weight_objects[i] = None
 
-                if ctx.fuse_wgrad_accumulation:
-                    for i in range(N):
-                        origin_weights[i].main_grad = main_grads[i]
+            if ctx.fuse_wgrad_accumulation:
+                for i in range(N):
+                    origin_weights[i].main_grad = main_grads[i]
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
