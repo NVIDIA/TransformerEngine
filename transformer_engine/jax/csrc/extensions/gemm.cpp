@@ -165,7 +165,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
-  if (is_nvfp4_scaling(scaling_mode)){
+  if (is_nvfp4_scaling(scaling_mode)) {
     auto lhs_scale_size = product(lhs_scale_inv.dimensions());
     auto rhs_scale_size = product(rhs_scale_inv.dimensions());
     workspace_size = workspace_size - lhs_scale_size - rhs_scale_size;
