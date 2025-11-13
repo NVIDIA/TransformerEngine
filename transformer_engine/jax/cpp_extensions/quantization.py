@@ -32,6 +32,7 @@ from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
+    global_mesh_resource,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -497,17 +498,27 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         x_spec = get_padded_spec(arg_infos[0])
         amax_spec = get_padded_spec(arg_infos[2])
+        out_spec = x_spec
+
+        # Optimization for NVFP4 2D 1x1x + FSDP
+        gsr = global_mesh_resource()
+        fsdp_all_gather_dim = None
+        # if ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING and q_layout.is_rowwise_only and gsr.fsdp_resource in out_spec:
+        if ScalingMode(scaling_mode) == ScalingMode.NVFP4_2D_SCALING and q_layout.is_rowwise_only and gsr.fsdp_resource == out_spec[0]:
+            fsdp_all_gather_dim = out_spec.index(gsr.fsdp_resource)
+            out_spec = tuple(s if s != gsr.fsdp_resource else None for s in out_spec)
+
         out_sharding = NamedSharding(
             mesh,
-            PartitionSpec(*x_spec),
+            PartitionSpec(*out_spec),
             desc="BaseDBiasQuantizePrimitive.out_sharding",
         )
 
         if q_layout.has_colwise:
             if ScalingMode(scaling_mode).is_colwise_transposed:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=flatten_axis)
             else:
-                colwise_out_spec = x_spec
+                colwise_out_spec = out_spec
         else:
             colwise_out_spec = (None,)
         colwise_out_sharding = NamedSharding(
@@ -516,7 +527,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             desc="BaseDBiasQuantizePrimitive.colwise_out_sharding",
         )
 
-        dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
+        dbias_spec = out_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
@@ -525,7 +536,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            scale_inv_spec = x_spec
+            scale_inv_spec = out_spec
 
         if q_layout.has_colwise:
             if (
@@ -604,6 +615,11 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
             else:
                 global_dbias = local_dbias
+
+            if fsdp_all_gather_dim is not None:
+                local_x = jax.lax.all_gather(local_x, gsr.fsdp_resource, axis=fsdp_all_gather_dim, tiled=True)
+                local_scale_inv = jax.lax.all_gather(local_scale_inv, gsr.fsdp_resource, axis=fsdp_all_gather_dim,
+                                                     tiled=True)
 
             return (
                 local_x,

@@ -199,7 +199,7 @@ def _dense_fwd_rule(
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
     )
-    casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
+    # casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
     casted_kernel = tex.quantize(
         kernel,
