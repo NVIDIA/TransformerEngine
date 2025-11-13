@@ -1152,7 +1152,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                                 quantizer,
                                 rank=ctx.metis_context.backward_lowrank_svd,
                                 niter=ctx.metis_context.backward_lowrank_niter,
-                                adaptive_schedule=ctx.metis_context.backward_longtail_schedule,
                                 broadcast_dim=ctx.metis_context.backward_broadcast_dim,
                             )
                         else:
