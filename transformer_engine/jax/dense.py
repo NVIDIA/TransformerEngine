@@ -19,6 +19,7 @@ from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
+    ScaledTensor,
     ScalingMode,
     QuantizeLayout,
     QuantizerSet,
@@ -227,8 +228,8 @@ def _dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         use_bias,
@@ -529,8 +530,12 @@ def _grouped_dense_fwd_rule(
 
     ctx = (
         group_sizes,
-        ctx_x,
-        ctx_kernel,
+        ctx_x.checkpoint(quantizer_set.x) if isinstance(ctx_x, ScaledTensor) else ctx_x,
+        (
+            ctx_kernel.checkpoint(quantizer_set.kernel)
+            if isinstance(ctx_kernel, ScaledTensor)
+            else ctx_kernel
+        ),
         x.shape,
         kernel.shape,
         use_bias,
