@@ -1512,7 +1512,6 @@ def assert_allclose(
     mismatch_counter = 0
     has_nonzero = jnp.any(actual != 0)
     print(f"has_nonzero: {has_nonzero}")
-    breakpoint()
     with np.printoptions(threshold=sys.maxsize):
         mismatch_mask = ~np.isclose(actual, desired, **tols) # True means mismatch
         diff_indices = np.argwhere(mismatch_mask)

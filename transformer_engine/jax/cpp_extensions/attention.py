@@ -521,6 +521,37 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
+        DEBUG = True #os.environ.get("TE_DEBUG_STRIPED_ATTN", "0") == "1"
+        # if DEBUG:
+        #     jax.debug.print("FusedAttnFwdPrimitive.impl CALLED")
+        #     jax.debug.print("Config: qkv_layout={}, attn_mask_type={}", 
+        #                    str(config.qkv_layout), str(config.attn_mask_type))
+        #     jax.debug.print("Input shapes:")
+        #     jax.debug.print("  q={}, k={}, v={}", q.shape, k.shape, v.shape)
+        #     jax.debug.print("  q_seqlen={}, kv_seqlen={}", q_seqlen.shape, kv_seqlen.shape)
+            
+        #     def print_impl_inputs(q_val, k_val, v_val, q_seq, kv_seq, q_off, k_off):
+        #         print(f"\n~~~ FusedAttnFwdPrimitive.impl INPUTS ~~~")
+        #         print(f"Q: shape={q_val.shape}, mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+        #         print(f"  First 5: {q_val.flatten()[:5]}")
+                
+        #         print(f"K: shape={k_val.shape}, mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+        #         print(f"  First 5: {k_val.flatten()[:5]}")
+                
+        #         print(f"V: shape={v_val.shape}, mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+        #         print(f"  First 5: {v_val.flatten()[:5]}")
+                
+        #         print(f"\nSequence info:")
+        #         print(f"  q_seqlen: {q_seq}")
+        #         print(f"  kv_seqlen: {kv_seq}")
+        #         print(f"  q_seq_offsets: {q_off}")
+        #         print(f"  k_seq_offsets: {k_off}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+            
+        #     jax.debug.callback(
+        #         print_impl_inputs, 
+        #         q, k, v, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets
+        #     )
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
         sequence_descriptor = SequenceDescriptor(
@@ -529,7 +560,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             segment_ids=(_q_segment_ids, _kv_segment_ids),
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
-        breakpoint()
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
@@ -538,9 +568,23 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.max_segments_per_seq,
             )
         )
-        #jax.debug.breakpoint()
-
+        # if DEBUG:
+        #     jax.debug.print("After sequence_descriptor processing:")
+        #     jax.debug.print("  q_seqlen={}, kv_seqlen={}", q_seqlen.shape, kv_seqlen.shape)
+            
+        #     def print_seq_descriptor(q_seq, kv_seq, q_off, k_off):
+        #         print(f"\n~~~ SEQUENCE DESCRIPTOR OUTPUTS ~~~")
+        #         print(f"q_seqlen (processed): {q_seq}")
+        #         print(f"kv_seqlen (processed): {kv_seq}")
+        #         print(f"q_seq_offsets (processed): {q_off}")
+        #         print(f"k_seq_offsets (processed): {k_off}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+            
+        #     jax.debug.callback(print_seq_descriptor, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets)
+        #jax.debug.print("Hello FA impl")
         if config.qkv_layout.is_thd():
+            # if DEBUG:
+            #     jax.debug.print("Processing THD layout...")
 
             def _fix_len_take(x, condition, fill_value=-1):
                 x_shape = x.shape
@@ -563,6 +607,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             )
             assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
+
+            # if DEBUG:
+            #     jax.debug.print("  batch={}, q_max_seqlen={}, kv_max_seqlen={}", 
+            #                    q_batch, q_max_seqlen, kv_max_seqlen)
 
             # Gather valid q_seqlen, which is greater than 0
             # cuDNN version < 9.3.0:
@@ -592,9 +640,36 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             k_seq_offsets = _fix_len_take(
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
             )
+            # if DEBUG:
+            #     def print_thd_processing(q_seq, kv_seq, q_off, k_off):
+            #         print(f"\n~~~ AFTER THD PROCESSING ~~~")
+            #         print(f"q_seqlen (fixed): {q_seq}")
+            #         print(f"kv_seqlen (fixed): {kv_seq}")
+            #         print(f"q_seq_offsets (2d): {q_off}")
+            #         print(f"k_seq_offsets (2d): {k_off}")
+            #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+                
+            #     jax.debug.callback(print_thd_processing, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets)
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+        # jax.debug.print(f"q_seqlen: {q_seqlen}, kv_seqlen: {kv_seqlen}")
+        # if DEBUG:
+        #     jax.debug.print("Generated cumulative sequence lengths:")
+        #     jax.debug.print("  q_cu_seqlen={}", q_cu_seqlen.shape)
+        #     jax.debug.print("  kv_cu_seqlen={}", kv_cu_seqlen.shape)
+            
+        #     def print_cu_seqlen(q_cu, kv_cu):
+        #         print(f"\n~~~ CUMULATIVE SEQLENS ~~~")
+        #         print(f"q_cu_seqlen: {q_cu}")
+        #         print(f"kv_cu_seqlen: {kv_cu}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+            
+        #     jax.debug.callback(print_cu_seqlen, q_cu_seqlen, kv_cu_seqlen)
+
+        # if DEBUG:
+        #     jax.debug.print("Calling inner_primitive.bind...")
+
 
         output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
@@ -1498,7 +1573,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
-        jax.debug.breakpoint()
+        #jax.debug.breakpoint()
 
         def impl(
             q,
@@ -1518,7 +1593,8 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
-            breakpoint()
+            # jax.debug.print("Test CP DC AG")
+            #breakpoint()
 
             # cuDNN does not support right-aligned masking with dynamic sequence length padding.
             # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
@@ -1529,6 +1605,8 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             def _cross_attn(idx, q, k, v, bias, softmax_offset, q_seqlen, kv_seqlen, seed):
                 kv_max_seqlen = k.shape[1]
                 kv_seqlen_per_subrank = kv_max_seqlen // (cp_size * 2)
+                #jax.debug.print("Test AG")
+                #jax.debug.print(f"kv_max_seqlen: {kv_max_seqlen}")
                 assert kv_max_seqlen % cp_size == 0, "sequence length must evenly divide cp size"
 
                 q_split = jnp.split(q, 2, axis=1)
@@ -1538,7 +1616,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 )
 
                 results = []
-                breakpoint()
+                #breakpoint()
                 for sub_idx in range(2):
                     if config.attn_mask_type == AttnMaskType.NO_MASK:
                         k_unmasked, v_unmasked = k, v  # full kv used for unmasked
@@ -1548,7 +1626,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-                    breakpoint()
+                    #breakpoint()
                     output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
@@ -1777,6 +1855,15 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
 
     @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
+        DEBUG = True #os.environ.get("TE_DEBUG_STRIPED_ATTN", "0") == "1"
+        if DEBUG:
+            print(f"STRIPED PARTITION CALLED (Compilation Phase)")
+            print(f"Mesh: {mesh}")
+            print(f"CP axis: {config.cp_axis}, size: {get_mesh_axis_size(config.cp_axis, mesh)}")
+            print(f"window_size: {config.window_size}, context_parallel_load_balanced: {config.context_parallel_load_balanced}, stripe_height: {config.stripe_height}")
+            print(f"Arg shapes: {[info.shape for info in arg_infos]}")
+            print(f"QKV layout: {config.qkv_layout}")
+            print(f"Attention mask type: {config.attn_mask_type}")
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
@@ -1794,7 +1881,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[4] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
-        #jax.debug.breakpoint()
 
         def impl(
             q,
@@ -1813,7 +1899,39 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
-            #jax.debug.breakpoint()
+            # jax.debug.print("Test CP striped AG")
+            # if DEBUG:
+            #     jax.debug.print("STRIPED IMPL CALLED (Execution Phase)")
+            #     jax.debug.print("cp_size={}, cp_rank={}", cp_size, cp_rank)
+                
+            #     # Print input shapes
+            #     jax.debug.print("INPUT SHAPES:")
+            #     jax.debug.print("  q.shape={}, k.shape={}, v.shape={}", q.shape, k.shape, v.shape)
+            #     jax.debug.print("  bias.shape={}", bias.shape if bias is not None else "None")
+            #     jax.debug.print("  q_seqlen.shape={}, kv_seqlen.shape={}", q_seqlen.shape, kv_seqlen.shape)
+                
+                # Print actual input values
+                # def print_inputs(q_val, k_val, v_val, q_seq_val, kv_seq_val, rank):
+                #     print(f"\n--- STRIPED INPUTS (Rank {rank}) ---")
+                #     print(f"Q: shape={q_val.shape}, dtype={q_val.dtype}")
+                #     print(f"  mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+                #     print(f"  min={q_val.min():.6f}, max={q_val.max():.6f}")
+                #     print(f"  First 10 values: {q_val.flatten()[:10]}")
+                    
+                #     print(f"\nK: shape={k_val.shape}, dtype={k_val.dtype}")
+                #     print(f"  mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+                #     print(f"  First 10 values: {k_val.flatten()[:10]}")
+                    
+                #     print(f"\nV: shape={v_val.shape}, dtype={v_val.dtype}")
+                #     print(f"  mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+                #     print(f"  First 10 values: {v_val.flatten()[:10]}")
+                    
+                #     print(f"\nSequence lengths:")
+                #     print(f"  q_seqlen: {q_seq_val}")
+                #     print(f"  kv_seqlen: {kv_seq_val}")
+                #     print(f"--------------------------------------\n")
+                
+                # jax.debug.callback(print_inputs, q, k, v, q_seqlen, kv_seqlen, cp_rank)
 
             # cuDNN does not support right-aligned masking with dynamic sequence length padding.
             # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
@@ -1822,6 +1940,35 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             # TODO(mgoldfarb-nvidia): When cuDNN supports we should be able to make use of a padding
             # mask/sequence length tensor to avoid this unrolled loop.
             def _cross_attn(idx, q, k, v, bias, kv_segment_ids_ag, kv_segment_pos_ag, seed):
+                # if DEBUG:
+                #     jax.debug.print("\n--- _cross_attn called: idx={} ---", idx)
+                #     jax.debug.print("  q.shape={}, k.shape={}, v.shape={}", q.shape, k.shape, v.shape)
+                    
+                #     def print_cross_attn_inputs(q_val, k_val, v_val, kv_seg_ids, kv_seg_pos, idx_val):
+                #         print(f"\n--- CROSS ATTN INPUTS (idx={idx_val}) ---")
+                #         print(f"Q (local): shape={q_val.shape}")
+                #         print(f"  mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+                #         print(f"  First 5 values: {q_val.flatten()[:5]}")
+                        
+                #         print(f"\nK (all-gathered): shape={k_val.shape}")
+                #         print(f"  mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+                #         print(f"  First 5 values: {k_val.flatten()[:5]}")
+                        
+                #         print(f"\nV (all-gathered): shape={v_val.shape}")
+                #         print(f"  mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+                #         print(f"  First 5 values: {v_val.flatten()[:5]}")
+                        
+                #         print(f"\nKV segment IDs: shape={kv_seg_ids.shape}")
+                #         print(f"  {kv_seg_ids.flatten()[:20]}")
+                        
+                #         print(f"\nKV segment positions: shape={kv_seg_pos.shape}")
+                #         print(f"  {kv_seg_pos.flatten()[:20]}")
+                #         print(f"--------------------------------------------\n")
+                    
+                #     jax.debug.callback(
+                #         print_cross_attn_inputs, 
+                #         q, k, v, kv_segment_ids_ag, kv_segment_pos_ag, idx
+                #     )
                 output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                     q,
                     k, #ag
@@ -1838,11 +1985,55 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     kv_segment_pos_ag,
                     config=helper.get_step_config(),
                 )
+                # if DEBUG:
+                #     jax.debug.print("  Output from FusedAttnFwdPrimitive.impl:")
+                #     jax.debug.print("    output.shape={}", output.shape)
+                #     jax.debug.print("    softmax_aux.shape={}", softmax_aux.shape)
+                    
+                #     def print_cross_attn_outputs(out, softmax, idx_val):
+                #         print(f"\n--- CROSS ATTN OUTPUTS (idx={idx_val}) ---")
+                #         print(f"Output: shape={out.shape}")
+                #         print(f"  mean={out.mean():.6f}, std={out.std():.6f}")
+                #         print(f"  min={out.min():.6f}, max={out.max():.6f}")
+                #         print(f"  First 10 values: {out.flatten()[:10]}")
+                        
+                #         print(f"\nSoftmax aux: shape={softmax.shape}")
+                #         print(f"  mean={softmax.mean():.6f}")
+                #         print(f"  First 10 values: {softmax.flatten()[:10]}")
+                #         print(f"--------------------------------------------\n")
+                    
                 return output, softmax_aux, rng_state
 
             k_ag, v_ag = helper.all_gather_kv(k, v)
             _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(_kv_segment_ids, _kv_segment_pos)
 
+            # if DEBUG:
+            #     jax.debug.print("After all-gather:")
+            #     jax.debug.print("  k_ag.shape={}, v_ag.shape={}", k_ag.shape, v_ag.shape)
+            #     jax.debug.print("  kv_segment_ids_ag.shape={}, kv_segment_pos_ag.shape={}", 
+            #                    _kv_segment_ids_ag.shape, _kv_segment_pos_ag.shape)
+                
+            #     def print_all_gathered(k_gathered, v_gathered, seg_ids, seg_pos, rank):
+            #         print(f"\n--- ALL-GATHERED DATA (Rank {rank}) ---")
+            #         print(f"K (all-gathered): shape={k_gathered.shape}")
+            #         print(f"  mean={k_gathered.mean():.6f}, std={k_gathered.std():.6f}")
+            #         print(f"  First 5 values: {k_gathered.flatten()[:5]}")
+                    
+            #         print(f"\nV (all-gathered): shape={v_gathered.shape}")
+            #         print(f"  mean={v_gathered.mean():.6f}, std={v_gathered.std():.6f}")
+            #         print(f"  First 5 values: {v_gathered.flatten()[:5]}")
+                    
+            #         print(f"\nKV segment IDs (all-gathered): shape={seg_ids.shape}")
+            #         print(f"  {seg_ids.flatten()[:30]}")
+                    
+            #         print(f"\nKV segment pos (all-gathered): shape={seg_pos.shape}")
+            #         print(f"  {seg_pos.flatten()[:30]}")
+            #         print(f"----------------------------------------\n")
+                
+            #     jax.debug.callback(
+            #         print_all_gathered, 
+            #         k_ag, v_ag, _kv_segment_ids_ag, _kv_segment_pos_ag, cp_rank
+            #     )
             functions = [
                 partial(_cross_attn, idx, q, k_ag, v_ag, bias, _kv_segment_ids_ag, _kv_segment_pos_ag, seed)
                 for idx in range(cp_size)
@@ -2958,7 +3149,6 @@ def fused_attn_fwd(
         *seq_desc_flatten,
         config=fused_config,
     )
-    breakpoint()
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
     return (output, softmax_aux, rng_state)
 
