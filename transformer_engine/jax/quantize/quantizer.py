@@ -443,7 +443,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         Returns:
             Updated AMAX history
         """
-        amax_history = amax_history.at[0].set(new_amax[0])
+        amax_history = amax_history.at[0].set(new_amax.reshape((1,))[0])
         return amax_history
 
     @staticmethod
