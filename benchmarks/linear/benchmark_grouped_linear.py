@@ -45,6 +45,9 @@ nsys profile \
     --trace=cuda,nvtx,cudnn,cublas \
     python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4
 
+# examples for jagged input benchmark to simulate unbalanced token splits
+python benchmarks/linear/benchmark_grouped_linear.py --recipe nvfp4 --jagged-input "15296,8960,14656,14784,11712,7936,14080,10880"
+
 """
 
 RECIPES = {
@@ -163,7 +166,7 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4):
+def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None):
     data = []
     assert not use_bias, "Bias is not supported for GroupedLinear benchmark"
 
@@ -173,12 +176,13 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4):
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
         ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
         assert m % num_gemms == 0
-        m_splits = [m // num_gemms] * num_gemms
+        m_splits = [m // num_gemms] * num_gemms if m_splits is None else m_splits
         # Bias is not supported for GroupedLinear benchmark
         bias = None
 
         # Run the benchmark
         print(f"fwd_m={m}, fwd_k={k}, fwd_n={n}")
+        print(f"m_splits: {m_splits}")
 
         grouped_fwd_bwd_timing_ms = benchmark_linear(
             x,
@@ -235,7 +239,34 @@ if __name__ == "__main__":
         default="bf16",
         help="Recipe to use, options are fp8_sub_channel, mxfp8, bf16, or all",
     )
+    # add an argument for the jagged input
+    # example: [15296, 8960, 14656, 14784, 11712, 7936, 14080, 10880] => sums up to 98304
+    parser.add_argument(
+        "--jagged-input",
+        type=str,
+        default=None,
+        help="Jagged input to use, example: [15296, 8960, 14656, 14784, 11712, 7936, 14080, 10880]",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=7168,
+        help="Hidden dimension to use, default is 7168",
+    )
+    parser.add_argument(
+        "--output-dim",
+        type=int,
+        default=2048,
+        help="Output dimension to use, default is 2048",
+    )
     args = parser.parse_args()
+
+    jagged_input_splits = None
+    if args.jagged_input is not None:
+        jagged_input_splits = [int(x) for x in args.jagged_input.split(",")]
+        print(f"Jagged input splits: {jagged_input_splits}")
+        print(f"Jagged input splits sum: {sum(jagged_input_splits)}")
+        print(f"Jagged input splits num_gemms: {len(jagged_input_splits)}")
 
     use_bias = False
     # Set the MKN values to benchmark
@@ -256,11 +287,28 @@ if __name__ == "__main__":
     # 4 or 8local experts per rank
     num_gemms_list = [4, 8]
 
+    if jagged_input_splits is not None:
+        num_gemms_list = [len(jagged_input_splits)]
+
+    token_dim_list = [65536]
+    hidden_dim_list = [7168]
+    output_dim_list = [2048]
+
+    # override the default targets to benchmark if specified
+    if jagged_input_splits is not None:
+        token_dim_list = [sum(jagged_input_splits)]
+
+    if args.hidden_dim is not None:
+        hidden_dim_list = [args.hidden_dim]
+
+    if args.output_dim is not None:
+        output_dim_list = [args.output_dim]
+
     # MKN for group linear
     mkns = []
-    for m in [65536]:
-        for k in [7168]:
-            for n in [2048]:
+    for m in token_dim_list:
+        for k in hidden_dim_list:
+            for n in output_dim_list:
                 mkns.append((m, k, n))
 
     # default recipes to run if not specified
@@ -272,14 +320,20 @@ if __name__ == "__main__":
         recipe_list = [args.recipe]
 
     if args.profile:
-        mkns = [(8192 * 8, 7168, 2048)]
+        num_gemms_list = [8]
+        hidden_dim_to_profile = 7168 if args.hidden_dim is None else args.hidden_dim
+        output_dim_to_profile = 2048 if args.output_dim is None else args.output_dim
+        token_dim_to_profile = 8192 * 8
+        if jagged_input_splits is not None:
+            num_gemms_list = [len(jagged_input_splits)]
+            token_dim_to_profile = sum(jagged_input_splits)
+        mkns = [(token_dim_to_profile, hidden_dim_to_profile, output_dim_to_profile)]
         # in profile mode, only run one recipe specified in args.recipe
         assert args.recipe != "all", (
             "In profile mode, only one recipe can be specified, please specify the recipe as"
             " fp8_sub_channel, mxfp8, nvfp4, or bf16"
         )
         recipe_list = [args.recipe]
-        num_gemms_list = [8]
         torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
 
     # Initialize a dataframe to store the results
@@ -310,6 +364,7 @@ if __name__ == "__main__":
                 recipe_name,
                 use_bias,
                 num_gemms=num_gemms,
+                m_splits=jagged_input_splits,
             )
             df_linears = pd.concat([df_linears, df])
 
