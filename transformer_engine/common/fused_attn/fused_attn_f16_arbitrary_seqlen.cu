@@ -506,6 +506,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           else
           {
             print_tensor_elements_2<<<1, 1, 0, stream>>>(static_cast<int32_t *>(devPtrCuSeqlensQ), 1, 0, actual_b, /*does not matter for single row*/actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if (devActualSeqlenQ) {
@@ -521,6 +522,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           }
           else {
             print_tensor_elements_2<<<1, 1, 0, stream>>>(static_cast<int32_t *>(devActualSeqlenQ), 1, 0, actual_b, /*does not matter for single row*/actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if(devPtrCuSeqlensKV) {
@@ -538,6 +540,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           }
           else {
             print_tensor_elements_2<<<1, 1, 0, stream>>>(static_cast<int32_t *>(devPtrCuSeqlensKV), 1, 0, actual_b, /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if(devActualSeqlenKV) {
@@ -556,6 +559,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           else
           {
             print_tensor_elements_2<<<1, 1, 0, stream>>>(static_cast<int32_t *>(devActualSeqlenKV), 1, 0, actual_b, /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
       }
@@ -597,6 +601,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           layout_group, actual_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
+      cudaDeviceSynchronize();
       NVTE_CHECK_CUDA(cudaGetLastError());
       if (print_tensors) {
         if (devPtrSeqOffsetsQ) {
@@ -614,6 +619,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             print_tensor_elements_2<<<1, 1, 0, stream>>>(
                 static_cast<int32_t *>(devPtrSeqOffsetsQ), 1, 0, actual_b,
                 /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if (devOffsetsQ) {
@@ -631,6 +637,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             print_tensor_elements_2<<<1, 1, 0, stream>>>(
                 static_cast<int64_t *>(devOffsetsQ), 1, 0, actual_b,
                 /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if (devPtrSeqOffsetsKV) {
@@ -648,6 +655,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             print_tensor_elements_2<<<1, 1, 0, stream>>>(
                 static_cast<int32_t *>(devPtrSeqOffsetsKV), 1, 0, actual_b,
                 /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
         if (devOffsetsK) {
@@ -665,6 +673,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             print_tensor_elements_2<<<1, 1, 0, stream>>>(
                 static_cast<int64_t *>(devOffsetsK), 1, 0, actual_b,
                 /*does not matter for single row*/ actual_b);
+            cudaDeviceSynchronize();
           }
         }
       }
