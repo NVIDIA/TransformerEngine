@@ -21,7 +21,8 @@ from jax.experimental.custom_partitioning import BATCHING, CompoundFactor
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
-from transformer_engine_jax import JAXX_Scaling_Mode, QuantizeLayout
+from transformer_engine_jax import JAXX_Scaling_Mode
+from .misc import QuantizeLayout
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
 
@@ -72,16 +73,18 @@ class QuantizeShardyRules:
 
     Attributes:
         input_spec: Specification for the input axes
-        rowwise_rule: Sharding rule for the row-wise scale tensor, depends on
-          the axes in `input_spec`
-        colwise_rule: Likewise for the column-wise scale tensor.
-        factor_sizes: For block scaling, contains the block size factor, which is
-          used in `input_spec`.
+        rowwise_out_spec: Sharding spec for the rowwise quantized data
+        rowwise_scale_spec: Sharding spec for the rowwise scale
+        colwise_out_spec: Sharding spec for the colwise quantized data
+        colwise_scale_spec: Sharding spec for the colwise scale
+        factor_sizes: For block scaling, contains the block size factor
     """
 
     input_spec: Tuple[str]
-    rowwise_rule: Tuple[str]
-    colwise_rule: Tuple[str]
+    rowwise_out_spec: Tuple[str]
+    rowwise_scale_spec: Tuple[str]
+    colwise_out_spec: Tuple[str]
+    colwise_scale_spec: Tuple[str]
     factor_sizes: Dict[str, int]
 
 
@@ -166,7 +169,9 @@ class ScalingModeMetadataImpl(ABC):
         input_shape,
         unique_var,
         flatten_axis,
+        q_layout,
         broadcast_2d_scale_shape_to_1d,
+        is_colwise_transposed,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
@@ -174,7 +179,9 @@ class ScalingModeMetadataImpl(ABC):
             input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
             flatten_axis: Axis along which data can be flattened to 2D for quantization
+            q_layout: The layout of the quantized tensor
             broadcast_2d_scale_shape_to_1d: Whether to broadcast the 2D scale shape to 1D.
+            is_colwise_transposed: Whether the column-wise tensors are transposed.
 
         Returns:
             The Shardy rules for the scaling mode
@@ -268,7 +275,9 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
         input_shape,
         unique_var,
         flatten_axis,
+        q_layout,
         broadcast_2d_scale_shape_to_1d,
+        is_colwise_transposed,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
@@ -281,10 +290,17 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        del flatten_axis, broadcast_2d_scale_shape_to_1d
-        input_spec = tuple(f"{unique_var}{i}" for i in range(len(input_shape)))
-        scale_var = BATCHING + unique_var + "_scale_inv"
-        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
+        del broadcast_2d_scale_shape_to_1d
+        input_spec = tuple(f"{unique_var}_x_{i}" for i in range(len(input_shape)))
+        output_spec = tuple(input_spec)
+        return QuantizeShardyRules(
+            input_spec,
+            output_spec,
+            (BATCHING + f"{unique_var}_scale",),
+            (BATCHING + f"{unique_var}_colwise_output",),
+            (BATCHING + f"{unique_var}_colwise_scale",),
+            {},
+        )
 
 
 class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
@@ -376,7 +392,9 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         input_shape,
         unique_var,
         flatten_axis,
+        q_layout,
         broadcast_2d_scale_shape_to_1d,
+        is_colwise_transposed,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
@@ -385,14 +403,26 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
             unique_var: An otherwise unused Shardy variable name prefix
             flatten_axis: Axis along which data can be flattened to 2D for quantization
             broadcast_2d_scale_shape_to_1d: Whether to broadcast the 2D scale shape to 1D.
-
+            q_layout: The layout of the quantized tensor
+            is_colwise_transposed: Whether the colwise scaling is transposed
         Returns:
             The Shardy rules for the scaling mode
         """
-        del flatten_axis, broadcast_2d_scale_shape_to_1d
-        input_spec = tuple(f"{unique_var}{i}" for i in range(len(input_shape)))
-        scale_var = BATCHING + unique_var + "_scale_inv"
-        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
+        del broadcast_2d_scale_shape_to_1d
+        input_spec = tuple(f"{unique_var}x_{i}" for i in range(len(input_shape)))
+        output_spec = input_spec
+        colwise_output_spec = (BATCHING + f"{unique_var}_colwise_output",)
+
+        if q_layout.has_colwise:
+            from ..cpp_extensions.misc import multidim_transpose
+
+            colwise_output_spec = input_spec
+            if is_colwise_transposed:
+                colwise_output_spec = multidim_transpose(
+                    colwise_output_spec, transpose_axis=flatten_axis
+                )
+        scale = (BATCHING + unique_var + "_scale_inv",)
+        return QuantizeShardyRules(input_spec, output_spec, scale, colwise_output_spec, scale, {})
 
 
 class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
@@ -658,7 +688,9 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         input_shape,
         unique_var,
         flatten_axis,
+        q_layout,
         broadcast_2d_scale_shape_to_1d,
+        is_colwise_transposed,
     ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
@@ -666,15 +698,18 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
             flatten_axis: Axis along which data can be flattened to 2D for quantization
+            q_layout: The layout of the quantized tensor
             broadcast_2d_scale_shape_to_1d: Whether to broadcast the 2D scale shape to 1D.
-
+            is_colwise_transposed: Whether the column-wise tensors are transposed.
         Returns:
             The Shardy rules for the scaling mode
         """
-        # TODO(Phuong): to rework the shardy rule to handle transposes after NVFP4 is upstreamed
+        is_rowwise = q_layout.has_rowwise
+        is_colwise = q_layout.has_colwise
+
         input_rank = len(input_shape)
-        input_spec = [f"{unique_var}_{i}" for i in range(input_rank)]
         flatten_axis = (flatten_axis + input_rank) % input_rank
+        input_spec = [f"{unique_var}_x_{i}" for i in range(input_rank)]
 
         assert (
             self._block_dims[1] != 1
@@ -690,30 +725,56 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         # We have to use two different factors in the two CompoundFactors because of Shardy
         # verifier requirements, even though they are the same.
+        # No CompoundFactor is needed if the dim has the same size as the blocksize
         blocksizes = {}
-        colwise_var = f"{unique_var}_None"
         rowwise_var = f"{unique_var}_None"
-        if not input_shape[-1] == block_size_1d:
+        colwise_var = f"{unique_var}_None"
+        if is_rowwise and not input_shape[-1] == block_size_1d:
             rowwise_var = input_spec[-1] + "_compound"
             input_spec[-1] = CompoundFactor(rowwise_var, "blocksize_x")
             blocksizes["blocksize_x"] = block_size_1d
-        if not input_shape[flatten_axis - 1] == block_size_1d:
+        if is_colwise and not input_shape[flatten_axis - 1] == block_size_1d:
             colwise_var = input_spec[flatten_axis - 1] + "_compound"
             input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "blocksize_y")
             blocksizes["blocksize_y"] = block_size_1d
 
         # The rowwise and colwise scale tensors should be sharded the same way as the input.
         # However, we need to adjust the dimensions where the block scaling factor applies.
-        rowwise = input_spec.copy()
-        rowwise[-1] = rowwise_var
+        if is_rowwise:
+            rowwise_out = input_spec.copy()
+            rowwise_scale = input_spec.copy()
+            rowwise_scale[-1] = rowwise_var
+        else:
+            rowwise_out = [
+                BATCHING + f"{unique_var}_rowwise_output",
+            ]
+            rowwise_scale = [
+                BATCHING + f"{unique_var}_rowwise_scale_inv",
+            ]
 
-        colwise = input_spec.copy()
-        colwise[flatten_axis - 1] = colwise_var
+        if is_colwise:
+            colwise_out = input_spec.copy()
+            colwise_scale = input_spec.copy()
+            colwise_scale[flatten_axis - 1] = colwise_var
+            if is_colwise_transposed:
+                from ..cpp_extensions.misc import multidim_transpose
+
+                colwise_out = multidim_transpose(colwise_out, transpose_axis=flatten_axis)
+                colwise_scale = multidim_transpose(colwise_scale, transpose_axis=flatten_axis)
+        else:
+            colwise_out = [
+                BATCHING + f"{unique_var}_colwise_output",
+            ]
+            colwise_scale = [
+                BATCHING + f"{unique_var}_colwise_scale_inv",
+            ]
 
         return QuantizeShardyRules(
             tuple(input_spec),
-            tuple(rowwise),
-            tuple(colwise),
+            tuple(rowwise_out),
+            tuple(rowwise_scale),
+            tuple(colwise_out),
+            tuple(colwise_scale),
             blocksizes,
         )
 
@@ -850,7 +911,8 @@ class ScalingMode(Enum):
         self,
         input_shape,
         unique_var,
-        flatten_axis=-1,
+        flatten_axis,
+        q_layout,
         broadcast_2d_scale_shape_to_1d=False,
     ) -> Tuple[Tuple[str]]:
         """Sharding rules for the input and (row, col)wise scale tensors.
@@ -859,13 +921,19 @@ class ScalingMode(Enum):
             input_shape: The shape of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
             flatten_axis: Axis along which data can be flattened to 2D for quantization.
+            q_layout: The layout of the quantized tensor
             broadcast_2d_scale_shape_to_1d: Whether to broadcast the 2D scale shape to 1D. Defaults to False.
 
         Returns:
             The Shardy rules for the scaling mode
         """
         return self._get_impl().get_shardy_sharding_rules(
-            input_shape, unique_var, flatten_axis, broadcast_2d_scale_shape_to_1d
+            input_shape,
+            unique_var,
+            flatten_axis,
+            q_layout,
+            broadcast_2d_scale_shape_to_1d,
+            self.is_colwise_transposed,
         )
 
     def get_grouped_scale_shape_2x(
