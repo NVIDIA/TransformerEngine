@@ -45,8 +45,15 @@ nsys profile \
     --trace=cuda,nvtx,cudnn,cublas \
     python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4
 
-# examples for jagged input benchmark to simulate unbalanced token splits
+# Example for jagged input benchmark to simulate unbalanced token splits
 python benchmarks/linear/benchmark_grouped_linear.py --recipe nvfp4 --jagged-input "15296,8960,14656,14784,11712,7936,14080,10880"
+
+# Example to look at a single kernel target with NCU, like the fused hadamard amax kernel for NVFP4 recipe
+ncu -f -o ./benchmarks/linear/ncu_b200_numgemm_8_nvfp4_rht_amax \
+    --set=full \
+    --kernel-name "MultiHadamardAmaxTmaKernel" \
+    -s 5 -c 5 \
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4 --profile
 
 """
 
