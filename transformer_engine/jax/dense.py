@@ -227,8 +227,8 @@ def _dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         use_bias,
@@ -529,8 +529,8 @@ def _grouped_dense_fwd_rule(
 
     ctx = (
         group_sizes,
-        ctx_x,
-        ctx_kernel,
+        ctx_x.checkpoint(quantizer_set.x),
+        ctx_kernel.checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         use_bias,

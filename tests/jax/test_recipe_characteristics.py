@@ -353,22 +353,13 @@ class TestJaxprAndHlo:
             )
             return
 
-        # 36 checkpointed values:
+        # 12 checkpointed values:
         # - Fwd pass:
-        #   - Input RMSNorm+Q -> 6 possible output tensors
-        #   - Kernel Q -> 6 possible output tensors
-        #   - Input Activation+Q -> 6 possible output tensors
-        #   - Kernel Q -> 6 possible output tensors
-        # - Backward pass: These are wrapped in checkpoint_name for simplicity, but are ignored by JAX since they are already in the backward pass
-        #   - 6 dgrad Q -> 6 possible output tensors
-        #   - 6 dact+Q -> 6 possible output tensors
-        expected_checkpoint_eqn_count = 36
-
-        if isinstance(quantization_recipe, DelayedScaling) or isinstance(
-            quantization_recipe, Float8CurrentScaling
-        ):
-            # For DelayedScaling and Float8CurrentScaling, we do 1x quantization and use JAX to transpose the result so we have fewer checkpointed tensors
-            expected_checkpoint_eqn_count = 18
+        #   - Input RMSNorm+Q -> 3 possible output tensors that will be used in the backward
+        #   - Kernel Q -> 3 possible output tensors that will be used in the backward
+        #   - Input Activation+Q -> 3 possible output tensors that will be used in the backward
+        #   - Kernel Q -> 3 possible output tensors that will be used in the backward
+        expected_checkpoint_eqn_count = 12
 
         assert len(checkpoint_name_eqns) == expected_checkpoint_eqn_count, (
             f"Expected {expected_checkpoint_eqn_count} checkpoint_name eqns when"

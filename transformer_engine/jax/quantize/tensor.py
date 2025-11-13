@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
+from jax.ad_checkpoint import checkpoint_name as jax_checkpoint_name
 
 from transformer_engine_jax import QuantizeLayout
 
@@ -89,6 +90,17 @@ class AbstractBaseTensor(ABC):
             The tensor with applied sharding constraints
         """
 
+    @abstractmethod
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+
 
 @dataclass
 class AbstractBaseTensor1x(AbstractBaseTensor):
@@ -151,6 +163,18 @@ class NoScaleTensor(AbstractBaseTensor1x):
             data=data,
             amax=self.amax,
         )
+
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        assert quantizer is None, "NoScaleTensor does not support quantization."
+        return self
 
 
 class ScaledTensor(ABC):
@@ -320,6 +344,20 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             has_rht_applied=self.has_rht_applied,
         )
 
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        if quantizer is None or quantizer.checkpoint_name is None:
+            return self
+
+        return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
+
 
 @register_pytree_node_class
 @dataclass
@@ -423,6 +461,20 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
         raise NotImplementedError
 
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        if quantizer is None or quantizer.checkpoint_name is None:
+            return self
+
+        return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
+
 
 @register_pytree_node_class
 @dataclass
@@ -498,6 +550,9 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
         )
 
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
+
+    def checkpoint(self, quantizer):
+        raise NotImplementedError
 
 
 @dataclass
