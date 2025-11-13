@@ -113,7 +113,7 @@ def assert_fp8_format(quantizer, tensor_source, fp8_format):
         raise ValueError(f"Unsupported FP8 format: {fp8_format}")
 
 
-class RecipeAssertionBase(ABC, unittest.TestCase):
+class RecipeAssertionBase(ABC):
     """Base class for defining recipe assertions."""
 
     @abstractmethod
@@ -141,93 +141,87 @@ class RecipeAssertionBase(ABC, unittest.TestCase):
 class DelayedScalingRecipeAssertion(RecipeAssertionBase):
 
     def assert_context(self, ref_recipe, quantize_config):
-        self.assertEqual(quantize_config.MARGIN, ref_recipe.margin)
-        self.assertEqual(quantize_config.FWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[0])
-        self.assertEqual(quantize_config.BWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[1])
-        self.assertEqual(quantize_config.AMAX_HISTORY_LEN, ref_recipe.amax_history_len)
-        self.assertEqual(quantize_config.AMAX_COMPUTE_ALGO.value, ref_recipe.amax_compute_algo)
+        assert quantize_config.MARGIN == ref_recipe.margin
+        assert quantize_config.FWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[0]
+        assert quantize_config.BWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[1]
+        assert quantize_config.AMAX_HISTORY_LEN == ref_recipe.amax_history_len
+        assert quantize_config.AMAX_COMPUTE_ALGO.value == ref_recipe.amax_compute_algo
         for tensor_source in TensorSource:
-            self.assertEqual(
-                quantize_config.get_scaling_mode(tensor_source),
-                ScalingMode.DELAYED_TENSOR_SCALING,
+            assert (
+                quantize_config.get_scaling_mode(tensor_source)
+                == ScalingMode.DELAYED_TENSOR_SCALING
             )
 
     def assert_quantizers(self, ref_recipe: DelayedScaling, quantizer, tensor_source):
-        self.assertEqual(quantizer.scaling_mode, ScalingMode.DELAYED_TENSOR_SCALING)
-        self.assertEqual(quantizer.margin, ref_recipe.margin)
-        self.assertEqual(quantizer.amax_compute_algo.value, ref_recipe.amax_compute_algo)
-        self.assertEqual(quantizer.amax_history.shape, (ref_recipe.amax_history_len,))
+        assert quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        assert quantizer.margin == ref_recipe.margin
+        assert quantizer.amax_compute_algo.value == ref_recipe.amax_compute_algo
+        assert quantizer.amax_history.shape == (ref_recipe.amax_history_len,)
         assert_fp8_format(quantizer, tensor_source, ref_recipe.fp8_format)
 
 
 class CurrentScalingRecipeAssertion(RecipeAssertionBase):
 
     def assert_context(self, ref_recipe, quantize_config):
-        self.assertEqual(quantize_config.FWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[0])
-        self.assertEqual(quantize_config.BWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[1])
+        assert quantize_config.FWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[0]
+        assert quantize_config.BWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[1]
         for tensor_source in TensorSource:
-            self.assertEqual(
-                quantize_config.get_scaling_mode(tensor_source),
-                ScalingMode.CURRENT_TENSOR_SCALING,
+            assert (
+                quantize_config.get_scaling_mode(tensor_source)
+                == ScalingMode.CURRENT_TENSOR_SCALING
             )
 
     def assert_quantizers(self, ref_recipe: Float8CurrentScaling, quantizer, tensor_source):
-        self.assertEqual(quantizer.scaling_mode, ScalingMode.CURRENT_TENSOR_SCALING)
+        assert quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
         assert_fp8_format(quantizer, tensor_source, ref_recipe.fp8_format)
 
 
 class MXFP8RecipeAssertion(RecipeAssertionBase):
 
     def assert_context(self, ref_recipe, quantize_config):
-        self.assertEqual(quantize_config.FWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[0])
-        self.assertEqual(quantize_config.BWD_DTYPE, _format2dtypes(ref_recipe.fp8_format)[1])
+        assert quantize_config.FWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[0]
+        assert quantize_config.BWD_DTYPE == _format2dtypes(ref_recipe.fp8_format)[1]
         for tensor_source in TensorSource:
-            self.assertEqual(
-                quantize_config.get_scaling_mode(tensor_source), ScalingMode.MXFP8_1D_SCALING
-            )
+            assert quantize_config.get_scaling_mode(tensor_source) == ScalingMode.MXFP8_1D_SCALING
 
     def assert_quantizers(self, ref_recipe: MXFP8BlockScaling, quantizer, tensor_source):
-        self.assertEqual(quantizer.scaling_mode, ScalingMode.MXFP8_1D_SCALING)
+        assert quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         assert_fp8_format(quantizer, tensor_source, ref_recipe.fp8_format)
 
 
 class NVFP4RecipeAssertion(RecipeAssertionBase):
 
     def assert_context(self, ref_recipe, quantize_config):
-        self.assertEqual(quantize_config.FWD_DTYPE, _format2dtypes(ref_recipe.fp4_format)[0])
-        self.assertEqual(quantize_config.BWD_DTYPE, _format2dtypes(ref_recipe.fp4_format)[1])
+        assert quantize_config.FWD_DTYPE == _format2dtypes(ref_recipe.fp4_format)[0]
+        assert quantize_config.BWD_DTYPE == _format2dtypes(ref_recipe.fp4_format)[1]
         for tensor_source in TensorSource:
             target_scaling_mode = (
                 ScalingMode.NVFP4_2D_SCALING
                 if (not ref_recipe.disable_2d_quantization) and tensor_source == TensorSource.KERNEL
                 else ScalingMode.NVFP4_1D_SCALING
             )
-            self.assertEqual(quantize_config.get_scaling_mode(tensor_source), target_scaling_mode)
-        self.assertEqual(
-            quantize_config.DISABLE_STOCHASTIC_ROUNDING, ref_recipe.disable_stochastic_rounding
-        )
-        self.assertEqual(quantize_config.DISABLE_RHT, ref_recipe.disable_rht)
-        self.assertEqual(
-            quantize_config.DISABLE_2D_QUANTIZATION, ref_recipe.disable_2d_quantization
-        )
+            assert quantize_config.get_scaling_mode(tensor_source) == target_scaling_mode
+        assert quantize_config.DISABLE_STOCHASTIC_ROUNDING == ref_recipe.disable_stochastic_rounding
+        assert quantize_config.DISABLE_RHT == ref_recipe.disable_rht
+        assert quantize_config.DISABLE_2D_QUANTIZATION == ref_recipe.disable_2d_quantization
 
     def assert_quantizers(self, ref_recipe: NVFP4BlockScaling, quantizer, tensor_source):
         if tensor_source == TensorSource.KERNEL and not ref_recipe.disable_2d_quantization:
-            self.assertEqual(quantizer.scaling_mode, ScalingMode.NVFP4_2D_SCALING)
+            assert quantizer.scaling_mode == ScalingMode.NVFP4_2D_SCALING
         else:
-            self.assertEqual(quantizer.scaling_mode, ScalingMode.NVFP4_1D_SCALING)
+            assert quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
 
         if ref_recipe.disable_stochastic_rounding or tensor_source != TensorSource.DGRAD:
-            self.assertIsNone(quantizer.stochastic_rounding_rng_state)
+            assert quantizer.stochastic_rounding_rng_state is None
         else:
-            self.assertIsNotNone(quantizer.stochastic_rounding_rng_state)
+            assert quantizer.stochastic_rounding_rng_state is not None
 
         expected_rht = (
             quantizer.scaling_mode == ScalingMode.NVFP4_1D_SCALING
             and quantizer.q_layout in {QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE}
             and not ref_recipe.disable_rht
         )
-        self.assertEqual(quantizer.use_rht, expected_rht)
+        assert quantizer.use_rht == expected_rht
 
 
 class TestFP8Functions(unittest.TestCase):
