@@ -88,15 +88,30 @@ void CheckNoopTensor(const Tensor &t, const std::string &name) {
 void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
-    // per-tensor scaling
-    if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
-                 "\" has invalid scale_inv shape (expected (1), got ", t.scale_inv.shape, ")");
-    }
-    if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
-                 "\" has invalid columnwise_scale_inv shape (expected (1), got ",
-                 t.columnwise_scale_inv.shape, ")");
+    if (is_fp8_dtype(t.dtype())) {
+      // FP8 tensor with tensor scaling
+      if (t.has_data()) {
+        NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected 1 entry, got ", t.scale_inv.shape,
+                   ")");
+      }
+      if (t.has_columnwise_data()) {
+        NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected 1 entry, got ",
+                   t.columnwise_scale_inv.shape, ")");
+      }
+    } else {
+      // High-precision tensor
+      if (t.has_data()) {
+        NVTE_CHECK(t.scale_inv.numel() == 0, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected 0 entries, got ", t.scale_inv.shape,
+                   ")");
+      }
+      if (t.has_columnwise_data()) {
+        NVTE_CHECK(t.columnwise_scale_inv.numel() == 0, "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected 0 entries, got ",
+                   t.columnwise_scale_inv.shape, ")");
+      }
     }
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -524,7 +539,8 @@ void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor) {
 NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    return nvte_make_shape(nullptr, 0);
+    const size_t zero = 0;
+    return nvte_make_shape(&zero, 1);
   }
   return nvte_make_shape(t->scale_inv.shape.data(), t->scale_inv.shape.size());
 }
@@ -563,7 +579,8 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
+    const size_t zero = 0;
+    return {nullptr, kNVTEFloat32, nvte_make_shape(&zero, 1)};
   }
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   switch (param_name) {
