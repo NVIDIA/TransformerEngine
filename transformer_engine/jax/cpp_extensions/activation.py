@@ -1365,7 +1365,6 @@ def act_lu(
 
     quantizer.update(updated_amax)
 
-    # pylint: disable=unexpected-keyword-arg
     return ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1375,7 +1374,6 @@ def act_lu(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        checkpoint_name=quantizer.checkpoint_name,
     )
 
 
@@ -1575,7 +1573,6 @@ def quantize_dact_dbias(
 
     quantizer.update(updated_amax)
 
-    # pylint: disable=unexpected-keyword-arg
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1586,7 +1583,6 @@ def quantize_dact_dbias(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=-2,  # as output has act axis
-        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return out, dbias

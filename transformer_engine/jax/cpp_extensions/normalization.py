@@ -1120,7 +1120,6 @@ def layernorm_fwd(
             : reduce(operator.mul, colwise_unpadded_shape)
         ].reshape(colwise_unpadded_shape)
 
-    # pylint: disable=unexpected-keyword-arg
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1130,7 +1129,6 @@ def layernorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return scaled_tensor, mu, rsigma
@@ -1376,7 +1374,6 @@ def rmsnorm_fwd(
             : reduce(operator.mul, colwise_unpadded_shape)
         ].reshape(colwise_unpadded_shape)
 
-    # pylint: disable=unexpected-keyword-arg
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1386,7 +1383,6 @@ def rmsnorm_fwd(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        checkpoint_name=quantizer.checkpoint_name,
     )
 
     return scaled_tensor, rsigma
