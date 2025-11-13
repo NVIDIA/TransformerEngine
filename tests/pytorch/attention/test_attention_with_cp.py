@@ -7,7 +7,7 @@ import subprocess
 import sys
 import pathlib
 import logging
-
+import copy
 import pytest
 import torch
 from transformer_engine.pytorch import (
