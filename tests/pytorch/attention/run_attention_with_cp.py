@@ -98,35 +98,33 @@ def generate_input_shapes(
             ]
         ).cuda()
         cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
-        # Since FlashAttention doesn't support pad b/w sequences, cu_seqlens_q
-        # is updated to reflect non-padded lengths for FusedAttention only.
+
+        # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
+        # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
         if kernel_backend == "FusedAttention":
             cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
 
-        if kernel_backend == "FlashAttention":
-            leading_dim = cu_seqlens_q[-1]
-        elif kernel_backend == "FusedAttention":
-            leading_dim = cu_seqlens_q_padded[-1]
+        total_tokens = cu_seqlens_q_padded[-1]
 
         q_input_shape = (
-            leading_dim,
+            total_tokens,
             config.num_heads,
             config.head_dim_qk,
         )
         k_input_shape = (
-            leading_dim,
+            total_tokens,
             config.num_gqa_groups,
             config.head_dim_qk,
         )
         v_input_shape = (
-            leading_dim,
+            total_tokens,
             config.num_gqa_groups,
             config.head_dim_v,
         )
         attn_output_shape = (
-            leading_dim,
+            total_tokens,
             config.num_heads * config.head_dim_v,
         )
     else:
