@@ -231,6 +231,8 @@ class AttentionParams:
         The type of softmax operation. See DotProductAttention for details.
     return_max_logit: bool, default = `False`
         Whether to output max_logit.
+    cuda_graph: bool, default = `False`
+        Whether support for cuda graph capture is needed or not.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -260,6 +262,7 @@ class AttentionParams:
     inference_params: Optional[InferenceParams] = None
     softmax_type: str = "vanilla"
     return_max_logit: bool = False
+    cuda_graph: bool = False
 
     def __eq__(self, other):
         """
@@ -334,6 +337,7 @@ def get_attention_backend(
     inference_params = attention_params.inference_params
     softmax_type = attention_params.softmax_type
     return_max_logit = attention_params.return_max_logit
+    cuda_graph = attention_params.cuda_graph
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -979,6 +983,7 @@ def get_attention_backend(
             window_size[0],
             window_size[1],
             return_max_logit,
+            cuda_graph,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
