@@ -667,7 +667,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 )
             # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
-            quantizer = tensor._quantizer.copy()
+            quantizer = tensor._quantizer
             out_tensor = Float8Tensor(
                 data=func_out,
                 shape=func_out.shape,
@@ -816,30 +816,29 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # internally in the update_usage method.
         if out is not None:
             out._data = data
-            all_gathered_quantizer = out._quantizer
         else:
             # We ll be here when post all gather is called the first time.
-            # So need to make sure the we create a fresh copy of the quantizer.
-            # for the allgathered tensors since self._quantizer belongs
-            # to the sharded parameter. No need to set all_gathered_quantizer
-            # in out for the consequent iterations.
-            all_gathered_quantizer = self._quantizer.copy()
-            all_gathered_quantizer.rowwise_usage = rowwise_usage
-            all_gathered_quantizer.columnwise_usage = columnwise_usage
+            # Float8Tensor constructor makes a copy of the quantizer to
+            # save as its own quantizer. For the consequent iterations,
+            # the same quantizer is used. Copy is needed in the first iteration,
+            # since we need different quantizers for sharded and allgathered tensors.
+            # and self._quantizer belongs to the sharded parameter.
             fp8_args = {
                 "shape": orig_shape,
                 "dtype": param_dtype,
                 "fp8_scale_inv": fp8_scale_inv,
                 "fp8_dtype": fp8_dtype,
-                "quantizer": all_gathered_quantizer,
+                "quantizer": self._quantizer,
                 "requires_grad": False,
                 "data": data,
             }
             out = Float8Tensor(**fp8_args)
-
+    
+        out._quantizer.set_usage(rowwise=rowwise_usage,
+            columnwise=columnwise_usage)
         out.update_usage(
-            rowwise_usage=all_gathered_quantizer.rowwise_usage,
-            columnwise_usage=all_gathered_quantizer.columnwise_usage,
+            rowwise_usage=rowwise_usage,
+            columnwise_usage=columnwise_usage,
         )
         return out, all_gather_outputs
 

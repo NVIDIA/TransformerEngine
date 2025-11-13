@@ -526,7 +526,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 rowwise_scale_inv=rowwise_scale_inv,
                 columnwise_data=columnwise_data,
                 columnwise_scale_inv=columnwise_scale_inv,
-                quantizer=tensor._quantizer.copy(),
+                quantizer=tensor._quantizer,
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
@@ -654,13 +654,11 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             out._columnwise_scale_inv = columnwise_scale_inv
         else:
             # We ll be here when post all gather is called the first time.
-            # So need to make sure the we create a fresh copy of the quantizer.
-            # for the allgathered tensors since self._quantizer belongs
-            # to the sharded parameter. No need to set all_gathered_quantizer
-            # in out for the consequent iterations.
-            all_gathered_quantizer = self._quantizer.copy()
-            all_gathered_quantizer.rowwise_usage = rowwise_usage
-            all_gathered_quantizer.columnwise_usage = columnwise_usage
+            # MXFP8Tensor constructor makes a copy of the quantizer to
+            # save as its own quantizer. For the consequent iterations,
+            # the same quantizer is used. Copy is needed in the first iteration,
+            # since we need different quantizers for sharded and allgathered tensors.
+            # and self._quantizer belongs to the sharded parameter.
             out = MXFP8Tensor(
                 rowwise_data=rowwise_data,
                 rowwise_scale_inv=rowwise_scale_inv,
@@ -669,9 +667,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 fp8_dtype=fp8_dtype,
                 dtype=param_dtype,
                 shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
-                quantizer=all_gathered_quantizer,
+                quantizer=self._quantizer,
             )
-
+        out._quantizer.set_usage(rowwise=rowwise_usage,
+            columnwise=columnwise_usage)
         return out, all_gather_outputs
 
     @classmethod
