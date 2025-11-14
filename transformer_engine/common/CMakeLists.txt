@@ -79,6 +79,9 @@ if(NOT arch_120_index EQUAL -1)
   endif()
 endif()
 
+# Python
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
@@ -90,13 +93,14 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+if(cudnn_LIBRARY MATCHES "nvidia/cudnn")
+  set(CMAKE_INSTALL_RPATH "\${ORIGIN}/../nvidia/cudnn/lib:\${ORIGIN}/../nvidia/cublas/lib:\${ORIGIN}/../nvidia/cuda_runtime/lib")
+endif()
+
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
 set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
-
-# Python
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
