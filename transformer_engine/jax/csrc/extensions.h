@@ -57,7 +57,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler);
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
-                                                   JAXX_Scaling_Mode scaling_mode, bool is_2x);
+                                                   JAXX_Scaling_Mode scaling_mode,
+                                                   JAXX_Quantize_Layout quantize_layout);
 
 // Normalization
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardInitializeHandler);
@@ -87,7 +88,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                DType in_dtype, DType out_dtype, DType scale_dtype,
                                                JAXX_Scaling_Mode scaling_mode,
-                                               QuantizeLayout q_layout);
+                                               JAXX_Quantize_Layout quantize_layout);
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
@@ -162,5 +163,6 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
