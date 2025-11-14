@@ -19,11 +19,14 @@ __all__ = [
     "map_score_function",
 ]
 
+
 def map_score_function(score_function: str) -> int:
     score_function_map = {"sigmoid": 0, "softmax": 1}
-    assert score_function in score_function_map, \
-        f"score_function must be 'sigmoid' or 'softmax', got {score_function}"
+    assert (
+        score_function in score_function_map
+    ), f"score_function must be 'sigmoid' or 'softmax', got {score_function}"
     return score_function_map[score_function]
+
 
 class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
     """
@@ -32,7 +35,14 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
 
     name = "te_fused_topk_with_score_function_forward_ffi"
     multiple_results = True  # Returns (probs, routing_map, intermediate_output)
-    impl_static_args = (2, 3, 4, 5, 6, 7,)  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
+    impl_static_args = (
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    )  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
     inner_primitive = None
     outer_primitive = None
 
@@ -52,7 +62,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         te_fused_topk_with_score_function_forward abstract
         """
         dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
-        assert len(logits_aval.shape) == 3 # (batch, seqlen, num_experts)
+        assert len(logits_aval.shape) == 3  # (batch, seqlen, num_experts)
 
         probs_aval = logits_aval.update(shape=logits_aval.shape, dtype=dtype)
         routing_map_aval = logits_aval.update(shape=logits_aval.shape, dtype=jnp.bool_)
@@ -78,14 +88,14 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         """
         logits_type = ir.RankedTensorType(logits.type)
         logits_shape = logits_type.shape
-        assert len(logits_shape) == 3 # (batch, seqlen, num_experts)
+        assert len(logits_shape) == 3  # (batch, seqlen, num_experts)
         (batch, seqlen, num_experts) = logits_shape
 
         return ffi.ffi_lowering(FusedTopkWithScoreFunctionFwdPrimitive.name)(
             ctx,
             logits,
             expert_bias,
-            num_tokens=batch*seqlen,
+            num_tokens=batch * seqlen,
             num_experts=num_experts,
             topk=topk,
             use_pre_softmax=use_pre_softmax,
@@ -107,17 +117,20 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         score_function,
     ):
         assert FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive is not None
-        (probs, routing_map, intermediate_output) = FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
-            logits,
-            expert_bias,
-            topk=topk,
-            use_pre_softmax=use_pre_softmax,
-            num_groups=num_groups,
-            group_topk=group_topk,
-            scaling_factor=scaling_factor,
-            score_function=score_function,
+        (probs, routing_map, intermediate_output) = (
+            FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
+                logits,
+                expert_bias,
+                topk=topk,
+                use_pre_softmax=use_pre_softmax,
+                num_groups=num_groups,
+                group_topk=group_topk,
+                scaling_factor=scaling_factor,
+                score_function=score_function,
+            )
         )
         return probs, routing_map, intermediate_output
+
     @staticmethod
     def batcher(
         batched_args,
@@ -129,7 +142,9 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         scaling_factor,
         score_function,
     ):
-        raise NotImplementedError("Batcher not implemented for FusedTopkWithScoreFunctionFwdPrimitive")
+        raise NotImplementedError(
+            "Batcher not implemented for FusedTopkWithScoreFunctionFwdPrimitive"
+        )
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -169,7 +184,8 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         del result_infos
         out_shardings = (arg_infos[0].sharding, arg_infos[0].sharding, arg_infos[0].sharding)
         arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding)
-        impl = partial(FusedTopkWithScoreFunctionFwdPrimitive.impl,
+        impl = partial(
+            FusedTopkWithScoreFunctionFwdPrimitive.impl,
             topk=topk,
             use_pre_softmax=use_pre_softmax,
             num_groups=num_groups,
@@ -261,7 +277,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         """
         intermediate_output_type = ir.RankedTensorType(intermediate_output.type)
         intermediate_output_shape = intermediate_output_type.shape
-        assert len(intermediate_output_shape) == 3 # (batch, seqlen, num_experts)
+        assert len(intermediate_output_shape) == 3  # (batch, seqlen, num_experts)
         (batch, seqlen, num_experts) = intermediate_output_shape
 
         return ffi.ffi_lowering(FusedTopkWithScoreFunctionBwdPrimitive.name)(
@@ -269,7 +285,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
             routing_map,
             intermediate_output,
             grad_probs,
-            num_tokens=batch*seqlen,
+            num_tokens=batch * seqlen,
             num_experts=num_experts,
             topk=topk,
             use_pre_softmax=use_pre_softmax,
@@ -307,7 +323,9 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         scaling_factor,
         score_function,
     ):
-        raise NotImplementedError("Batcher not implemented for FusedTopkWithScoreFunctionBwdPrimitive")
+        raise NotImplementedError(
+            "Batcher not implemented for FusedTopkWithScoreFunctionBwdPrimitive"
+        )
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -410,6 +428,7 @@ def fused_topk_with_score_function_fwd(
         scaling_factor=scaling_factor,
         score_function=score_function,
     )
+
 
 def fused_topk_with_score_function_bwd(
     routing_map: jnp.ndarray,

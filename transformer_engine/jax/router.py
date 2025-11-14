@@ -57,13 +57,27 @@ def _fused_topk_with_score_function(
     score_function,
 ):
     outputs, _ = _fused_topk_fwd_rule(
-        logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
+        logits,
+        expert_bias,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
     )
     return outputs
 
 
 def _fused_topk_fwd_rule(
-    logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
+    logits,
+    expert_bias,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
 ):
     probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
         logits,
@@ -84,7 +98,7 @@ def _fused_topk_bwd_rule(
     del num_groups, group_topk
     routing_map, intermediate_output = ctx
     grad_probs, _, _ = grads
-    
+
     grad_logits = tex.fused_topk_with_score_function_bwd(
         routing_map,
         intermediate_output,
