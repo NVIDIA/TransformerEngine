@@ -633,8 +633,9 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
         optimizer_fp8.step()
         optimizer.step()
 
-        assert torch.allclose(loss_fp8, loss, atol=0, rtol=0), \
-            f"Loss mismatch at rank {rank}, step {i} for {quantization}"
+        assert torch.allclose(
+            loss_fp8, loss, atol=0, rtol=0
+        ), f"Loss mismatch at rank {rank}, step {i} for {quantization}"
 
 
 def _test_fsdp_cast_master_weights_to_fp8(
@@ -724,8 +725,9 @@ def _test_fsdp_cast_master_weights_to_fp8(
         optimizer_fp8.step()
         optimizer.step()
 
-        assert torch.allclose(loss_fp8, loss, atol=0, rtol=0), \
-            f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
+        assert torch.allclose(
+            loss_fp8, loss, atol=0, rtol=0
+        ), f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
 
 
 def run_parallel_tests() -> None:
