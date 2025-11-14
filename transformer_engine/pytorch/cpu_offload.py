@@ -134,8 +134,8 @@ class TensorGroupProcessor:
         Changes tensors to base tensors and saves view options in aux.
 
         It we save multiple tensors which in fact are views of the same base tensor,
-        this will save unnecessary calls to .contiguous(). It is used for example in
-        MultiHeadAttention for interleavedq, k, v tensors.
+        this will offload only this one base tensor. It is used for example in
+        MultiHeadAttention for interleaved q, k, v tensors.
         """
 
         def _check_if_offload_base_tensor(tensor: torch.Tensor) -> bool:
