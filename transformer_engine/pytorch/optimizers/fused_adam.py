@@ -372,9 +372,9 @@ class FusedAdam(torch.optim.Optimizer):
         """
         dtype = self.name_to_dtype_map[state_name]
         if store_param_remainders:
-            data = torch.zeros_like(param, dtype=torch.int16)
+            data = torch.zeros(param.shape, dtype=torch.int16, device=param.device)
         else:
-            data = torch.empty_like(param, dtype=dtype)
+            data = torch.empty(param.shape, dtype=dtype, device=param.device)
         if zero_buffer:
             data.zero_()
 
