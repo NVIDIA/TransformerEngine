@@ -7,6 +7,7 @@ Wrapper module for Transformer related layers with FP8 support.
 from functools import reduce
 import operator
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
+import warnings
 
 import numpy as np
 import jax.numpy as jnp
