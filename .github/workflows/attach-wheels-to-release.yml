@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 # This workflow will:
 # - Create a new Github release
 # - Build wheels for supported architectures
