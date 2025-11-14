@@ -68,7 +68,12 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
@@ -229,6 +234,9 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
+
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
         # ------------------------------------------------------
         # Input tensor is ready for GEMM...
@@ -240,7 +248,8 @@ class _Linear(torch.autograd.Function):
         weightmat = weight
         if fp8 or debug:
             # Configure quantizer
-            if weight_quantizer is not None:
+            # No need to set the quantizer states if weight is already quantized
+            if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
                 columnwise_usage = is_grad_enabled and inp.requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (
@@ -248,7 +257,9 @@ class _Linear(torch.autograd.Function):
                         and not in_fp8_activation_recompute_phase()
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-
+            elif isinstance(weight, QuantizedTensor):
+                # If weight is already quantized, no need to set quantizer states
+                weight_quantizer = weight._quantizer
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
@@ -389,11 +400,6 @@ class _Linear(torch.autograd.Function):
             if backward_needs_input:
                 saved_inputmat = inputmat
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensorStorage):
-                    weightmat.update_usage(columnwise_usage=True)
-
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
 
@@ -419,6 +425,7 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
+            mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -510,8 +517,8 @@ class _Linear(torch.autograd.Function):
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    weight.main_grad = main_grad
+            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already

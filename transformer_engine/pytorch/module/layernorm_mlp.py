@@ -69,7 +69,12 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -99,6 +104,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "sreglu": (tex.sreglu, tex.dsreglu, None),
             "silu": (tex.silu, tex.dsilu, None),
             "swiglu": (tex.swiglu, tex.dswiglu, None),
+            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
         }
     if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
@@ -114,6 +120,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "sreglu": (tex.sreglu, tex.dsreglu, None),
             "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
             "swiglu": (tex.swiglu, tex.dswiglu, None),
+            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
         }
     # no activation fusion written yet
     # Per-tensor current scaling or fp8 blockwise scaling or custom quantization: []
@@ -135,6 +142,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "sreglu": (tex.sreglu, tex.dsreglu, None),
             "silu": (tex.silu, tex.dsilu, None),
             "swiglu": (tex.swiglu, tex.dswiglu, None),
+            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
         }
     raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
@@ -199,6 +207,7 @@ class _LayerNormMLP(torch.autograd.Function):
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
         activation: str,
+        activation_params: Optional[dict],
         normalization: str,
         ub_overlap_ag: bool,
         ub_overlap_rs: bool,
@@ -231,6 +240,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
@@ -347,8 +358,17 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            # No need to set the quantizer states if weights are already quantized
+            if isinstance(fc1_weight, QuantizedTensorStorage):
+                fc1_weight_quantizer = fc1_weight._quantizer
+            elif fc1_weight_quantizer is not None:
+                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+
+            if isinstance(fc2_weight, QuantizedTensorStorage):
+                fc2_weight_quantizer = fc2_weight._quantizer
+            elif fc2_weight_quantizer is not None:
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -440,6 +460,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # ACTIVATION - sometimes activation is fused with the GEMM above.
 
         fc1_out_without_bias = None
+        act_params = activation_params or {}
 
         if bias_gelu_fusion:
             fc1_out = None
@@ -449,7 +470,7 @@ class _LayerNormMLP(torch.autograd.Function):
             act_out, _, fc1_out, _ = fc1_outputs
         elif debug:
             fc1_out, *_ = fc1_outputs
-            act_out = activation_func(fc1_out, None)
+            act_out = activation_func(fc1_out, None, **act_params)
             act_out = fc2_input_quantizer(act_out)
         else:
             fc1_out, *_ = fc1_outputs
@@ -457,19 +478,19 @@ class _LayerNormMLP(torch.autograd.Function):
                 recipe = FP8GlobalStateManager.get_fp8_recipe()
                 if recipe.float8_block_scaling():
                     # tex.quantize does not support GELU fusion for blockwise
-                    act_out = activation_func(fc1_out, None)
+                    act_out = activation_func(fc1_out, None, **act_params)
                     act_out = tex.quantize(act_out, fc2_input_quantizer)
                 elif recipe.custom():
                     # tex.quantize does not support custom quantizers
-                    act_out = activation_func(fc1_out, None)
+                    act_out = activation_func(fc1_out, None, **act_params)
                     act_out = fc2_input_quantizer(act_out)
                 else:
-                    act_out = activation_func(fc1_out, fc2_input_quantizer)
+                    act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
             else:
                 if fp8_calibration:
-                    act_out = activation_func(fc1_out, None)
+                    act_out = activation_func(fc1_out, None, **act_params)
                 else:
-                    act_out = activation_func(fc1_out, fc2_input_quantizer)
+                    act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
 
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
@@ -533,13 +554,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Cache state for backward pass
         if is_grad_enabled:
-
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(fc1_weight_final, QuantizedTensorStorage):
-                fc1_weight_final.update_usage(columnwise_usage=True)
-            if isinstance(fc2_weight_final, QuantizedTensorStorage):
-                fc2_weight_final.update_usage(columnwise_usage=True)
-
             if cpu_offloading:
                 mark_activation_offload(
                     inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
@@ -569,6 +583,18 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
+
+            if cpu_offloading:
+                mark_not_offload(
+                    ln_weight,
+                    ln_bias,
+                    fc1_weight_final,
+                    fc1_weight,
+                    fc1_bias,
+                    fc2_weight_final,
+                    fc2_weight,
+                    fc2_bias,
+                )
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
@@ -624,6 +650,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.device = device
             ctx.activation_dtype = activation_dtype
             ctx.activation = activation
+            ctx.activation_params = activation_params
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -1002,6 +1029,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # --------------------------------------------------
 
             # bias computation
+            act_params = ctx.activation_params or {}
             fc1_bias_grad = None
             fuse_gemm_and_bias_fc1_wgrad = False
             if ctx.fc1_grad_output_quantizer is not None:
@@ -1015,7 +1043,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     dact = ctx.fc1_grad_output_quantizer(dact)
             elif ctx.debug:
                 dact_func = _act_func(ctx.activation)[1]
-                dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None)
+                dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params)
                 fc1_bias_grad = dact.sum(dim=0)
                 dact = ctx.fc1_grad_output_quantizer(dact)
             elif (
@@ -1027,7 +1055,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
                 )[2]
                 fc1_bias_grad, dact = dbias_dact_quantize_func(
-                    fc2_dgrad, fc1_out.to(ctx.activation_dtype), ctx.fc1_grad_output_quantizer
+                    fc2_dgrad,
+                    fc1_out.to(ctx.activation_dtype),
+                    ctx.fc1_grad_output_quantizer,
+                    **act_params,
                 )  # quantize bgrad gelu fused
             else:
                 # Fusion: gemm + gelu,
@@ -1036,7 +1067,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
                     )[1]
                     dact = activation_func_bwd(
-                        fc2_dgrad, fc1_out.to(ctx.activation_dtype), None
+                        fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params
                     )  # activation in high precision
 
                 if ctx.fp8:
@@ -1401,6 +1432,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # bwd_ln_sm_margin
             None,  # zero_centered_gamma
             None,  # activation
+            None,  # activation_params
             None,  # normalization
             None,  # ub_overlap_ag
             None,  # ub_overlap_rs
@@ -1436,7 +1468,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
     activation : str, default = 'gelu'
           activation function used.
           Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                   'silu', and 'swiglu'.
+                   'silu', 'swiglu', and 'clamped_swiglu'.
+    activation_params : dict, default = `None`
+                        Additional parameters for the activation function.
+                        At the moment, only used for 'clamped_swiglu' activation which
+                        supports 'limit' and 'alpha' parameters.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -1537,6 +1573,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         bias: bool = True,
         normalization: str = "LayerNorm",
         activation: str = "gelu",
+        activation_params: Optional[dict] = None,
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
         params_dtype: Optional[torch.dtype] = None,
@@ -1564,6 +1601,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         assert normalization in ["LayerNorm", "RMSNorm"], "Unsupported normalization type!"
         self.use_bias = bias
         self.activation = activation
+        self.activation_params = activation_params
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
@@ -1643,7 +1681,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu"]:
+        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
@@ -1897,6 +1935,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,
+                self.activation_params,
                 self.normalization,
                 self.ub_overlap_ag,
                 self.ub_overlap_rs,
@@ -2026,6 +2065,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
 
         fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
+        act_params = self.activation_params or {}
+        # Default params for clamped_swiglu in Transformer Engine
+        clamped_swiglu_limit, clamped_swiglu_alpha = act_params.get("limit", 7.0), act_params.get(
+            "alpha", 1.702
+        )
+
+        def _clamped_swiglu(x, limit, alpha):
+            x_glu, x_linear = x.chunk(2, dim=-1)
+            x_glu = x_glu.clamp(min=None, max=limit)
+            x_linear = x_linear.clamp(min=-limit, max=limit)
+            out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+            y = out_glu * (x_linear + 1)
+            return y
 
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
@@ -2040,6 +2092,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             * x.chunk(2, -1)[1],
             "silu": torch.nn.functional.silu,
             "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "clamped_swiglu": lambda x: _clamped_swiglu(
+                x, clamped_swiglu_limit, clamped_swiglu_alpha
+            ),
         }
         if self.activation not in activation_map:
             raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
