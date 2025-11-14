@@ -272,6 +272,7 @@ static void FusedAttnForwardImpl(
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
     // Python passes: q=packed_qkv, k=dummy, v=dummy
     // Extract K and V pointers from the packed q data
+    NVTE_CHECK(q_max_seqlen == kv_max_seqlen, "q_max_seqlen must equal kv_max_seqlen");
     NVTE_CHECK(qk_head_dim == v_head_dim,
                "For QKV packed layout, qk_head_dim must equal v_head_dim");
     size_t stride = (typeToSize(dtype) * attn_heads * qk_head_dim);
@@ -505,6 +506,7 @@ static void FusedAttnBackwardImpl(
 
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
+    NVTE_CHECK(q_max_seqlen == kv_max_seqlen, "q_max_seqlen must equal kv_max_seqlen");
     NVTE_CHECK(qk_head_dim == v_head_dim,
                "For QKV packed layout, qk_head_dim must equal v_head_dim");
     size_t stride = (typeToSize(dtype) * attn_heads * qk_head_dim);
