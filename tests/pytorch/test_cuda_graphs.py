@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Iterable, List, Union
+from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
 import torch
@@ -158,6 +158,20 @@ def get_outputs(
     else:
         values.extend(output)
     return values
+
+
+def reset_graphs(
+    graphed_callables: Union[Callable, Tuple[Callable, ...], Dict[Tuple[int, int], Callable]],
+) -> None:
+    """Reset CUDA graphs."""
+    if isinstance(graphed_callables, tuple) or isinstance(graphed_callables, list):
+        for callable in graphed_callables:
+            callable.reset()
+    elif isinstance(graphed_callables, dict):
+        for callable in graphed_callables.values():
+            callable.reset()
+    else:
+        graphed_callables.reset()
 
 
 class _Sequential(torch.nn.Sequential):
@@ -322,7 +336,12 @@ def _test_cuda_graphs(
             output.backward(grad_output)
         optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if graph_mode == "full":
+        reset_graphs(model)
+    elif graph_mode == "individual":
+        reset_graphs(modules)
+    return outputs
 
 
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
@@ -468,7 +487,10 @@ def _test_cuda_graphs_with_dot_product_attention(
         output = model(*inputs)
         output.backward(grad_output)
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
 
 
 @pytest.mark.parametrize("dtype", dtypes)
@@ -553,7 +575,10 @@ def _test_cuda_graphs_with_kwargs(
             output.backward(grad_output)
         optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
 
 
 def test_make_graphed_callables_with_kwargs(
@@ -668,7 +693,10 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         optimizer.step()
 
     outputs = [y for _, y in sorted(outputs.items())]
-    return get_outputs(model, outputs)
+    outputs = get_outputs(model, outputs)
+    if with_graph:
+        reset_graphs(layer_forwards)
+    return outputs
 
 
 def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
