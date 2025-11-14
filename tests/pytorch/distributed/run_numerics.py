@@ -1030,6 +1030,7 @@ def test_layernorm_mlp():
         {"return_bias": True},
         {"return_layernorm_output": True},
         {"delay_wgrad_compute": True},
+        {"checkpoint": True},
     ]
 
     for kwargs in kwargs_list:
