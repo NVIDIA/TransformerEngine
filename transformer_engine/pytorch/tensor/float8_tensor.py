@@ -306,7 +306,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1])
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
