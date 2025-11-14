@@ -247,6 +247,7 @@ def check_group_quantization_nvfp4_versus_reference(
         (1024, 256),
         # larger sizes
         (8192, 1024),
+        (16384, 16384),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
