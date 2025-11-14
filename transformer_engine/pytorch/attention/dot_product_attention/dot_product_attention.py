@@ -974,11 +974,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = `False`
             Whether to enforce output to be in FP8 or not.
-        num_splits: Optional[int], default = `None`
+        num_splits: Optional[int], default = 1
             Optional split control for FlashAttention-3 only. When set, this value is forwarded
             to the FA3 backend to control internal kernel splitting behavior. It is ignored for
-            other backends and will raise a ValueError if a non-FA3 backend is selected or if
-            FlashAttention-3 is not installed.
+            other backends.
         """
 
         with torch.cuda.device(query_layer.device), self.prepare_forward(
@@ -1321,6 +1320,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1371,34 +1371,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_fused_attention = _attention_backends["use_fused_attention"]
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
-
-            # If num_splits is requested, ensure we are using FlashAttention-3.
-            if num_splits is not None:
-                is_fa3_selected = (
-                    use_flash_attention
-                    and flash_attention_backend is not None
-                    and flash_attention_backend == dpa_utils.FlashAttentionUtils.fa3_version
-                )
-                if not is_fa3_selected:
-                    backend_name = (
-                        f"FlashAttention ({str(flash_attention_backend)})"
-                        if use_flash_attention
-                        else (
-                            "FusedAttention"
-                            if use_fused_attention
-                            else "UnfusedDotProductAttention"
-                        )
-                    )
-                    if not dpa_utils.FlashAttentionUtils.v3_is_installed:
-                        raise ValueError(
-                            "num_splits is only supported with FlashAttention-3, which is not"
-                            " installed. "
-                        )
-                    raise ValueError(
-                        "num_splits is only supported with FlashAttention-3. Selected backend is"
-                        f" {backend_name}. Please adjust configuration to enable FA3 for these"
-                        " inputs."
-                    )
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:

@@ -125,7 +125,6 @@ def test_dot_product_attention(
     qkv_layout,
     swa,
     pad_between_seqs,
-    num_splits=None,
 ):
     """Test DotProductAttention module"""
 
@@ -252,7 +251,6 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
-            num_splits=num_splits,
         )
 
     # Compare results
@@ -317,16 +315,21 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
 
+model_configs_num_splits = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "num_splits_1_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+    }
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_base])
-@pytest.mark.parametrize("model", ["base_1_0"])
+@pytest.mark.parametrize("model_configs", [model_configs_num_splits])
+@pytest.mark.parametrize("model", model_configs_num_splits.keys())
 def test_dpa_num_splits(dtype, model_configs, model):
     """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
-    if not FlashAttentionUtils.v3_is_installed:
-        pytest.skip("num_splits requires FlashAttention-3.")
     test_dot_product_attention(
-        dtype, model_configs, model, False, True, None, False, False, num_splits=2
+        dtype, model_configs, model, False, True, None, False, False,
     )
 
 
@@ -870,7 +873,6 @@ def _run_dot_product_attention(
     workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
-    num_splits=None,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
     # Set RNG and environment varables
@@ -1176,7 +1178,7 @@ def _run_dot_product_attention(
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
         # Only pass num_splits when exercising the FlashAttention path
-        num_splits=(num_splits if backend == "FlashAttention" else None),
+        num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
     max_logit = None
     if config.return_max_logit:
