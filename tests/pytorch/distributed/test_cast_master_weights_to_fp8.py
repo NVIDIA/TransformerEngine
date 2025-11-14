@@ -288,7 +288,7 @@ class MiniZero_1:
                 start = offset
                 end = offset + weight.numel()
                 if isinstance(weight, QuantizedTensor):
-                    weight = _get_raw_data(weight)
+                    weight = _get_raw_data(weight, colwise)
                 weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
             if self.manual_post_all_gather_processing:
@@ -633,7 +633,8 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
         optimizer_fp8.step()
         optimizer.step()
 
-        torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
+        assert torch.allclose(loss_fp8, loss, atol=0, rtol=0), \
+            f"Loss mismatch at rank {rank}, step {i} for {quantization}"
 
 
 def _test_fsdp_cast_master_weights_to_fp8(
@@ -687,7 +688,7 @@ def _test_fsdp_cast_master_weights_to_fp8(
     )
     optimizer = MiniFSDP([w for w in model.parameters()], 10.0, dp_group)
 
-    for _ in range(100):
+    for i in range(100):
         optimizer_fp8.zero_grad()
         optimizer.zero_grad()
 
@@ -723,7 +724,8 @@ def _test_fsdp_cast_master_weights_to_fp8(
         optimizer_fp8.step()
         optimizer.step()
 
-        torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
+        assert torch.allclose(loss_fp8, loss, atol=0, rtol=0), \
+            f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
 
 
 def run_parallel_tests() -> None:
