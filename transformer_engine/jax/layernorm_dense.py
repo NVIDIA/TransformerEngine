@@ -236,8 +236,8 @@ def _layernorm_dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(TensorUsage.RHS_TRANS),
+        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
+        casted_kernel.get_tensor(TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         mu,

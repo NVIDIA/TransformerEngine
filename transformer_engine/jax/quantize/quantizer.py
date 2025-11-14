@@ -15,10 +15,10 @@ import warnings
 import jax
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
-from transformer_engine_jax import QuantizeLayout
 from transformer_engine.common import recipe
 
 from .scaling_modes import ScalingMode
+from .misc import QuantizeLayout
 from .hadamard import apply_rht
 from .tensor import (
     ScaledTensor,
@@ -37,7 +37,6 @@ from .device_utils import is_fp8_gemm_with_all_layouts_supported
 from ..sharding import get_num_devices_in_mesh
 
 __all__ = [
-    "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
     "CurrentScaleQuantizer",
@@ -84,12 +83,15 @@ class Quantizer(ABC):
         q_dtype: The data type for quantized values
         scaling_mode: The scaling mode to use for quantization
         q_layout: The quantization axis (row-wise, column-wise, or both)
+        data_layout: The data layout string (e.g., "NT")
+        checkpoint_name: Optional name for checkpointing quantization state
     """
 
     q_dtype: jnp.dtype
     scaling_mode: ScalingMode
     q_layout: QuantizeLayout
     data_layout: str
+    checkpoint_name: Optional[str] = None
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -98,7 +100,13 @@ class Quantizer(ABC):
             Tuple of (children, aux_data) for tree operations
         """
         children = ()
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
+        aux_data = (
+            self.q_dtype,
+            self.scaling_mode,
+            self.q_layout,
+            self.data_layout,
+            self.checkpoint_name,
+        )
         return (children, aux_data)
 
     @classmethod
@@ -118,14 +126,6 @@ class Quantizer(ABC):
         """Update quantizer state (no-op in base class)."""
         del args, kwargs
 
-    def is_2x2x(self) -> bool:
-        """Check if quantizer uses both row-wise and column-wise quantization.
-
-        Returns:
-            True if using both row-wise and column-wise quantization
-        """
-        return self.q_layout == QuantizeLayout.ROWWISE_COLWISE
-
     def get_data_layout(self) -> str:
         """Get the data data_layout string.
 
@@ -135,11 +135,11 @@ class Quantizer(ABC):
         Raises:
             ValueError: If quantization axis is invalid
         """
-        if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
+        if self.q_layout.is_rowwise_colwise:
             return self.data_layout
-        if self.q_layout == QuantizeLayout.ROWWISE:
+        if self.q_layout.is_rowwise_only:
             return self.data_layout[0]
-        if self.q_layout == QuantizeLayout.COLWISE:
+        if self.q_layout.is_colwise_only:
             return self.data_layout[1]
         raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
@@ -174,18 +174,10 @@ class Quantizer(ABC):
         """
         del kwargs
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
 
-        if (is_rowwise and is_colwise) or self.is_2x2x():
+        if is_rowwise and is_colwise:
             rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
             colwise_tensor = self._quantize_func(
                 x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis
@@ -299,16 +291,8 @@ class CurrentScaleQuantizer(Quantizer):
             flatten_axis += x.ndim
         assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
 
         rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
         colwise_tensor = None
@@ -362,7 +346,13 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.scale, self.amax_history)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
+        aux_data = (
+            self.q_dtype,
+            self.scaling_mode,
+            self.q_layout,
+            self.data_layout,
+            self.checkpoint_name,
+        )
         return (children, aux_data)
 
     def _quantize_func(
@@ -613,7 +603,14 @@ class NVFP4Quantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.stochastic_rounding_rng_state,)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.use_rht)
+        aux_data = (
+            self.q_dtype,
+            self.scaling_mode,
+            self.q_layout,
+            self.data_layout,
+            self.checkpoint_name,
+            self.use_rht,
+        )
         return (children, aux_data)
 
     @classmethod
@@ -892,7 +889,14 @@ class GroupedQuantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.quantizers,)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.n_groups)
+        aux_data = (
+            self.q_dtype,
+            self.scaling_mode,
+            self.q_layout,
+            self.data_layout,
+            self.checkpoint_name,
+            self.n_groups,
+        )
         return (children, aux_data)
 
     def __post_init__(self):
@@ -974,16 +978,8 @@ class GroupedQuantizer(Quantizer):
             flatten_axis += x.ndim
         assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
 
-        is_rowwise = (
-            is_rowwise
-            if is_rowwise is not None
-            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
-        )
-        is_colwise = (
-            is_colwise
-            if is_colwise is not None
-            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
-        )
+        is_rowwise = is_rowwise if is_rowwise is not None else self.q_layout.has_rowwise
+        is_colwise = is_colwise if is_colwise is not None else self.q_layout.has_colwise
         assert is_rowwise or is_colwise, "No quantization layout is specified"
 
         original_shape = x.shape
@@ -1074,6 +1070,7 @@ class QuantizerFactory:
         q_dtype: jnp.dtype = None,
         q_layout: QuantizeLayout = None,
         n_groups: int = None,
+        checkpoint_name: Optional[str] = None,
         **kwargs,
     ) -> Quantizer:
         """Create one or more quantizers with specified parameters.
@@ -1085,6 +1082,7 @@ class QuantizerFactory:
             q_layout: Quantization axis
             flatten_axis: The quantization axis for the tensor
             n_groups: Number of quantizers if GroupedQuantizer
+            checkpoint_name: Optional name for checkpointing quantizations
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -1108,7 +1106,11 @@ class QuantizerFactory:
             for _ in range(n_quantizers):
                 quantizers.append(
                     quantizer_type(
-                        q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout, **kwargs
+                        q_dtype=q_dtype,
+                        scaling_mode=scaling_mode,
+                        q_layout=q_layout,
+                        checkpoint_name=checkpoint_name,
+                        **kwargs,
                     )
                 )
         return quantizers[0] if len(quantizers) == 1 else tuple(quantizers)
@@ -1122,6 +1124,7 @@ class QuantizerFactory:
         bwd_dtype,
         is_2x2x,
         n_groups,
+        checkpoint_name: Optional[str] = None,
         **kwargs,
     ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
@@ -1134,6 +1137,7 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass
             is_2x2x: Whether to use 2x2x quantization
             n_groups
+            checkpoint_name: Optional name for checkpointing quantizations
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -1156,12 +1160,32 @@ class QuantizerFactory:
         else:
             args_x = args_kernel = args_grad = {}
 
-        q_x = QuantizerFactory.create(1, x_scaling_mode, fwd_dtype, q_layout_x, n_groups, **args_x)
+        q_x = QuantizerFactory.create(
+            1,
+            x_scaling_mode,
+            fwd_dtype,
+            q_layout_x,
+            n_groups,
+            checkpoint_name=checkpoint_name,
+            **args_x,
+        )
         q_kernel = QuantizerFactory.create(
-            1, kernel_scaling_mode, fwd_dtype, q_layout_kernel, n_groups, **args_kernel
+            1,
+            kernel_scaling_mode,
+            fwd_dtype,
+            q_layout_kernel,
+            n_groups,
+            checkpoint_name=checkpoint_name,
+            **args_kernel,
         )
         q_dgrad = QuantizerFactory.create(
-            1, grad_scaling_mode, bwd_dtype, q_layout_dgrad, n_groups, **args_grad
+            1,
+            grad_scaling_mode,
+            bwd_dtype,
+            q_layout_dgrad,
+            n_groups,
+            checkpoint_name=checkpoint_name,
+            **args_grad,
         )
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
@@ -1173,6 +1197,7 @@ class QuantizerFactory:
         bwd_dtype: jnp.dtype = None,
         is_2x2x: bool = None,
         n_groups: int = None,
+        checkpoint_name: Optional[str] = None,
         # TODO(jberchtold): rename fp8_recipe to quantization_recipe
         fp8_recipe: Optional[recipe.Recipe] = None,
         **kwargs,
@@ -1186,6 +1211,7 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass, default is get_quantize_config().BWD_DTYPE
             is_2x2x: Whether to use 2x2x quantization, default is get_quantize_config().IF_QUANTIZE_2X
             n_groups:
+            checkpoint_name: Optional name for checkpointing quantizations
             fp8_recipe: Recipe to use for quantization. Scaling mode can be specified directly via the scaling_mode parameter or indirectly via recipe. Recipe is preferred as it will support additional recipes in future where scaling mode differs between x, kernel, and grad in the quantizer set.
             **kwargs: Additional arguments for quantizer initialization
 
@@ -1241,6 +1267,7 @@ class QuantizerFactory:
                     bwd_dtype=bwd_dtype,
                     is_2x2x=is_2x2x,
                     n_groups=n_groups,
+                    checkpoint_name=checkpoint_name,
                     **kwargs,
                 )
             )
