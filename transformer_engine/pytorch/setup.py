@@ -117,8 +117,10 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
         if FORCE_BUILD:
-            return super().run()
+            super().run()
+            return
 
         wheel_url, wheel_filename = get_wheel_url()
         print("Guessing wheel URL: ", wheel_url)
@@ -141,7 +143,8 @@ class CachedWheelsCommand(_bdist_wheel):
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
-            return super().run()
+            super().run()
+            return
 
 
 if __name__ == "__main__":
