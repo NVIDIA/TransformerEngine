@@ -316,7 +316,8 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
                                 std::vector<TensorWrapper> &output_list,
-                                const std::vector<int> &split_sections) {
+                                const std::vector<int> &split_sections,
+                                bool contiguous_data_and_scale) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -350,6 +351,11 @@ void multi_tensor_quantize_impl(const TensorWrapper &single_input,
         break;
       }
     } else if (detail::IsNVFP4Quantizers(quantizer_py_list[i].ptr())) {
+      // NVFP4 grouped quantization kernels requires contiguous data and scale
+      if (!contiguous_data_and_scale) {
+        with_fused_kernel = false;
+        break;
+      }
       // check if the list of quantizers are all NVFP4 quantizers
       if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
         with_fused_kernel = false;
@@ -451,20 +457,28 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   TensorWrapper dummy_input_wrapper;
   // Perform multi-tensor quantization
   multi_tensor_quantize_impl(dummy_input_wrapper, input_cpp_list, quantizer_list,
-                             quantizer_cpp_list, output_cpp_list, dummy_split_sections);
+                             quantizer_cpp_list, output_cpp_list, dummy_split_sections, false);
 
   return output_py_list;
 }
 
 namespace {
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp8_blockwise_tensors(
-    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
-    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
+// allocate fp8 block scaling data, fp32 scales
+// layout: [fp8_data0, ..., fp8_dataN, fp32_scale0, ..., fp32_scaleN]
+// also returns a bool indicating if the data and scale buffers are contiguous
+// when alignment creates bubbles between buffers, any fused quantization will not be invoked
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool>
+bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list,
+                                    std::vector<py::handle> &quantizer_py_list,
+                                    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
+  auto &contiguous_data_and_scale = std::get<2>(retval);
+
+  contiguous_data_and_scale = true;
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -512,12 +526,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -555,12 +575,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -610,13 +636,20 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   return retval;
 }
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mxfp8_tensors(
+// allocate mxfp8 data, e8m0 scalings
+// layout: [mxfp8_data0, ..., mxfp8_dataN, e8m0_scaling0, ..., e8m0_scalingN]
+// also returns a bool indicating if the data and scale buffers are contiguous
+// when alignment creates bubbles between buffers, any fused quantization will not be invoked
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_mxfp8_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
+  auto &contiguous_data_and_scale = std::get<2>(retval);
+
+  contiguous_data_and_scale = true;
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -663,12 +696,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -703,12 +742,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -760,13 +805,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 // allocate fp4 data, fp8 scalings, and amax values
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nvfp4_tensors(
+// also returns a bool indicating if the data and scale buffers are contiguous
+// when alignment creates bubbles between buffers, fused quantization will not be invoked
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_nvfp4_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
+  auto &contiguous_data_and_scale = std::get<2>(retval);
+
+  contiguous_data_and_scale = true;
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -821,18 +871,25 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nv
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       // Store ceil(product/2) bytes for fp4 (since each element is 4 bits = 0.5 bytes).
       // Integer arithmetic: ceil(product / 2) == (product + 1) / 2.
       buffer_size += (product(rowwise_data_shapes[i]) + 1) / 2;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // amax is not gonna be contiguous and it's okay
       buffer_size = roundup(buffer_size, 16);  // align to 16B
       amax_offsets.push_back(buffer_size);
       // amax is scalar in fp32, 4 bytes each
@@ -876,18 +933,25 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nv
     size_t buffer_size = 0;
     std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if data buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 256);  // align to 256B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       data_offsets.push_back(buffer_size);
       // Store ceil(product/2) bytes for fp4 (since each element is 4 bits = 0.5 bytes).
       // Integer arithmetic: ceil(product / 2) == (product + 1) / 2.
       buffer_size += (product(columnwise_data_shapes[i]) + 1) / 2;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // Check if roundup changed buffer_size to determine if scale buffer is contiguous
+      size_t prev_buffer_size = buffer_size;
       buffer_size = roundup(buffer_size, 16);  // align to 16B
+      contiguous_data_and_scale &= (prev_buffer_size == buffer_size);
       scale_offsets.push_back(buffer_size);
       buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
+      // amax is not gonna be contiguous and it's okay
       buffer_size = roundup(buffer_size, 16);  // align to 16B
       amax_offsets.push_back(buffer_size);
       // amax is scalar in fp32, 4 bytes each
@@ -1028,6 +1092,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   // Allocate output tensors
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
+  bool contiguous_data_and_scale = false;
   if (!use_fused_bulk_alloc) {
     // Allocate output tensors individually
     for (size_t i = 0; i < num_splits; ++i) {
@@ -1047,7 +1112,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list) =
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
     } else if (is_mxfp8) {
       // MXFP8: construct output tensors with bulk allocations
@@ -1055,7 +1120,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list) =
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
     } else if (is_nvfp4) {
       // NVFP4: construct output tensors with bulk allocations
@@ -1063,7 +1128,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list) =
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
     } else {
       NVTE_CHECK(false, "Expected either FP8 block-scaling or MXFP8 quantizer");
@@ -1072,7 +1137,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
 
   // Perform multi-tensor quantization
   multi_tensor_quantize_impl(input_wrapper, input_list, quantizer_list, quantizer_cpp_list,
-                             output_cpp_list, split_sections);
+                             output_cpp_list, split_sections, contiguous_data_and_scale);
 
   return output_py_list;
 }
