@@ -164,7 +164,7 @@ def reset_graphs(
     graphed_callables: Union[Callable, Tuple[Callable, ...], Dict[Tuple[int, int], Callable]],
 ) -> None:
     """Reset CUDA graphs."""
-    if isinstance(graphed_callables, tuple):
+    if isinstance(graphed_callables, tuple) or isinstance(graphed_callables, list):
         for callable in graphed_callables:
             callable.reset()
     elif isinstance(graphed_callables, dict):
