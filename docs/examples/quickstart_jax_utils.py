@@ -22,18 +22,18 @@ def speedometer(
     dropout_key: jax.random.PRNGKey,
     model_init_fn: Callable = None,
     forward_kwargs: dict = {},
-    fp8_autocast_kwargs: Optional[dict] = None,
+    autocast_kwargs: Optional[dict] = None,
     timing_iters: int = 50,
     warmup_iters: int = 50,
 ) -> None:
     """Measure average runtime for a JAX module
     Perform forward and backward passes .
     """
-    if fp8_autocast_kwargs is None:
-        fp8_autocast_kwargs = {"enabled": False}
+    if autocast_kwargs is None:
+        autocast_kwargs = {"enabled": False}
         model_init_fn = None
 
-    train_step_fn = create_train_step_fn(model_apply_fn, fp8_autocast_kwargs, forward_kwargs)
+    train_step_fn = create_train_step_fn(model_apply_fn, autocast_kwargs, forward_kwargs)
 
     # Warm up runs
     key = dropout_key
@@ -53,7 +53,7 @@ def speedometer(
 
 def create_train_step_fn(
     model_apply_fn: Callable,
-    fp8_autocast_kwargs: Dict[str, Any],
+    autocast_kwargs: Dict[str, Any],
     forward_kwargs: Dict[str, Any] = None,
 ) -> Callable:
     """
@@ -65,7 +65,7 @@ def create_train_step_fn(
 
     def loss_fn(variables: Any, inp: jnp.ndarray, grad_target: jnp.ndarray, dropout_key):
         rngs = {"dropout": dropout_key}
-        with te.fp8_autocast(**fp8_autocast_kwargs):
+        with te.autocast(**autocast_kwargs):
             # Forward Pass: Apply the model using current parameters and variables
             call_kwargs = {**forward_kwargs, "rngs": rngs}
             out = model_apply_fn(variables, inp, **call_kwargs)
