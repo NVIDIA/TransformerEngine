@@ -355,10 +355,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 if rowwise_matches and columnwise_matches:
                     if dst._rowwise_data is not None:
                         dst._rowwise_data.copy_(src._rowwise_data.detach(), *args[2:], **kwargs)
-                        dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach(), *args[2:], **kwargs)
+                        dst._rowwise_scale_inv.copy_(
+                            src._rowwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
                     if dst._columnwise_data is not None:
-                        dst._columnwise_data.copy_(src._columnwise_data.detach(), *args[2:], **kwargs)
-                        dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach(), *args[2:], **kwargs)
+                        dst._columnwise_data.copy_(
+                            src._columnwise_data.detach(), *args[2:], **kwargs
+                        )
+                        dst._columnwise_scale_inv.copy_(
+                            src._columnwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
                     return dst
 
         # FSDP2 related functions.
