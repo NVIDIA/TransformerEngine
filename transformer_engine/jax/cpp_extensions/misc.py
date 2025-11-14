@@ -207,7 +207,9 @@ def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quant
             break
     # _quantize_dbias_impl forcing 1x quantization for tensor scaling switches q_layout to ROWWISE,
     # but this fails when bias fusion is turned on with arch < 100.
-    force_1x_quantization = quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
+    force_1x_quantization = (
+        quantizer.scaling_mode.is_tensor_scaling() and quantizer.q_layout.is_rowwise_colwise
+    )
     return (
         (force_1x_quantization or quantizer.q_layout == QuantizeLayout.ROWWISE)
         and arch_l_100
@@ -229,7 +231,9 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     @return: the output of 'f' with the colwise output calculated
     """
     should_apply_war = (
-        quantizer is not None and quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
+        quantizer is not None
+        and quantizer.scaling_mode.is_tensor_scaling()
+        and quantizer.q_layout.is_rowwise_colwise
     )
     if not should_apply_war:
         return None

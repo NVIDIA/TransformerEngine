@@ -284,12 +284,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # Prepare weight tensor
         # ------------------------------------------------------
         weightmat = weight
-        quantized_weight = False
+        is_weight_param_quantized = False
         if fp8 or debug:
-            quantized_weight = not isinstance(weight, QuantizedTensorStorage)
+            is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
-            if weight_quantizer is not None:
+            # If weight is already quantized, no need to set quantizer states
+            if is_weight_param_quantized:
+                weight_quantizer = weight._quantizer
+            elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             # Get quantized weight
@@ -421,10 +424,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     ):
                         ln_out.update_usage(rowwise_usage=False)
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(weightmat, QuantizedTensorStorage):
-                weightmat.update_usage(columnwise_usage=True)
-
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
 
@@ -437,7 +436,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 fsdp_group,
                 mu,
                 rsigma,
-                weightmat if quantized_weight else None,
+                weightmat if fp8 and not is_weight_param_quantized else None,
                 ln_out if weight.requires_grad else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
@@ -473,7 +472,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
-            ctx.quantized_weight = quantized_weight
+            ctx.is_weight_param_quantized = is_weight_param_quantized
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -578,7 +577,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.fsdp_shapes,
                 mu,
                 rsigma,
-                weight if ctx.fp8 and ctx.quantized_weight else None,
+                weight if ctx.fp8 and not ctx.is_weight_param_quantized else None,
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
@@ -588,8 +587,8 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    origin_weight.main_grad = main_grad
+            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
