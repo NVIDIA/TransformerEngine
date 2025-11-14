@@ -8,6 +8,7 @@ from typing import Tuple
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.interpreters.mlir import ir
+from jax.experimental.custom_partitioning import SdyShardingRule
 
 from .base import BasePrimitive, register_primitive
 
@@ -106,7 +107,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         score_function,
     ):
         assert FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive is not None
-        return FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
+        (probs, routing_map, intermediate_output) = FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
             logits,
             expert_bias,
             topk=topk,
@@ -116,7 +117,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
             scaling_factor=scaling_factor,
             score_function=score_function,
         )
-
+        return probs, routing_map, intermediate_output
     @staticmethod
     def batcher(
         batched_args,
@@ -177,6 +178,40 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
             score_function=score_function,
         )
         return mesh, impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        mesh,
+        operand_types,
+        result_types,
+    ):
+        del (
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            mesh,
+            result_types,
+        )
+
+        prefix = "Router_"
+        logits_spec = (prefix + "batch", prefix + "seqlen", prefix + "experts")
+        expert_bias_spec = (prefix + "experts",)
+
+        output_spec = (prefix + "batch", prefix + "seqlen", prefix + "experts")
+
+        return SdyShardingRule(
+            (logits_spec, expert_bias_spec),
+            (output_spec, output_spec, output_spec),
+        )
 
 
 register_primitive(FusedTopkWithScoreFunctionFwdPrimitive)
@@ -317,6 +352,36 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         )
         return mesh, impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(
+        topk,
+        use_pre_softmax,
+        scaling_factor,
+        score_function,
+        mesh,
+        operand_types,
+        result_types,
+    ):
+        del (
+            topk,
+            use_pre_softmax,
+            scaling_factor,
+            score_function,
+            mesh,
+            result_types,
+        )
+
+        prefix = "RouterBwd_"
+
+        input_spec = (prefix + "batch", prefix + "seqlen", prefix + "experts")
+
+        output_spec = (prefix + "batch", prefix + "seqlen", prefix + "experts")
+
+        return SdyShardingRule(
+            (input_spec, input_spec, input_spec),
+            (output_spec,),
+        )
+
 
 register_primitive(FusedTopkWithScoreFunctionBwdPrimitive)
 
@@ -360,8 +425,8 @@ def fused_topk_with_score_function_bwd(
         routing_map,
         intermediate_output,
         grad_probs,
-        topk,
-        use_pre_softmax,
-        scaling_factor,
-        score_function,
+        topk=topk,
+        use_pre_softmax=use_pre_softmax,
+        scaling_factor=scaling_factor,
+        score_function=score_function,
     )
