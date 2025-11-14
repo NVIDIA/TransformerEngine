@@ -29,7 +29,7 @@ transformer_engine::Tensor make_tensor_view(const transformer_engine::Tensor *so
   return view;
 }
 
-// Helper function to calculate stride for packed QKV tensor unpacking
+// Helper function to calculate stride in bytes for packed QKV tensor unpacking
 size_t calculate_qkv_stride(NVTE_QKV_Layout_Group layout_group, transformer_engine::DType dtype,
                             size_t h, size_t d) {
   size_t stride = 0;
