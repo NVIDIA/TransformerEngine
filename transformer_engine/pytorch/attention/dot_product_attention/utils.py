@@ -1582,8 +1582,9 @@ def _pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     if isinstance(tensor, Float8Tensor):
@@ -1638,8 +1639,9 @@ def _unpack_tensor(
     Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     if isinstance(tensor, Float8Tensor):
         unpacked.scatter_(0, indices, tensor._data)
