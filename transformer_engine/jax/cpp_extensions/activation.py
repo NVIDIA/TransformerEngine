@@ -27,7 +27,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_dbias, quantize, quantize_dbias, AmaxScope
+from .quantization import _jax_dbias, quantize, quantize_dbias, _quantize_dbias_impl, AmaxScope
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -1272,13 +1272,15 @@ def act_lu(
         assert (
             act_out.data.dtype == x.dtype
         ), f"JAX activation output dtype {act_out.data.dtype} must match input dtype {x.dtype}"
-        if quantizer is not None:
-            return quantize(
-                act_out,
-                quantizer=quantizer,
-                amax_scope=amax_scope,
-                transpose_batch_sequence=transpose_batch_sequence,
-            )
+        if quantizer is None:
+            return act_out
+
+        return quantize(
+            act_out,
+            quantizer=quantizer,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
 
     # TE/common does not support colwise-only quantization yet
     if quantizer is not None and quantizer.q_layout.is_colwise_only:
@@ -1432,21 +1434,21 @@ def quantize_dact_dbias(
     ):
         if quantizer is None:
             return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, act_params=act_params)
-        else:
-            dact_out, _ = _jax_quantize_dact_dbias(
-                dz, x, activation_type, is_dbias=False, act_params=act_params
-            )
-            assert (
-                dact_out.data.dtype == x.dtype
-            ), f"JAX dact output dtype {dact_out.data.dtype} must match input dtype {x.dtype}"
-            return quantize_dbias(
-                dact_out,
-                quantizer,
-                is_dbias=is_dbias,
-                flatten_axis=-2,
-                amax_scope=amax_scope,
-                transpose_batch_sequence=transpose_batch_sequence,
-            )
+        dact_out, _ = _jax_quantize_dact_dbias(
+            dz, x, activation_type, is_dbias=False, act_params=act_params
+        )
+        assert (
+            dact_out.data.dtype == x.dtype
+        ), f"JAX dact output dtype {dact_out.data.dtype} must match input dtype {x.dtype}"
+        return quantize_dbias(
+            dact_out,
+            quantizer,
+            is_dbias=is_dbias,
+            flatten_axis=-2,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
+
     if quantizer is None:
         output, _, _, _, updated_amax, _ = PrimitiveClass.outer_primitive.bind(
             dz,
@@ -1482,8 +1484,8 @@ def quantize_dact_dbias(
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
         out = dact_lu(
-            dz,
-            x,
+            dz.astype(jnp.float32),
+            x.astype(jnp.float32),
             activation_type,
             quantizer=None,
             act_params=act_params,
@@ -1491,13 +1493,11 @@ def quantize_dact_dbias(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
         )
-        assert (
-            out.data.dtype == x.dtype
-        ), f"Dact output dtype {out.data.dtype} must match input dtype {x.dtype}"
-        return quantize_dbias(
+        return _quantize_dbias_impl(
             out,
             quantizer,
             is_dbias=True,
+            dq_dtype=x.dtype,
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
@@ -1537,13 +1537,11 @@ def quantize_dact_dbias(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
         )
-        assert (
-            out.data.dtype == x.dtype
-        ), f"Dact output dtype {out.data.dtype} must match input dtype {x.dtype}"
-        out, dbias = quantize_dbias(
+        out, dbias = _quantize_dbias_impl(
             out,
             is_dbias=is_dbias,
             quantizer=quantizer,
+            dq_dtype=x.dtype,
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
@@ -1556,20 +1554,18 @@ def quantize_dact_dbias(
     # TE/common dact_dbias_quantize does not support gated act yet
     if is_dbias and is_gated:
         dgated = dact_lu(
-            dz,
-            x,
+            dz.astype(jnp.float32),
+            x.astype(jnp.float32),
             activation_type=activation_type,
             act_params=act_params,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
-        assert (
-            dgated.data.dtype == x.dtype
-        ), f"Dact output dtype {dgated.data.dtype} must match input dtype {x.dtype}"
-        out, dbias = quantize_dbias(
+        out, dbias = _quantize_dbias_impl(
             dgated,
             quantizer,
             is_dbias=True,
+            dq_dtype=x.dtype,
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
