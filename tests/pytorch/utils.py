@@ -211,7 +211,7 @@ class ModelConfig:
         max_ctx_len: int = None,
         num_layers: int = 1,
         eps: float = 1e-5,
-        num_splits = 1,
+        num_splits=1,
     ):
         self.batch_size = batch_size
         self.max_seqlen_q = max_seqlen_q

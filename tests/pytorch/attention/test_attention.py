@@ -319,7 +319,7 @@ model_configs_num_splits = {
     # test: ModelConfig(b, sq, hq, dqk)
     "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),
     "num_splits_1_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
-    }
+}
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -329,7 +329,14 @@ model_configs_num_splits = {
 def test_dpa_num_splits(dtype, model_configs, model):
     """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
     test_dot_product_attention(
-        dtype, model_configs, model, False, True, None, False, False,
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        None,
+        False,
+        False,
     )
 
 
