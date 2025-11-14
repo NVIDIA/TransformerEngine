@@ -976,8 +976,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             Whether to enforce output to be in FP8 or not.
         num_splits: Optional[int], default = 1
             Optional split control for FlashAttention-3 only. When set, this value is forwarded
-            to the FA3 backend to control internal kernel splitting behavior. It is ignored for
-            other backends.
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
         with torch.cuda.device(query_layer.device), self.prepare_forward(
