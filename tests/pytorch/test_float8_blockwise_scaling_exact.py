@@ -2,27 +2,23 @@
 #
 # See LICENSE for license information.
 
-from typing import Tuple
 import math
 import os
 import pathlib
+from typing import Tuple
+
 import pytest
 import torch
+from references.blockwise_quantizer_reference import BlockwiseQuantizerReference, QuantizeResult
+from test_float8_current_scaling_exact import (
+    TestFP8RecipeLayerNormLinearBase,
+    TestFP8RecipeLinearBase,
+)
+
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
+from transformer_engine.pytorch import Float8BlockQuantizer, get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch import (
-    Float8BlockQuantizer,
-    get_device_compute_capability,
-)
-from references.blockwise_quantizer_reference import (
-    BlockwiseQuantizerReference,
-    QuantizeResult,
-)
-from test_float8_current_scaling_exact import (
-    TestFP8RecipeLinearBase,
-    TestFP8RecipeLayerNormLinearBase,
-)
 
 # read env variable NVTE_TEST_FLOAT8_BLOCK_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
 TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"

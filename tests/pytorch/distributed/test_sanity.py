@@ -4,10 +4,12 @@
 
 import pathlib
 import sys
+
 import pytest
 import torch
+
 import transformer_engine
-from transformer_engine.pytorch import DotProductAttention, TransformerLayer, Linear
+from transformer_engine.pytorch import DotProductAttention, Linear, TransformerLayer
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))

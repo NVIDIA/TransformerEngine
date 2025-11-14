@@ -9,7 +9,9 @@ the quantization machinery.
 """
 
 from __future__ import annotations
-from typing import Callable, Optional, Tuple, Any, Dict, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+
 import torch
 
 if TYPE_CHECKING:

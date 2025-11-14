@@ -8,21 +8,20 @@ This module provides tensor classes for handling quantized tensors in JAX, inclu
 both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Tuple
-from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
-from jax.tree_util import register_pytree_node_class
 from jax.ad_checkpoint import checkpoint_name as jax_checkpoint_name
+from jax.tree_util import register_pytree_node_class
 
-
-from .scaling_modes import ScalingMode, TensorUsage
-from .dequantizer import ScalingModeToDequantizerMap
-from .misc import QuantizeLayout
 from ..sharding import (
     with_sharding_constraint_by_logical_axes as original_with_sharding_constraint_by_logical_axes,
 )
+from .dequantizer import ScalingModeToDequantizerMap
+from .misc import QuantizeLayout
+from .scaling_modes import ScalingMode, TensorUsage
 
 __all__ = [
     "TensorUsage",

@@ -5,32 +5,29 @@
 """Linear layer forward with Userbuffers communication."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
-
 from transformer_engine_torch import CommOverlapType
+
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
-from ...quantization import FP8GlobalStateManager
 from ...module.base import (
+    _2X_ACC_FPROP,
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
     get_workspace,
-    _2X_ACC_FPROP,
 )
+from ...quantization import FP8GlobalStateManager
 from ...quantized_tensor import Quantizer
-from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
-from .._common import maybe_dequantize, is_quantized_tensor
+from .._common import is_quantized_tensor, maybe_dequantize
 from ..basic import BasicLinear, Bias, ReduceScatter
-from ..op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class UserbuffersForwardLinear(FusedOperation):

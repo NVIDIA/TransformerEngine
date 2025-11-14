@@ -5,35 +5,52 @@
 Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
+import os
+import warnings
 from enum import Enum
 from math import sqrt
-import os
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
-import warnings
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen.attention import combine_masks
+from jax import lax
 from jax import nn as jax_nn
 from jax import random as jax_random
-from jax import lax, vmap
+from jax import vmap
 from jax.ad_checkpoint import checkpoint_name
 
-from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
-from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
-from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
-from ..attention import fused_attn
-from ..attention import CPStrategy
+from ..attention import (
+    AttnBiasType,
+    AttnMaskType,
+    CPStrategy,
+    QKVLayout,
+    SequenceDescriptor,
+    canonicalize_attn_mask_type,
+    fused_attn,
+    is_fused_attn_kernel_available,
+    make_swa_mask,
+)
+from ..sharding import (
+    BATCH_AXES,
+    HEAD_AXES,
+    HIDDEN_AXES,
+    HIDDEN_TP_AXES,
+    JOINED_AXES,
+    SEQLEN_AXES,
+    SEQLEN_TP_AXES,
+    W_FSDP_AXES,
+    W_JOINED_AXES,
+    W_NO_SHARD_AXES,
+    W_TP_AXES,
+    get_sharding_map_logic_axis_to_mesh_axis,
+    num_of_devices,
+    with_sharding_constraint_by_logical_axes,
+)
 from ..softmax import SoftmaxType
-from ..sharding import num_of_devices
-from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
-from ..sharding import with_sharding_constraint_by_logical_axes
-from ..sharding import BATCH_AXES, SEQLEN_AXES, SEQLEN_TP_AXES, HEAD_AXES
-from ..sharding import HIDDEN_AXES, HIDDEN_TP_AXES, JOINED_AXES
-from ..sharding import W_NO_SHARD_AXES, W_FSDP_AXES, W_TP_AXES, W_JOINED_AXES
+from .module import DenseGeneral, LayerNorm, LayerNormDenseGeneral, LayerNormMLP, Softmax
 
 PRNGKey = Any
 Shape = Tuple[int, ...]

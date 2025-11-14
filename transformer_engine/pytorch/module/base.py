@@ -4,53 +4,53 @@
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
 import io
+import logging
 import math
 import os
 import pickle
 import warnings
-from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
-import logging
+from enum import Enum
 from types import MethodType
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
+import transformer_engine_torch as tex
 from torch.distributed.tensor import DTensor
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
-from ._common import _ParameterInitMeta, noop_cat
+from ...common.recipe import DelayedScaling, Recipe
+from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.utils import any_feature_enabled, next_iter_when_debug_should_be_run
+from ..constants import dist_group_type
+from ..distributed import (
+    _fsdp_gather_tensors,
+    gather_along_first_dim,
+    in_fp8_activation_recompute_phase,
+    is_fp8_activation_recompute_enabled,
+)
 from ..quantization import (
-    MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
-    Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
-    NVFP4BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
+    MXFP8BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
     RecipeState,
 )
-from ..distributed import (
-    gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
-    _fsdp_gather_tensors,
-)
-from ..constants import dist_group_type
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
-from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
-from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ...common.recipe import DelayedScaling, Recipe
-from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
-from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
+from ._common import _ParameterInitMeta, noop_cat
 
 __all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 

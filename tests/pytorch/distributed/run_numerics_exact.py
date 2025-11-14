@@ -10,22 +10,16 @@ import os
 import sys
 from functools import wraps
 
-import transformer_engine.pytorch as te
 import torch
-from torch import nn
 import torch.distributed as dist
-from transformer_engine.common.recipe import (
-    NVFP4BlockScaling,
-    Recipe,
-    QParams,
-    CustomRecipe,
-)
+from run_layer_with_overlap import _compare_tensors
+from torch import nn
+
+import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import CustomRecipe, NVFP4BlockScaling, QParams, Recipe
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
-from transformer_engine.pytorch.custom_recipes import utils
-from run_layer_with_overlap import _compare_tensors
-
+from transformer_engine.pytorch.custom_recipes import quantization_nvfp4, utils
 
 BATCH_SIZE, HIDDEN_SIZE, OUT_SIZE = 128, 256, 128
 WORLD_RANK, WORLD_SIZE = None, None

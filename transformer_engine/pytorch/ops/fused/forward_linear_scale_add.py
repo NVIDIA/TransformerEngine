@@ -5,6 +5,7 @@
 """Fused operation for forward GEMM + scale + add."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 
@@ -14,11 +15,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import AddExtraInput, BasicLinear, ConstantScale
-from ..op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 class ForwardLinearScaleAdd(FusedOperation):

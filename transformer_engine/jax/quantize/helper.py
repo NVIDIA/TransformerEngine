@@ -8,42 +8,42 @@ This module provides configuration and helper functions for managing quantizatio
 in JAX, including support for different scaling modes and datatypes.
 """
 
+import hashlib
+import operator
+import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-import hashlib
-from typing import Optional, Tuple, Dict, Union, Sequence, Type, List
-from functools import reduce, lru_cache
-import operator
+from functools import lru_cache, reduce
 from importlib.metadata import version as get_pkg_version
-import warnings
-from packaging.version import Version as PkgVersion
+from typing import Dict, List, Optional, Sequence, Tuple, Type, Union
 
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
-
+from packaging.version import Version as PkgVersion
 from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
+
 from transformer_engine.common.recipe import (
-    Recipe,
     DelayedScaling,
+    Float8CurrentScaling,
     Format,
     MXFP8BlockScaling,
-    Float8CurrentScaling,
     NVFP4BlockScaling,
+    Recipe,
 )
 from transformer_engine.jax.sharding import (
-    global_shard_guard,
     MeshResource,
-    get_num_devices_in_mesh,
     get_all_mesh_axes,
+    get_num_devices_in_mesh,
+    global_shard_guard,
     with_sharding_constraint,
 )
 
+from .device_utils import get_device_compute_capability
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
-from .device_utils import get_device_compute_capability
 
 __all__ = [
     "get_quantize_config",

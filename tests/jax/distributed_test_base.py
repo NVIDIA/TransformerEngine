@@ -5,14 +5,13 @@ import operator
 import re
 from functools import reduce
 from itertools import product
-import pytest
 
 import jax
+import pytest
 from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
+from utils import assert_allclose, is_devices_enough
 
 from transformer_engine.jax.sharding import MeshResource
-
-from utils import assert_allclose, is_devices_enough
 
 
 def generate_configs():

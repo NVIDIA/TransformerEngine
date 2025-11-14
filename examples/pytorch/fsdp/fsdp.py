@@ -2,23 +2,22 @@
 #
 # See LICENSE for license information.
 
-import os
 import argparse
-
+import os
 from functools import partial
 
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision
-from torch.distributed.fsdp.wrap import always_wrap_policy, transformer_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     apply_activation_checkpointing,
     checkpoint_wrapper,
 )
+from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision
+from torch.distributed.fsdp.wrap import always_wrap_policy, transformer_auto_wrap_policy
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.distributed import prepare_te_modules_for_fsdp
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))

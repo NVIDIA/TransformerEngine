@@ -6,20 +6,18 @@
 
 from typing import Optional
 
-import torch
-
 import nvdlfw_inspect.api as debug_api
+import torch
+import transformer_engine_torch as tex
 from nvdlfw_inspect.registry import Registry, api_method
 from nvdlfw_inspect.utils import append_parent_docstring
 
-
-import transformer_engine_torch as tex
-from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.common.recipe import Format
+from transformer_engine.debug.features.api import TEConfigAPIMapper
+from transformer_engine.pytorch.quantization import _default_sf_compute
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.quantization import _default_sf_compute
 
 
 def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):

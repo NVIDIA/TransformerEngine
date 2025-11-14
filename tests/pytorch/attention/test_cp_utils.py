@@ -3,12 +3,14 @@
 # See LICENSE for license information.
 
 """Unit tests for context parallel utils."""
-import torch
 import unittest
+
+import torch
+
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    generate_positional_ids_for_cp,
     get_batch_on_this_cp_rank,
     pad_thd_sequences_for_cp,
-    generate_positional_ids_for_cp,
 )
 
 

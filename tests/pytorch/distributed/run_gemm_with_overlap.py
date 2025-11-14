@@ -4,13 +4,13 @@
 #
 # See LICENSE for license information.
 
-import os
-import sys
-import socket
-import warnings
-import subprocess
 import argparse
 import operator
+import os
+import socket
+import subprocess
+import sys
+import warnings
 from functools import partial, reduce
 
 import torch
@@ -18,12 +18,8 @@ import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch import (
-    Float8Tensor,
-    Float8Quantizer,
-    MXFP8Quantizer,
-)
 import transformer_engine.pytorch.cpp_extensions as tex
+from transformer_engine.pytorch import Float8Quantizer, Float8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublas_workspace_size_bytes,

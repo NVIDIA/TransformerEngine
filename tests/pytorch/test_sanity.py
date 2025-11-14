@@ -2,43 +2,40 @@
 #
 # See LICENSE for license information.
 
+import os
 from typing import Optional
 
-import torch
 import pytest
-import os
+import torch
+import transformer_engine_torch as tex
+from utils import ModelConfig
 
 import transformer_engine
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-)
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    autocast,
-    quantized_model_init,
-    LayerNormLinear,
-    Linear,
-    GroupedLinear,
-    LayerNormMLP,
-    TransformerLayer,
-    RMSNorm,
-    LayerNorm,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
     Float8Tensor,
+    GroupedLinear,
+    LayerNorm,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
     MXFP8Tensor,
-    checkpoint,
     QuantizedTensor,
+    RMSNorm,
+    TransformerLayer,
+    autocast,
+    checkpoint,
     is_bf16_available,
+    quantized_model_init,
 )
-from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig
+from transformer_engine.pytorch.utils import init_method_normal, scaled_init_method_normal
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)

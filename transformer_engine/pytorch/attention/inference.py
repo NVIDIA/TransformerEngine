@@ -5,12 +5,12 @@
 """Inference"""
 import logging
 from collections import OrderedDict, defaultdict
-from typing import Optional, List
-from einops import rearrange
+from typing import List, Optional
 
 import torch
-
 import transformer_engine_torch as tex
+from einops import rearrange
+
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 __all__ = ["InferenceParams", "KVCacheManager", "NonPagedKVCacheManager", "PagedKVCacheManager"]

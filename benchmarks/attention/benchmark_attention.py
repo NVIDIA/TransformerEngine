@@ -2,18 +2,19 @@
 #
 # See LICENSE for license information.
 
-import os, sys, time
+import os
 import subprocess
-import pandas as pd
+import sys
+import time
+
 import numpy as np
-import torch
 import nvtx
+import pandas as pd
+import torch
+
 import transformer_engine
-from tests.pytorch.utils import (
-    ModelConfig,
-    get_available_attention_backends,
-)
 from tests.pytorch.attention.test_attention import _run_dot_product_attention
+from tests.pytorch.utils import ModelConfig, get_available_attention_backends
 
 pd.set_option("display.precision", 4)
 

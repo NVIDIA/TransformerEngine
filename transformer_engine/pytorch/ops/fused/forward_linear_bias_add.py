@@ -5,6 +5,7 @@
 """Fused operation for forward GEMM + bias + add."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 

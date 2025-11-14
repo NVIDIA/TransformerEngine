@@ -3,29 +3,26 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
-from collections.abc import Iterable
 import contextlib
 import gc
 import warnings
+from collections.abc import Iterable
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
+from torch._C import _graph_pool_handle
 from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
-from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from .quantization import (
-    autocast,
-    FP8GlobalStateManager,
-    get_default_fp8_recipe,
-)
+
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
-from .ops.op import BasicOperation
 from .ops import Sequential
 from .ops.fuser import OperationFuser
+from .ops.op import BasicOperation
+from .quantization import FP8GlobalStateManager, autocast, get_default_fp8_recipe
 from .utils import make_weak_ref
 
 __all__ = ["make_graphed_callables"]

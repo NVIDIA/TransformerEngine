@@ -4,15 +4,16 @@
 
 """Fused optimizers and multi-tensor kernels."""
 from transformer_engine_torch import (
-    multi_tensor_scale,
-    multi_tensor_l2norm,
-    multi_tensor_unscale_l2norm,
     multi_tensor_adam,
-    multi_tensor_adam_fp8,
     multi_tensor_adam_capturable,
     multi_tensor_adam_capturable_master,
+    multi_tensor_adam_fp8,
+    multi_tensor_l2norm,
+    multi_tensor_scale,
     multi_tensor_sgd,
+    multi_tensor_unscale_l2norm,
 )
+
 from .fused_adam import FusedAdam
 from .fused_sgd import FusedSGD
 from .multi_tensor_apply import MultiTensorApply, multi_tensor_applier

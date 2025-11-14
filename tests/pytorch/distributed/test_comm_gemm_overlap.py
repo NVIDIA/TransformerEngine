@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 

@@ -10,7 +10,6 @@ scale factors and amax history for different tensor types.
 """
 from dataclasses import dataclass
 
-
 __all__ = ["QuantizeMeta", "QuantizeMetaSet"]
 
 

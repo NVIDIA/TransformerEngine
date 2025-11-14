@@ -3,52 +3,43 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
-from typing import Union, Optional, Callable, Tuple, List
-import warnings
-
 import functools
-import torch
+import warnings
+from typing import Callable, List, Optional, Tuple, Union
 
+import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from .base import (
-    get_dummy_wgrad,
-    get_multi_stream_cublas_workspace,
-    TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
-from ._common import WeightGradStore
-from ..quantization import FP8GlobalStateManager
-from ..utils import (
-    divide,
-    cast_if_needed,
-    clear_tensor_data,
-    init_method_constant,
-    requires_grad,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
-)
-from ..cpp_extensions import (
-    general_grouped_gemm,
-)
-from ..constants import GemmParallelModes, dist_group_type
-from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
-from ..cpu_offload import is_cpu_offload_enabled
 
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..constants import GemmParallelModes, dist_group_type
+from ..cpp_extensions import general_grouped_gemm
+from ..cpu_offload import is_cpu_offload_enabled
+from ..distributed import (
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    is_fp8_activation_recompute_enabled,
+    set_tensor_model_parallel_attributes,
+)
+from ..graph import is_graph_capturing
+from ..jit import no_torch_dynamo
+from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
+)
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..utils import cast_if_needed, clear_tensor_data, divide, init_method_constant, requires_grad
+from ._common import WeightGradStore
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    get_dummy_wgrad,
+    get_multi_stream_cublas_workspace,
 )
 
 __all__ = ["GroupedLinear"]

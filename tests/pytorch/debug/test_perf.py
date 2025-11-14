@@ -3,12 +3,11 @@
 # See LICENSE for license information.
 
 
+import nvdlfw_inspect.api as debug_api
 import pytest
 import torch
+
 import transformer_engine.pytorch as te
-
-import nvdlfw_inspect.api as debug_api
-
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 

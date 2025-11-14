@@ -5,54 +5,51 @@
 """
 Utils/Helper classes and methods for attention
 """
+import functools
+import logging
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
-import logging
-import functools
-
 from dataclasses import dataclass, fields
-import numpy as np
-from packaging.version import Version as PkgVersion
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
+from packaging.version import Version as PkgVersion
+
 import transformer_engine as te
+from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    QKVLayout,
-    AttnBiasType,
-    AttnMaskType,
-    SoftmaxType,
-    FusedAttnBackend,
-    META_QKV,
+    META_DO,
+    META_DP,
     META_DQKV,
     META_O,
-    META_DO,
+    META_QKV,
     META_S,
-    META_DP,
-)
-from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
-    Float8Quantizer,
-    Float8CurrentScalingQuantizer,
-)
-from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType
-
-
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    get_cudnn_version,
-    SplitAlongDim,
-    combine_tensors,
+    AttnBiasType,
+    AttnMaskType,
+    FusedAttnBackend,
+    QKVLayout,
+    SoftmaxType,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-
 from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.quantization import get_fp8_te_dtype
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+)
+from transformer_engine.pytorch.utils import (
+    SplitAlongDim,
+    combine_tensors,
+    get_cudnn_version,
+    get_device_compute_capability,
+)
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))

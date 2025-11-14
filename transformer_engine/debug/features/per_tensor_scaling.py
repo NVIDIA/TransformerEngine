@@ -6,19 +6,18 @@
 
 from typing import Optional
 
-import torch
-
 import nvdlfw_inspect.api as debug_api
+import torch
+import transformer_engine_torch as tex
 from nvdlfw_inspect.registry import Registry, api_method
 
-import transformer_engine_torch as tex
+from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
 )
-from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 
 def per_tensor_cast(

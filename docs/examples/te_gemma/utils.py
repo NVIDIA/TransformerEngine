@@ -2,25 +2,22 @@
 #
 # See LICENSE for license information.
 
-import sys
-import IPython
 import random
 import string
+import sys
 
-from te_gemma_loading_weights import load_te_model
+import IPython
 import torch
+from datasets import load_dataset
+from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
+from te_gemma_loading_weights import load_te_model
 from torch.utils.data import DataLoader
-
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    AutoConfig,
+    DataCollatorForLanguageModeling,
 )
-from transformers import DataCollatorForLanguageModeling
-from datasets import load_dataset
-
-
-from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 
 random.seed(42)
 torch.manual_seed(42)

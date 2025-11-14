@@ -2,23 +2,21 @@
 #
 # See LICENSE for license information.
 
-from contextlib import contextmanager
-
-from typing import Optional
-from functools import partial
 from collections import OrderedDict
+from contextlib import contextmanager
+from functools import partial
+from typing import Optional
 
 import torch
+import torch.nn.functional as F
+import transformers
 from torch.amp import autocast
+from transformers.models.gemma.modeling_gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 
 import transformer_engine as te
+from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
-from transformer_engine.common.recipe import Format, DelayedScaling
 from transformer_engine.pytorch.quantization import get_default_fp8_recipe
-import transformers
-from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConfig, GemmaModel
-
-import torch.nn.functional as F
 
 """
 Top level description of the classes used in the tutorial from this file.

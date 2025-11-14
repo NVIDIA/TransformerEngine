@@ -10,31 +10,27 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-
 from utils import assert_allclose, pytest_parametrize_wrapper
-from transformer_engine.common.recipe import (
-    DelayedScaling,
-    MXFP8BlockScaling,
-    Float8CurrentScaling,
-    NVFP4BlockScaling,
-)
+
+import transformer_engine.jax as te
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from transformer_engine.common.recipe import Format as FP8Format
+from transformer_engine.common.recipe import MXFP8BlockScaling, NVFP4BlockScaling
 from transformer_engine.jax import autocast
+from transformer_engine.jax import flax as te_flax
+from transformer_engine.jax.flax.module import TransformerEngineBase
 from transformer_engine.jax.quantize import (
+    QuantizeLayout,
+    QuantizerFactory,
+    ScalingMode,
+    TensorSource,
     get_quantize_config,
     get_supported_quantization_recipes,
     is_scaling_mode_supported,
-    ScalingMode,
     update_collections,
-    TensorSource,
-    QuantizerFactory,
-    QuantizeLayout,
 )
 from transformer_engine.jax.quantize.helper import _format2dtypes
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
-from transformer_engine.jax.flax.module import TransformerEngineBase
-from transformer_engine.jax import flax as te_flax
-import transformer_engine.jax as te
 
 is_fp8_supported, reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
 is_mxfp8_supported, mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)

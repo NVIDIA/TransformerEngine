@@ -5,53 +5,47 @@
 
 import math
 import operator
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial, reduce
-from typing import Tuple, Sequence, Union
 from enum import Enum
-import warnings
+from functools import partial, reduce
+from typing import Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-from jax.sharding import NamedSharding, PartitionSpec
 from jax.experimental.custom_partitioning import SdyShardingRule
-
+from jax.sharding import NamedSharding, PartitionSpec
 from transformer_engine_jax import (
-    get_num_compute_streams,
     JAXX_Collective_Op,
-    get_device_compute_capability,
-    initialize_cgemm_communicator,
     get_cgemm_num_max_streams,
+    get_device_compute_capability,
+    get_num_compute_streams,
+    initialize_cgemm_communicator,
 )
 
-from .base import BasePrimitive, register_primitive
-from .quantization import grouped_quantize
 from ..quantize import (
     AbstractBaseTensor,
+    GroupedQuantizer,
+    GroupedScaledTensor1x,
     NoScaleTensor,
+    QuantizeLayout,
+    Quantizer,
+    QuantizerSet,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
-    GroupedScaledTensor1x,
     ScalingMode,
-    Quantizer,
-    GroupedQuantizer,
-    get_quantize_config,
-    QuantizerSet,
-    QuantizeLayout,
-    noop_quantizer_set,
-    is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
+    get_quantize_config,
+    is_fp8_gemm_with_all_layouts_supported,
+    noop_quantizer_set,
 )
+from ..sharding import dp_or_fsdp_axis_size, global_mesh_resource, tpsp_axis_size
+from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, is_all_reduce_in_float32
-from ..sharding import (
-    global_mesh_resource,
-    tpsp_axis_size,
-    dp_or_fsdp_axis_size,
-)
-
+from .quantization import grouped_quantize
 
 __all__ = [
     "CollectiveOp",

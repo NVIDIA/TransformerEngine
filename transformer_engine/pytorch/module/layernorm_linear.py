@@ -5,57 +5,37 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.nn import init
-
 import transformer_engine_torch as tex
+from torch.nn import init
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
-from .base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_workspace,
-    get_ub,
-    TransformerEngineBaseModule,
-    get_dummy_wgrad,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
-from ..quantization import FP8GlobalStateManager
-from ..utils import (
-    assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
-    cast_if_needed,
-    clear_tensor_data,
-    divide,
-    get_default_init_method,
-    init_method_constant,
-    nvtx_range_pop,
-    nvtx_range_push,
-    requires_grad,
-    needs_quantized_gemm,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    symmetric_all_reduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-    _fsdp_gather_tensors,
-)
+
+from ...debug.pytorch.debug_state import TEDebugState
 from ..constants import GemmParallelModes, dist_group_type
-from ..jit import no_torch_dynamo
+from ..cpp_extensions import general_gemm
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..distributed import (
+    _fsdp_gather_tensors,
+    _fsdp_scatter_tensors,
+    allreduce,
+    gather_along_first_dim,
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    reduce_scatter_along_first_dim,
+    set_tensor_model_parallel_attributes,
+    symmetric_all_reduce,
+)
+from ..export import assert_warmed_up, is_in_onnx_export_mode
 from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, WeightGradStore
+from ..jit import no_torch_dynamo
+from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -63,16 +43,33 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-
-from ..cpp_extensions import (
-    general_gemm,
+from ..utils import (
+    assert_dim_for_all_gather,
+    assert_dim_for_fp8_exec,
+    cast_if_needed,
+    clear_tensor_data,
+    divide,
+    get_default_init_method,
+    init_method_constant,
+    needs_quantized_gemm,
+    nvtx_range_pop,
+    nvtx_range_push,
+    requires_grad,
+)
+from ._common import WeightGradStore, apply_normalization, noop_cat
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    fill_userbuffers_buffer_for_all_gather,
+    get_dummy_wgrad,
+    get_ub,
+    get_workspace,
 )
 
 __all__ = ["LayerNormLinear"]
@@ -1685,7 +1682,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
-        from ..export import onnx_layernorm, onnx_gemm
+        from ..export import onnx_gemm, onnx_layernorm
 
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
         assert_warmed_up(self)

@@ -5,19 +5,16 @@
 """Fused backward RMNorm + add."""
 
 from __future__ import annotations
-from typing import Optional
+
 import math
+from typing import Optional
 
 import torch
-
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.ops.basic import MakeExtraOutput, RMSNorm
 
-from transformer_engine.pytorch.ops.op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from transformer_engine.pytorch.ops.basic import MakeExtraOutput, RMSNorm
+from transformer_engine.pytorch.ops.op import FusedOperation, FusibleOperation, OperationContext
+
 from ...utils import clear_tensor_data
 from .._common import maybe_dequantize
 

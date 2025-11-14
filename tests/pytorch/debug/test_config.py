@@ -3,9 +3,8 @@
 # See LICENSE for license information.
 import pathlib
 
-from nvdlfw_inspect.config_manager import ConfigManager
-
 import nvdlfw_inspect.api as debug_api
+from nvdlfw_inspect.config_manager import ConfigManager
 
 try:
     import transformer_engine

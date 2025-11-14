@@ -4,28 +4,28 @@
 #
 # See LICENSE for license information.
 
+import argparse
 import os
 import sys
-import argparse
-
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import (
-    Format,
-    DelayedScaling,
-    Float8CurrentScaling,
-    MXFP8BlockScaling,
-)
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
 import torch.nn.functional as F
 from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
+
+import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+    Format,
+    MXFP8BlockScaling,
+)
 from transformer_engine.pytorch import QuantizedTensor
-from contextlib import nullcontext
 
 LOCAL_RANK = None
 

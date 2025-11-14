@@ -4,22 +4,24 @@
 
 """Tensor class with MXFP8 data"""
 from __future__ import annotations
-from collections.abc import Iterable
+
 import math
-from typing import Optional, Tuple, Union, Any
 import warnings
+from collections.abc import Iterable
+from typing import Any, Optional, Tuple, Union
 
 import torch
-from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
+
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match, round_up_to_nearest_multiple
-from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..utils import devices_match, round_up_to_nearest_multiple
 from ._quantization_helpers import _IdentityFunc
+from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 
 aten = torch.ops.aten
 

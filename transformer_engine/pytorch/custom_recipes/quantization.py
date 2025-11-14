@@ -5,6 +5,7 @@
 """Quantization API for experimental middleware between Transformer Engine and Kitchen."""
 
 from __future__ import annotations
+
 import dataclasses
 import enum
 

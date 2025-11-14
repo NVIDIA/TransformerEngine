@@ -5,14 +5,15 @@
 """Fusible operation for bias."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
-
 import transformer_engine_torch as tex
-from ..op import BasicOperation, OperationContext
-from ...utils import canonicalize_device, canonicalize_dtype
+
 from ...tensor import Quantizer
+from ...utils import canonicalize_device, canonicalize_dtype
+from ..op import BasicOperation, OperationContext
 
 
 class Bias(BasicOperation):

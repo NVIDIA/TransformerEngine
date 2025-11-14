@@ -15,10 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-
-from .quantize import (
-    Quantizer,
-)
+from .quantize import Quantizer
 
 
 def canonicalize_norm_type(x):

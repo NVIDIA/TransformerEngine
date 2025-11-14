@@ -4,19 +4,18 @@
 
 """PyTorch wrapper functions for Cross Entropy Triton kernels."""
 
-from typing import Union
 from functools import reduce
 from operator import mul
+from typing import Union
 
 import torch
 import torch.distributed as dist
-
 import triton
 
 from transformer_engine.common.triton.cross_entropy import (
-    online_softmax_kernel,
     cross_entropy_kernel,
     element_mul_kernel,
+    online_softmax_kernel,
 )
 
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype

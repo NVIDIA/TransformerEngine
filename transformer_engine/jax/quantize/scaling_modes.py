@@ -9,22 +9,21 @@ This module provides implementations of different scaling modes for tensor quant
 including delayed scaling and block scaling strategies.
 """
 
+import operator
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Tuple, Dict
-from functools import reduce, lru_cache
-import operator
-import numpy as np
+from functools import lru_cache, reduce
+from typing import Dict, Tuple
 
+import jax.numpy as jnp
+import numpy as np
 from jax.experimental.custom_partitioning import BATCHING, CompoundFactor
 from jax.tree_util import register_pytree_node_class
-import jax.numpy as jnp
-
 from transformer_engine_jax import JAXX_Scaling_Mode
-from .misc import QuantizeLayout
-from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
+from .device_utils import is_fp8_gemm_with_all_layouts_supported
+from .misc import QuantizeLayout
 
 __all__ = [
     "QuantizeShardyRules",

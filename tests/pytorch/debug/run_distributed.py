@@ -2,42 +2,42 @@
 #
 # See LICENSE for license information.
 
-import tempfile
-import functools
-import os
-import itertools
-import random
 import argparse
+import functools
+import itertools
+import os
+import random
 import re
+import tempfile
 
+import nvdlfw_inspect.api as debug_api
 import torch
 import torch.distributed as dist
-import transformer_engine
 import transformer_engine_torch as tex
-import nvdlfw_inspect.api as debug_api
-from transformer_engine.debug import set_weight_tensor_tp_group_reduce
-from transformer_engine.pytorch import is_fp8_available
-
 from test_numerics import (
-    _emulate_linear,
-    _init_debug,
-    disable_fp8_gemms_create_config,
+    AMAX_HISTORY_LEN,
+    BATCH_SIZE,
     DISABLE_FP8_LAYER_CONFIG,
-    _cmp,
+    FP8_RECIPE,
     IN_SIZE,
     OUT_SIZE,
-    _init_model,
     SEED,
     SEQ_LEN,
-    BATCH_SIZE,
-    FP8_RECIPE,
-    fake_quant_fp8_create_config,
+    _cmp,
+    _emulate_linear,
     _get_current_scale,
+    _init_debug,
+    _init_model,
     _prepare_per_tensor_scaling_config,
-    AMAX_HISTORY_LEN,
-    set_scaling_factors,
+    disable_fp8_gemms_create_config,
+    fake_quant_fp8_create_config,
     set_current_scaling_factors,
+    set_scaling_factors,
 )
+
+import transformer_engine
+from transformer_engine.debug import set_weight_tensor_tp_group_reduce
+from transformer_engine.pytorch import is_fp8_available
 
 WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None

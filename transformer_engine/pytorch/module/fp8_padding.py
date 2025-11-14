@@ -7,12 +7,10 @@
 from typing import List, Optional, Tuple
 
 import torch
-
 import transformer_engine_torch as tex
 
-from ..quantization import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
-
+from ..quantization import FP8GlobalStateManager
 
 __all__ = ["Fp8Padding"]
 

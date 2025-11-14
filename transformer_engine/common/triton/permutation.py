@@ -6,11 +6,9 @@
 
 import triton
 import triton.language as tl
-
+from packaging import version
 from triton.language import core
 from triton.language.standard import _log2
-from packaging import version
-
 
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698

@@ -2,41 +2,42 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
-from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
-from functools import reduce, partial
 from dataclasses import dataclass
+from functools import partial, reduce
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, ffi
-from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
-from jax.sharding import PartitionSpec
-
 import numpy as np
 import transformer_engine_jax
+from jax import dtypes, ffi
+from jax.experimental.custom_partitioning import BATCHING, SdyShardingRule
+from jax.sharding import PartitionSpec
 from transformer_engine_jax import NVTE_Activation_Type
-from .base import BasePrimitive, register_primitive
-from .misc import (
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
-    get_padded_spec,
-    check_valid_batch_dims,
-    multidim_transpose,
-    try_apply_delayed_scaling_2x_war,
-    should_apply_1x_fused_dbias_war_for_arch_l_100,
-    NamedSharding,
-)
-from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
+
 from ..quantize import (
-    Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
+    NoScaleTensor,
+    QuantizeLayout,
+    Quantizer,
+    ScaledTensor,
+    ScaledTensorFactory,
     ScalingMode,
 )
-
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from .base import BasePrimitive, register_primitive
+from .misc import (
+    NamedSharding,
+    check_valid_batch_dims,
+    get_padded_spec,
+    jax_dtype_to_te_dtype,
+    multidim_transpose,
+    should_apply_1x_fused_dbias_war_for_arch_l_100,
+    te_dtype_to_jax_dtype,
+    try_apply_delayed_scaling_2x_war,
+)
+from .quantization import AmaxScope, _jax_dbias, _quantize_dbias_impl
 
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 

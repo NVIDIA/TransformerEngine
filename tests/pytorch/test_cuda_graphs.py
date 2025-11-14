@@ -3,9 +3,13 @@
 # See LICENSE for license information.
 
 from typing import Iterable, List, Union
-import pytest
 
+import pytest
 import torch
+from utils import ModelConfig, reset_rng_states
+
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     DotProductAttention,
     LayerNormLinear,
@@ -14,17 +18,14 @@ from transformer_engine.pytorch import (
     MultiheadAttention,
     TransformerLayer,
     autocast,
-    quantized_model_init,
-    make_graphed_callables,
+    is_bf16_available,
     is_fp8_available,
     is_fp8_block_scaling_available,
     is_mxfp8_available,
-    is_bf16_available,
+    make_graphed_callables,
+    quantized_model_init,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
 fp8_available = is_fp8_available()

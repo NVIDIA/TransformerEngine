@@ -3,21 +3,19 @@
 # See LICENSE for license information.
 
 import unittest
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from distributed_test_base import generate_configs
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from functools import partial
-
-from distributed_test_base import generate_configs
 from utils import assert_allclose, pytest_parametrize_wrapper
 
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax import autocast
 from transformer_engine.jax.dense import dense
-
 
 DTYPES = [jnp.bfloat16]
 

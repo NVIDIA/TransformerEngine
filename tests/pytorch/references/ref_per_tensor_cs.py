@@ -4,9 +4,9 @@
 
 import torch
 import transformer_engine_torch as tex
+from references.quantize_scale_calc import scale_from_amax_tensor
 
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
-from references.quantize_scale_calc import scale_from_amax_tensor
 
 
 # compute amax and scale

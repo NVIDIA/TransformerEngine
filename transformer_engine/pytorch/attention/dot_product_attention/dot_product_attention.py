@@ -3,64 +3,52 @@
 # See LICENSE for license information.
 
 """Attention."""
-from contextlib import nullcontext
+import logging
 import math
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
-import logging
+from contextlib import nullcontext
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
-
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import (
-    Format,
-    Recipe,
-    DelayedScaling,
-    Float8CurrentScaling,
-)
-from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.quantization import (
-    get_fp8_te_dtype,
-    FP8GlobalStateManager,
-    RecipeState,
-    DelayedScalingRecipeState,
-    MXFP8BlockScalingRecipeState,
-    Float8CurrentScalingRecipeState,
-    Float8BlockScalingRecipeState,
-)
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    dist_group_type,
-)
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    checkpoint,
-    set_all_rng_states,
-    CudaRNGStatesTracker,
-    graph_safe_rng_available,
-)
-from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.attention.inference import InferenceParams
+from torch.nn.parameter import Parameter
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Format, Recipe
+from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+    FlashAttention,
+    FusedAttention,
+    UnfusedDotProductAttention,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
 )
-
-from transformer_engine.pytorch.attention.dot_product_attention.backends import (
-    UnfusedDotProductAttention,
-    FusedAttention,
-    FlashAttention,
+from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type
+from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
+    checkpoint,
+    get_distributed_world_size,
+    graph_safe_rng_available,
+    set_all_rng_states,
 )
-
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.jit import no_torch_dynamo
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantization import (
+    DelayedScalingRecipeState,
+    Float8BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
+    FP8GlobalStateManager,
+    MXFP8BlockScalingRecipeState,
+    RecipeState,
+    get_fp8_te_dtype,
+)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.utils import get_cudnn_version
 
 # Setup Attention Logging
 attn_log.setup_logging()

@@ -10,14 +10,14 @@ import torch
 import triton
 
 from transformer_engine.common.triton.permutation import (
+    _make_chunk_sort_map_kernel,
+    _permute_kernel,
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,
     _row_id_map_pass_3_kernel,
-    _permute_kernel,
-    _unpermute_kernel,
-    _unpermute_bwd_with_merging_probs_kernel,
-    _make_chunk_sort_map_kernel,
     _sort_chunks_by_map_kernel,
+    _unpermute_bwd_with_merging_probs_kernel,
+    _unpermute_kernel,
 )
 
 

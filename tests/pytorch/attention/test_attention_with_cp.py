@@ -2,22 +2,17 @@
 #
 # See LICENSE for license information.
 
+import logging
 import os
+import pathlib
 import subprocess
 import sys
-import pathlib
-import logging
 
 import pytest
 import torch
-from transformer_engine.pytorch import (
-    get_device_compute_capability,
-    get_cudnn_version,
-)
-from transformer_engine.common.recipe import (
-    DelayedScaling,
-    Float8CurrentScaling,
-)
+
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
+from transformer_engine.pytorch import get_cudnn_version, get_device_compute_capability
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()

@@ -2,13 +2,12 @@
 #
 # See LICENSE for license information.
 
+import nvdlfw_inspect.api as debug_api
 import pytest
 import torch
-
-import nvdlfw_inspect.api as debug_api
-import transformer_engine.pytorch as te
-
 from test_numerics import create_config_file
+
+import transformer_engine.pytorch as te
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 

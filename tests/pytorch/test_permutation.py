@@ -2,29 +2,29 @@
 #
 # See LICENSE for license information.
 
+import copy
 import random
-
-import torch
-import pytest
 from typing import Dict, List
+
+import pytest
+import torch
+import transformer_engine_torch as tex
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    moe_permute as te_permute,
-    moe_permute_with_probs as te_permute_with_probs,
-    moe_unpermute as te_unpermute,
-    moe_sort_chunks_by_index as te_sort_chunks_by_index,
-    moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
-)
-from transformer_engine.pytorch import (
-    Float8Quantizer,
-    Float8CurrentScalingQuantizer,
     Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
     MXFP8Quantizer,
 )
-import transformer_engine_torch as tex
-import copy
+from transformer_engine.pytorch import moe_permute as te_permute
+from transformer_engine.pytorch import moe_permute_with_probs as te_permute_with_probs
+from transformer_engine.pytorch import moe_sort_chunks_by_index as te_sort_chunks_by_index
+from transformer_engine.pytorch import (
+    moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
+)
+from transformer_engine.pytorch import moe_unpermute as te_unpermute
 
 seed = 1234
 torch.manual_seed(seed)

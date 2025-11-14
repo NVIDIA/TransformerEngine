@@ -31,17 +31,10 @@ from transformer_engine.common import load_framework_extension
 
 load_framework_extension("jax")
 
-from . import flax
-from . import quantize
-
-from .quantize import autocast, fp8_autocast, update_collections
-from .quantize import NVTE_FP8_COLLECTION_NAME
-
+from ..common.utils import DeprecatedEnum, deprecate_wrapper
+from . import flax, quantize
+from .quantize import NVTE_FP8_COLLECTION_NAME, autocast, fp8_autocast, update_collections
 from .sharding import MeshResource
-
-from ..common.utils import deprecate_wrapper
-from ..common.utils import DeprecatedEnum
-
 
 __all__ = [
     "NVTE_FP8_COLLECTION_NAME",

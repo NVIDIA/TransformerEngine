@@ -5,13 +5,14 @@
 """Sequential container for fusible operations."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable, Iterator
 from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
+from transformer_engine.pytorch.ops.op import FusibleOperation
 
 
 class Sequential(torch.nn.Module):

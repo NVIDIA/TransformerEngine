@@ -9,20 +9,21 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
-import torch
 
+from typing import Iterable, Optional, Tuple, Union
+
+import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensor,
-    Quantizer,
     QuantizedTensorStorage,
+    Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 aten = torch.ops.aten
 

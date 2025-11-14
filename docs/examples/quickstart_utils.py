@@ -4,7 +4,9 @@
 
 import math
 from typing import Optional
+
 import torch
+
 import transformer_engine.pytorch as te
 
 
@@ -203,8 +205,9 @@ def share_parameters_with_transformerlayer_te_model(te_model, basic_model):
 
 
 def cast_to_representable(inp, scale=1.0, fp8_format="e4m3"):
-    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     import transformer_engine_torch as tex
+
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
     fp8_type = tex.DType.kFloat8E4M3 if fp8_format == "e4m3" else tex.DType.kFloat8E5M2
     scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
