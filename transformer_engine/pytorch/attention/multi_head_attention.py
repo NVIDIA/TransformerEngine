@@ -3,35 +3,24 @@
 # See LICENSE for license information.
 
 """Multi-head Attention."""
-import os
 import collections
+import os
 from typing import Callable, List, Optional, Tuple, Union
+
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
-from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
-from transformer_engine.pytorch.utils import (
-    SplitAlongDim,
-    divide,
-    get_default_init_method,
-)
-from transformer_engine.pytorch.constants import (
-    AttnTypes,
-    AttnBiasTypes,
-    dist_group_type,
-)
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    get_distributed_rank,
-)
-
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+from transformer_engine.pytorch.constants import AttnBiasTypes, AttnTypes, dist_group_type
+from transformer_engine.pytorch.distributed import get_distributed_rank, get_distributed_world_size
+from transformer_engine.pytorch.module import LayerNorm, LayerNormLinear, Linear, RMSNorm
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.utils import SplitAlongDim, divide, get_default_init_method
 
 # Force DotProductAttention to use a different recipe than the fp8_recipe set in autocast().
 # Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"

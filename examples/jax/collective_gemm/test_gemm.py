@@ -12,28 +12,27 @@ This script uses custom distributed initialization with the following arguments:
 Example:
     python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3
 """
-import unittest
 import os
+import unittest
 from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec, NamedSharding
-
 from common import (
-    assert_allclose,
-    _initialize_distributed,
-    _get_dp_and_tp_sizes,
-    _create_mesh,
     DP_AXIS,
-    TPSP_AXIS,
     PARAMS_KEY,
+    TPSP_AXIS,
+    _create_mesh,
+    _get_dp_and_tp_sizes,
+    _initialize_distributed,
+    assert_allclose,
     cgemm_parser,
 )
+from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.quantize import autocast
 from transformer_engine.jax.cpp_extensions.gemm import CollectiveOp
+from transformer_engine.jax.quantize import autocast
 from transformer_engine.jax.sharding import MeshResource
 
 

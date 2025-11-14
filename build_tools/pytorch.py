@@ -5,11 +5,11 @@
 """PyTorch related extensions."""
 import os
 from pathlib import Path
+from typing import List
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
-from typing import List
+from .utils import all_files_in_dir, cuda_version, debug_build_enabled, get_cuda_include_dirs
 
 
 def install_requirements() -> List[str]:

@@ -6,10 +6,10 @@ import unittest
 
 import jax
 import numpy as np
+from utils import is_devices_enough, pytest_parametrize_wrapper
 
-from utils import pytest_parametrize_wrapper, is_devices_enough
-from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 from transformer_engine.jax import autocast
+from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 
 
 def generate_mesh_configs():

@@ -2,17 +2,16 @@
 #
 # See LICENSE for license information.
 
+import gc
 import os
 import re
-import gc
-import torch
-
 from typing import List
 
-from transformer_engine.pytorch.quantization import quantized_model_init
-
+import torch
 from transformers.modeling_utils import load_state_dict
 from transformers.utils.hub import get_checkpoint_shard_files
+
+from transformer_engine.pytorch.quantization import quantized_model_init
 
 """
     This file contains logic of mapping the HuggingFace GemmaModel parameters

@@ -3,10 +3,11 @@
 # See LICENSE for license information.
 
 import random
-import torch
-from transformer_engine.pytorch import parallel_cross_entropy
 
+import torch
 from utils import dtype_tols
+
+from transformer_engine.pytorch import parallel_cross_entropy
 
 
 class TestParallelCrossEntropy:

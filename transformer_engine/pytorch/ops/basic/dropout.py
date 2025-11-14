@@ -5,10 +5,12 @@
 """Fusible operation for dropout."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 import transformer_engine_torch as tex
+
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage

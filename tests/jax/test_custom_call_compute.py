@@ -2,49 +2,42 @@
 #
 # See LICENSE for license information.
 
+import operator
+from functools import reduce
+from typing import Union
+
 import jax
 import jax.numpy as jnp
 import pytest
 from jax import jit, value_and_grad
-from functools import reduce
-from typing import Union
-import operator
+from utils import assert_allclose, pytest_parametrize_wrapper, use_jax_gemm
 
-from utils import (
-    assert_allclose,
-    pytest_parametrize_wrapper,
-    use_jax_gemm,
-)
-from transformer_engine.jax.layernorm import layernorm
-from transformer_engine.jax.layernorm_mlp import layernorm_mlp
-
+from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.activation import activation
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
+from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax.cpp_extensions.normalization import (
     _jax_layernorm,
     _jax_rmsnorm,
     is_norm_zero_centered_gamma_in_weight_dtype,
 )
-from transformer_engine.jax.cpp_extensions.quantization import (
-    _jax_quantize,
-    _jax_quantize_dbias,
-)
-from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
-from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.cpp_extensions.quantization import _jax_quantize, _jax_quantize_dbias
+from transformer_engine.jax.dense import dense, grouped_dense
+from transformer_engine.jax.layernorm import layernorm
+from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 from transformer_engine.jax.quantize import (
+    GroupedScaledTensor1x,
     NoScaleTensor,
+    QuantizeLayout,
+    QuantizerFactory,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
-    GroupedScaledTensor1x,
     ScalingMode,
-    QuantizerFactory,
-    QuantizeLayout,
+    helper,
     noop_quantizer_set,
 )
-from transformer_engine.jax.quantize import helper
-from transformer_engine.jax.activation import activation
-from transformer_engine.jax.dense import dense, grouped_dense
-from transformer_engine.jax.layernorm_dense import layernorm_dense
 
 GEMM_CASES = [
     (256, 256, 512),

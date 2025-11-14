@@ -9,16 +9,16 @@ tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
 parallelism (FSDP). It includes functions for sharding constraints, mesh management,
 and collective operations.
 """
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
-import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
-import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 

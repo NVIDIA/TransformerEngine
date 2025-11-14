@@ -3,35 +3,33 @@
 # See LICENSE for license information.
 """Collective Dense Gradient test on multi-GPU with tensor parallelism"""
 import argparse
-import unittest
 import os
+import unittest
 
+import flax
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec, NamedSharding
-import flax
-
 from common import (
-    assert_allclose,
-    _initialize_distributed,
-    _get_dp_and_tp_sizes,
-    _create_mesh,
     DP_AXIS,
-    TPSP_AXIS,
     PARAMS_KEY,
+    TPSP_AXIS,
+    _create_mesh,
+    _get_dp_and_tp_sizes,
+    _initialize_distributed,
+    assert_allclose,
     cgemm_parser,
 )
+from jax.sharding import NamedSharding, PartitionSpec
 
-from transformer_engine.jax.dense import dense
-
-from transformer_engine.jax.quantize import autocast
+import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveOp,
     CollectiveOpSet,
     noop_collective_op_set,
 )
+from transformer_engine.jax.dense import dense
+from transformer_engine.jax.quantize import autocast
 from transformer_engine.jax.sharding import MeshResource
-import transformer_engine.jax.flax as te_flax
 
 
 def _get_logical_axes(collective_op):

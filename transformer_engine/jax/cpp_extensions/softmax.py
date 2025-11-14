@@ -2,20 +2,19 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for softmax"""
-from abc import abstractmethod
-from functools import partial, reduce
 import operator
 import warnings
+from abc import abstractmethod
+from functools import partial, reduce
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.sharding import PartitionSpec, NamedSharding
+from jax.sharding import NamedSharding, PartitionSpec
 
-from .base import BasePrimitive, register_primitive
-from .misc import get_padded_spec, check_valid_batch_dims
 from ..softmax import SoftmaxType
-
+from .base import BasePrimitive, register_primitive
+from .misc import check_valid_batch_dims, get_padded_spec
 
 __all__ = [
     "scaled_softmax_fwd",

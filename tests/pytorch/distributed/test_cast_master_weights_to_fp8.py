@@ -5,29 +5,29 @@
 import argparse
 import datetime
 import os
+import pathlib
 import subprocess
 import sys
-import pathlib
 
 import pytest
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 
+import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
     DelayedScaling,
-    Float8CurrentScaling,
     Float8BlockScaling,
+    Float8CurrentScaling,
     Format,
     Recipe,
 )
-import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
+    Float8BlockwiseQTensor,
+    Float8Tensor,
+    QuantizedTensor,
     is_fp8_available,
     is_fp8_block_scaling_available,
-    QuantizedTensor,
-    Float8Tensor,
-    Float8BlockwiseQTensor,
 )
 from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data

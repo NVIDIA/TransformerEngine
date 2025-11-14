@@ -5,14 +5,15 @@
 """Fusible operation for all-gather."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
 from ...distributed import gather_along_first_dim
+from ...tensor import Quantizer
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
-from ...tensor import Quantizer
 
 
 class AllGather(BasicOperation):

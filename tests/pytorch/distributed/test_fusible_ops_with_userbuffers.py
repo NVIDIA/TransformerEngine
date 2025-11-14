@@ -12,28 +12,23 @@ import os
 import pathlib
 import subprocess
 import sys
+from typing import Iterable, Optional
 
 import pytest
 import torch
-
-from typing import Optional, Iterable
 
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops.fused import (
-    UserbuffersBackwardLinear,
-    UserbuffersForwardLinear,
-)
 from transformer_engine.pytorch import (
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
     MXFP8Quantizer,
     QuantizedTensor,
-    Float8Tensor,
 )
-
+from transformer_engine.pytorch.ops.fused import UserbuffersBackwardLinear, UserbuffersForwardLinear
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()

@@ -4,40 +4,37 @@
 """
 Wrapper module for Transformer related layers with FP8 support.
 """
-from functools import reduce
 import operator
-from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
+from functools import reduce
+from typing import Any, Callable, Iterable, List, NewType, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-
-from ..dense import dense
-
-from ..layernorm import canonicalize_norm_type
-from ..layernorm import layernorm
-from ..layernorm_dense import layernorm_dense
-from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
-from ..softmax import softmax, SoftmaxType
-from ..sharding import with_sharding_constraint_by_logical_axes
 from ..cpp_extensions import (
     is_softmax_kernel_available,
-    jax_scaled_softmax,
     jax_scaled_masked_softmax,
+    jax_scaled_softmax,
     jax_scaled_upper_triang_masked_softmax,
 )
+from ..dense import dense
+from ..layernorm import canonicalize_norm_type, layernorm
+from ..layernorm_dense import layernorm_dense
+from ..layernorm_mlp import layernorm_mlp
 from ..quantize import (
-    QuantizerFactory,
-    get_quantize_config,
     QuantizeMetaSet,
+    QuantizerFactory,
     TensorSource,
+    get_quantize_config,
     get_quantize_config_with_recipe,
 )
+from ..sharding import with_sharding_constraint_by_logical_axes
+from ..softmax import SoftmaxType, softmax
 
 PRNGKey = Any
 Shape = Tuple[int, ...]

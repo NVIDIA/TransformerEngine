@@ -9,25 +9,26 @@ It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
 """
 
-from typing import Tuple, Sequence
-from functools import partial
 import warnings
+from functools import partial
+from typing import Sequence, Tuple
+
 import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
-    ScaledTensorFactory,
-    ScaledTensor,
-    ScalingMode,
     QuantizeLayout,
     QuantizerSet,
-    noop_quantizer_set,
-    with_sharding_constraint_by_logical_axes,
-    is_fp8_gemm_with_all_layouts_supported,
+    ScaledTensor,
+    ScaledTensorFactory,
+    ScalingMode,
     TensorUsage,
     get_quantize_config,
+    is_fp8_gemm_with_all_layouts_supported,
+    noop_quantizer_set,
+    with_sharding_constraint_by_logical_axes,
 )
 
 

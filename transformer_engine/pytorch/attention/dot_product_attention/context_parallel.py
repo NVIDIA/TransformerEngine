@@ -4,49 +4,47 @@
 
 """Context Parallelism."""
 import os
-from typing import List, Union, Tuple
+from typing import List, Tuple, Union
+
 import torch
 import transformer_engine_torch as tex
-
-from transformer_engine.pytorch.utils import (
-    get_cudnn_version,
-    nvtx_range_pop,
-    nvtx_range_push,
-    get_device_compute_capability,
-)
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
-    FusedAttnBackend,
-)
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-from transformer_engine.pytorch.jit import jit_fuser
-from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.constants import (
-    dist_group_type,
-    TE_DType,
-)
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    get_distributed_rank,
-    gather_along_first_dim,
-    reduce_scatter_along_first_dim,
-)
-
-from transformer_engine.pytorch.quantized_tensor import (
-    prepare_for_saving,
-    restore_from_saved,
-)
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
-    combine_and_quantize,
+)
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     combine_and_dequantize,
+    combine_and_quantize,
     print_quantizers,
+)
+from transformer_engine.pytorch.constants import TE_DType, dist_group_type
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+    FusedAttnBackend,
+    fused_attn_bwd,
+    fused_attn_fwd,
+)
+from transformer_engine.pytorch.distributed import (
+    gather_along_first_dim,
+    get_distributed_rank,
+    get_distributed_world_size,
+    reduce_scatter_along_first_dim,
+)
+from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.quantized_tensor import (
+    QuantizedTensorStorage,
+    prepare_for_saving,
+    restore_from_saved,
+)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    get_device_compute_capability,
+    nvtx_range_pop,
+    nvtx_range_push,
 )
 
 _cu_seqlens_info_with_cp_cache = {}

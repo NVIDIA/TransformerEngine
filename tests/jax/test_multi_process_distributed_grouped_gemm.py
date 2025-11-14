@@ -5,17 +5,12 @@
 from functools import partial
 
 import jax
-import jax.numpy as jnp
 import jax.experimental.multihost_utils as jem
-
-from transformer_engine.jax.dense import grouped_dense as te_grouped_dense
-from transformer_engine.jax.quantize import (
-    QuantizerFactory,
-    ScalingMode,
-)
-
+import jax.numpy as jnp
 from utils import assert_allclose, dtype_tols
 
+from transformer_engine.jax.dense import grouped_dense as te_grouped_dense
+from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode
 
 N_GROUP = 8
 MESH_AXIS_NAME = "fsdp"
@@ -151,9 +146,10 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
 
 
 if __name__ == "__main__":
-    from jax.sharding import NamedSharding, PartitionSpec
-    from jax.experimental import shard_map
     import sys
+
+    from jax.experimental import shard_map
+    from jax.sharding import NamedSharding, PartitionSpec
 
     coord_addr = sys.argv[1]
     proc_id = int(sys.argv[2])

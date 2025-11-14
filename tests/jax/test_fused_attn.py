@@ -2,51 +2,47 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
-from enum import Enum, auto
+import random
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from functools import partial
 from math import sqrt
-from typing import Tuple, Optional, Dict
-import random
+from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from flax.linen import combine_masks
-from flax.linen import make_attention_mask
+from distributed_test_base import assert_equal_collectives
+from flax.linen import combine_masks, make_attention_mask
 from flax.linen.dtypes import promote_dtype
-from jax import Array
-from jax import value_and_grad, jit
+from jax import Array, jit, value_and_grad
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
-
-from transformer_engine.jax import autocast
-from transformer_engine.jax.sharding import MeshResource
-from transformer_engine.jax.attention import (
-    AttnBiasType,
-    AttnMaskType,
-    QKVLayout,
-    QKVFormat,
-    reorder_causal_load_balancing,
-    inverse_reorder_causal_load_balancing,
-    fused_attn,
-    run_length_fill,
-    make_swa_mask,
-    SequenceDescriptor,
-    CPStrategy,
-    ReorderStrategy,
-)
-from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
     get_device_compute_capability,
 )
-
-from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
+
+from transformer_engine.jax import autocast
+from transformer_engine.jax.attention import (
+    AttnBiasType,
+    AttnMaskType,
+    CPStrategy,
+    QKVFormat,
+    QKVLayout,
+    ReorderStrategy,
+    SequenceDescriptor,
+    fused_attn,
+    inverse_reorder_causal_load_balancing,
+    make_swa_mask,
+    reorder_causal_load_balancing,
+    run_length_fill,
+)
+from transformer_engine.jax.cpp_extensions import FusedAttnHelper
+from transformer_engine.jax.sharding import MeshResource
 
 
 @pytest.fixture(autouse=True, scope="module")

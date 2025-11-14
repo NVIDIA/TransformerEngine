@@ -4,27 +4,16 @@
 """JAX/TE custom ops for amax calculation"""
 from enum import Enum
 
-
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
+from ..quantize import get_sign_from_vector, get_wgrad_sign_vector
+from ..sharding import global_mesh_resource, lax_paral_op
 from .base import BasePrimitive, register_primitive
-from .misc import (
-    get_padded_spec,
-    NamedSharding,
-)
-from ..sharding import (
-    global_mesh_resource,
-    lax_paral_op,
-)
-from ..quantize import (
-    get_wgrad_sign_vector,
-    get_sign_from_vector,
-)
-
+from .misc import NamedSharding, get_padded_spec
 
 __all__ = ["AmaxScope", "calculate_amax", "calculate_post_rht_amax"]
 

@@ -2,51 +2,48 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
+import math
 import operator
 from functools import reduce
-from typing import Tuple, Optional, Union
-import math
-
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+import transformer_engine_jax
 from jax import dtypes, ffi
-from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
+from jax.experimental.custom_partitioning import BATCHING, SdyShardingRule
 from jax.sharding import PartitionSpec
 
-import transformer_engine_jax
-
-from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
-from .base import BasePrimitive, register_primitive
-from .misc import (
-    get_padded_spec,
-    check_valid_batch_dims,
-    te_dtype_to_jax_dtype,
-    jax_dtype_to_te_dtype,
-    multidim_transpose,
-    should_apply_1x_fused_dbias_war_for_arch_l_100,
-    get_min_device_compute_capability,
-    NamedSharding,
+from ..quantize import (
+    GroupedQuantizer,
+    GroupedScaledTensor1x,
+    NoScaleTensor,
+    QuantizeLayout,
+    Quantizer,
+    ScaledTensor,
+    ScaledTensor2x,
+    ScaledTensorFactory,
+    ScalingMode,
+    compute_scale_from_amax,
+    get_rht_matrix,
 )
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
 )
-from ..quantize import (
-    ScaledTensor2x,
-    ScaledTensor,
-    ScaledTensorFactory,
-    GroupedScaledTensor1x,
-    Quantizer,
-    GroupedQuantizer,
-    QuantizeLayout,
-    ScalingMode,
-    compute_scale_from_amax,
-    NoScaleTensor,
-    get_rht_matrix,
+from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
+from .base import BasePrimitive, register_primitive
+from .misc import (
+    NamedSharding,
+    check_valid_batch_dims,
+    get_min_device_compute_capability,
+    get_padded_spec,
+    jax_dtype_to_te_dtype,
+    multidim_transpose,
+    should_apply_1x_fused_dbias_war_for_arch_l_100,
+    te_dtype_to_jax_dtype,
 )
-
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 

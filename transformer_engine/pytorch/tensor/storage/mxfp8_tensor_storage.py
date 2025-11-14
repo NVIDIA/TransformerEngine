@@ -5,18 +5,17 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple
-from collections.abc import Iterable
-import math
-import torch
 
+import math
+from collections.abc import Iterable
+from typing import Any, Dict, Optional, Tuple
+
+import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
-
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
-
+from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...utils import _empty_tensor
 
 

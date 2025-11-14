@@ -2,16 +2,13 @@
 #
 # See LICENSE for license information.
 
-import pytest
-
 import jax
 import jax.numpy as jnp
-
+import pytest
 from utils import assert_allclose
-from transformer_engine.jax.flax.module import _apply_low_rank_adaptation
-from transformer_engine.jax.flax.module import _normalize_axes
-from transformer_engine.jax.flax.transformer import LoRAScope
-from transformer_engine.jax.flax.transformer import _canonicalize_lora_scope
+
+from transformer_engine.jax.flax.module import _apply_low_rank_adaptation, _normalize_axes
+from transformer_engine.jax.flax.transformer import LoRAScope, _canonicalize_lora_scope
 
 
 class TestLoRA:

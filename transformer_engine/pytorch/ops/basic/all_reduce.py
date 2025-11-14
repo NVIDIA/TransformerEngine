@@ -5,13 +5,14 @@
 """Fusible operation for all-reduce."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
+from ...tensor import Quantizer
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
-from ...tensor import Quantizer
 
 
 class AllReduce(BasicOperation):

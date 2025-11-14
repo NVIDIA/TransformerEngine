@@ -4,8 +4,9 @@
 
 import dataclasses
 import math
-import torch
 from typing import Optional, Protocol, Tuple
+
+import torch
 from references.quantize_scale_calc import scale_from_amax_tensor
 
 

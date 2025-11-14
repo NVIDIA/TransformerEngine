@@ -9,25 +9,21 @@ import random
 import tempfile
 from string import Template
 
+import nvdlfw_inspect.api as debug_api
 import pytest
 import torch
+import transformer_engine_torch as tex
 
-import nvdlfw_inspect.api as debug_api
 import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.pytorch.quantization import _default_sf_compute
 from transformer_engine.pytorch import (
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
     is_fp8_available,
 )
-from transformer_engine.pytorch.module.base import (
-    _2X_ACC_DGRAD,
-    _2X_ACC_FPROP,
-    _2X_ACC_WGRAD,
-)
+from transformer_engine.pytorch.module.base import _2X_ACC_DGRAD, _2X_ACC_FPROP, _2X_ACC_WGRAD
+from transformer_engine.pytorch.quantization import _default_sf_compute
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 

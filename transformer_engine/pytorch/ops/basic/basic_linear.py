@@ -5,9 +5,10 @@
 """Fusible operation for linear layer without bias."""
 
 from __future__ import annotations
-from collections.abc import Callable, Iterable
+
 import contextlib
 import math
+from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
 import torch
@@ -19,25 +20,20 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
 from ...module.base import (
-    _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
     _2X_ACC_WGRAD,
     get_dummy_wgrad,
     get_workspace,
 )
+from ...quantization import FP8GlobalStateManager, Recipe
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
-from ...utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    clear_tensor_data,
-    devices_match,
-)
+from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data, devices_match
+from .._common import is_quantized_tensor, maybe_dequantize
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
 
 
 def _wait_async(handle: Optional[Any]) -> None:

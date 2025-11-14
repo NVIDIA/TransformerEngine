@@ -2,14 +2,15 @@
 #
 # See LICENSE for license information.
 
-import torch
-from transformer_engine.pytorch import Float8Tensor, Float8Quantizer
-
 import nvdlfw_inspect.api as debug_api
+import torch
+
+from transformer_engine.pytorch import Float8Quantizer, Float8Tensor
 
 try:
-    import transformer_engine
     import transformer_engine_torch as tex
+
+    import transformer_engine
 except (ImportError, ModuleNotFoundError):
     print("Could not find TransformerEngine package.")
     exit(1)

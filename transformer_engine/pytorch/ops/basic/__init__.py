@@ -5,17 +5,17 @@
 """Single tensor operations supported by the operation fuser."""
 
 from .activation import (
-    GELU,
     GEGLU,
-    QGELU,
+    GELU,
     QGEGLU,
-    ReLU,
-    ReGLU,
-    SReLU,
-    SReGLU,
-    SiLU,
-    SwiGLU,
+    QGELU,
     ClampedSwiGLU,
+    ReGLU,
+    ReLU,
+    SiLU,
+    SReGLU,
+    SReLU,
+    SwiGLU,
 )
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather

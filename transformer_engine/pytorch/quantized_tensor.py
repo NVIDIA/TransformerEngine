@@ -5,18 +5,19 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+
 import abc
 import copy
 import warnings
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import torch
 from torch.utils._pytree import tree_map
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor._quantization_helpers import (
-    _QuantizeFunc,
     _IdentityFunc,
+    _QuantizeFunc,
     _stride_from_shape,
 )
 

@@ -8,13 +8,13 @@ import functools
 import glob
 import importlib
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
-import platform
-from pathlib import Path
 from importlib.metadata import version as get_version
+from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 

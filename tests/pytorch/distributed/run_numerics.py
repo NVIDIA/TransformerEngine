@@ -6,30 +6,31 @@
 
 import argparse
 import datetime
+import math
 import os
 import sys
 from functools import wraps
-import math
 
-import transformer_engine.pytorch as te
 import torch
-from torch import nn
 import torch.distributed as dist
 import transformer_engine_torch as tex
+from run_layer_with_overlap import _compare_tensors
+from torch import nn
+
+import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
-    MXFP8BlockScaling,
     DelayedScaling,
-    Float8CurrentScaling,
     Float8BlockScaling,
-    NVFP4BlockScaling,
+    Float8CurrentScaling,
     Format,
-    Recipe,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
     QParams,
+    Recipe,
 )
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
-from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64

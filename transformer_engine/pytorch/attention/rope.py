@@ -5,12 +5,12 @@
 """
 Rotary Position Embedding implementation of different types along with helper functions
 """
-from typing import Optional, Tuple, Union, List
+from typing import List, Optional, Tuple, Union
+
 import torch
-
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
+from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
 

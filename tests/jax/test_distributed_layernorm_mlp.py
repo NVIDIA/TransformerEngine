@@ -2,12 +2,12 @@
 #
 # See LICENSE for license information.
 import re
-from typing import Callable, Sequence, Union, Optional
-import pytest
+from typing import Callable, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from utils import (
     assert_allclose,
@@ -18,33 +18,30 @@ from utils import (
 )
 
 from transformer_engine.common import recipe
-from transformer_engine.jax.quantize import (
-    is_fp8_available,
-    ScalingMode,
-    get_quantize_config_with_recipe,
-)
 from transformer_engine.jax import autocast
+from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 from transformer_engine.jax.flax import LayerNormMLP
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
-from transformer_engine.jax.sharding import (
-    HIDDEN_AXES,
-    HIDDEN_TP_AXES,
-    BATCH_AXES,
-    SEQLEN_TP_AXES,
-    SEQLEN_AXES,
-    W_NO_SHARD_AXES,
-    W_FSDP_AXES,
-    W_TP_AXES,
-    W_JOINED_AXES,
-)
-from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.quantize import (
     QuantizerFactory,
+    ScalingMode,
+    get_quantize_config_with_recipe,
     get_supported_quantization_recipes,
+    is_fp8_available,
     is_scaling_mode_supported,
 )
-from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
-
+from transformer_engine.jax.sharding import (
+    BATCH_AXES,
+    HIDDEN_AXES,
+    HIDDEN_TP_AXES,
+    SEQLEN_AXES,
+    SEQLEN_TP_AXES,
+    W_FSDP_AXES,
+    W_JOINED_AXES,
+    W_NO_SHARD_AXES,
+    W_TP_AXES,
+    MeshResource,
+)
 
 is_fp8_supported, reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
 is_mxfp8_supported, reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)

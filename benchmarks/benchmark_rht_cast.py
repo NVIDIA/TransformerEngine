@@ -3,14 +3,14 @@
 # See LICENSE for license information.
 
 import argparse
-import torch
+
 import pandas as pd
+import torch
 import torch.utils.benchmark as benchmark
+import transformer_engine_torch as tex
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 import transformer_engine.pytorch.cpp_extensions as ext
-
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
 scale_padding_to = 1

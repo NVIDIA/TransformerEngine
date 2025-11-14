@@ -6,7 +6,6 @@ import argparse
 import os
 import unittest
 from functools import partial
-import pytest
 
 import flax
 import jax
@@ -14,21 +13,22 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
+import pytest
+from common import (
+    get_quantization_recipe_from_name_string,
+    is_bf16_supported,
+    is_fp8_supported,
+    is_mxfp8_supported,
+    is_nvfp4_supported,
+    unpack_cached_datasets_if_available,
+)
 from datasets import load_dataset
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec, NamedSharding
+from jax.sharding import NamedSharding, PartitionSpec
 
-from common import (
-    is_bf16_supported,
-    is_fp8_supported,
-    is_mxfp8_supported,
-    is_nvfp4_supported,
-    get_quantization_recipe_from_name_string,
-    unpack_cached_datasets_if_available,
-)
 import transformer_engine.jax as te
 import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax

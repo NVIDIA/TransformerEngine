@@ -4,13 +4,11 @@
 
 import pytest
 import torch
-
-import transformer_engine.pytorch
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.optimizers import MultiTensorApply
-
 from references.quantize_scale_calc import scale_from_amax_tensor
 
+import transformer_engine.pytorch
+from transformer_engine.pytorch.optimizers import MultiTensorApply
 
 input_size_pairs = [
     (7777 * 77, 555 * 555),

@@ -4,12 +4,12 @@
 #
 # See LICENSE for license information.
 
-import os
-import sys
-import socket
-import fcntl
-import struct
 import argparse
+import fcntl
+import os
+import socket
+import struct
+import sys
 import warnings
 
 import torch
@@ -18,7 +18,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)

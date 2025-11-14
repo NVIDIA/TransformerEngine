@@ -4,51 +4,52 @@
 
 import math
 import os
-from typing import Dict, List, Tuple, Optional
-import pytest
 import random
+from typing import Dict, List, Optional, Tuple
 
+import pytest
 import torch
 import torch.nn as nn
+import transformer_engine_torch as tex
 from torch.nn import Parameter
+from utils import ModelConfig, reset_rng_states
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-    attention_mask_func,
-)
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    autocast,
-    quantized_model_init,
     DotProductAttention,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Fp8Padding,
+    Fp8Unpadding,
+    GroupedLinear,
+    LayerNorm,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
-    GroupedLinear,
     MultiheadAttention,
+    MXFP8Quantizer,
     RMSNorm,
     TransformerLayer,
-    LayerNorm,
-    Fp8Padding,
-    Fp8Unpadding,
-    Float8Quantizer,
-    Float8CurrentScalingQuantizer,
-    MXFP8Quantizer,
-    get_device_compute_capability,
-    is_fp8_available,
-    is_mxfp8_available,
-    is_fp8_block_scaling_available,
-    is_bf16_available,
-    is_nvfp4_available,
+    autocast,
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch import (
+    get_device_compute_capability,
+    is_bf16_available,
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_mxfp8_available,
+    is_nvfp4_available,
+    quantized_model_init,
+)
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.common import recipe
-import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states
-
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    init_method_normal,
+    scaled_init_method_normal,
+)
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)

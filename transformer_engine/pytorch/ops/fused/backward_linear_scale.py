@@ -5,6 +5,7 @@
 """Fused backward dgrad GEMM + scale."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch

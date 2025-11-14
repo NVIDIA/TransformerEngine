@@ -4,11 +4,10 @@
 
 import pytest
 import torch
+
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
-from transformer_engine.pytorch.custom_recipes import utils
-
+from transformer_engine.pytorch.custom_recipes import quantization_nvfp4, utils
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 

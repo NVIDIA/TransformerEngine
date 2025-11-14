@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import NVFP4Quantizer
 

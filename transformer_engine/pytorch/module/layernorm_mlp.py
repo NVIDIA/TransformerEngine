@@ -5,82 +5,76 @@
 """LayerNormMLP API"""
 import os
 import warnings
-from typing import Callable, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
-from torch.nn import init
-
 import transformer_engine_torch as tex
+from torch.nn import init
+from torch.nn.parameter import Parameter
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
-from .base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_workspace,
-    _ub_communicators,
-    get_ub,
-    TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
+
+from ...debug.pytorch.debug_state import TEDebugState
+from ..constants import dist_group_type
+from ..cpp_extensions import general_gemm
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..distributed import (
+    _fsdp_scatter_tensors,
+    allreduce,
+    gather_along_first_dim,
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    reduce_scatter_along_first_dim,
+    set_tensor_model_parallel_attributes,
+    symmetric_all_reduce,
+    use_reentrant_activation_recompute,
 )
-from ..quantization import FP8GlobalStateManager
+from ..export import assert_warmed_up, is_in_onnx_export_mode
+from ..graph import is_graph_capturing
 from ..jit import (
-    bias_gelu_fused,
     bgrad_dgelu_fused,
+    bias_gelu_fused,
+    no_torch_dynamo,
     set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
-from ..utils import (
-    divide,
-    get_default_init_method,
-    init_method_constant,
-    cast_if_needed,
-    assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
-    clear_tensor_data,
-    requires_grad,
-    needs_quantized_gemm,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    symmetric_all_reduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    use_reentrant_activation_recompute,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-)
-from ..constants import dist_group_type
-from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
-from ..cpp_extensions import (
-    general_gemm,
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer, Float8Tensor
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
+from ..utils import (
+    assert_dim_for_all_gather,
+    assert_dim_for_fp8_exec,
+    cast_if_needed,
+    clear_tensor_data,
+    divide,
+    get_default_init_method,
+    init_method_constant,
+    needs_quantized_gemm,
+    requires_grad,
 )
-from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ...debug.pytorch.debug_state import TEDebugState
+from ._common import WeightGradStore, apply_normalization
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    _ub_communicators,
+    fill_userbuffers_buffer_for_all_gather,
+    get_ub,
+    get_workspace,
+)
 
 __all__ = ["LayerNormMLP"]
 
@@ -2007,7 +2001,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
-        from ..export import onnx_layernorm, onnx_gemm
+        from ..export import onnx_gemm, onnx_layernorm
 
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
         assert_warmed_up(self)

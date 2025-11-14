@@ -22,21 +22,23 @@ For reproducibility use: torch.manual_seed(0)
 
 import os
 import tempfile
-import pytest
 import warnings
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 import onnxruntime as ort
+import pytest
+import tensorrt as trt
 import torch
-from torch import nn as nn
-from typing import Optional, Union, Tuple, List
+import transformer_engine_torch as tex
 from onnxruntime_extensions import PyCustomOpDef, get_library_path, onnx_op
+from torch import nn as nn
+
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
-import tensorrt as trt
 
 # Global test configuration knobs.
 
@@ -44,8 +46,8 @@ import tensorrt as trt
 SAVE_TEST_IO = bool(int(os.getenv("NVTE_ONNX_EXPORT_SAVE_TEST_IO", "0")))
 
 if SAVE_TEST_IO:
-    from polygraphy.json import save_json
     from polygraphy.comparator import RunResults
+    from polygraphy.json import save_json
 
 # The directory where generated ONNX test models are stored.
 NVTE_TEST_ARTIFACTS_DIR = os.environ.get("NVTE_TEST_ARTIFACTS_DIR")

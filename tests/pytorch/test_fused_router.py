@@ -1,15 +1,17 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import torch
+from copy import deepcopy
 from typing import Optional
+
+import pytest
+import torch
+
 from transformer_engine.pytorch.router import (
-    fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
+    fused_topk_with_score_function,
 )
-import pytest
-from copy import deepcopy
 
 seed = 42
 torch.manual_seed(seed)

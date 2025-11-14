@@ -5,12 +5,13 @@
 """Linear layer backward with Userbuffers communication."""
 
 from __future__ import annotations
-from typing import Optional
+
 import warnings
+from typing import Optional
 
 import torch
-
 from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
+
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...module.base import (
@@ -24,8 +25,8 @@ from ...module.base import (
 from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
+from .._common import is_quantized_tensor, maybe_dequantize
 from ..basic import BasicLinear, Bias, ReduceScatter
-from .._common import maybe_dequantize, is_quantized_tensor
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 

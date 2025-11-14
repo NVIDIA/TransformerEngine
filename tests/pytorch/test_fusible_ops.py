@@ -4,18 +4,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import io
 import math
+from collections.abc import Iterable
 from typing import Optional
 
 import pytest
 import torch
+import transformer_engine_torch as tex
+
+# Import utility functions
+from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch import (
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    QuantizedTensor,
+    is_bf16_available,
+)
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
     BackwardAddRMSNorm,
@@ -25,18 +37,6 @@ from transformer_engine.pytorch.ops.fused import (
     ForwardLinearBiasAdd,
     ForwardLinearScaleAdd,
 )
-from transformer_engine.pytorch import (
-    QuantizedTensor,
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    MXFP8Quantizer,
-    NVFP4Quantizer,
-    is_bf16_available,
-)
-import transformer_engine_torch as tex
-
-# Import utility functions
-from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
 
 # Check for supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)

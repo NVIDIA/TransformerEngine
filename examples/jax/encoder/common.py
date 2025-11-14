@@ -2,17 +2,18 @@
 #
 # See LICENSE for license information.
 """Shared functions for the encoder tests"""
-from functools import lru_cache
 import os
 import pathlib
 import zipfile
+from functools import lru_cache
 
 import jax
 import jax.numpy
-import transformer_engine
-from transformer_engine_jax import get_device_compute_capability
-from transformer_engine.common import recipe
 import numpy as np
+from transformer_engine_jax import get_device_compute_capability
+
+import transformer_engine
+from transformer_engine.common import recipe
 
 
 @lru_cache

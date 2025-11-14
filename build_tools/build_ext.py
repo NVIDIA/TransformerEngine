@@ -4,13 +4,12 @@
 
 """Installation script."""
 
+import copy
 import os
 import subprocess
 import sys
 import sysconfig
-import copy
 import time
-
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Type
@@ -22,8 +21,8 @@ from .utils import (
     debug_build_enabled,
     found_ninja,
     get_frameworks,
-    nvcc_path,
     get_max_jobs_for_parallel_build,
+    nvcc_path,
 )
 
 

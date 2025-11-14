@@ -5,12 +5,12 @@
 """JAX related extensions."""
 import os
 from pathlib import Path
-from packaging import version
+from typing import List
 
 import setuptools
+from packaging import version
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
-from typing import List
+from .utils import all_files_in_dir, debug_build_enabled, get_cuda_include_dirs
 
 
 def install_requirements() -> List[str]:

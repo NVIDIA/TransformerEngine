@@ -3,13 +3,13 @@
 # See LICENSE for license information.
 
 import os
-import pytest
 import subprocess
 from pathlib import Path
-import transformer_engine.pytorch as te
 
+import pytest
 import torch
 
+import transformer_engine.pytorch as te
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)

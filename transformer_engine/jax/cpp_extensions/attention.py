@@ -11,42 +11,41 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax, ffi
-from jax.sharding import PartitionSpec, NamedSharding
-from jax.experimental.custom_partitioning import SdyShardingRule
-
 import transformer_engine_jax
+from jax import dtypes, ffi, lax
+from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.sharding import NamedSharding, PartitionSpec
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
+
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
-    QKVLayout,
-    QKVFormat,
     CPStrategy,
+    QKVFormat,
+    QKVLayout,
     SequenceDescriptor,
 )
 
-from .base import BasePrimitive, register_primitive
-from .misc import (
-    check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
-    get_padded_spec,
-    get_cudnn_version,
-    get_all_device_compute_capability,
-)
 from ..sharding import (
-    global_mesh_resource,
-    lax_paral_op,
     all_reduce_sum_along_dp_fsdp,
-    get_mesh_axis_size,
+    get_all_mesh_axes,
     get_mesh_axis_rank,
     get_mesh_axis_rank_host,
-    get_all_mesh_axes,
+    get_mesh_axis_size,
+    global_mesh_resource,
+    lax_paral_op,
     num_of_devices,
     with_sharding_constraint,
 )
-
+from .base import BasePrimitive, register_primitive
+from .misc import (
+    check_valid_batch_dims,
+    get_all_device_compute_capability,
+    get_cudnn_version,
+    get_padded_spec,
+    jax_dtype_to_te_dtype,
+    te_dtype_to_jax_dtype,
+)
 
 __all__ = [
     "FusedAttnHelper",

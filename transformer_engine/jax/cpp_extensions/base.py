@@ -8,14 +8,13 @@ import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
 
-from jax.extend import core
-from jax.interpreters import xla, mlir
-from jax.experimental.custom_partitioning import custom_partitioning
-from jax._src.interpreters import batching
-from jax._src import dispatch
-from jax import ffi
-
 import transformer_engine_jax
+from jax import ffi
+from jax._src import dispatch
+from jax._src.interpreters import batching
+from jax.experimental.custom_partitioning import custom_partitioning
+from jax.extend import core
+from jax.interpreters import mlir, xla
 
 
 class BasePrimitive(metaclass=ABCMeta):

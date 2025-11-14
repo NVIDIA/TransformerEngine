@@ -5,15 +5,14 @@
 """Fusible operation for reshape."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
+from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
+
 from ...tensor import Quantizer
 
 

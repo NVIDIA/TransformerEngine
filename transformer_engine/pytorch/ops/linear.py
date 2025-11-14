@@ -5,18 +5,14 @@
 """Fusible operation for linear layer."""
 
 from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.basic import (
-    AllReduce,
-    BasicLinear,
-    Bias,
-    ReduceScatter,
-)
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
+from transformer_engine.pytorch.ops.basic import AllReduce, BasicLinear, Bias, ReduceScatter
 from transformer_engine.pytorch.ops.op import FusedOperation
 
 

@@ -75,8 +75,10 @@ PARAMS_KEY = "params"
 
 # Shared functions for distributed testing
 import argparse
+
 import jax
 from jax.experimental import mesh_utils
+
 from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 # Global flag to track if distributed has been initialized

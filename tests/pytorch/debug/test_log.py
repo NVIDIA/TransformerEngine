@@ -2,27 +2,29 @@
 #
 # See LICENSE for license information.
 
+import contextlib
+import math
+import os
+import tempfile
+
 import nvdlfw_inspect.api as debug_api
+import pytest
+import torch
+
 import transformer_engine.debug
 import transformer_engine.pytorch as te
-import torch
-import tempfile
 from transformer_engine.common import recipe
-import pytest
-import contextlib
-import os
+from transformer_engine.debug.features.utils.stats_computation import (
+    BlockwiseDynamicRangeStat,
+    compute_max_blockwise_dynamic_range,
+)
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch import (
     is_fp8_available,
-    is_mxfp8_available,
     is_fp8_block_scaling_available,
+    is_mxfp8_available,
 )
 from transformer_engine.pytorch.quantization import RecipeState
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.debug.features.utils.stats_computation import (
-    compute_max_blockwise_dynamic_range,
-    BlockwiseDynamicRangeStat,
-)
-import math
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)

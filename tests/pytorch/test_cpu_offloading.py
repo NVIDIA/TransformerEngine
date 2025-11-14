@@ -9,12 +9,12 @@ from typing import Iterable, Optional
 
 import pytest
 import torch
+from utils import ModelConfig, get_available_attention_backends
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
-from utils import ModelConfig, get_available_attention_backends
 
 # Check supported quantization schemes
 fp8_available = te.is_fp8_available()

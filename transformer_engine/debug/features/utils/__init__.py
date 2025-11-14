@@ -6,8 +6,8 @@
 Utils for the debug features.
 """
 
-import torch
 import nvdlfw_inspect.api as debug_api
+import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 

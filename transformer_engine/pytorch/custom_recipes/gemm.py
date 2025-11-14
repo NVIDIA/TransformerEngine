@@ -8,10 +8,7 @@ from typing import Iterable, Optional
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes.quantization import (
-    MMParams,
-    GEMMType,
-)
+from transformer_engine.pytorch.custom_recipes.quantization import GEMMType, MMParams
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.tensor.utils import is_custom
 

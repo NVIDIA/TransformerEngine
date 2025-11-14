@@ -3,14 +3,14 @@
 # See LICENSE for license information.
 """conftest for tests/jax"""
 import os
+import time
+from collections import defaultdict
+
 import jax
 import pytest
-from collections import defaultdict
-import time
-
+from transformer_engine_jax import get_device_compute_capability
 
 import transformer_engine.jax
-from transformer_engine_jax import get_device_compute_capability
 
 
 @pytest.fixture(autouse=True, scope="function")

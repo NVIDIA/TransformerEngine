@@ -2,16 +2,15 @@
 #
 # See LICENSE for license information.
 
-import pathlib
 import os
-import torch
+import pathlib
+
 import pytest
+import torch
 
 import transformer_engine.pytorch as te
-
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
-
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
 TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"

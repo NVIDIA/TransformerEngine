@@ -5,14 +5,15 @@
 """Fusible operation for quantization."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
 from ...quantization import FP8GlobalStateManager
+from ...tensor import Quantizer
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
-from ...tensor import Quantizer
 
 
 class Quantize(BasicOperation):

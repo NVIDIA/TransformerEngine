@@ -4,10 +4,12 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
+
 import os
-from enum import Enum
-from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
+from enum import Enum
+from typing import Any, Callable, Literal, NamedTuple, Optional, Union
+
 from pydantic.dataclasses import dataclass
 
 

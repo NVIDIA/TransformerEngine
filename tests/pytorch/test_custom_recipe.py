@@ -4,19 +4,19 @@
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
+import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    autocast,
-    Linear,
+    Float8CurrentScalingQuantizer,
+    GroupedLinear,
     LayerNormLinear,
     LayerNormMLP,
-    GroupedLinear,
-    Float8CurrentScalingQuantizer,
+    Linear,
+    autocast,
 )
-import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
 )

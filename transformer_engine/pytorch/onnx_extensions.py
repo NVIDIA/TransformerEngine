@@ -20,19 +20,20 @@ The primary goal of ONNX export is to enable inference compatibility with Tensor
 
 """
 
-from typing import Tuple
 import math
-import torch
-import onnxscript
-from onnxscript import opset18 as op
-from onnx import defs
-import transformer_engine_torch as tex
+from typing import Tuple
 
+import onnxscript
+import torch
+import transformer_engine_torch as tex
+from onnx import defs
+from onnxscript import opset18 as op
+
+from .constants import MXFP8_BLOCK_SCALING_SIZE
+from .export import is_in_onnx_export_mode
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .constants import MXFP8_BLOCK_SCALING_SIZE
 from .utils import round_up_to_nearest_multiple
-from .export import is_in_onnx_export_mode
 
 trt_opset = onnxscript.values.Opset(
     "trt", version=1

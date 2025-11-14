@@ -6,31 +6,31 @@
 from __future__ import annotations
 
 import abc
-import itertools
 import functools
-import warnings
+import itertools
 import os
-from contextlib import contextmanager
+import warnings
 from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+
 from transformer_engine.common.recipe import (
-    Recipe,
+    CustomRecipe,
     DelayedScaling,
+    Float8BlockScaling,
+    Float8CurrentScaling,
     Format,
     MXFP8BlockScaling,
-    Float8CurrentScaling,
-    Float8BlockScaling,
     NVFP4BlockScaling,
-    CustomRecipe,
+    Recipe,
 )
 
 from .constants import dist_group_type
-from .utils import get_device_compute_capability
 from .jit import jit_fuser
-
+from .utils import get_device_compute_capability
 
 __all__ = [
     "autocast",

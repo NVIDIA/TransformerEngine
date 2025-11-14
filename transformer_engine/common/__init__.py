@@ -8,13 +8,13 @@ import ctypes
 import functools
 import glob
 import importlib
-from importlib.metadata import version, distribution, PackageNotFoundError
 import os
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import sysconfig
+from importlib.metadata import PackageNotFoundError, distribution, version
+from pathlib import Path
 from typing import Optional, Tuple
 
 

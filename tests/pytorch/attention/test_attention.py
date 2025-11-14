@@ -3,35 +3,33 @@
 # See LICENSE for license information.
 import logging
 import os
-import sys
 import pathlib
+import sys
 from typing import Any, Dict, Tuple, Union
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
+import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    TransformerLayer,
-    autocast,
-    quantized_model_init,
     DotProductAttention,
     MultiheadAttention,
-    get_device_compute_capability,
     Quantizer,
-    is_fp8_available,
+    TransformerLayer,
+    autocast,
+    get_device_compute_capability,
     is_bf16_available,
+    is_fp8_available,
+    quantized_model_init,
 )
-from transformer_engine.pytorch.attention.dot_product_attention import (
-    _attention_backends,
-)
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
+from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
 )
-from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
     fused_attn_bwd,
@@ -39,26 +37,26 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-)
-from transformer_engine.pytorch.utils import get_cudnn_version
-import transformer_engine_torch as tex
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    init_method_normal,
+    scaled_init_method_normal,
+)
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
-    reset_rng_states,
-    compare_and_assert,
     ModelConfig,
+    compare_and_assert,
     dtype_tols,
     get_available_attention_backends,
+    reset_rng_states,
 )
 
 # Check if hardware supports FP8 attention.

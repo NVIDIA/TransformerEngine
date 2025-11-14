@@ -4,15 +4,18 @@
 
 """Fused Adam optimizer."""
 from __future__ import annotations
+
+import warnings
 from collections.abc import Iterable
 from copy import deepcopy
 from itertools import chain
 from typing import Optional
-import warnings
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+
 from .multi_tensor_apply import multi_tensor_applier
 
 

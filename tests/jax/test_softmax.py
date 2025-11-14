@@ -9,16 +9,13 @@ from functools import wraps
 import jax
 import jax.numpy as jnp
 import pytest
-from jax import lax
-from jax import nn
-from jax import value_and_grad, jit
+from jax import jit, lax, nn, value_and_grad
 from jax.typing import DTypeLike
-
 from utils import assert_allclose
 
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
-from transformer_engine.jax.softmax import SoftmaxType, softmax
 from transformer_engine.jax.flax.module import Softmax
+from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 
 def catch_unsupported(method):
