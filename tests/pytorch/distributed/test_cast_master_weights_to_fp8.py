@@ -291,11 +291,11 @@ class MiniZero_1:
                     weight = _get_raw_data(weight, colwise)
                 weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
-            if self.manual_post_all_gather_processing:
-                quantized_weights = [
-                    weight for weight in self.weights if isinstance(weight, QuantizedTensor)
-                ]
-                post_all_gather_processing(quantized_weights)
+        if self.manual_post_all_gather_processing:
+            quantized_weights = [
+                weight for weight in self.weights if isinstance(weight, QuantizedTensor)
+            ]
+            post_all_gather_processing(quantized_weights)
 
 
 class MiniFSDP:
