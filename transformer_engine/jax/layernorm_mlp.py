@@ -28,7 +28,6 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     TensorUsage,
-    get_quantize_config,
 )
 
 
@@ -114,7 +113,7 @@ def layernorm_mlp(
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
 
-    if not get_quantize_config().is_fp8_enabled():
+    if quantizer_sets == (noop_quantizer_set, noop_quantizer_set):
         input_dtype = x.dtype
         kernel_1 = kernel_1.astype(input_dtype)
         kernel_2 = kernel_2.astype(input_dtype)
