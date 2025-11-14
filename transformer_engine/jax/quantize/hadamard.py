@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 """Randomized Hadamard Transform (RHT) utilities for JAX."""
+from functools import lru_cache
+
 import jax.numpy as jnp
 
 
@@ -28,6 +30,7 @@ def apply_rht(x: jnp.ndarray, inverse=False) -> jnp.ndarray:
     return (x.reshape(-1, block_size) @ h).reshape(x.shape)
 
 
+@lru_cache(maxsize=1)
 def get_rht_matrix() -> jnp.ndarray:
     """Get the Randomized Hadamard Transform (RHT) matrix used in NVFP4 weight gradient quantization.
 
@@ -44,3 +47,11 @@ def get_rht_matrix() -> jnp.ndarray:
     h = jnp.diag(s) @ h
 
     return (h / jnp.sqrt(block_size)).astype(jnp.bfloat16)
+
+
+try:
+    # Pre-cache the RHT matrix so it is a constant real array and not a tracer that could leak between traces.
+    get_rht_matrix()
+    # This is allowed to fail as we don't want to introduce a hard dependency on scipy if the user isn't using NVFP4 quantization.
+except Exception:
+    pass
