@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
