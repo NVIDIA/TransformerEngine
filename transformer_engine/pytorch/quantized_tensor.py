@@ -21,7 +21,7 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _stride_from_shape,
 )
 
-_qunatized_tensor_cpu_supported_ops = (
+_quantized_tensor_cpu_supported_ops = (
     torch.ops.aten.empty_like.default,
     torch.ops.aten.copy_.default,
 )
@@ -547,7 +547,7 @@ class QuantizedTensor(torch.Tensor):
         def check_if_cpu(arg):
             if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
                 assert (
-                    func in _qunatized_tensor_cpu_supported_ops
+                    func in _quantized_tensor_cpu_supported_ops
                 ), f"QuantizedTensor on CPU does not support this operation: {func}"
             return arg
 
