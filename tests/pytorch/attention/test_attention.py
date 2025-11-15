@@ -1820,8 +1820,8 @@ def test_mha_fp8_vs_f16(
         fp8_meta=fp8_meta,
         is_training=is_training,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if flash_attn_supported + fused_attn_supported < 1:
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
     if not fp8_dpa_bwd:
         available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -1830,8 +1830,8 @@ def test_mha_fp8_vs_f16(
             qkv_layout=qkv_format.replace("hd", "h3d"),
             is_training=is_training,
         )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
+        _, fused_attn_supported_f16, _ = available_backends
+        if not fused_attn_supported_f16:
             pytest.skip("No attention backend available.")
 
     if flash_attn_supported:
@@ -1843,7 +1843,7 @@ def test_mha_fp8_vs_f16(
             dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
-    if fused_attn_supported:
+    if fused_attn_supported_fp8:
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "1"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1851,6 +1851,11 @@ def test_mha_fp8_vs_f16(
         fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
             dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
+
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
         fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
             dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
@@ -1859,7 +1864,7 @@ def test_mha_fp8_vs_f16(
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    if flash_attn_supported and fused_attn_supported:
+    if flash_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -1872,7 +1877,7 @@ def test_mha_fp8_vs_f16(
             rmse_tol,
             True,
         )
-    if fused_attn_supported:
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
