@@ -1501,14 +1501,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_output=fp8_output,
                 )
 
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
-                )
-
             if use_unfused_attention:
                 allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
                 if checkpoint_core_attention:

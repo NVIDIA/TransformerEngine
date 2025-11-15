@@ -68,7 +68,12 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    start_offload,
+    mark_not_offload,
+    mark_activation_offload,
+)
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
@@ -229,6 +234,9 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
+
+        if is_cpu_offload_enabled():
+            start_offload(inputmat)
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
         # ------------------------------------------------------
         # Input tensor is ready for GEMM...
@@ -417,6 +425,7 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
+            mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
