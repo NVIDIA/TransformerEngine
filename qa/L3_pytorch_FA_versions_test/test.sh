@@ -33,10 +33,10 @@ do
     pip3 install flash-attn==${fa_version}
   else
     git clone https://github.com/Dao-AILab/flash-attention.git
-    cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
+    cd flash-attention/hopper && python setup.py install
     python_path=`python -c "import site; print(site.getsitepackages()[0])"`
     mkdir -p $python_path/flash_attn_3
-    wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.py
+    cp flash_attn_interface.py $python_path/flash_attn_3/
     cd ../../
   fi
 
