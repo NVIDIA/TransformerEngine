@@ -117,7 +117,15 @@ model_configs_base = {
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype,
+    model_configs,
+    model,
+    ckpt_attn,
+    workspace_opt,
+    qkv_layout,
+    swa,
+    pad_between_seqs,
+    num_splits=None,
 ):
     """Test DotProductAttention module"""
 
@@ -244,6 +252,7 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
+            num_splits=num_splits,
         )
 
     # Compare results
@@ -306,6 +315,19 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_base])
+@pytest.mark.parametrize("model", ["base_1_0"])
+def test_dpa_num_splits(dtype, model_configs, model):
+    """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
+    if not FlashAttentionUtils.v3_is_installed:
+        pytest.skip("num_splits requires FlashAttention-3.")
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, None, False, False, num_splits=2
+    )
 
 
 model_configs_softmax = {
@@ -848,6 +870,7 @@ def _run_dot_product_attention(
     workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
+    num_splits=None,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
     # Set RNG and environment varables
@@ -1152,6 +1175,8 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        # Only pass num_splits when exercising the FlashAttention path
+        num_splits=(num_splits if backend == "FlashAttention" else None),
     )
     max_logit = None
     if config.return_max_logit:
