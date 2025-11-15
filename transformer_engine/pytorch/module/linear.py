@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import contextlib
 
 import torch
 
@@ -38,6 +39,7 @@ from ..utils import (
     assert_dim_for_all_gather,
     nvtx_range_pop,
     nvtx_range_push,
+    should_set_cuda_device_every_batch,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -1426,9 +1428,14 @@ class Linear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(
+        if should_set_cuda_device_every_batch():
+            device_ctx = torch.cuda.device(
+                getattr(self, list(self.named_parameters())[0][0]).device
+            )
+        else:
+            device_ctx = contextlib.nullcontext()
+
+        with device_ctx, self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
