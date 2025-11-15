@@ -1843,23 +1843,23 @@ def test_mha_fp8_vs_f16(
             dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
-    fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
-
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
-    fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
+    if fused_attn_supported:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+        fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+        fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
+            dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    if flash_attn_supported:
+    if flash_attn_supported and fused_attn_supported:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -1872,32 +1872,33 @@ def test_mha_fp8_vs_f16(
             rmse_tol,
             True,
         )
-    logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
-    logging.debug("========== {:^25s} ==========".format("forward output"))
-    compare_and_assert(
-        fused_attn_fwd_fp8,
-        fused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "fused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-        True,
-    )
+    if fused_attn_supported:
+        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
+            fused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "fused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+            True,
+        )
 
-    if is_training:
-        for i in range(len(param_names[:1])):
-            logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            compare_and_assert(
-                fused_attn_bwd_fp8[i],
-                fused_attn_bwd_f16[i],
-                f"fused_attn_bwd_fp8[{i}]",
-                f"fused_attn_bwd_f16[{i}]",
-                atol,
-                rtol,
-                rmse_tol,
-                True,
-            )
+        if is_training:
+            for i in range(len(param_names[:1])):
+                logging.debug("========== {:^25s} ==========".format(param_names[i]))
+                compare_and_assert(
+                    fused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"fused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                    True,
+                )
 
 
 def _run_mha_fp8_vs_f16(
