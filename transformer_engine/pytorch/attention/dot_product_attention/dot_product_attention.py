@@ -975,7 +975,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             Whether to enforce output to be in FP8 or not.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,

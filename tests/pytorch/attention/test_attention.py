@@ -2489,7 +2489,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         max_s: int,
         fast_zero_fill: bool,
         fp8_meta: Dict[str, Any],
-        workspace: torch.Tensor,
         is_training: bool,
         mask_type: str,
         quantizers: list[Quantizer],
@@ -2518,7 +2517,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         qkv, *_ = ext.general_gemm(
             qkv_weight_fp8,
             inp_fp8,
-            workspace,
             bias=qkv_bias,
             out_dtype=qkv_weight_fp8.dtype,
             quantization_params=qkv_quantizer,
@@ -2560,9 +2558,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             s_quantizer=s_quantizer,
         )
 
-        tensors_to_save, tensor_objects = prepare_for_saving(
-            q, k, v, inp_fp8, qkv_weight_fp8, workspace, out
-        )
+        tensors_to_save, tensor_objects = prepare_for_saving(q, k, v, inp_fp8, qkv_weight_fp8, out)
 
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
@@ -2592,7 +2588,7 @@ class _custom_mha_fp8(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
             saved_tensors = ctx.saved_tensors
-            (q, k, v, inp_fp8, qkv_weight_fp8, workspace, out) = restore_from_saved(
+            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_saved(
                 ctx.tensor_objects, saved_tensors
             )
 
@@ -2648,7 +2644,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_dgrad, *_ = ext.general_gemm(
                 qkv_weight_fp8,
                 dqkv_c,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_DGRAD,
                 layout="NN",
@@ -2658,7 +2653,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_wgrad, *_ = ext.general_gemm(
                 inp_fp8,
                 dqkv,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_WGRAD,
                 layout="NT",
@@ -2709,9 +2703,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         with torch.no_grad():
             self.qkv_bias.zero_()
             self.qkv_weight.fill_(1.0)
-        self.workspace = torch.empty(
-            _CUBLASLT_WORKSPACE_SIZE_BYTES, dtype=torch.int8, device="cuda"
-        )
 
     def forward(
         self,
@@ -2730,7 +2721,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 max_s,
                 self.fast_zero_fill,
                 self.fp8_meta,
-                self.workspace,
                 self.training,
                 self.mask_type,
                 self.quantizers,

@@ -18,7 +18,6 @@ from ...quantization import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
-    get_workspace,
     _2X_ACC_FPROP,
 )
 from ...quantized_tensor import Quantizer
@@ -243,7 +242,6 @@ class UserbuffersForwardLinear(FusedOperation):
         gemm_output, *_, reduce_scatter_output = general_gemm(
             w,
             x,
-            get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
             bias=bias,

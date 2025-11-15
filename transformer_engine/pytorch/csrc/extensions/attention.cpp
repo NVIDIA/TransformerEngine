@@ -108,6 +108,11 @@ std::vector<py::object> fused_attn_fwd(
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
     size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph) {
+  // Ensure that cuDNN handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(cu_seqlens_q.device());
+
   auto none = py::none();
 
   // create QKV tensor wrappers

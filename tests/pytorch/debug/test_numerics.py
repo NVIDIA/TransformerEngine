@@ -82,7 +82,6 @@ def _fp8_gemm_kernel(tensor1, scale1, dtype1, tensor2, scale2, dtype2, use_split
     out, *_ = tepytorch.cpp_extensions.general_gemm(
         fp8_tensor1,
         fp8_tensor2,
-        tepytorch.module.base.get_workspace(),
         torch.float32,
         use_split_accumulator=use_split_accumulator,
     )
@@ -199,7 +198,6 @@ def _emulate_linear(
         wgrad, *_ = tepytorch.cpp_extensions.general_gemm(
             wgrad_input,
             wgrad_gradient,
-            tepytorch.module.base.get_workspace(),
             torch.float32,
             layout="NT",
             grad=True,

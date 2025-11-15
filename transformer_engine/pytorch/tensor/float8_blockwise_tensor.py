@@ -57,6 +57,22 @@ class Float8BlockQuantizer(Quantizer):
         self.block_scaling_dim = block_scaling_dim
         self.all_gather_usage = all_gather_usage
 
+    def copy(self) -> Float8BlockQuantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            block_scaling_dim=self.block_scaling_dim,
+            all_gather_usage=self.all_gather_usage,
+            amax_epsilon=self.amax_epsilon,
+            force_pow_2_scales=self.force_pow_2_scales,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,

@@ -36,7 +36,6 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig
 
@@ -912,7 +911,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     inp = torch.reshape(scratchpad[offset:-offset], (N, N))
     weight = torch.reshape(scratchpad[offset * 2 :], (N, N))
 
-    _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
+    _ = general_gemm(A=weight, B=inp)
     torch.cuda.synchronize()
 
 
@@ -936,7 +935,6 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         bias=None,
         use_split_accumulator=False,
