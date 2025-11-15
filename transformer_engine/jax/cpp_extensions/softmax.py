@@ -11,10 +11,11 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.sharding import PartitionSpec, NamedSharding
+from .attention import AttnSoftmaxType
 
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
-from ..softmax import SoftmaxType
+from ..softmax import SoftmaxFusionType
 
 
 __all__ = [
@@ -32,7 +33,8 @@ __all__ = [
 
 
 def is_softmax_kernel_available(
-    softmax_type: SoftmaxType,
+    softmax_fusion_type: SoftmaxFusionType,
+    softmax_type: AttnSoftmaxType,
     batch: int,
     heads: int,
     q_seqlen: int,
@@ -40,15 +42,18 @@ def is_softmax_kernel_available(
     dtype: jnp.dtype,
 ):
     """check softmax available"""
-    if softmax_type is SoftmaxType.SCALED:
+    if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+        return False
+
+    if softmax_fusion_type is SoftmaxFusionType.SCALED:
         return ScaledSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         return ScaledMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
         return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
@@ -792,26 +797,77 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
 
 
-def jax_scaled_softmax(logits: jnp.ndarray, scale_factor: float):
+def jax_scaled_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
     """
     JAX based implementation of scaled softmax
     """
+    if softmax_offset is not None:
+        return jax_general_softmax(scale_factor * logits, offset=softmax_offset)
     return jax.nn.softmax(scale_factor * logits)
 
 
-def jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float):
+def jax_scaled_masked_softmax(
+    logits: jnp.ndarray,
+    mask: jnp.ndarray,
+    scale_factor: float,
+    softmax_offset: jnp.ndarray | float | None = None,
+):
     """
     JAX based implementation of scaled and masked softmax
     """
+    if softmax_offset is not None:
+        return jax_general_softmax(logits * scale_factor, offset=softmax_offset, where=mask != 1)
     return jax.nn.softmax(logits * scale_factor, where=mask != 1)
 
 
-def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float):
+def jax_scaled_upper_triang_masked_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
     """
     JAX based implementation of scaled and upper triangle masked softmax
     """
     mask = 1 - jnp.tril(jnp.ones_like(logits))
-    return jax_scaled_masked_softmax(logits, mask, scale_factor)
+    return jax_scaled_masked_softmax(logits, mask, scale_factor, softmax_offset)
+
+
+def jax_general_softmax(
+    x: jnp.ndarray,
+    axis: int = -1,
+    where: jnp.ndarray | None = None,
+    initial: jnp.ndarray = -jnp.inf,
+    offset: jnp.ndarray | float | None = None,
+) -> jnp.ndarray:
+    """
+    JAX based implementation of general softmax with optional masking and offset.
+    """
+    # Compute max of x
+    x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+
+    if offset is not None:
+        # Cast offset to x.dtype to prevent type promotion
+        if isinstance(offset, (int, float)):
+            offset = jnp.array(offset, dtype=x.dtype)
+        else:
+            offset = offset.astype(x.dtype)
+
+        # Include offset in max: x_max = max(x_max, offset)
+        # This is equivalent to computing max over [x..., offset]
+        x_max = jnp.maximum(x_max, offset)
+
+    x_safe = x if where is None else jnp.where(where, x, initial)
+    unnormalized = jnp.exp(x_safe - x_max)
+    denominator = jnp.sum(unnormalized, axis, where=where, keepdims=True)
+
+    if offset is not None:
+        # Add exp(offset - x_max) to denominator
+        denominator = denominator + jnp.exp(offset - x_max)
+
+    result = unnormalized / denominator
+    if where is not None:
+        result = jnp.where(where, result, 0)
+    return result
 
 
 def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:

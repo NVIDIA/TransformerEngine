@@ -7,6 +7,7 @@ Wrapper module for Transformer related layers with FP8 support.
 from functools import reduce
 import operator
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
+import warnings
 
 import numpy as np
 import jax.numpy as jnp
@@ -23,8 +24,9 @@ from ..layernorm import layernorm
 from ..layernorm_dense import layernorm_dense
 from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
-from ..softmax import softmax, SoftmaxType
+from ..softmax import softmax, SoftmaxFusionType
 from ..sharding import with_sharding_constraint_by_logical_axes
+from ..attention import AttnSoftmaxType
 from ..cpp_extensions import (
     is_softmax_kernel_available,
     jax_scaled_softmax,
@@ -171,15 +173,20 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     ----------
     scale_factor : float, default = 1.0
         Scalar for the input to softmax.
-    softmax_type : SoftmaxType, default = SoftmaxType.SCALED
+    softmax_fusion_type : SoftmaxFusionType, default = SoftmaxFusionType.SCALED
+        Indicate the type of softmax.
+    softmax_type : AttnSoftmaxType, default = AttnSoftmaxType.VANILLA_SOFTMAX
         Indicate the type of softmax.
     """
 
     scale_factor: float = 1.0
-    softmax_type: SoftmaxType = SoftmaxType.SCALED
+    softmax_fusion_type: SoftmaxFusionType = SoftmaxFusionType.SCALED
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
-    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None) -> jnp.ndarray:
+    def __call__(
+        self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None
+    ) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -187,33 +194,52 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         input_dtype = inputs.dtype
         logits = inputs
 
+        if softmax_offset is not None:
+            assert self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            softmax_offset = 0.0
+
         # use primitives
         if is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
+            self.softmax_fusion_type,
+            self.softmax_type,
+            batch,
+            heads,
+            q_seqlen,
+            k_seqlen,
+            input_dtype,
         ):
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
             mask_ = mask
-            if self.softmax_type is not SoftmaxType.SCALED_MASKED:
+            if self.softmax_fusion_type is not SoftmaxFusionType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
+            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_fusion_type)
         # use default jax based implementation
         else:
+            warnings.warn(
+                "Using unfused JAX softmax implementation instead of TE fused primitives. ",
+                UserWarning,
+                stacklevel=2,
+            )
+
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
-            if self.softmax_type is SoftmaxType.SCALED:
-                outputs = jax_scaled_softmax(logits, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_MASKED:
-                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
+            if self.softmax_fusion_type is SoftmaxFusionType.SCALED:
+                outputs = jax_scaled_softmax(logits, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
+                outputs = jax_scaled_upper_triang_masked_softmax(
+                    logits, self.scale_factor, softmax_offset
+                )
             else:
                 raise ValueError(
-                    f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED,"
-                    " SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                    f"Unsupported softmax fusion: {self.softmax_fusion_type}. softmax_fusion_type"
+                    " must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
                 )
         assert input_dtype == outputs.dtype
         return outputs

@@ -156,7 +156,9 @@ class FusedScaleMaskSoftmax(nn.Module):
         softmax_in_fp32: bool = True,
     ) -> None:
         super().__init__()
-        self.scaled_masked_softmax_fusion = bool(int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1")))
+        self.scaled_masked_softmax_fusion_type = bool(
+            int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1"))
+        )
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
 
@@ -189,7 +191,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if not self.scaled_masked_softmax_fusion:
+        if not self.scaled_masked_softmax_fusion_type:
             return False  # user doesn't want to fuse
         if not self.input_in_float16:
             return False  # input must be fp16
