@@ -393,6 +393,105 @@ int nvte_is_non_tn_fp8_gemm_supported();
 */
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
+/*! \brief TE Grouped Tensor type
+ *
+ * NVTEGroupedTensor is a collection of tensors with potentially different shapes
+ * but the same dtype and scaling mode. It does not own the memory it points to.
+ */
+typedef void *NVTEGroupedTensor;
+
+/*! \enum NVTEGroupedTensorParam
+ *  \brief Indicates the kind of the grouped tensor parameter to set/get.
+ */
+enum NVTEGroupedTensorParam {
+  kNVTEGroupedRowwiseData = 0,        /*!< Data usable in rowwise manner */
+  kNVTEGroupedColumnwiseData = 1,     /*!< Data usable in columnwise manner */
+  kNVTEGroupedScale = 2,              /*!< Scale tensor */
+  kNVTEGroupedAmax = 3,               /*!< Amax tensor */
+  kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTEGroupedFirstDims = 7,          /*!< First dimension sizes (device pointer to size_t array) */
+  kNVTEGroupedSecondDims = 8,      /*!< Second dimension sizes (device pointer to size_t array) */
+  kNVTEGroupedCumulativeSizes = 9, /*!< Cumulative tensor sizes (device pointer to size_t array) */
+  kNVTENumGroupedTensorParams
+};
+
+/*! \struct NVTEGroupedTensorInfo
+ *  \brief Information needed to construct a grouped tensor parameter.
+ */
+struct NVTEGroupedTensorInfo {
+  void *base_dptr;        /*!< Base pointer for contiguous layout, or nullptr */
+  void **dptr_list;       /*!< Array of pointers for non-contiguous layout, or nullptr */
+  NVTEDType dtype;        /*!< Data type */
+  size_t num_tensors;     /*!< Number of tensors in the group */
+  bool contiguous;        /*!< Whether data is contiguous */
+  size_t sum_first_dims;  /*!< Sum of first dimensions across all tensors (for validation) */
+  size_t sum_second_dims; /*!< Sum of second dimensions across all tensors (for validation) */
+};
+
+/*! \brief Create a new TE grouped tensor.
+ *
+ * Create a new TE grouped tensor. Before use its parameters need to be set.
+ * TE grouped tensors are just wrappers on top of raw data and do not
+ * own memory.
+ *
+ *  \param[in] scaling_mode    Scaling mode of the grouped tensor.
+ *
+ *  \return A new TE grouped tensor.
+ */
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode);
+
+/*! \brief Destroy a TE grouped tensor.
+ *
+ * Since the TE grouped tensor does not own memory, the underlying
+ * data is not freed during this operation.
+ *
+ *  \param[in] tensor Grouped tensor to be destroyed.
+ */
+void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
+
+/*! \brief Set a parameter of the grouped tensor.
+ *
+ *  \param[in/out] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be set.
+ *  \param[in] param The value to be set.
+ */
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
+                                   const NVTEGroupedTensorInfo *param);
+
+/*! \brief Get a value of the parameter of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be queried.
+ */
+NVTEGroupedTensorInfo nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                                    NVTEGroupedTensorParam param_name);
+
+/*! \brief Get the number of tensors in a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Number of tensors in the group.
+ */
+size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor);
+
+/*! \brief Get a grouped tensor's data type.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return A data type of the grouped tensor.
+ */
+NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
+
+/*! \brief Get a scaling mode of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Scaling mode of the grouped tensor.
+ */
+NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor);
+
 #ifdef __cplusplus
 }  // extern "C"
 
