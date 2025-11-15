@@ -239,3 +239,88 @@ Let's run training and open TensorBoard by ``tensorboard --logdir=./tensorboard_
    :align: center
 
    Fig 2: TensorBoard with plotted stats.
+
+Real-world Examples
+-------------------
+
+Below are complete working examples from the repository that demonstrate various use cases of Transformer Engine.
+
+.. tabs::
+
+   .. tab:: MNIST Training
+
+      This example shows how to integrate Transformer Engine into a standard PyTorch training script.
+      
+      Model Definition
+      ^^^^^^^^^^^^^^^^
+      
+      First, we define our neural network. Notice how we use ``te.Linear`` instead of ``nn.Linear`` 
+      for the fully connected layers that will benefit from FP8 computation:
+
+      .. literalinclude:: ../../examples/pytorch/mnist/main.py
+         :language: python
+         :lines: 16-29
+         :linenos:
+         :emphasize-lines: 8-9
+
+      The ``use_te`` flag allows us to switch between standard PyTorch Linear layers and 
+      Transformer Engine Linear layers for benchmarking.
+
+      Training Loop
+      ^^^^^^^^^^^^^
+      
+      The training function wraps the forward pass in ``te.autocast`` to enable FP8:
+
+      .. literalinclude:: ../../examples/pytorch/mnist/main.py
+         :language: python
+         :lines: 49-68
+         :linenos:
+         :emphasize-lines: 6-7
+
+      Key points:
+      
+      - Forward pass is inside ``te.autocast(enabled=use_fp8)``
+      - Backward pass happens outside autocast (it still uses FP8 from forward)
+      - Standard PyTorch optimizer works without modification
+
+      Inference
+      ^^^^^^^^^
+
+      During inference, we use the same autocast pattern:
+
+      .. literalinclude:: ../../examples/pytorch/mnist/main.py
+         :language: python
+         :lines: 83-95
+         :linenos:
+         :emphasize-lines: 5-6
+
+   .. tab:: FSDP Integration
+
+      This example demonstrates using Transformer Engine with PyTorch's Fully Sharded Data Parallel (FSDP).
+      
+      Complete Example
+      ^^^^^^^^^^^^^^^^
+
+      .. literalinclude:: ../../examples/pytorch/fsdp/fsdp.py
+         :language: python
+         :lines: 1-50
+         :linenos:
+
+      FSDP wraps the Transformer Engine model and handles distributed training automatically.
+      The FP8 precision works seamlessly with FSDP's sharding strategy.
+
+   .. tab:: Communication Overlap
+
+      Advanced example showing how to overlap communication with computation for better performance
+      in distributed training scenarios.
+      
+      Overlap Pattern
+      ^^^^^^^^^^^^^^^
+
+      .. literalinclude:: ../../examples/pytorch/comm_gemm_overlap/te_layer_with_overlap.py
+         :language: python
+         :lines: 1-40
+         :linenos:
+
+      This pattern allows gradient communication to happen concurrently with backward computation,
+      reducing the overall training time in multi-GPU setups.

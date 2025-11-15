@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 600" width="850" height="520">
+  <defs>
+    <style>
+      /* Common styles loaded from diagram-colors.css: .hp, .fp8, .gemm, .quantize, .text, .small-text, .label, .title, .section-title, .arrow */
+      /* Diagram-specific override for arrow */
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="425" y="30" class="title">Default FP8 Linear Layer example - Forward and Backward Pass</text>
+  
+  <!-- Forward Pass Section -->
+  <text x="425" y="65" class="section-title" style="fill: #1565c0;">Forward Pass</text>
+  
+  <!-- Forward: Input High Precision -->
+  <rect x="30" y="95" width="100" height="50" class="hp" rx="6"/>
+  <text x="80" y="118" class="text">Input</text>
+  <text x="80" y="133" class="small-text">(High Precision)</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 130 120 L 160 120" class="arrow"/>
+  
+  <!-- Forward: Quantize Input -->
+  <rect x="160" y="100" width="70" height="40" class="quantize" rx="6"/>
+  <text x="195" y="123" class="text" style="font-size: 12px;">Quantize</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 230 120 L 260 120" class="arrow"/>
+  
+  <!-- Forward: Input FP8 -->
+  <rect x="260" y="95" width="80" height="50" class="fp8" rx="6"/>
+  <text x="300" y="118" class="text">Input</text>
+  <text x="300" y="133" class="small-text">(FP8)</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 340 120 L 400 140" class="arrow"/>
+  
+  <!-- Forward: Weights High Precision -->
+  <rect x="30" y="165" width="100" height="50" class="hp" rx="6"/>
+  <text x="80" y="188" class="text">Weight</text>
+  <text x="80" y="203" class="small-text">(High Precision)</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 130 190 L 160 190" class="arrow"/>
+  
+  <!-- Forward: Quantize Weights -->
+  <rect x="160" y="170" width="70" height="40" class="quantize" rx="6"/>
+  <text x="195" y="193" class="text" style="font-size: 12px;">Quantize</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 230 190 L 260 190" class="arrow"/>
+  
+  <!-- Forward: Weights FP8 -->
+  <rect x="260" y="165" width="80" height="50" class="fp8" rx="6"/>
+  <text x="300" y="188" class="text">Weights</text>
+  <text x="300" y="203" class="small-text">(FP8)</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 340 190 L 400 170" class="arrow"/>
+  
+  <!-- Forward: GEMM -->
+  <rect x="400" y="125" width="130" height="70" class="gemm" rx="6"/>
+  <text x="465" y="165" class="text" style="font-weight: 600; font-size: 16px;">FP8 GEMM</text>
+  
+  <!-- Forward: Arrow -->
+  <path d="M 530 160 L 580 160" class="arrow"/>
+  
+  <!-- Forward: Output -->
+  <rect x="580" y="135" width="110" height="50" class="hp" rx="6"/>
+  <text x="635" y="158" class="text">Output</text>
+  <text x="635" y="173" class="small-text">(High Precision)</text>
+  
+  <!-- Divider Line -->
+  <line x1="30" y1="260" x2="820" y2="260" stroke="#ddd" stroke-width="2"/>
+  
+  <!-- Backward Pass Section -->
+  <text x="425" y="295" class="section-title" style="fill: #c62828;">Backward Pass</text>
+  
+  <!-- Backward: Output gradient High Precision -->
+  <rect x="30" y="421" width="120" height="50" class="hp" rx="6"/>
+  <text x="90" y="445" class="text">Output gradient</text>
+  <text x="90" y="460" class="small-text">(High Precision)</text>
+  
+  <!-- Backward: Arrow -->
+  <path d="M 150 446 L 180 446" class="arrow"/>
+  
+  <!-- Backward: Quantize Output gradient -->
+  <rect x="180" y="426" width="70" height="40" class="quantize" rx="6"/>
+  <text x="215" y="449" class="text" style="font-size: 12px;">Quantize</text>
+  
+  <!-- Backward: Arrow -->
+  <path d="M 250 446 L 280 446" class="arrow"/>
+  
+  <!-- Backward: Output gradient FP8 -->
+  <rect x="280" y="421" width="100" height="50" class="fp8" rx="6"/>
+  <text x="330" y="445" class="text">Output grad.</text>
+  <text x="330" y="460" class="small-text">(FP8)</text>
+  
+  <!-- Top GEMM path -->
+  <!-- Backward: Weight transpose -->
+  <rect x="440" y="310" width="90" height="40" class="fp8" rx="6"/>
+  <text x="485" y="327" class="text">Weight^T</text>
+  <text x="485" y="342" class="small-text">(FP8)</text>
+  
+  <!-- Backward: GEMM 1 (for input gradient) -->
+  <rect x="420" y="375" width="130" height="60" class="gemm" rx="6"/>
+  <text x="485" y="410" class="text" style="font-weight: 600;">FP8 GEMM</text>
+  
+  <!-- Backward: Input gradient -->
+  <rect x="590" y="380" width="130" height="50" class="hp" rx="6"/>
+  <text x="655" y="401" class="text">Input gradient</text>
+  <text x="655" y="416" class="small-text">(High Precision)</text>
+  
+  <!-- Bottom GEMM path -->
+  <!-- Backward: Input transpose -->
+  <rect x="440" y="540" width="90" height="40" class="fp8" rx="6"/>
+  <text x="485" y="557" class="text">Input^T</text>
+  <text x="485" y="572" class="small-text">(FP8)</text>
+  
+  <!-- Backward: GEMM 2 (for weight gradient) -->
+  <rect x="420" y="455" width="130" height="60" class="gemm" rx="6"/>
+  <text x="485" y="490" class="text" style="font-weight: 600;">FP8 GEMM</text>
+  
+  <!-- Backward: Weight gradient -->
+  <rect x="590" y="460" width="130" height="50" class="hp" rx="6"/>
+  <text x="655" y="481" class="text">Weight gradient</text>
+  <text x="655" y="496" class="small-text">(High Precision)</text>
+  
+  <!-- Backward: Arrows -->
+  <!-- Output gradient FP8 to top GEMM -->
+  <path d="M 380 436 L 420 400" class="arrow"/>
+  <!-- Weight transpose to top GEMM -->
+  <path d="M 485 350 L 485 375" class="arrow"/>
+  <!-- Top GEMM to input gradient -->
+  <path d="M 550 405 L 590 405" class="arrow"/>
+  
+  <!-- Output gradient FP8 to bottom GEMM -->
+  <path d="M 380 456 L 420 485" class="arrow"/>
+  <!-- Input transpose to bottom GEMM -->
+  <path d="M 485 540 L 485 515" class="arrow"/>
+  <!-- Bottom GEMM to weight gradient -->
+  <path d="M 550 485 L 590 485" class="arrow"/>
+  
+</svg>
+
