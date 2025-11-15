@@ -10,7 +10,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, get_align_size_for_quantization
 from ..jit import no_torch_dynamo
 
 
@@ -109,14 +109,8 @@ class Fp8Unpadding(torch.nn.Module):
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
         if self.align_size is None:
-            self.align_size = (
-                32
-                if (
-                    FP8GlobalStateManager.get_fp8_recipe().mxfp8()
-                    or FP8GlobalStateManager.get_fp8_recipe().nvfp4()
-                )
-                else 16
-            )
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            self.align_size = get_align_size_for_quantization(recipe)
 
         # FP8 padding calculate
         padded_m_splits = [

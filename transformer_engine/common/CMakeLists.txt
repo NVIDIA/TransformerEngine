@@ -175,6 +175,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu
      hadamard_transform/hadamard_transform.cu
+     hadamard_transform/multi_hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu)
 
 # Compiling the files with the worst compilation time first to hopefully overlap
