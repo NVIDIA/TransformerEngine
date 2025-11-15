@@ -30,7 +30,7 @@ do
   # Build Flash Attention
   if [ "${fa_version}" \< "3.0.0" ]
   then
-    pip3 install flash-attn==${fa_version}
+    pip3 install flash-attn==${fa_version} --no-build-isolation
   else
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention/hopper && python setup.py install
