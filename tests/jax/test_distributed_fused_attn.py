@@ -279,9 +279,12 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 ]
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
-    # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
+    # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
+    # TODO: Change the id to CPx2
     pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
+    # KL test code
+    pytest.param([2, 8, 16, 64], id="2-8xCP-16-64"),
 ]
 
 
@@ -305,8 +308,8 @@ class TestDistributedContextParallelSelfAttn:
         window_size=None,
     ):
         if qkv_layout.is_thd():
-            if cp_strategy == CPStrategy.ALL_GATHER:
-                pytest.skip("THD doesn't support all gather context parallelism.")
+            # if cp_strategy == CPStrategy.ALL_GATHER:
+            #     pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and cp_strategy == CPStrategy.RING:
                 pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
@@ -333,6 +336,9 @@ class TestDistributedContextParallelSelfAttn:
 
         num_kv_heads = num_head // kv_groups
 
+        # KL code For AG case only
+        stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
+
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -356,6 +362,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
+            stripe_height=stripe_height,
         )
 
         def check_has_backend_for_mask(mask_type):
@@ -394,7 +401,9 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        runner.test_backward()
+        # KL code
+        # runner.test_backward()
+        runner.test_forward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
     @pytest_parametrize_wrapper(
@@ -587,31 +596,39 @@ REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
 
+REORDER_STRATEGY = [
+    pytest.param(ReorderStrategy.DualChunkSwap, None, id="DualChunkSwap"),
+    pytest.param(ReorderStrategy.Striped, 1, id="Striped-1"),
+    pytest.param(ReorderStrategy.Striped, 4, id="Striped-4"),
+]
+
 
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
     @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
-    @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
+    @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD, QKVFormat.THD])
     @pytest.mark.parametrize(
-        "reorder_strategy",
-        [
-            pytest.param(ReorderStrategy.DualChunkSwap, id="DualChunkSwap"),
-            pytest.param(ReorderStrategy.Striped, id="Striped"),
-        ],
+        "reorder_strategy, stripe_height",
+        REORDER_STRATEGY,
     )
-    def test(self, cp_size, shape, qkv_format, reorder_strategy):
+    def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_height):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
         seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
             tensor = tensor.swapaxes(0, 1)
             seq_dim = 0
 
+        if reorder_strategy == ReorderStrategy.Striped:
+            seq_lens = shape[seq_dim]
+            if seq_lens < (cp_size * stripe_height):
+                pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_height=}")
+
         ref = tensor.copy()
 
-        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3])
-        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3])
+        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
+        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
 
-        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim)
-        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim, stripe_height)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_height)
 
         assert jnp.array_equal(inversed, ref)

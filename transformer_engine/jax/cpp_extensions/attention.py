@@ -70,6 +70,7 @@ __all__ = [
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
+        "stripe_height",
     ],
 )
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class _FusedAttnConfig:
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring + THD + SWA
+    stripe_height: int  # Only for CP + Striped. For, Ring P2P , stripe_height=1 only.
 
 
 @dataclass(frozen=True)
@@ -500,6 +502,37 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
+        DEBUG = True  # os.environ.get("TE_DEBUG_STRIPED_ATTN", "0") == "1"
+        # if DEBUG:
+        #     jax.debug.print("FusedAttnFwdPrimitive.impl CALLED")
+        #     jax.debug.print("Config: qkv_layout={}, attn_mask_type={}",
+        #                    str(config.qkv_layout), str(config.attn_mask_type))
+        #     jax.debug.print("Input shapes:")
+        #     jax.debug.print("  q={}, k={}, v={}", q.shape, k.shape, v.shape)
+        #     jax.debug.print("  q_seqlen={}, kv_seqlen={}", q_seqlen.shape, kv_seqlen.shape)
+
+        #     def print_impl_inputs(q_val, k_val, v_val, q_seq, kv_seq, q_off, k_off):
+        #         print(f"\n~~~ FusedAttnFwdPrimitive.impl INPUTS ~~~")
+        #         print(f"Q: shape={q_val.shape}, mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+        #         print(f"  First 5: {q_val.flatten()[:5]}")
+
+        #         print(f"K: shape={k_val.shape}, mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+        #         print(f"  First 5: {k_val.flatten()[:5]}")
+
+        #         print(f"V: shape={v_val.shape}, mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+        #         print(f"  First 5: {v_val.flatten()[:5]}")
+
+        #         print(f"\nSequence info:")
+        #         print(f"  q_seqlen: {q_seq}")
+        #         print(f"  kv_seqlen: {kv_seq}")
+        #         print(f"  q_seq_offsets: {q_off}")
+        #         print(f"  k_seq_offsets: {k_off}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+
+        #     jax.debug.callback(
+        #         print_impl_inputs,
+        #         q, k, v, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets
+        #     )
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
         sequence_descriptor = SequenceDescriptor(
@@ -508,7 +541,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             segment_ids=(_q_segment_ids, _kv_segment_ids),
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
-
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
@@ -517,8 +549,23 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.max_segments_per_seq,
             )
         )
+        # if DEBUG:
+        #     jax.debug.print("After sequence_descriptor processing:")
+        #     jax.debug.print("  q_seqlen={}, kv_seqlen={}", q_seqlen.shape, kv_seqlen.shape)
 
+        #     def print_seq_descriptor(q_seq, kv_seq, q_off, k_off):
+        #         print(f"\n~~~ SEQUENCE DESCRIPTOR OUTPUTS ~~~")
+        #         print(f"q_seqlen (processed): {q_seq}")
+        #         print(f"kv_seqlen (processed): {kv_seq}")
+        #         print(f"q_seq_offsets (processed): {q_off}")
+        #         print(f"k_seq_offsets (processed): {k_off}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+
+        #     jax.debug.callback(print_seq_descriptor, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets)
+        # jax.debug.print("Hello FA impl")
         if config.qkv_layout.is_thd():
+            # if DEBUG:
+            #     jax.debug.print("Processing THD layout...")
 
             def _fix_len_take(x, condition, fill_value=-1):
                 x_shape = x.shape
@@ -541,6 +588,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             )
             assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
+
+            # if DEBUG:
+            #     jax.debug.print("  batch={}, q_max_seqlen={}, kv_max_seqlen={}",
+            #                    q_batch, q_max_seqlen, kv_max_seqlen)
 
             # Gather valid q_seqlen, which is greater than 0
             # cuDNN version < 9.3.0:
@@ -570,9 +621,35 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             k_seq_offsets = _fix_len_take(
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
             )
+            # if DEBUG:
+            #     def print_thd_processing(q_seq, kv_seq, q_off, k_off):
+            #         print(f"\n~~~ AFTER THD PROCESSING ~~~")
+            #         print(f"q_seqlen (fixed): {q_seq}")
+            #         print(f"kv_seqlen (fixed): {kv_seq}")
+            #         print(f"q_seq_offsets (2d): {q_off}")
+            #         print(f"k_seq_offsets (2d): {k_off}")
+            #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+
+            #     jax.debug.callback(print_thd_processing, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets)
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+        # jax.debug.print(f"q_seqlen: {q_seqlen}, kv_seqlen: {kv_seqlen}")
+        # if DEBUG:
+        #     jax.debug.print("Generated cumulative sequence lengths:")
+        #     jax.debug.print("  q_cu_seqlen={}", q_cu_seqlen.shape)
+        #     jax.debug.print("  kv_cu_seqlen={}", kv_cu_seqlen.shape)
+
+        #     def print_cu_seqlen(q_cu, kv_cu):
+        #         print(f"\n~~~ CUMULATIVE SEQLENS ~~~")
+        #         print(f"q_cu_seqlen: {q_cu}")
+        #         print(f"kv_cu_seqlen: {kv_cu}")
+        #         print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+
+        #     jax.debug.callback(print_cu_seqlen, q_cu_seqlen, kv_cu_seqlen)
+
+        # if DEBUG:
+        #     jax.debug.print("Calling inner_primitive.bind...")
 
         output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
@@ -1165,31 +1242,33 @@ def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contig
     return combined.reshape(ori_tensor_shape)
 
 
-def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool):
+def reorder_causal_striped(
+    tensor, cp_size: int, seq_dim: int, is_inverse: bool, stripe_height: int = 1
+):
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
-    if origin_shape[seq_dim] % cp_size != 0:
+    if origin_shape[seq_dim] % (cp_size * stripe_height) != 0:
         raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
-            f" {origin_shape[seq_dim]=} and {cp_size=}"
+            "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_height but got"
+            f" {origin_shape[seq_dim]=}, {cp_size=}, {stripe_height=}, {cp_size*stripe_height=}"
         )
 
     if not is_inverse:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[origin_shape[seq_dim] // cp_size, cp_size],
+            *[origin_shape[seq_dim] // (cp_size * stripe_height), cp_size, stripe_height],
             *origin_shape[seq_dim + 1 :],
         ]
     else:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[cp_size, origin_shape[seq_dim] // cp_size],
+            *[cp_size, origin_shape[seq_dim] // (cp_size * stripe_height), stripe_height],
             *origin_shape[seq_dim + 1 :],
         ]
 
-    chunked_tensor = tensor.reshape(new_shape)
-    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
-    return reordered_chunked_tensor.reshape(origin_shape)
+    striped_tensor = tensor.reshape(new_shape)
+    reordered_striped_tensor = jnp.swapaxes(striped_tensor, seq_dim, seq_dim + 1)
+    return reordered_striped_tensor.reshape(origin_shape)
 
 
 @dataclass(frozen=True)
@@ -1203,26 +1282,46 @@ class _FusedAttnCPWithAllGatherHelper:
         """Checks if the context parallel implementation is supported by the given arguments."""
         header = "Context parallel fused attention"
 
-        allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+        allowed_layouts = [
+            QKVLayout.BSHD_BS2HD,
+            QKVLayout.BSHD_BSHD_BSHD,
+            QKVLayout.THD_T2HD,
+            QKVLayout.THD_THD_THD,
+        ]
         if self.config.qkv_layout not in allowed_layouts:
             raise ValueError(
                 f"{header} only supports layouts:"
                 f" {','.join(map(str, allowed_layouts))} got: {self.config.qkv_layout}"
             )
 
+        if (not self.config.qkv_layout.is_thd() and self.config.stripe_height != 0) or (
+            self.config.qkv_layout.is_thd() and self.config.stripe_height == 0
+        ):
+            raise ValueError(
+                f"{header} only supports Dual Chunk load balancing with BSHD layouts and Striped"
+                " load balancing with THD layouts"
+            )
+
         if self.config.attn_bias_type != AttnBiasType.NO_BIAS:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
+        # TODO: Should AttnMaskType.PADDING_CAUSAL_MASK be allowed for CP + AG + THD + Striped ?
+        # TODO: Should Should AttnMaskType.NO_MASK be allowed for CP + AG + THD + Striped ?
         allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
+        if self.config.qkv_layout.is_thd():
+            allowed_masks.append(AttnMaskType.PADDING_CAUSAL_MASK)
         if self.config.attn_mask_type not in allowed_masks:
             raise ValueError(
                 f"{header} only supports masking types: "
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
+        # TODO: For now do not all  CP + AG + THD + Striped with NO_MASK
+        if self.config.attn_mask_type is AttnMaskType.NO_MASK and self.config.qkv_layout.is_thd():
+            raise ValueError(f"{header} only supports CAUSAL_MASK for THD types")
 
-        if self.config.max_segments_per_seq != 1:
+        if self.config.max_segments_per_seq != 1 and (not self.config.qkv_layout.is_thd):
             raise ValueError(
-                f"{header} only supports max_segments_per_seq == 1 got:"
+                f"{header} only supports max_segments_per_seq == 1 for BSHD layouts, got:"
                 f" {self.config.max_segments_per_seq}"
             )
 
@@ -1231,12 +1330,21 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
-        if self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK:
+        if (
+            self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK
+            and not self.config.qkv_layout.is_thd()
+        ):  # BSHD only ?
             return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
+        if (
+            self.config.attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK
+            and self.config.qkv_layout.is_thd()
+        ):  # THD only ?
+            return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
         return self.config.attn_mask_type
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        # TODO: Should the max_segments_per_seq be different ?
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
@@ -1249,6 +1357,7 @@ class _FusedAttnCPWithAllGatherHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_height=self.config.stripe_height,
         )
 
     def all_gather_kv(self, k, v):
@@ -1260,7 +1369,10 @@ class _FusedAttnCPWithAllGatherHelper:
             )
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
+                if self.config.qkv_layout.is_thd():
+                    x = reorder_causal_striped(x, cp_size, 1, True, self.config.stripe_height)
+                else:
+                    x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
             return x
 
         if self.config.qkv_layout.is_kvpacked():
@@ -1269,6 +1381,30 @@ class _FusedAttnCPWithAllGatherHelper:
             return ag(k), ag(v)
 
         return k, v  # fall through
+
+    def all_gather_segment_ids_and_pos(self, kv_segment_ids, kv_segment_pos):
+        """Performs a all-gather of k and v over context parallel ranks."""
+
+        # TODO: Is the axis chosen right ?
+        kv_segment_ids = lax_paral_op(
+            kv_segment_ids, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        kv_segment_pos = lax_paral_op(
+            kv_segment_pos, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        # jax.debug.breakpoint()
+        if self.config.context_parallel_load_balanced:
+            cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+            if self.config.qkv_layout.is_thd():
+                kv_segment_ids_ag = reorder_causal_striped(
+                    kv_segment_ids, cp_size, 1, True, self.config.stripe_height
+                )
+                kv_segment_pos_ag = reorder_causal_striped(
+                    kv_segment_pos, cp_size, 1, True, self.config.stripe_height
+                )
+                return kv_segment_ids_ag, kv_segment_pos_ag
+            # TODO: Is the dual chunk case needed ?
+        return kv_segment_ids, kv_segment_pos  # fall through
 
     def reduce_scatter_dkv(self, dk, dv):
         """Performs a reduce-scatter of dk and dv over context parallel ranks."""
@@ -1379,6 +1515,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[4] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        # jax.debug.breakpoint()
 
         def impl(
             q,
@@ -1397,6 +1534,8 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+            # jax.debug.print("Test CP DC AG")
+            # breakpoint()
 
             # cuDNN does not support right-aligned masking with dynamic sequence length padding.
             # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
@@ -1407,6 +1546,8 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             def _cross_attn(idx, q, k, v, bias, q_seqlen, kv_seqlen, seed):
                 kv_max_seqlen = k.shape[1]
                 kv_seqlen_per_subrank = kv_max_seqlen // (cp_size * 2)
+                # jax.debug.print("Test AG")
+                # jax.debug.print(f"kv_max_seqlen: {kv_max_seqlen}")
                 assert kv_max_seqlen % cp_size == 0, "sequence length must evenly divide cp size"
 
                 q_split = jnp.split(q, 2, axis=1)
@@ -1416,6 +1557,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 )
 
                 results = []
+                # breakpoint()
                 for sub_idx in range(2):
                     if config.attn_mask_type == AttnMaskType.NO_MASK:
                         k_unmasked, v_unmasked = k, v  # full kv used for unmasked
@@ -1425,7 +1567,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-
+                    # breakpoint()
                     output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
@@ -1629,6 +1771,222 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
 register_primitive(FusedAttnCPWithAllGatherBwdPrimitive)
 
 
+class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
+    """
+    Fused Attention Forward with Context Parallelism and Striped Load Balancing Primitive
+
+    This context parallel implementation uses all-gather to collect KV inputs from context parallel ranks.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        DEBUG = True  # os.environ.get("TE_DEBUG_STRIPED_ATTN", "0") == "1"
+        if DEBUG:
+            print(f"STRIPED PARTITION CALLED (Compilation Phase)")
+            print(f"Mesh: {mesh}")
+            print(f"CP axis: {config.cp_axis}, size: {get_mesh_axis_size(config.cp_axis, mesh)}")
+            print(
+                f"window_size: {config.window_size}, context_parallel_load_balanced:"
+                f" {config.context_parallel_load_balanced}, stripe_height: {config.stripe_height}"
+            )
+            print(f"Arg shapes: {[info.shape for info in arg_infos]}")
+            print(f"QKV layout: {config.qkv_layout}")
+            print(f"Attention mask type: {config.attn_mask_type}")
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+
+        helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
+        helper.check_supported()
+
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[4] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+            # jax.debug.print("Test CP striped AG")
+            # if DEBUG:
+            #     jax.debug.print("STRIPED IMPL CALLED (Execution Phase)")
+            #     jax.debug.print("cp_size={}, cp_rank={}", cp_size, cp_rank)
+
+            #     # Print input shapes
+            #     jax.debug.print("INPUT SHAPES:")
+            #     jax.debug.print("  q.shape={}, k.shape={}, v.shape={}", q.shape, k.shape, v.shape)
+            #     jax.debug.print("  bias.shape={}", bias.shape if bias is not None else "None")
+            #     jax.debug.print("  q_seqlen.shape={}, kv_seqlen.shape={}", q_seqlen.shape, kv_seqlen.shape)
+
+            # Print actual input values
+            # def print_inputs(q_val, k_val, v_val, q_seq_val, kv_seq_val, rank):
+            #     print(f"\n--- STRIPED INPUTS (Rank {rank}) ---")
+            #     print(f"Q: shape={q_val.shape}, dtype={q_val.dtype}")
+            #     print(f"  mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+            #     print(f"  min={q_val.min():.6f}, max={q_val.max():.6f}")
+            #     print(f"  First 10 values: {q_val.flatten()[:10]}")
+
+            #     print(f"\nK: shape={k_val.shape}, dtype={k_val.dtype}")
+            #     print(f"  mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+            #     print(f"  First 10 values: {k_val.flatten()[:10]}")
+
+            #     print(f"\nV: shape={v_val.shape}, dtype={v_val.dtype}")
+            #     print(f"  mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+            #     print(f"  First 10 values: {v_val.flatten()[:10]}")
+
+            #     print(f"\nSequence lengths:")
+            #     print(f"  q_seqlen: {q_seq_val}")
+            #     print(f"  kv_seqlen: {kv_seq_val}")
+            #     print(f"--------------------------------------\n")
+
+            # jax.debug.callback(print_inputs, q, k, v, q_seqlen, kv_seqlen, cp_rank)
+
+            # cuDNN does not support right-aligned masking with dynamic sequence length padding.
+            # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
+            # to select the appropriate computation. Each case generates a [..., SEQ/CP, ..] tensor
+            # meeting the expectation of the SPMD model.
+            # TODO(mgoldfarb-nvidia): When cuDNN supports we should be able to make use of a padding
+            # mask/sequence length tensor to avoid this unrolled loop.
+            def _cross_attn(idx, q, k, v, bias, kv_segment_ids_ag, kv_segment_pos_ag, seed):
+                # if DEBUG:
+                #     jax.debug.print("\n--- _cross_attn called: idx={} ---", idx)
+                #     jax.debug.print("  q.shape={}, k.shape={}, v.shape={}", q.shape, k.shape, v.shape)
+
+                #     def print_cross_attn_inputs(q_val, k_val, v_val, kv_seg_ids, kv_seg_pos, idx_val):
+                #         print(f"\n--- CROSS ATTN INPUTS (idx={idx_val}) ---")
+                #         print(f"Q (local): shape={q_val.shape}")
+                #         print(f"  mean={q_val.mean():.6f}, std={q_val.std():.6f}")
+                #         print(f"  First 5 values: {q_val.flatten()[:5]}")
+
+                #         print(f"\nK (all-gathered): shape={k_val.shape}")
+                #         print(f"  mean={k_val.mean():.6f}, std={k_val.std():.6f}")
+                #         print(f"  First 5 values: {k_val.flatten()[:5]}")
+
+                #         print(f"\nV (all-gathered): shape={v_val.shape}")
+                #         print(f"  mean={v_val.mean():.6f}, std={v_val.std():.6f}")
+                #         print(f"  First 5 values: {v_val.flatten()[:5]}")
+
+                #         print(f"\nKV segment IDs: shape={kv_seg_ids.shape}")
+                #         print(f"  {kv_seg_ids.flatten()[:20]}")
+
+                #         print(f"\nKV segment positions: shape={kv_seg_pos.shape}")
+                #         print(f"  {kv_seg_pos.flatten()[:20]}")
+                #         print(f"--------------------------------------------\n")
+
+                #     jax.debug.callback(
+                #         print_cross_attn_inputs,
+                #         q, k, v, kv_segment_ids_ag, kv_segment_pos_ag, idx
+                #     )
+                output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                    q,
+                    k,  # ag
+                    v,  # ag
+                    bias,
+                    seed,
+                    q_seqlen,
+                    kv_seqlen,
+                    q_seq_offsets,
+                    k_seq_offsets,
+                    _q_segment_ids,
+                    kv_segment_ids_ag,
+                    _q_segment_pos,
+                    kv_segment_pos_ag,
+                    config=helper.get_step_config(),
+                )
+                # if DEBUG:
+                #     jax.debug.print("  Output from FusedAttnFwdPrimitive.impl:")
+                #     jax.debug.print("    output.shape={}", output.shape)
+                #     jax.debug.print("    softmax_aux.shape={}", softmax_aux.shape)
+
+                #     def print_cross_attn_outputs(out, softmax, idx_val):
+                #         print(f"\n--- CROSS ATTN OUTPUTS (idx={idx_val}) ---")
+                #         print(f"Output: shape={out.shape}")
+                #         print(f"  mean={out.mean():.6f}, std={out.std():.6f}")
+                #         print(f"  min={out.min():.6f}, max={out.max():.6f}")
+                #         print(f"  First 10 values: {out.flatten()[:10]}")
+
+                #         print(f"\nSoftmax aux: shape={softmax.shape}")
+                #         print(f"  mean={softmax.mean():.6f}")
+                #         print(f"  First 10 values: {softmax.flatten()[:10]}")
+                #         print(f"--------------------------------------------\n")
+
+                return output, softmax_aux, rng_state
+
+            k_ag, v_ag = helper.all_gather_kv(k, v)
+            _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(
+                _kv_segment_ids, _kv_segment_pos
+            )
+
+            # if DEBUG:
+            #     jax.debug.print("After all-gather:")
+            #     jax.debug.print("  k_ag.shape={}, v_ag.shape={}", k_ag.shape, v_ag.shape)
+            #     jax.debug.print("  kv_segment_ids_ag.shape={}, kv_segment_pos_ag.shape={}",
+            #                    _kv_segment_ids_ag.shape, _kv_segment_pos_ag.shape)
+
+            #     def print_all_gathered(k_gathered, v_gathered, seg_ids, seg_pos, rank):
+            #         print(f"\n--- ALL-GATHERED DATA (Rank {rank}) ---")
+            #         print(f"K (all-gathered): shape={k_gathered.shape}")
+            #         print(f"  mean={k_gathered.mean():.6f}, std={k_gathered.std():.6f}")
+            #         print(f"  First 5 values: {k_gathered.flatten()[:5]}")
+
+            #         print(f"\nV (all-gathered): shape={v_gathered.shape}")
+            #         print(f"  mean={v_gathered.mean():.6f}, std={v_gathered.std():.6f}")
+            #         print(f"  First 5 values: {v_gathered.flatten()[:5]}")
+
+            #         print(f"\nKV segment IDs (all-gathered): shape={seg_ids.shape}")
+            #         print(f"  {seg_ids.flatten()[:30]}")
+
+            #         print(f"\nKV segment pos (all-gathered): shape={seg_pos.shape}")
+            #         print(f"  {seg_pos.flatten()[:30]}")
+            #         print(f"----------------------------------------\n")
+
+            #     jax.debug.callback(
+            #         print_all_gathered,
+            #         k_ag, v_ag, _kv_segment_ids_ag, _kv_segment_pos_ag, cp_rank
+            #     )
+            functions = [
+                partial(
+                    _cross_attn,
+                    idx,
+                    q,
+                    k_ag,
+                    v_ag,
+                    bias,
+                    _kv_segment_ids_ag,
+                    _kv_segment_pos_ag,
+                    seed,
+                )
+                for idx in range(cp_size)
+            ]
+
+            return lax.switch(cp_rank, functions)
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnCPStripedWithAllGatherFwdPrimitive)
+
+
 @dataclass(frozen=True)
 class _FusedAttnCPWithP2PHelper:
     """Helper class to assist with running the P2P ring strategy for CP attention."""
@@ -1712,6 +2070,7 @@ class _FusedAttnCPWithP2PHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_height=self.config.stripe_height,
         )
 
     def stack_kv(self, k, v):
@@ -2570,6 +2929,7 @@ def fused_attn_fwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    stripe_height: int = 0,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -2606,6 +2966,7 @@ def fused_attn_fwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        stripe_height (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -2645,19 +3006,23 @@ def fused_attn_fwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_height=stripe_height,
     )
 
     primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
+            if qkv_layout.is_thd():
+                primitive = FusedAttnCPStripedWithAllGatherFwdPrimitive.outer_primitive
+            else:
+                primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
         case CPStrategy.RING:
             # We must use stripe attention for THD-RING
             if qkv_layout.is_thd():
                 primitive = FusedRingAttnStripedFwdPrimitive.outer_primitive
             else:
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
-
+    print(f"qkv_for_primitive: \n {qkv_for_primitive}")
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,
@@ -2763,6 +3128,7 @@ def fused_attn_bwd(
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
         ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
 
+    # TODO: stripe_height hardcoded for now as bwd is not being tests
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -2775,6 +3141,7 @@ def fused_attn_bwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_height=0,
     )
 
     primitive = None

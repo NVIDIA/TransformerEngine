@@ -353,23 +353,25 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
+def reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1
+):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False, stripe_height)
     raise ValueError(f"Unsupported {strategy=}")
 
 
 def inverse_reorder_causal_load_balancing(
-    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True, stripe_height)
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -498,12 +500,13 @@ def _segment_ids_pos_to_seqlens_offsets(
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    if (attn_mask_type.is_causal() and window_size is None) or (
-        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
-    ):
-        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
-        )
+    # TODO: Un comment the fast path
+    # if (attn_mask_type.is_causal() and window_size is None) or (
+    #     window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    # ):
+    #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+    #     )
 
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
@@ -516,6 +519,7 @@ def _segment_ids_pos_to_seqlens_offsets(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    # jax.debug.breakpoint()
     # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
     attn_mask = segment_mask
     if attn_mask_type.is_bottom_right():
@@ -577,6 +581,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
         attn_mask_with_id, max_segments_per_seq
     )
+    # jax.debug.breakpoint()
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
@@ -656,6 +661,7 @@ class SequenceDescriptor:
                 window_size,
                 max_segments_per_seq,
             )
+            # jax.debug.breakpoint()
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
@@ -957,7 +963,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -975,6 +981,7 @@ def _fused_attn(
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
+    stripe_height: int = 0,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -993,6 +1000,7 @@ def _fused_attn(
         context_parallel_causal_load_balanced,
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_height=stripe_height,
     )
     return output
 
@@ -1014,6 +1022,7 @@ def _fused_attn_fwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_height,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -1031,6 +1040,7 @@ def _fused_attn_fwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_height=stripe_height,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1120,6 +1130,7 @@ def fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
+    stripe_height: int = 0,
 ):
     """
     Perform cuDNN fused attention.
@@ -1153,6 +1164,10 @@ def fused_attn(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
+        stripe_height (int):
+            Indicates the striping height to be used when using ReorderStrategy.Striped.
+            Currently, a stripe_height > 1 is only allowed for CP + THD + Striped + AG
+            0 indicates no striping strategy
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1226,5 +1241,6 @@ def fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_height=stripe_height,
     )
     return output
