@@ -259,3 +259,35 @@ def test_multi_tensor_compute_scale_and_scale_inv(
         )
         torch.testing.assert_close(scale, scale_ref, rtol=0, atol=0)
         torch.testing.assert_close(scale_inv, scale_inv_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("input_size_pair", input_size_pairs + [(1, 1)])
+@pytest.mark.parametrize("applier", appliers)
+@pytest.mark.parametrize("repeat", [1, 55])
+def test_multi_tensor_compute_scale_inv_e8m0(input_size_pair, applier, repeat):
+    sizea, sizeb = input_size_pair
+    device = torch.device("cuda")
+    overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
+    a = torch.randn([sizea], dtype=torch.bfloat16, device=device).abs()
+    b = torch.randn([sizeb], dtype=torch.bfloat16, device=device).abs()
+
+    amax_list = []
+    for _ in range(repeat):
+        amax_list += [a.clone(), b.clone()]
+    scale_inv_list = [torch.empty_like(x).to(torch.uint8) for x in amax_list]
+
+    applier(
+        tex.multi_tensor_compute_scale_inv_e8m0,
+        overflow_buf,
+        [amax_list, scale_inv_list],
+    )
+
+    max_fp8 = torch.finfo(torch.float8_e4m3fn).max
+    for amax, scale_inv in zip(amax_list, scale_inv_list):
+        scale_inv_u32 = (amax.float() / max_fp8).view(torch.int)
+        exponent = scale_inv_u32 // 2**23
+        mantissa = scale_inv_u32 & 0x7FFFFF
+        exponent += (
+            ((mantissa > 0) & (exponent != 0xFE)) & ~((exponent == 0) & (mantissa <= 0x400000))
+        ).to(torch.int)
+        torch.testing.assert_close(exponent.to(torch.uint8), scale_inv)
