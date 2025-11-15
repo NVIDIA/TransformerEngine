@@ -1823,6 +1823,7 @@ def test_mha_fp8_vs_f16(
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
+    fused_attn_supported_f16 = False
     if not fp8_dpa_bwd:
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
