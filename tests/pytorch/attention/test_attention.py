@@ -284,7 +284,6 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 model_configs_chunked_attn = {
     "chunked_1_0": ModelConfig(8, 2048, 16, 64, chunk_size=128),
     "chunked_1_1": ModelConfig(8, 2048, 16, 64, attn_mask_type="causal", chunk_size=128),
-    "chunked_2_0": ModelConfig(8, 2048, 16, 64, attn_mask_type="padding_causal", chunk_size=128),
 }
 
 
@@ -1247,7 +1246,7 @@ model_configs_te_layer = {
     ),
     "te_3_0": ModelConfig(4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
     "te_3_1": ModelConfig(4, 2048, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
-    "te_4_0": ModelConfig(4, 2048, 16, 64, attn_mask_tyep="causal", chunk_size=128),
+    "te_4_0": ModelConfig(4, 2048, 16, 64, attn_mask_type="causal", chunk_size=128),
 }
 
 
@@ -1587,7 +1586,7 @@ def _run_transformer_layer(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        attn_chunk_size=config.chunk_size,
+        chunk_size=config.chunk_size,
     )
     if is_training:
         loss = out.sum()

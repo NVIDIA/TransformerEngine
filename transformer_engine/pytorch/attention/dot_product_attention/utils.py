@@ -514,6 +514,18 @@ def get_attention_backend(
                 )
             use_flash_attention = False
             use_fused_attention = False
+        if use_flash_attention and chunk_size is not None and qkv_format == "thd":
+            logger.debug(
+                "Disabling FlashAttention as it does not support chunked attention in FP8"
+                " with qkv_format = thd"
+            )
+            use_flash_attention = False
+        if use_fused_attention and chunk_size is not None and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support chunked attention in FP8"
+                " with qkv_format = thd"
+            )
+            use_fused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:

@@ -666,8 +666,6 @@ def cp_p2p_fwd_fused_attn(
     is_training,
     max_seqlen_q,
     max_seqlen_kv,
-    cu_seqlens_q_padded,
-    cu_seqlens_kv_padded,
     fused_attn_backend,
     softmax_scale,
     dropout_p,
@@ -1540,7 +1538,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs[:-2], section
+                                        *flash_attn_inputs, *prepare_outputs, section
                                     )
                                 )
                         elif i <= rank:
@@ -1552,6 +1550,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 v_part,
                                 cu_seqlens_q_per_step[i],
                                 cu_seqlens_kv_per_step[i],
+                                cu_seqlens_q_padded_per_step[i],
+                                cu_seqlens_kv_padded_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
@@ -1567,7 +1567,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs[:-2], section
+                                        *flash_attn_inputs, *prepare_outputs, section
                                     )
                                 )
                         else:
@@ -1579,6 +1579,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 v_part,
                                 cu_seqlens_q_per_step[i],
                                 cu_seqlens_kv_per_step[i],
+                                cu_seqlens_q_padded_per_step[i],
+                                cu_seqlens_kv_padded_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
@@ -1594,7 +1596,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs[:-2], section
+                                        *flash_attn_inputs, *prepare_outputs, section
                                     )
                                 )
                     else:
@@ -1607,6 +1609,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             v_part,
                             cu_seqlens_q_per_step[i],
                             cu_seqlens_kv_per_step[i],
+                            cu_seqlens_q_padded_per_step[i],
+                            cu_seqlens_kv_padded_per_step[i],
                         ) = prepare_outputs
                         q_inputs[i % 2] = q_part
                         if use_fused_attention:
@@ -1619,7 +1623,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
                             out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs[:-2], section)
+                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
                             )
 
             # softmax_lse correction

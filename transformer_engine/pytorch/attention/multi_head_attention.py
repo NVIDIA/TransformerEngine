@@ -30,6 +30,7 @@ from transformer_engine.pytorch.distributed import (
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
 

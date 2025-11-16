@@ -1071,23 +1071,41 @@ class DotProductAttention(TransformerEngineBaseModule):
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
 
+            # checks for qkv_format
+            if qkv_format is None:
+                qkv_format = self.qkv_format
+            assert qkv_format in [
+                "sbhd",
+                "bshd",
+                "thd",
+            ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
+
+            # checks for context parallel
+            cp_size = 1
+            if isinstance(self.cp_group, dist_group_type):
+                cp_size = get_distributed_world_size(self.cp_group)
+            elif isinstance(self.cp_group, list):
+                for group in self.cp_group:
+                    cp_size *= get_distributed_world_size(group)
+            context_parallel = cp_size > 1
+
             # check for chunked attention
-            # reshape if qkv_format = {'bshd', 'sbhd'}, and chunkify if qkv_format = 'thd'
             if chunk_size is None:
                 chunk_size = self.chunk_size
-            context_parallel = self.cp_group is not None
+
+            # reshape if qkv_format = {'bshd', 'sbhd'}, and chunkify if qkv_format = 'thd'
             if chunk_size is not None and not context_parallel:
                 if qkv_format == "bshd":
-                    input_batch_size = query_layer.shape[0]
+                    original_batch_size = query_layer.shape[0]
                     assert query_layer.shape[1] % chunk_size == 0, \
                         f"sequence length = {query_layer.shape[1]} must be divisible by chunk size = {chunk_size}!"
-                    total_seq_len = input_batch_size * query_layer.shape[1]
+                    total_seq_len = original_batch_size * query_layer.shape[1]
                     query_layer, key_layer, value_layer = [x.reshape(-1, chunk_size, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
                 elif qkv_format == "sbhd":
-                    input_batch_size = query_layer.shape[1]
+                    original_batch_size = query_layer.shape[1]
                     assert query_layer.shape[0] % chunk_size == 0, \
                         f"sequence length = {query_layer.shape[0]} must be divisible by chunk size = {chunk_size}!"
-                    total_seq_len = input_batch_size * query_layer.shape[0]
+                    total_seq_len = original_batch_size * query_layer.shape[0]
                     query_layer, key_layer, value_layer = [x.reshape(chunk_size, -1, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
                 else:
                     total_seq_len = query_layer.shape[0]
@@ -1101,19 +1119,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size, total_seq_len
                     )
                     max_seqlen_kv = chunk_size
-            elif context_parallel and chunk_size is not None:
-                assert (
-                    qkv_format == "thd"
-                ), "Chunked attention with context parallelism is supported only for qkv_format = thd."
 
-            # checks for qkv_format
-            if qkv_format is None:
-                qkv_format = self.qkv_format
-            assert qkv_format in [
-                "sbhd",
-                "bshd",
-                "thd",
-            ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
+            # update max_seqlen and cu_seqlens if necessary
             batch_size = None
             if qkv_format in ["sbhd", "bshd"]:
                 assert all(
@@ -1229,13 +1236,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # adjust max_seqlen and cu_seqlens for CP
-            cp_size = 1
-            if isinstance(self.cp_group, dist_group_type):
-                cp_size = get_distributed_world_size(self.cp_group)
-            elif isinstance(self.cp_group, list):
-                for group in self.cp_group:
-                    cp_size *= get_distributed_world_size(group)
-            context_parallel = cp_size > 1
             if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
                 if cu_seqlens_q is None:
@@ -1596,7 +1596,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     )
             if chunk_size is not None and not context_parallel:
                 if qkv_format == "bshd":
-                    out = out.reshape(input_batch_size, -1, *out.shape[2:])
+                    out = out.reshape(original_batch_size, -1, *out.shape[2:])
                 elif qkv_format == "sbhd":
-                    out = out.reshape(-1, input_batch_size, *out.shape[2:])
+                    out = out.reshape(-1, original_batch_size, *out.shape[2:])
             return out
