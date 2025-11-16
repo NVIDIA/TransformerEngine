@@ -515,25 +515,21 @@ def cp_p2p_fwd_prepare_qkv(
             cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
             if chunk_size is not None:
                 num_tokens = q_part.shape[0]
-                cu_seqlens_q_per_step, cu_seqlens_q_padded_per_step = (
-                    dpa_utils.thd_chunkify_p2p(
-                        cu_seqlens_q_per_step,
-                        cu_seqlens_q_padded_per_step,
-                        chunk_size,
-                        rank,
-                        cp_size,
-                        num_tokens,
-                    )
+                cu_seqlens_q_per_step, cu_seqlens_q_padded_per_step = dpa_utils.thd_chunkify_p2p(
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_q_padded_per_step,
+                    chunk_size,
+                    rank,
+                    cp_size,
+                    num_tokens,
                 )
-                cu_seqlens_kv_per_step, cu_seqlens_kv_padded_per_step = (
-                    dpa_utils.thd_chunkify_p2p(
-                        cu_seqlens_kv_per_step,
-                        cu_seqlens_kv_padded_per_step,
-                        chunk_size,
-                        rank,
-                        cp_size,
-                        num_tokens,
-                    )
+                cu_seqlens_kv_per_step, cu_seqlens_kv_padded_per_step = dpa_utils.thd_chunkify_p2p(
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_kv_padded_per_step,
+                    chunk_size,
+                    rank,
+                    cp_size,
+                    num_tokens,
                 )
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
@@ -550,7 +546,9 @@ def cp_p2p_fwd_prepare_qkv(
 
     elif section == "lower-triangle":
         cu_seqlens_q_padded_per_step = cu_seqlens_q_padded
-        cu_seqlens_kv_padded_per_step = cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
+        cu_seqlens_kv_padded_per_step = (
+            cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
+        )
         if pad_between_seqs:
             cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
@@ -604,9 +602,7 @@ def cp_p2p_fwd_prepare_qkv(
 
     elif section == "upper-triangle":
         cu_seqlens_q_padded_per_step = (
-            cu_seqlens_q_padded // 2
-            if cu_seqlens_q_padded is not None
-            else None
+            cu_seqlens_q_padded // 2 if cu_seqlens_q_padded is not None else None
         )
         cu_seqlens_kv_padded_per_step = cu_seqlens_kv_padded
         if pad_between_seqs:
@@ -657,7 +653,15 @@ def cp_p2p_fwd_prepare_qkv(
             # [t, h, d] -> [t/2, h, d]
             q_part = tex.thd_read_half_tensor(q_part, cu_seqlens_q_padded, 1)
 
-    return q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step, cu_seqlens_q_padded_per_step, cu_seqlens_kv_padded_per_step
+    return (
+        q_part,
+        k_part,
+        v_part,
+        cu_seqlens_q_per_step,
+        cu_seqlens_kv_per_step,
+        cu_seqlens_q_padded_per_step,
+        cu_seqlens_kv_padded_per_step,
+    )
 
 
 def cp_p2p_fwd_fused_attn(
