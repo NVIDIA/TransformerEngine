@@ -249,6 +249,7 @@ def run_dpa_with_cp(
         window_size=config.window_size,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
+        chunk_size=config.chunk_size,
     ).cuda()
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True

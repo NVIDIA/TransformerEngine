@@ -203,6 +203,7 @@ class ModelConfig:
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        chunk_size: int = None,
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
         return_max_logit=False,
@@ -232,6 +233,7 @@ class ModelConfig:
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
+        self.chunk_size = chunk_size
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
         self.return_max_logit = return_max_logit
@@ -321,6 +323,7 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
+            chunk_size=config.chunk_size,
         )
         (
             use_flash_attention,

@@ -281,6 +281,24 @@ def test_dpa_checkpoint(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 
+model_configs_chunked_attn = {
+    "chunked_1_0": ModelConfig(8, 2048, 16, 64, chunk_size=128),
+    "chunked_1_1": ModelConfig(8, 2048, 16, 64, attn_mask_type="causal", chunk_size=128),
+    "chunked_2_0": ModelConfig(8, 2048, 16, 64, attn_mask_type="padding_causal", chunk_size=128),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_chunked_attn])
+@pytest.mark.parametrize("model", model_configs_chunked_attn.keys())
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
+def test_dpa_chunked_attn(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with chunked attention"""
+    config = model_configs[model]
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
 model_configs_max_logit = {
     # test: ModelConfig(b, sq, hq, dqk)
     "max_logit_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
@@ -302,7 +320,7 @@ model_configs_max_logit = {
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
 @pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
 def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
-    """Test DotProductAttention module with checkpointing"""
+    """Test DotProductAttention module with max logit"""
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
@@ -1152,6 +1170,7 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        chunk_size=config.chunk_size,
     )
     max_logit = None
     if config.return_max_logit:
@@ -1228,6 +1247,7 @@ model_configs_te_layer = {
     ),
     "te_3_0": ModelConfig(4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
     "te_3_1": ModelConfig(4, 2048, 16, 64, attn_mask_type="causal", attn_bias_type="alibi"),
+    "te_4_0": ModelConfig(4, 2048, 16, 64, attn_mask_tyep="causal", chunk_size=128),
 }
 
 
@@ -1567,6 +1587,7 @@ def _run_transformer_layer(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
+        attn_chunk_size=config.chunk_size,
     )
     if is_training:
         loss = out.sum()

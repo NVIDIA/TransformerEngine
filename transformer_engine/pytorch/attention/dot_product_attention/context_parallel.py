@@ -491,12 +491,17 @@ def cp_p2p_fwd_prepare_qkv(
     rank,
     step,
     cp_size,
+    chunk_size,
     section,
 ):
     """Prepare q, k, v and cu_seqlens for CP P2P forward"""
     cu_seqlens_q_per_step = None
     cu_seqlens_kv_per_step = None
+    cu_seqlens_q_padded_per_step = None
+    cu_seqlens_kv_padded_per_step = None
     if section in ["diagonal", "all"]:
+        cu_seqlens_q_padded_per_step = cu_seqlens_q_padded
+        cu_seqlens_kv_padded_per_step = cu_seqlens_kv_padded
         if pad_between_seqs:
             cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
@@ -508,6 +513,28 @@ def cp_p2p_fwd_prepare_qkv(
         elif qkv_format == "thd":
             cu_seqlens_q_per_step = cu_seqlens_q // cp_size
             cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
+            if chunk_size is not None:
+                num_tokens = q_part.shape[0]
+                cu_seqlens_q_per_step, cu_seqlens_q_padded_per_step = (
+                    dpa_utils.thd_chunkify_p2p(
+                        cu_seqlens_q_per_step,
+                        cu_seqlens_q_padded_per_step,
+                        chunk_size,
+                        rank,
+                        cp_size,
+                        num_tokens,
+                    )
+                )
+                cu_seqlens_kv_per_step, cu_seqlens_kv_padded_per_step = (
+                    dpa_utils.thd_chunkify_p2p(
+                        cu_seqlens_kv_per_step,
+                        cu_seqlens_kv_padded_per_step,
+                        chunk_size,
+                        rank,
+                        cp_size,
+                        num_tokens,
+                    )
+                )
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
             cu_seqlens_kv_per_step = cu_seqlens_kv
@@ -522,6 +549,8 @@ def cp_p2p_fwd_prepare_qkv(
             q_part, k_part, v_part = [x.view(-1, *x.shape[-3:]) for x in [q_part, k_part, v_part]]
 
     elif section == "lower-triangle":
+        cu_seqlens_q_padded_per_step = cu_seqlens_q_padded
+        cu_seqlens_kv_padded_per_step = cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
         if pad_between_seqs:
             cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
@@ -537,6 +566,21 @@ def cp_p2p_fwd_prepare_qkv(
         elif qkv_format == "thd":
             cu_seqlens_q_per_step = cu_seqlens_q // cp_size
             cu_seqlens_kv_per_step = cu_seqlens_kv // (cp_size * 2)
+            if chunk_size is not None:
+                (
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_q_padded_per_step,
+                    cu_seqlens_kv_padded_per_step,
+                ) = dpa_utils.thd_seq_tweak_below_diagonal(
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_q_padded,
+                    rank,
+                    rank - step,
+                    cp_size,
+                    chunk_size,
+                )
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
             cu_seqlens_kv_per_step = cu_seqlens_kv_half
@@ -559,6 +603,12 @@ def cp_p2p_fwd_prepare_qkv(
             v_part = tex.thd_read_half_tensor(v_part, cu_seqlens_kv_padded, 0)
 
     elif section == "upper-triangle":
+        cu_seqlens_q_padded_per_step = (
+            cu_seqlens_q_padded // 2
+            if cu_seqlens_q_padded is not None
+            else None
+        )
+        cu_seqlens_kv_padded_per_step = cu_seqlens_kv_padded
         if pad_between_seqs:
             cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, False, True
@@ -574,6 +624,21 @@ def cp_p2p_fwd_prepare_qkv(
         elif qkv_format == "thd":
             cu_seqlens_q_per_step = cu_seqlens_q // (cp_size * 2)
             cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
+            if chunk_size is not None:
+                (
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_q_padded_per_step,
+                    cu_seqlens_kv_padded_per_step,
+                ) = dpa_utils.thd_seq_tweak_above_diagonal(
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_q_padded,
+                    rank,
+                    rank - step + cp_size,
+                    cp_size,
+                    chunk_size,
+                )
         else:
             cu_seqlens_q_per_step = cu_seqlens_q_half
             cu_seqlens_kv_per_step = cu_seqlens_kv
@@ -592,7 +657,7 @@ def cp_p2p_fwd_prepare_qkv(
             # [t, h, d] -> [t/2, h, d]
             q_part = tex.thd_read_half_tensor(q_part, cu_seqlens_q_padded, 1)
 
-    return q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step
+    return q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step, cu_seqlens_q_padded_per_step, cu_seqlens_kv_padded_per_step
 
 
 def cp_p2p_fwd_fused_attn(
@@ -625,17 +690,19 @@ def cp_p2p_fwd_fused_attn(
     v_part,
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
+    cu_seqlens_q_padded_per_step,
+    cu_seqlens_kv_padded_per_step,
     section,
 ):
     """Per-tile forward call of CP P2P with FusedAttention backend"""
     attn_bias_inputs = None
     max_seqlen_q_ = None
     max_seqlen_kv_ = None
-    cu_seqlens_q_ = None
-    cu_seqlens_kv_ = None
     attn_mask_type_ = None
-    cu_seqlens_q_padded_ = None
-    cu_seqlens_kv_padded_ = None
+    cu_seqlens_q_ = cu_seqlens_q_per_step
+    cu_seqlens_kv_ = cu_seqlens_kv_per_step
+    cu_seqlens_q_padded_ = cu_seqlens_q_padded_per_step
+    cu_seqlens_kv_padded_ = cu_seqlens_kv_padded_per_step
     if section in ["diagonal", "all"]:
         if attn_bias is not None:
             idx = (rank - step) % cp_size
@@ -648,11 +715,7 @@ def cp_p2p_fwd_fused_attn(
             ).contiguous()
         max_seqlen_q_ = max_seqlen_q
         max_seqlen_kv_ = max_seqlen_kv
-        cu_seqlens_q_ = cu_seqlens_q_per_step
-        cu_seqlens_kv_ = cu_seqlens_kv_per_step
         attn_mask_type_ = attn_mask_type
-        cu_seqlens_q_padded_ = cu_seqlens_q_padded
-        cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
     elif section == "lower-triangle":
         k_part = k_part.contiguous()
         v_part = v_part.contiguous()
@@ -661,13 +724,7 @@ def cp_p2p_fwd_fused_attn(
             attn_bias_inputs = attn_bias[..., idx, :].contiguous()
         max_seqlen_q_ = max_seqlen_q
         max_seqlen_kv_ = max_seqlen_kv // 2
-        cu_seqlens_q_ = cu_seqlens_q_per_step
-        cu_seqlens_kv_ = cu_seqlens_kv_per_step
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
-        cu_seqlens_q_padded_ = cu_seqlens_q_padded
-        cu_seqlens_kv_padded_ = (
-            cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
-        )
     elif section == "upper-triangle":
         q_part = q_part.contiguous()
         if attn_bias is not None:
@@ -681,11 +738,7 @@ def cp_p2p_fwd_fused_attn(
             ).contiguous()
         max_seqlen_q_ = max_seqlen_q // 2
         max_seqlen_kv_ = max_seqlen_kv
-        cu_seqlens_q_ = cu_seqlens_q_per_step
-        cu_seqlens_kv_ = cu_seqlens_kv_per_step
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
-        cu_seqlens_q_padded_ = cu_seqlens_q_padded // 2 if cu_seqlens_q_padded is not None else None
-        cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
 
     fp8_meta_kwargs = {}
     if fp8:
@@ -743,6 +796,8 @@ def cp_p2p_fwd_flash_attn(
     v_part,
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
+    cu_seqlens_q_padded_per_step,
+    cu_seqlens_kv_padded_per_step,
     section,
 ):
     """Per-tile forward call of CP P2P with FlashAttention backend"""
@@ -880,8 +935,8 @@ def cp_p2p_bwd_fused_attn(
     cp_size,
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
-    cu_seqlens_q_padded,
-    cu_seqlens_kv_padded,
+    cu_seqlens_q_padded_per_step,
+    cu_seqlens_kv_padded_per_step,
     fused_attn_backend,
     softmax_scale,
     dropout_p,
@@ -914,15 +969,12 @@ def cp_p2p_bwd_fused_attn(
 
     max_seqlen_q_ = max_seqlen_q
     max_seqlen_kv_ = max_seqlen_kv
-    cu_seqlens_q_padded_ = cu_seqlens_q_padded
-    cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
     attn_mask_type_ = attn_mask_type
 
     if section == "lower-triangle":
         k_part = k_part.contiguous()
         v_part = v_part.contiguous()
         max_seqlen_kv_ = max_seqlen_kv // 2
-        cu_seqlens_kv_padded_ = None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
     elif section == "upper-triangle":
         q_part, out_part, dout_part = [x.contiguous() for x in [q_part, out_part, dout_part]]
@@ -936,7 +988,6 @@ def cp_p2p_bwd_fused_attn(
             aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
 
         max_seqlen_q_ = max_seqlen_q // 2
-        cu_seqlens_q_padded_ = None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
 
     if attn_dbias is not None:
@@ -972,8 +1023,8 @@ def cp_p2p_bwd_fused_attn(
         bwd_output_te_dtype,
         aux_tensors,
         fused_attn_backend,
-        cu_seqlens_q_padded=cu_seqlens_q_padded_,
-        cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
+        cu_seqlens_q_padded=cu_seqlens_q_per_step[cp_size - step - 1],
+        cu_seqlens_kv_padded=cu_seqlens_kv_per_step[cp_size - step - 1],
         attn_scale=softmax_scale,
         dropout=dropout_p,
         qkv_layout=qkv_layout,
@@ -1105,6 +1156,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         use_flash_attn_3,
         fp8_output,
         layer_number,
+        chunk_size,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1160,6 +1212,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         max_seqlen_kv = max_seqlen_kv // cp_size
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
+        cu_seqlens_q_padded_per_step = [None for _ in range(cp_size)]
+        cu_seqlens_kv_padded_per_step = [None for _ in range(cp_size)]
 
         fused_attn_backend = None
         amax_per_step = None
@@ -1407,6 +1461,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         rank,
                         i,
                         cp_size,
+                        chunk_size,
                     ]
                     if use_fused_attention:
                         fused_attn_inputs = [
@@ -1415,8 +1470,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             is_training,
                             max_seqlen_q,
                             max_seqlen_kv,
-                            cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded,
                             fused_attn_backend,
                             softmax_scale,
                             dropout_p,
@@ -1470,6 +1523,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 v_part,
                                 cu_seqlens_q_per_step[i],
                                 cu_seqlens_kv_per_step[i],
+                                cu_seqlens_q_padded_per_step[i],
+                                cu_seqlens_kv_padded_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
@@ -1485,7 +1540,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs, *prepare_outputs[:-2], section
                                     )
                                 )
                         elif i <= rank:
@@ -1512,7 +1567,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs, *prepare_outputs[:-2], section
                                     )
                                 )
                         else:
@@ -1539,7 +1594,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs, *prepare_outputs[:-2], section
                                     )
                                 )
                     else:
@@ -1564,7 +1619,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
                             out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs[:-2], section)
                             )
 
             # softmax_lse correction
@@ -1793,6 +1848,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *cu_seqlens_q_per_step,
             *cu_seqlens_kv_per_step,
+            *cu_seqlens_q_padded_per_step,
+            *cu_seqlens_kv_padded_per_step,
             *rng_states,
             *attn_biases,
         )
@@ -1892,8 +1949,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
         cu_seqlens_q_per_step = other_tensors[:cp_size]
         cu_seqlens_kv_per_step = other_tensors[cp_size : cp_size * 2]
-        rng_states = other_tensors[cp_size * 2 : cp_size * 3]
-        attn_biases = other_tensors[cp_size * 3 : cp_size * 4]
+        cu_seqlens_q_padded_per_step = other_tensors[cp_size * 2 : cp_size * 3]
+        cu_seqlens_kv_padded_per_step = other_tensors[cp_size * 3 : cp_size * 4]
+        rng_states = other_tensors[cp_size * 4 : cp_size * 5]
+        attn_biases = other_tensors[cp_size * 5 : cp_size * 6]
 
         # set up attention args
         causal = "causal" in ctx.attn_mask_type
@@ -2180,8 +2239,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     cp_size,
                     cu_seqlens_q_per_step,
                     cu_seqlens_kv_per_step,
-                    cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded,
+                    cu_seqlens_q_padded_per_step,
+                    cu_seqlens_kv_padded_per_step,
                     fused_attn_backend,
                     ctx.softmax_scale,
                     ctx.dropout_p,
@@ -2545,6 +2604,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             attn_dbias,
+            None,
             None,
             None,
             None,
@@ -3709,6 +3769,7 @@ def attn_forward_func_with_cp(
     fp8_output=False,
     layer_number=1,
     return_max_logit=False,
+    chunk_size=None,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
@@ -3837,6 +3898,10 @@ def attn_forward_func_with_cp(
         softmax_type == "vanilla" or qkv_format != "thd"
     ), "Context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
 
+    assert chunk_size is None or cp_comm_type in [
+        "p2p"
+    ], "Context parallelism only supports chunked attention with cp_comm_type = 'p2p'!"
+
     args = [
         is_training,
         q,
@@ -3872,6 +3937,8 @@ def attn_forward_func_with_cp(
             fp8_output,
             layer_number,
         ]
+        if cp_comm_type == "p2p":
+            args += [chunk_size]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)

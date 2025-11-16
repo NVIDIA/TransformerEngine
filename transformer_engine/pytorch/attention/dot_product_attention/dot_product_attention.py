@@ -261,6 +261,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                      <https://arxiv.org/pdf/2502.16982>`_).
                      max_logit = max(S), where S = mask(Q*K^T*softmax_scale + bias) in shape [b, h, s_q, s_kv],
                      and max_logit is in shape [h].
+    chunk_size: Optional[int], default = `None`
+                if set, chunked attention will be used.
+                For bshd and sbhd formats, this will result in internal reshape to (b*s/chunk_size, chunk_size h, d) or (chunk_size, b*s/chunk_size, h, d).
+                For thd format, this will split sequence lengths into chunks of size chunk_size.
+                Context parallelism of chunked attention is supported only for thd format.
 
     Parallelism parameters
     ----------------------
@@ -318,6 +323,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        chunk_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -416,6 +422,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
+
+        self.chunk_size = chunk_size
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
@@ -799,6 +807,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -973,6 +982,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = `False`
             Whether to enforce output to be in FP8 or not.
+        chunk_size: Optional[int], default = `None`
+            If set, chunked attention will be used.
+            For bshd and sbhd formats, this will result in internal reshape to (b*s/chunk_size, chunk_size h, d) or (chunk_size, b*s/chunk_size, h, d).
+            For thd format, this will split sequence lengths into chunks of size chunk_size.
+            Context parallelism of chunked attention is supported only for thd format.
         """
 
         with torch.cuda.device(query_layer.device), self.prepare_forward(
@@ -1057,6 +1071,41 @@ class DotProductAttention(TransformerEngineBaseModule):
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
 
+            # check for chunked attention
+            # reshape if qkv_format = {'bshd', 'sbhd'}, and chunkify if qkv_format = 'thd'
+            if chunk_size is None:
+                chunk_size = self.chunk_size
+            context_parallel = self.cp_group is not None
+            if chunk_size is not None and not context_parallel:
+                if qkv_format == "bshd":
+                    input_batch_size = query_layer.shape[0]
+                    assert query_layer.shape[1] % chunk_size == 0, \
+                        f"sequence length = {query_layer.shape[1]} must be divisible by chunk size = {chunk_size}!"
+                    total_seq_len = input_batch_size * query_layer.shape[1]
+                    query_layer, key_layer, value_layer = [x.reshape(-1, chunk_size, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
+                elif qkv_format == "sbhd":
+                    input_batch_size = query_layer.shape[1]
+                    assert query_layer.shape[0] % chunk_size == 0, \
+                        f"sequence length = {query_layer.shape[0]} must be divisible by chunk size = {chunk_size}!"
+                    total_seq_len = input_batch_size * query_layer.shape[0]
+                    query_layer, key_layer, value_layer = [x.reshape(chunk_size, -1, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
+                else:
+                    total_seq_len = query_layer.shape[0]
+                if cu_seqlens_q is not None:
+                    cu_seqlens_q, cu_seqlens_q_padded = dpa_utils.thd_chunkify(
+                        cu_seqlens_q, cu_seqlens_q_padded, chunk_size, total_seq_len
+                    )
+                    max_seqlen_q = chunk_size
+                if cu_seqlens_kv is not None:
+                    cu_seqlens_kv, cu_seqlens_kv_padded = dpa_utils.thd_chunkify(
+                        cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size, total_seq_len
+                    )
+                    max_seqlen_kv = chunk_size
+            elif context_parallel and chunk_size is not None:
+                assert (
+                    qkv_format == "thd"
+                ), "Chunked attention with context parallelism is supported only for qkv_format = thd."
+
             # checks for qkv_format
             if qkv_format is None:
                 qkv_format = self.qkv_format
@@ -1084,7 +1133,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
                 assert (
                     "padding" in attn_mask_type
-                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
+                ), "Attention mask type must be padding or padding_causal for qkv_format = thd!"
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -1315,6 +1364,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
+                chunk_size=self.chunk_size,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1375,12 +1425,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
+            out = None
             softmax_offset = (
                 self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
                 if self.softmax_offset is not None
                 else None
             )
-
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
@@ -1390,7 +1440,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                out = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1414,8 +1464,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
                 )
-
-            if use_fused_attention:
+            elif use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
                 if core_attention_bias_type == "alibi" and (
@@ -1432,7 +1481,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    out = self._checkpointed_attention_forward(
                         self.fused_attention,
                         query_layer,
                         key_layer,
@@ -1463,41 +1512,41 @@ class DotProductAttention(TransformerEngineBaseModule):
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
                     )
-                return self.fused_attention(
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    qkv_layout=qkv_layout,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    cu_seqlens_q_padded=cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    attn_mask_type=attn_mask_type,
-                    attention_mask=attention_mask,
-                    window_size=window_size,
-                    fused_attention_backend=fused_attention_backend,
-                    core_attention_bias_type=fu_core_attention_bias_type,
-                    core_attention_bias=fu_core_attention_bias,
-                    fast_zero_fill=fast_zero_fill,
-                    cp_group=self.cp_group,
-                    cp_global_ranks=self.cp_global_ranks,
-                    cp_stream=self.cp_stream,
-                    cp_comm_type=self.cp_comm_type,
-                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                    fp8_meta=self.fp8_meta,
-                    quantizers=self.quantizers,
-                    pad_between_seqs=pad_between_seqs,
-                    inference_params=inference_params,
-                    softmax_offset=softmax_offset,
-                    fp8_output=fp8_output,
-                )
-
-            if use_unfused_attention:
+                else:
+                    out = self.fused_attention(
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        qkv_layout=qkv_layout,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        attn_mask_type=attn_mask_type,
+                        attention_mask=attention_mask,
+                        window_size=window_size,
+                        fused_attention_backend=fused_attention_backend,
+                        core_attention_bias_type=fu_core_attention_bias_type,
+                        core_attention_bias=fu_core_attention_bias,
+                        fast_zero_fill=fast_zero_fill,
+                        cp_group=self.cp_group,
+                        cp_global_ranks=self.cp_global_ranks,
+                        cp_stream=self.cp_stream,
+                        cp_comm_type=self.cp_comm_type,
+                        fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                        fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
+                        pad_between_seqs=pad_between_seqs,
+                        inference_params=inference_params,
+                        softmax_offset=softmax_offset,
+                        fp8_output=fp8_output,
+                    )
+            elif use_unfused_attention:
                 allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    out = self._checkpointed_attention_forward(
                         self.unfused_attention,
                         _alibi_cache,
                         query_layer,
@@ -1521,27 +1570,33 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         fp8_output=fp8_output,
                     )
-                return self.unfused_attention(
-                    _alibi_cache,
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    qkv_layout=qkv_layout,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    attn_mask_type=attn_mask_type,
-                    attention_mask=attention_mask,
-                    window_size=window_size,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
-                    alibi_slopes=alibi_slopes,
-                    inference_params=inference_params,
-                    softmax_offset=softmax_offset,
-                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
-                    fp8_meta=self.fp8_meta,
-                    quantizers=self.quantizers,
-                    fp8_output=fp8_output,
-                )
-            return None
+                else:
+                    out = self.unfused_attention(
+                        _alibi_cache,
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        qkv_layout=qkv_layout,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        attn_mask_type=attn_mask_type,
+                        attention_mask=attention_mask,
+                        window_size=window_size,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        alibi_slopes=alibi_slopes,
+                        inference_params=inference_params,
+                        softmax_offset=softmax_offset,
+                        fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                        fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
+                        fp8_output=fp8_output,
+                    )
+            if chunk_size is not None and not context_parallel:
+                if qkv_format == "bshd":
+                    out = out.reshape(input_batch_size, -1, *out.shape[2:])
+                elif qkv_format == "sbhd":
+                    out = out.reshape(-1, input_batch_size, *out.shape[2:])
+            return out

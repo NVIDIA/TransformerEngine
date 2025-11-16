@@ -207,6 +207,12 @@ class TransformerLayer(torch.nn.Module):
                  where alpha is a learnable parameter in shape [h].
                  'off-by-one' and 'learnable' softmax types are also called sink attention
                  ('zero sink' and 'learnable sink').
+    chunk_size: Optional[int], default = `None`
+                if set, chunked attention will be used. For bshd and sbhd formats,
+                this will result in internal reshape to (b*s/chunk_size, chunk_size h, d)
+                or (chunk_size, b*s/chunk_size, h, d). For thd format, this will split
+                sequence lengths into chunks of size chunk_size.
+                Context parallelism of chunked attention is supported only for thd format.
 
     Parallelism parameters
     ----------------------
@@ -324,6 +330,7 @@ class TransformerLayer(torch.nn.Module):
         qk_norm_eps: float = 1e-6,
         qk_norm_before_rope: bool = False,
         softmax_type: str = "vanilla",
+        chunk_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -382,6 +389,8 @@ class TransformerLayer(torch.nn.Module):
         self.attn_input_format = attn_input_format
         self.softmax_type = softmax_type
 
+        self.chunk_size = chunk_size
+
         self.name = name
 
         attention_args = (
@@ -417,6 +426,7 @@ class TransformerLayer(torch.nn.Module):
             "seq_length": seq_length,
             "micro_batch_size": micro_batch_size,
             "softmax_type": self.softmax_type,
+            "chunk_size": self.chunk_size,
         }
 
         self.self_attention = MultiheadAttention(
@@ -609,6 +619,7 @@ class TransformerLayer(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -714,6 +725,12 @@ class TransformerLayer(torch.nn.Module):
             If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
             If true, there are padding tokens between individual sequences in a packed batch,
             i.e. qkv_format = 'thd'.
+        chunk_size: Optional[int], default = `None`
+            if set, chunked attention will be used. For bshd and sbhd formats,
+            this will result in internal reshape to (b*s/chunk_size, chunk_size h, d)
+            or (chunk_size, b*s/chunk_size, h, d). For thd format, this will split
+            sequence lengths into chunks of size chunk_size.
+            Context parallelism of chunked attention is supported only for thd format.
         """
 
         if self_attn_mask_type is None:
@@ -731,6 +748,9 @@ class TransformerLayer(torch.nn.Module):
         assert (
             enc_dec_attn_mask_type in AttnMaskTypes
         ), f"enc_dec_attn_mask_type {enc_dec_attn_mask_type} not supported"
+
+        if chunk_size is None:
+            chunk_size = self.chunk_size
 
         hidden_states = hidden_states.contiguous()
 
@@ -780,6 +800,7 @@ class TransformerLayer(torch.nn.Module):
             max_seqlen_kv=max_seqlen_q,
             fast_zero_fill=fast_zero_fill,
             pad_between_seqs=pad_between_seqs,
+            chunk_size=chunk_size,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -816,6 +837,7 @@ class TransformerLayer(torch.nn.Module):
                 max_seqlen_kv=max_seqlen_kv,
                 fast_zero_fill=fast_zero_fill,
                 pad_between_seqs=pad_between_seqs,
+                chunk_size=chunk_size,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs

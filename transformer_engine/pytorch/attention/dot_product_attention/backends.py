@@ -676,6 +676,7 @@ class FlashAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -885,6 +886,7 @@ class FlashAttention(torch.nn.Module):
                     pad_between_seqs=False,
                     use_flash_attn_3=use_flash_attn_3,
                     fp8_output=fp8_output,
+                    chunk_size=chunk_size,
                 )
         else:
             if is_cpu_offload_enabled():
@@ -1736,6 +1738,7 @@ class FusedAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         softmax_offset: torch.Tensor = None,
         fp8_output: bool = False,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -1903,6 +1906,7 @@ class FusedAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
+                    chunk_size=chunk_size,
                 )
         else:
             with self.attention_dropout_ctx():
