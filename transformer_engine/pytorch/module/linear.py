@@ -241,7 +241,8 @@ class _Linear(torch.autograd.Function):
                         input_quantizer,
                         rank=LinearLowbitContext.activation_lowrank_svd,
                         niter=LinearLowbitContext.activation_lowrank_niter,
-                        broadcast_dim=LinearLowbitContext.activation_broadcast_dim
+                        broadcast_dim=LinearLowbitContext.activation_broadcast_dim,
+                        is_backward=False,
                     )
                     own_quantized_input = True
                 else:
@@ -504,6 +505,7 @@ class _Linear(torch.autograd.Function):
             if use_metis:
                 # Load metis lowbit context
                 ctx.metis_context = LinearLowbitContext().clone()
+                ctx.svd_grad_output_history = svd_grad_output_history
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -1134,6 +1136,7 @@ class Linear(TransformerEngineBaseModule):
         self.use_metis = use_metis
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
+        self.svd_grad_output_history = []
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1486,6 +1489,7 @@ class Linear(TransformerEngineBaseModule):
                 self.save_original_input,
                 debug,
                 self.use_metis,
+                self.svd_grad_output_history,
             )
             out = linear_fn(
                 *autograd_ctx,

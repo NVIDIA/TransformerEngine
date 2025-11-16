@@ -8,7 +8,8 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.experimental import quantization_nvfp4
 from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.module import LinearLowbitContext,get_metis_context
+from transformer_engine.pytorch.module import LinearLowbitContext,get_metis_context, load_svd_history
+import contextlib
 # import debugpy
 has_init = False
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -277,14 +278,20 @@ def check_nvfp4_module_versus_reference(
             "forward_svd_rank":max(in_features//8,64),
             "enable_activation_svd": True,
             "enable_backward_svd": True,
+            "gradacc_broadcast":True
         }
+        metis_gradacc_broadcast_ctx = load_svd_history()
+        if step % 2 == 0:
+            metis_gradacc_broadcast_ctx = contextlib.nullcontext()
         y_native = None
         # Native forward/backward
-        with te.autocast(enabled=True, recipe=nvfp4_recipe), get_metis_context(**metis_param):
-            # enable weight cache by giving is_first_microbatch
-            y_native, metis_forward_time = cuda_time_call(
-                native_module, x_native, is_first_microbatch=(step == 0)
-            )
+        with metis_gradacc_broadcast_ctx:
+            print("traing context==",LinearLowbitContext())
+            with te.autocast(enabled=True, recipe=nvfp4_recipe), get_metis_context(**metis_param):
+                # enable weight cache by giving is_first_microbatch
+                y_native, metis_forward_time = cuda_time_call(
+                    native_module, x_native, is_first_microbatch=(step == 0)
+                )
         # Backward timing for native
         _, metis_backward_time = cuda_time_call(y_native.backward, grad_output_metis)
 

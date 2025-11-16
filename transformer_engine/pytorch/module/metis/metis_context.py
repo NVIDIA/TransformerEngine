@@ -25,6 +25,8 @@ class LinearLowbitContext:
     enable_lowbit = True
     forward_svd_rank = -1
     enable_weight_svd = False
+    gradacc_broadcast = False
+    load_history=False
 
     def __repr__(self) -> str:
         """Pretty full-text representation of LinearLowbitContext."""
@@ -53,7 +55,9 @@ class LinearLowbitContext:
             f"  backward_longtail_schedule='{self.backward_longtail_schedule}',\n"
             f"  enable_lowbit={self.enable_lowbit},\n"
             f"  forward_svd_rank={self.forward_svd_rank},\n"
-            f"  enable_weight_svd=[{self.enable_weight_svd}]\n"
+            f"  enable_weight_svd={self.enable_weight_svd}\n"
+            f"  gradacc_broadcast={self.gradacc_broadcast}\n"
+            f"  load_history={self.load_history}\n"
             f")"
         )
     # === 新增：clone 方法 ===
@@ -95,3 +99,17 @@ def get_metis_context(**kwargs):
         # print("exiting metis context with ", old_state)
         for key, value in old_state.items():
             setattr(LinearLowbitContext, key, value)
+
+
+
+@contextmanager
+def load_svd_history():
+    old_gradacc_status = LinearLowbitContext.load_history
+    LinearLowbitContext.load_history = True
+    # setattr(LinearLowbitContext, "gradacc_broadcast", True)
+    try:
+        yield
+    finally:
+        LinearLowbitContext.load_history = old_gradacc_status
+
+    

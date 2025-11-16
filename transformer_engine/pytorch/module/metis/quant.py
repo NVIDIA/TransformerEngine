@@ -1,9 +1,10 @@
+from typing import Optional, List
 import torch
 
 from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.module.linear import general_gemm
 from transformer_engine.pytorch.utils import nvtx_range_push, nvtx_range_pop
-# from transformer_engine.pytorch import Quantizer
+
 
 def schedule_none(input_:torch.Tensor):
     return input_, 1.0
@@ -40,7 +41,7 @@ class MetisSvdFunction():
     @torch.no_grad()
     def svd_quant_gemm(x,y,output_dtype,output_quantizer = None,layout="TN",nvtx_label=""):
         
-        nvtx_range_push(f"transformer_engine._MetisLowBitLinear.svd_quant_{nvtx_label}.gemm")
+        nvtx_range_push(f"transformer_engine.MetisSvdFunction.svd_quant_gemm_{nvtx_label}.gemm")
         gemm_out, *_ = general_gemm(
             x,
             y,
@@ -51,12 +52,20 @@ class MetisSvdFunction():
             out_dtype=output_dtype,
             use_split_accumulator=True,
         )
-        nvtx_range_pop(f"transformer_engine._MetisLowBitLinear.svd_quant_{nvtx_label}.gemm")
+        nvtx_range_pop(f"transformer_engine.MetisSvdFunction.svd_quant_gemm_{nvtx_label}.gemm")
         return gemm_out
 
     @staticmethod
     @torch.no_grad()
-    def svd_lowrank_quant(input_:torch.Tensor,input_quantizer: "Quantizer", rank=60, niter=0, adaptive_schedule="none", broadcast_dim=-1):
+    def svd_lowrank_quant(input_:torch.Tensor,
+                          input_quantizer: "Quantizer", 
+                          rank=60, 
+                          niter=2, 
+                          broadcast_dim=-1, 
+                          is_backward = False,
+                          gradacc_broadcast = False,
+                          load_history = False,
+                          history_list=List[Optional[torch.Tensor]]):
         # print("-"*20+"svd_lowrank_quant begin"+"-"*20)
         if broadcast_dim >= 0:
             cinput = input_.select(broadcast_dim, 0)
@@ -73,80 +82,58 @@ class MetisSvdFunction():
         #     q=rank, 
         #     niter=niter
         # )
-        ug, sg, vg = torch.svd_lowrank(
-            cinput.to(torch.float32), 
-            q=rank, 
-            niter=niter
-        )
-        # print("svd_time = ",svd_time)
-        # start_time = torch.cuda.Event(enable_timing=True)
-        # end_time = torch.cuda.Event(enable_timing=True)
-        # start_time.record()
-        ug = ug.to(input_.dtype)
-        sg = sg.to(input_.dtype)
-        vg = vg.T.to(input_.dtype)
-        # vg = vg.T
-        # ug = ug.T
-        
-        # sg, res_scalar = LinearLowbitContext.schedule_list[adaptive_schedule](sg)
-        sg = torch.diag(sg)
-        ker = (ug @ sg @ vg)
-        if broadcast_dim >= 0:
-            ker = ker.unsqueeze(broadcast_dim)
+        if load_history and gradacc_broadcast and is_backward :
+            ug,sg,vg,ker = history_list
+            # print("load")       
+        else:
+            ug, sg, vg = torch.svd_lowrank(
+                cinput.to(torch.float32), 
+                q=rank, 
+                niter=niter
+            )
+
+            ug = ug.to(input_.dtype)
+            sg = sg.to(input_.dtype)
+            sg = torch.diag(sg)
+            vg = vg.T.to(input_.dtype)
+
+            ker = (ug @ sg @ vg)
+            if broadcast_dim >= 0:
+                ker = ker.unsqueeze(broadcast_dim)
+
+            ug_nvfp4 = input_quantizer.make_empty(
+                ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
+            )
+            vg_nvfp4 = input_quantizer.make_empty(
+                vg.shape,dtype = vg.dtype, device=vg.device, requires_grad=False
+            )
+            sg_nvfp4 = input_quantizer.make_empty(
+                sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
+            )
+            ug = input_quantizer.update_quantized(ug, ug_nvfp4)
+
+            vg = input_quantizer.update_quantized(vg, vg_nvfp4)
+
+            sg = input_quantizer.update_quantized(sg, sg_nvfp4)
+
+            if gradacc_broadcast and is_backward:
+                print("storing history_list----")
+                history_list.clear()
+                history_list.extend([ug, sg, vg, ker])
 
         input_res = input_ - ker
-        # print("input_res mean=",torch.mean(input_res))
-        # end_time.record()
-        # torch.cuda.synchronize()
-        # ker_time_elapsed = start_time.elapsed_time(end_time)
-        # print("input_res time elapsed = ",ker_time_elapsed)
-        # input_res = input_quantizer(input_res)
-        # start_time.record()
-
-        ug_nvfp4 = input_quantizer.make_empty(
-            ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
-        )
-        vg_nvfp4 = input_quantizer.make_empty(
-            vg.shape,dtype = vg.dtype, device=vg.device, requires_grad=False
-        )
-        sg_nvfp4 = input_quantizer.make_empty(
-            sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
-        )
-        ug_native = input_quantizer.update_quantized(ug, ug_nvfp4)
-        # ug_native.update_usage(rowwise_usage=True, columnwise_usage=True)
-
-        vg_native = input_quantizer.update_quantized(vg, vg_nvfp4)
-        # vg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
-
-        sg_native = input_quantizer.update_quantized(sg, sg_nvfp4)
-        # sg_native.update_usage(columnwise_usage=True, rowwise_usage=True)
-        # end_time.record()
-        # torch.cuda.synchronize()
-        # print("quant time elapsed = ",start_time.elapsed_time(end_time))
-        # out = torch.randn(sg_native.shape,dtype = input_.dtype, device=input_.device)
-        # start_time.record()
-        gemm_out = MetisSvdFunction.svd_quant_gemm(sg_native, ug_native, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
-        # gemm_out.update_usage(rowwise_usage=True, columnwise_usage=True)
-        # gemmout_tmp = ug @ sg
-        # loss = torch.mean(torch.abs(gemmout_tmp - gemm_out.dequantize()))
-        # print("gemm_tmp loss=",loss.item())
-        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg_native,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
+        gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
+        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
         
-        # gemmout_tmp = gemmout_tmp @ vg
-        # loss = torch.mean(torch.abs(de_svd_gemm_out - gemmout_tmp))
-        # print("svd lowrank quant loss=",loss.item())
         input_ = de_svd_gemm_out + input_res
-        # input_ = de_svd_gemm_out
+
         output_fp4 = input_quantizer.make_empty(
             input_.shape,dtype = input_.dtype, device=input_.device, requires_grad=False
         )
         output_fp4 = input_quantizer.update_quantized(input_, output_fp4)
         if len(original_shape) == 3:
             output_fp4 = output_fp4.view(original_shape[0], original_shape[1], -1)
-        # end_time.record()
-        # torch.cuda.synchronize()
-        # print("fp4_svd and final output time elapsed = ",start_time.elapsed_time(end_time))
-        # print("-"*20+"svd_lowrank_quant end"+"-"*20)
+
         return output_fp4
 
     @staticmethod
