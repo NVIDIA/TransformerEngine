@@ -519,7 +519,7 @@ class TestContextParallelUtils(unittest.TestCase):
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=0
         )
 
         # Rank 0 should get indices [0,1] and [6,7]
@@ -534,7 +534,7 @@ class TestContextParallelUtils(unittest.TestCase):
         # Test rank 1
         self._mock_distributed_env(cp_size=2, cp_rank=1)
         input_ids_r1, labels_r1, pos_ids_r1 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=1
         )
 
         # Rank 1 should get indices [2,3] and [4,5]
@@ -561,7 +561,7 @@ class TestContextParallelUtils(unittest.TestCase):
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=0
         )
 
         # For each sequence, rank 0 gets first and last slices
@@ -584,7 +584,7 @@ class TestContextParallelUtils(unittest.TestCase):
 
         self._mock_distributed_env(cp_size=1, cp_rank=0)
         input_ids_result, labels_result, pos_ids_result = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=1, cp_rank=0
         )
 
         # With CP size = 1, should return original tensors
@@ -608,7 +608,7 @@ class TestContextParallelUtils(unittest.TestCase):
 
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=0
         )
 
         # Should get indices [0,1] and [6,7] along dimension 0
@@ -635,7 +635,7 @@ class TestContextParallelUtils(unittest.TestCase):
         # Test rank 0
         self._mock_distributed_env(cp_size=2, cp_rank=0)
         input_ids_r0, labels_r0, pos_ids_r0 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=0
         )
 
         # Rank 0 should get indices [0,1] and [6,7]
@@ -650,7 +650,7 @@ class TestContextParallelUtils(unittest.TestCase):
         # Test rank 1
         self._mock_distributed_env(cp_size=2, cp_rank=1)
         input_ids_r1, labels_r1, pos_ids_r1 = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens, input_ids, labels, position_ids, cp_size=2, cp_rank=1
         )
 
         # Rank 1 should get indices [2,3] and [4,5]
