@@ -75,7 +75,6 @@ from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
     mark_not_offload,
-    mark_activation_offload,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -944,8 +943,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
             return out
 
-        else:  # load from saved (return ctx is just because the other branch does too)
-            return tuple([ctx] + tensors)
+        # load from saved (return ctx is just because the other branch does too)
+        return tuple([ctx] + tensors)
 
     @staticmethod
     def backward(
