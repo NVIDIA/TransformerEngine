@@ -67,26 +67,20 @@ class MetisSvdFunction():
                           load_history = False,
                           history_list=List[Optional[torch.Tensor]]):
         # print("-"*20+"svd_lowrank_quant begin"+"-"*20)
+        # input_ shape [b,s,h]
+        input_shape = input_.shape
         if broadcast_dim >= 0:
-            cinput = input_.select(broadcast_dim, 0)
+            cinput = input_.select(broadcast_dim, 0) #[s,h]
         else:
             cinput = input_
 
-        original_shape = cinput.shape
-        if len(original_shape) == 3:
-            cinput = cinput.view(-1, original_shape[-1])
-            input_ = input_.view(-1, original_shape[-1])
+        original_shape = cinput.shape #[s,h]
 
-        # (ug, sg, vg),svd_time = cuda_time_call(torch.svd_lowrank,
-        #     cinput.to(torch.float32), 
-        #     q=rank, 
-        #     niter=niter
-        # )
-        # print("load_history == ",load_history)
         if load_history and gradacc_broadcast and is_backward :
             ker,de_svd_gemm_out = history_list
             # print("load")       
         else:
+            cinput = cinput.view(-1, original_shape[-1]) #[s,h] or [b*s,h]
             ug, sg, vg = torch.svd_lowrank(
                 cinput.to(torch.float32), 
                 q=rank, 
@@ -98,43 +92,35 @@ class MetisSvdFunction():
             sg = torch.diag(sg)
             vg = vg.T.to(input_.dtype)
 
-            ker = (ug @ sg @ vg)
+            ker = (ug @ sg @ vg) #[s,h] or [b*s,h]
             if broadcast_dim >= 0:
-                ker = ker.unsqueeze(broadcast_dim)
+                ker = ker.unsqueeze(broadcast_dim) #[1,s,h]
+            else:
+                ker = ker.view(input_shape) #[b,s,h]
 
-            ug_nvfp4 = input_quantizer.make_empty(
-                ug.shape,dtype = ug.dtype, device=ug.device, requires_grad=False
-            )
-            vg_nvfp4 = input_quantizer.make_empty(
-                vg.shape,dtype = vg.dtype, device=vg.device, requires_grad=False
-            )
-            sg_nvfp4 = input_quantizer.make_empty(
-                sg.shape,dtype = sg.dtype, device=sg.device, requires_grad=False
-            )
-            ug = input_quantizer.update_quantized(ug, ug_nvfp4)
+            ug = input_quantizer(ug)
+            vg = input_quantizer(vg)
+            sg = input_quantizer(sg)
 
-            vg = input_quantizer.update_quantized(vg, vg_nvfp4)
-
-            sg = input_quantizer.update_quantized(sg, sg_nvfp4)
-            
             gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
             de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
+            #[s,h] or [b*s,h]
+
+            if broadcast_dim >= 0:
+                de_svd_gemm_out = de_svd_gemm_out.unsqueeze(broadcast_dim) #[1,s,h]
+            else:
+                de_svd_gemm_out = de_svd_gemm_out.view(input_shape) # [b,s,h]
 
             if gradacc_broadcast and is_backward:
                 # print("storing history_list----")
                 history_list.clear()
                 history_list.extend([ker,de_svd_gemm_out])
 
-        input_res = input_ - ker
-        
-        input_ = de_svd_gemm_out + input_res
+        input_res = input_ - ker #[b,s,h]
 
-        output_fp4 = input_quantizer.make_empty(
-            input_.shape,dtype = input_.dtype, device=input_.device, requires_grad=False
-        )
-        output_fp4 = input_quantizer.update_quantized(input_, output_fp4)
-        if len(original_shape) == 3:
-            output_fp4 = output_fp4.view(original_shape[0], original_shape[1], -1)
+        out_tensor = de_svd_gemm_out + input_res #[b,s,h]
+        
+        output_fp4 = input_quantizer(out_tensor)
 
         return output_fp4
 
