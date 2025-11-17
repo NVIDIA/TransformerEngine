@@ -128,6 +128,8 @@ def _make_graphed_callables(
         )
 
     # Check sizes of args
+    _order_without_wgrad = None
+    delay_wgrad_compute = False
     if _order is None:
         assert len(sample_args) == len(callables)
         assert len(sample_kwargs) == len(callables)
@@ -149,11 +151,23 @@ def _make_graphed_callables(
         _order_without_wgrad = []
         for c_id in _order:
             if ceil(c_id) != c_id:
+                delay_wgrad_compute = True
                 continue
             _order_without_wgrad.append(c_id)
         num_model_chunks = max(_order_without_wgrad)
         num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
         assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad)
+
+        # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
+        # allows for fine-grained graph capture order.
+        if delay_wgrad_compute:
+            assert _num_layers_per_chunk is not None, (
+                "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
+            )
+            for num_layers in _num_layers_per_chunk:
+                assert num_layers == 1, (
+                    "Each model chunk must have only one layer when delay_wgrad_compute is True."
+                )
 
         # Determine number of layers in each model chunk.
         if _num_layers_per_chunk is None:
