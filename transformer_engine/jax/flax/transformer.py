@@ -118,7 +118,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     dtype: DType = jnp.float32
     float32_logits: bool = False
     scale_factor: Optional[float] = None
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
 
     @nn.compact
@@ -501,9 +501,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Scale factor to apply on query. When :attr:`None` is present, the scale factor is equal
         to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
         need to apply scale on query, which is to set :attr:`scale_factor=1.`.
-    transpose_batch_sequence: bool, default = True
+    transpose_batch_sequence: bool, default = False
         Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. The default value is no sliding window.
@@ -532,7 +532,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
@@ -988,7 +988,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence: bool, default = True
+    transpose_batch_sequence: bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -1030,7 +1030,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
