@@ -161,13 +161,13 @@ def _make_graphed_callables(
         # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
         # allows for fine-grained graph capture order.
         if delay_wgrad_compute:
-            assert _num_layers_per_chunk is not None, (
-                "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
-            )
+            assert (
+                _num_layers_per_chunk is not None
+            ), "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
             for num_layers in _num_layers_per_chunk:
-                assert num_layers == 1, (
-                    "Each model chunk must have only one layer when delay_wgrad_compute is True."
-                )
+                assert (
+                    num_layers == 1
+                ), "Each model chunk must have only one layer when delay_wgrad_compute is True."
 
         # Determine number of layers in each model chunk.
         if _num_layers_per_chunk is None:
