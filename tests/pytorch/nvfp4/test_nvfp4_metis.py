@@ -281,12 +281,14 @@ def check_nvfp4_module_versus_reference(
             "gradacc_broadcast":True
         }
         metis_gradacc_broadcast_ctx = load_svd_history()
+        load_history = True
         if step % 2 == 0:
             metis_gradacc_broadcast_ctx = contextlib.nullcontext()
+            load_history = False
         y_native = None
         # Native forward/backward
         with metis_gradacc_broadcast_ctx:
-            print("traing context==",LinearLowbitContext())
+            # print("traing context==",LinearLowbitContext())
             with te.autocast(enabled=True, recipe=nvfp4_recipe), get_metis_context(**metis_param):
                 # enable weight cache by giving is_first_microbatch
                 y_native, metis_forward_time = cuda_time_call(
@@ -304,7 +306,7 @@ def check_nvfp4_module_versus_reference(
 
         baseline,baseline_time = cuda_time_call(baseline_module,x_base)
         _,baseline_backward_time = cuda_time_call(baseline.backward,grad_output_baseline)
-        print(f"="*20+f" Step {step} time summary begin "+"="*20)
+        print(f"="*20+f" Step {step} time summary begin, load_history == {load_history} "+"="*20)
         print(f"baseline forward time (ms): {baseline_time}, backward time (ms): {baseline_backward_time}")
         print(f"metis forward time (ms): ", metis_forward_time, ", backward time (ms): ", metis_backward_time)
         print(f"nvfp4 reference forward time (ms): ", ref_forward_time, ", backward time (ms): ", ref_backward_time)
@@ -375,11 +377,11 @@ def check_nvfp4_module_versus_reference(
         baseline_out = baseline_outputs[step]
         print(f"="*20+f" Step {step} result begin"+"="*20)
         if use_mse:
-            print(f"output MSE in metis fp4 pass:", mse_loss(native_out["output"], baseline_out["output"]).item())
+            print(f"output MSE in metis fp4 pass load_svd_history: {step%2!=0} :", mse_loss(native_out["output"], baseline_out["output"]).item())
             print(f"output MSE in nv fp4 pass:", mse_loss(ref_out["output"] , baseline_out["output"]).item())
-            print(f"input_grad MSE in metis fp4 pass:", mse_loss(native_out["input_grad"] , baseline_out["input_grad"]).item())
+            print(f"input_grad MSE in metis fp4 pass load_svd_history: {step%2!=0}:", mse_loss(native_out["input_grad"] , baseline_out["input_grad"]).item())
             print(f"input_grad MSE  in nv fp4 pass:", mse_loss(ref_out["input_grad"] , baseline_out["input_grad"]).item())
-            print(f"weight_grad MSE in metis fp4 pass:", mse_loss(native_out["weight_grad"] , baseline_out["weight_grad"]).item())
+            print(f"weight_grad MSE in metis fp4 pass  load_svd_history: {step%2!=0}:", mse_loss(native_out["weight_grad"] , baseline_out["weight_grad"]).item())
             print(f"weight_grad MSE in nv fp4 pass:", mse_loss(ref_out["weight_grad"] , baseline_out["weight_grad"]).item())
         # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
         # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())

@@ -82,8 +82,9 @@ class MetisSvdFunction():
         #     q=rank, 
         #     niter=niter
         # )
+        # print("load_history == ",load_history)
         if load_history and gradacc_broadcast and is_backward :
-            ug,sg,vg,ker = history_list
+            ker,de_svd_gemm_out = history_list
             # print("load")       
         else:
             ug, sg, vg = torch.svd_lowrank(
@@ -115,15 +116,16 @@ class MetisSvdFunction():
             vg = input_quantizer.update_quantized(vg, vg_nvfp4)
 
             sg = input_quantizer.update_quantized(sg, sg_nvfp4)
+            
+            gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
+            de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
 
             if gradacc_broadcast and is_backward:
-                print("storing history_list----")
+                # print("storing history_list----")
                 history_list.clear()
-                history_list.extend([ug, sg, vg, ker])
+                history_list.extend([ker,de_svd_gemm_out])
 
         input_res = input_ - ker
-        gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
-        de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
         
         input_ = de_svd_gemm_out + input_res
 
