@@ -540,6 +540,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_strategy: str = "DEFAULT"
     context_checkpoint_name: str = "context"
 
+    def __post_init__(self):
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.13
+        warnings.warn("transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10")
+        super().__post_init__()
+
     @nn.compact
     def __call__(
         self,
@@ -1045,6 +1050,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     fuse_qkv: Optional[bool] = None
 
     def __post_init__(self):
+        # Deal with changed defaults in API
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.13
+        warnings.warn("transpose_batch_sequence defaults to False in MultiHeadAttention starting TransformerEngine v2.10")
         # Deal with the deprecated parameters
         if self.num_heads is not None:
             self.num_attention_heads = self.num_heads
