@@ -154,8 +154,9 @@ def test_selective_activation_checkpoint(size, seq_size):
     )
     assert (
         ln_bwd_time < sln_bwd_time
-    ), "selective activation activation checkpointing backward pass is slower than native!"
-    assert _max_diff(ln_fwd_out, sln_fwd_out) == 0.0, "outputs are not equal!"
+    ), f"selective activation activation checkpointing backward pass is NOT slower than native! got Native LayerNormMLP Backward Time: {ln_bwd_time} ms and Selective Activation Checkpointed LayerNormMLP Backward Time: {sln_bwd_time} ms"
+    diff = _max_diff(ln_fwd_out, sln_fwd_out)
+    assert diff == 0.0, f"outputs are not equal! maximum difference {diff}"
     for key in [
         "layer_norm_weight",
         "layer_norm_bias",
@@ -164,6 +165,7 @@ def test_selective_activation_checkpoint(size, seq_size):
         "fc2_weight",
         "fc2_bias",
     ]:
+        diff = _max_diff(ln_grads[key], sln_grads[key])
         assert (
-            _max_diff(ln_grads[key], sln_grads[key]) == 0.0
-        ), f"gradients for {key} are not equal!"
+            diff == 0.0
+        ), f"gradients for {key} are not equal! maximum difference: {diff}"
