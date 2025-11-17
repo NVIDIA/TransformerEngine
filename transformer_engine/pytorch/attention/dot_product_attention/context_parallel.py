@@ -414,7 +414,9 @@ def flash_attn_a2a_communicate(
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """A2A communication for context parallelism."""
 
-    assert qkv_format != "thd" or cu_seqlens_padded is not None, "cu_seqlens_padded is required for THD format!"
+    assert (
+        qkv_format != "thd" or cu_seqlens_padded is not None
+    ), "cu_seqlens_padded is required for THD format!"
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     if before_attn:
