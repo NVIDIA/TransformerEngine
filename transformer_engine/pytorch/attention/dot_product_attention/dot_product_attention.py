@@ -975,7 +975,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             Whether to enforce output to be in FP8 or not.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1492,14 +1492,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
-                )
-
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
                 )
 
             if use_unfused_attention:

@@ -19,7 +19,6 @@ from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
-    get_workspace,
 )
 from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
@@ -378,7 +377,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
-                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 layout="NN",
@@ -464,7 +462,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
-                get_workspace(),
                 out_dtype=dw_dtype,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",

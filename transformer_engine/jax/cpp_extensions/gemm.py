@@ -38,12 +38,13 @@ from ..quantize import (
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
-    get_quantize_config,
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
+    get_quantize_config_with_recipe,
+    get_global_quantize_recipe,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
@@ -533,6 +534,9 @@ class GemmPrimitive(BasePrimitive):
 
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
+        # NVFP4 swizzling happen in via nvte kernel instead of JAX transposes
+        if scaling_mode.is_nvfp4_scaling:
+            workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
             workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
@@ -662,6 +666,8 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv = apply_padding_to_scale_inv(
                 rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
             )
+        # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
+        if scaling_mode.is_mxfp8_scaling:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
@@ -1241,7 +1247,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
-    use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
+    use_split_accumulator: bool = None,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
 ) -> Tuple[jax.Array, ...]:
@@ -1252,6 +1258,13 @@ def _te_gemm(
             " future",
             DeprecationWarning,
         )
+
+    if use_split_accumulator is None:
+        # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
+        # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
+        use_split_accumulator = get_quantize_config_with_recipe(
+            get_global_quantize_recipe()
+        ).FP8_2X_ACC_FPROP
 
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -1715,10 +1728,15 @@ def _jax_gemm(
             assert (
                 rhs.scaling_mode == lhs.scaling_mode
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+
+            # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
+            # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
+            use_split_accumulator = get_quantize_config_with_recipe(
+                get_global_quantize_recipe()
+            ).FP8_2X_ACC_FPROP
+
             precision = (
-                jax.lax.Precision.HIGHEST
-                if get_quantize_config().FP8_2X_ACC_FPROP
-                else jax.lax.Precision.DEFAULT
+                jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
 
