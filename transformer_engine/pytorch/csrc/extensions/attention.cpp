@@ -258,15 +258,15 @@ std::vector<py::object> fused_attn_fwd(
   size_t i = 0;
   at::Tensor output_tensor;
   // intermediate softmax tensor, S or M
-  output_tensor =
-      allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
-                    static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
+  output_tensor = allocateSpace(
+      nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
   set_tensor_param(i++, output_tensor);
   // fp8 has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Sum_Exp tensor
   if (return_max_logit || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    output_tensor =
-        allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
-                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
+    output_tensor = allocateSpace(
+        nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+        static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
     set_tensor_param(i++, output_tensor);
   }
   // rng_state

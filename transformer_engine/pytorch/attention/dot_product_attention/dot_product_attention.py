@@ -1097,16 +1097,26 @@ class DotProductAttention(TransformerEngineBaseModule):
             if chunk_size is not None and not context_parallel:
                 if qkv_format == "bshd":
                     original_batch_size = query_layer.shape[0]
-                    assert query_layer.shape[1] % chunk_size == 0, \
-                        f"sequence length = {query_layer.shape[1]} must be divisible by chunk size = {chunk_size}!"
+                    assert query_layer.shape[1] % chunk_size == 0, (
+                        f"sequence length = {query_layer.shape[1]} must be divisible by chunk size"
+                        f" = {chunk_size}!"
+                    )
                     total_seq_len = original_batch_size * query_layer.shape[1]
-                    query_layer, key_layer, value_layer = [x.reshape(-1, chunk_size, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
+                    query_layer, key_layer, value_layer = [
+                        x.reshape(-1, chunk_size, *x.shape[2:])
+                        for x in [query_layer, key_layer, value_layer]
+                    ]
                 elif qkv_format == "sbhd":
                     original_batch_size = query_layer.shape[1]
-                    assert query_layer.shape[0] % chunk_size == 0, \
-                        f"sequence length = {query_layer.shape[0]} must be divisible by chunk size = {chunk_size}!"
+                    assert query_layer.shape[0] % chunk_size == 0, (
+                        f"sequence length = {query_layer.shape[0]} must be divisible by chunk size"
+                        f" = {chunk_size}!"
+                    )
                     total_seq_len = original_batch_size * query_layer.shape[0]
-                    query_layer, key_layer, value_layer = [x.reshape(chunk_size, -1, *x.shape[2:]) for x in [query_layer, key_layer, value_layer]]
+                    query_layer, key_layer, value_layer = [
+                        x.reshape(chunk_size, -1, *x.shape[2:])
+                        for x in [query_layer, key_layer, value_layer]
+                    ]
                 else:
                     total_seq_len = query_layer.shape[0]
                 if cu_seqlens_q is not None:
