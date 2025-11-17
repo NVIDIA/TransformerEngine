@@ -163,6 +163,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_qkv_rope_forward(
 }
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
+                               const std::optional<at::Tensor> start_positions,
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
                                const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank) {
@@ -179,6 +180,12 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
+
+  auto start_positions_cu = TensorWrapper();  // empty start_positions tensor
+  if (start_positions) {
+    start_positions_cu = makeTransformerEngineTensor(start_positions.value());
+    TORCH_CHECK(start_positions_cu.ndim() == 1, "expected 1D tensor");
+  }
 
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     TORCH_CHECK(output_grads.dim() == 3, "expected 3D tensor");
@@ -208,8 +215,8 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
     nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                             input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank,
-                             max_s, b, h, d, d2, stride_t,
+                             start_positions_cu.data(), input_grads_cu.data(), qkv_format,
+                             interleaved, cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
                              /*stride_b=*/0, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
     return input_grads;
@@ -246,9 +253,9 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 
   auto cu_seqlens_cu = TensorWrapper();  // empty cu_seqlens tensor
   nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                           input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank, s, b,
-                           h, d, d2, stride_s, stride_b, stride_h, stride_d,
-                           at::cuda::getCurrentCUDAStream());
+                           start_positions_cu.data(), input_grads_cu.data(), qkv_format,
+                           interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
+                           stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }

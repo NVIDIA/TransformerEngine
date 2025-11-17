@@ -45,6 +45,18 @@ class MXFP8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
 
+    def copy(self) -> MXFP8Quantizer:
+        """Create shallow copy"""
+
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -90,6 +102,7 @@ class MXFP8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> MXFP8Tensor:
 
         # Canonicalize tensor attributes
@@ -105,24 +118,29 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.empty(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
-            device=device,
-        )
+        data = None
+        scale_inv = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+            scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty_like(data)
+            columnwise_data = torch.empty_like(data, pin_memory=pin_memory)
             columnwise_scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -339,23 +357,27 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
-            # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
-            # If not, default to base class behavior.
-            rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
-            columnwise_matches = src._columnwise_data is not None or dst._columnwise_data is None
-            if (
-                isinstance(src, MXFP8Tensor)
-                and isinstance(dst, MXFP8Tensor)
-                and rowwise_matches
-                and columnwise_matches
-            ):
-                if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(src._rowwise_data.detach())
-                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
-                if dst._columnwise_data is not None:
-                    dst._columnwise_data.copy_(src._columnwise_data.detach())
-                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
-                return dst
+            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
+                # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
+                # If not, default to base class behavior.
+                rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
+                columnwise_matches = (
+                    src._columnwise_data is not None or dst._columnwise_data is None
+                )
+                if rowwise_matches and columnwise_matches:
+                    if dst._rowwise_data is not None:
+                        dst._rowwise_data.copy_(src._rowwise_data.detach(), *args[2:], **kwargs)
+                        dst._rowwise_scale_inv.copy_(
+                            src._rowwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
+                    if dst._columnwise_data is not None:
+                        dst._columnwise_data.copy_(
+                            src._columnwise_data.detach(), *args[2:], **kwargs
+                        )
+                        dst._columnwise_scale_inv.copy_(
+                            src._columnwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
+                    return dst
 
         # FSDP2 related functions.
         if func == aten.split.Tensor:

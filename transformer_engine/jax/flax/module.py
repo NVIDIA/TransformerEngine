@@ -6,7 +6,7 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 from functools import reduce
 import operator
-from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType
+from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
 
 import numpy as np
 import jax.numpy as jnp
@@ -33,10 +33,11 @@ from ..cpp_extensions import (
 )
 from ..quantize import (
     QuantizerFactory,
-    get_quantize_config,
+    get_global_quantize_recipe,
     QuantizeMetaSet,
     TensorSource,
     get_quantize_config_with_recipe,
+    noop_quantizer_set,
 )
 
 PRNGKey = Any
@@ -345,22 +346,26 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
     """
 
     def generate_quantizer_set(
-        self, postfix: str = "", variable_collection: str = None, fp8_recipe=None
+        self,
+        postfix: str = "",
+        variable_collection: str = None,
+        quantization_checkpoint_name: Optional[str] = None,
+        fp8_recipe=None,
     ):
         """
         Generate a set of FP8 meta for a GEMM.
         """
 
+        if fp8_recipe is None:
+            fp8_recipe = get_global_quantize_recipe()
+
+        quantize_config = get_quantize_config_with_recipe(fp8_recipe)
+
         collection_name = (
             variable_collection
             if variable_collection is not None
-            else get_quantize_config().COLLECTION_NAME
+            else quantize_config.COLLECTION_NAME
         )
-
-        if fp8_recipe is None:
-            quantize_config = get_quantize_config()
-        else:
-            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
 
         x_meta = quantize_config.get_quantize_flax_meta(
             self, collection_name, postfix, TensorSource.X, "x"
@@ -375,7 +380,9 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
 
         quantizer_set = QuantizerFactory.create_set(
-            fp8_recipe=fp8_recipe, quantize_meta_set=quantize_meta_set
+            fp8_recipe=fp8_recipe,
+            quantize_meta_set=quantize_meta_set,
+            checkpoint_name=quantization_checkpoint_name,
         )
         return quantizer_set
 
@@ -424,6 +431,8 @@ class DenseGeneral(TransformerEngineBase):
         The data type used to allocate the initial parameters.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     features: Union[Iterable[int], int]
@@ -439,6 +448,7 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     input_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -483,7 +493,11 @@ class DenseGeneral(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        quantizer_set = self.generate_quantizer_set(
+            quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
+
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
@@ -496,7 +510,6 @@ class DenseGeneral(TransformerEngineBase):
         else:
             bias = None
 
-        quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
         y = dense(
             inputs,
@@ -628,6 +641,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         value or None. When None is set, then no scaling is applied.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     features: Union[Iterable[int], int]
@@ -654,6 +669,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -693,10 +709,12 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         input_dtype = inputs.dtype
         ln_output = None
 
-        quantizer_set = self.generate_quantizer_set()
+        quantizer_set = self.generate_quantizer_set(
+            quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
 
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -747,7 +765,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             kernel_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -941,6 +959,8 @@ class LayerNormMLP(TransformerEngineBase):
         The data type used to allocate the initial parameters.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     intermediate_dim: int = 2048
@@ -976,6 +996,7 @@ class LayerNormMLP(TransformerEngineBase):
     ffn1_ckpt_name: str = "ffn1"
     ffn2_ckpt_name: str = "ffn2"
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -1010,8 +1031,12 @@ class LayerNormMLP(TransformerEngineBase):
         """
         assert self.axis == -1, "Only support axis == -1 at this moment"
 
-        ffn1_quantizer_set = self.generate_quantizer_set("_0")
-        ffn2_quantizer_set = self.generate_quantizer_set("_1")
+        ffn1_quantizer_set = self.generate_quantizer_set(
+            "_0", quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
+        ffn2_quantizer_set = self.generate_quantizer_set(
+            "_1", quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
 
         input_dtype = inputs.dtype
         ln_output = None
@@ -1019,7 +1044,7 @@ class LayerNormMLP(TransformerEngineBase):
         # TODO(Phuong): use fuse_layernorm for high-precision
         # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            ffn1_quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -1105,7 +1130,7 @@ class LayerNormMLP(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn1_quantizer_set == noop_quantizer_set:
             kernel_1 = kernel_1.astype(input_dtype)
 
         hidden_size = inputs.shape[-1]
@@ -1117,7 +1142,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel_2_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn2_quantizer_set == noop_quantizer_set:
             kernel_2 = kernel_2.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
