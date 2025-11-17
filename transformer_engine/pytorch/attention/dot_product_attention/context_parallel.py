@@ -410,11 +410,11 @@ def flash_attn_a2a_communicate(
     cp_stream: torch.cuda.Stream,
     before_attn: bool,
     qkv_format: str = "bshd",
-    cu_seqlens: torch.Tensor = None,
+    cu_seqlens_padded: torch.Tensor = None,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """A2A communication for context parallelism."""
 
-    assert qkv_format != "thd" or cu_seqlens is not None, "cu_seqlens is required for THD format!"
+    assert qkv_format != "thd" or cu_seqlens_padded is not None, "cu_seqlens_padded is required for THD format!"
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     if before_attn:
@@ -443,7 +443,7 @@ def flash_attn_a2a_communicate(
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
                         a2a_outputs[i - 2] = reorder_seq_chunks_after_a2a_before_attn_thd(
-                            x, cu_seqlens, chunk_ids_for_a2a, cp_size
+                            x, cu_seqlens_padded, chunk_ids_for_a2a, cp_size
                         )
 
             if i < len(a2a_inputs):
@@ -475,7 +475,7 @@ def flash_attn_a2a_communicate(
                     )
                 else:  # qkv_format == "thd"
                     # reorder the sequence chunks
-                    x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size)
+                    x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens_padded, cp_size)
                     # [cp*t, np//cp, hn] -> [cp, t, np//cp, hn]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
@@ -3425,7 +3425,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cp_stream,
             before_attn=True,
             qkv_format=qkv_format,
-            cu_seqlens=cu_seqlens_q_padded,
+            cu_seqlens_padded=cu_seqlens_q_padded,
         )
         if softmax_type != "vanilla":
             softmax_offset = flash_attn_a2a_communicate_softmax_offset(
@@ -3524,7 +3524,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cp_stream,
             before_attn=False,
             qkv_format=qkv_format,
-            cu_seqlens=cu_seqlens_q_padded,
+            cu_seqlens_padded=cu_seqlens_q_padded,
         )
         if return_max_logit:
             max_logit = flash_attn_a2a_communicate_softmax_offset(
@@ -3695,7 +3695,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.cp_stream,
             before_attn=True,
             qkv_format=qkv_format,
-            cu_seqlens=cu_seqlens_q_padded,
+            cu_seqlens_padded=cu_seqlens_q_padded,
         )
 
         flash_attn_bwd = None
@@ -3814,7 +3814,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.cp_stream,
             before_attn=False,
             qkv_format=qkv_format,
-            cu_seqlens=cu_seqlens_q_padded,
+            cu_seqlens_padded=cu_seqlens_q_padded,
         )
 
         if qkv_format == "bshd":
