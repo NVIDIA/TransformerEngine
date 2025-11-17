@@ -808,6 +808,21 @@ def _make_graphed_callables(
 
         return functionalized
 
+    def make_graphed_attribute_functions(graph_idx):
+
+        # Attach backward_dw as an attribute to the graphed callable.
+        def backward_dw():
+            if need_bwd_dw_graph.get(graph_idx, False):
+                bwd_dw_graphs[graph_idx].replay()
+
+        # Attach reset as an attribute to the graphed callable.
+        def reset():
+            fwd_graphs[graph_idx].reset()
+            bwd_graphs[graph_idx].reset()
+            bwd_dw_graphs[graph_idx].reset()
+
+        return backward_dw, reset
+
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
@@ -883,15 +898,9 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        # Attach backward_dw as an attribute to the graphed callable.
-        def backward_dw(
-            need_backward_dw=need_bwd_dw_graph.get(i, False),
-            bwd_dw_graph=bwd_dw_graphs[i],
-        ):
-            if need_backward_dw:
-                bwd_dw_graph.replay()
-
-        setattr(ret[-1], "backward_dw", backward_dw)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
+        setattr(ret[-1], "backward_dw", backward_dw_func)
+        setattr(ret[-1], "reset", reset_func)
 
     if just_one_callable:
         return ret[0]

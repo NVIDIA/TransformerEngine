@@ -214,6 +214,7 @@ class Float8BlockQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -229,12 +230,13 @@ class Float8BlockQuantizer(Quantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Allocate FP8 data transpose if needed
@@ -242,13 +244,17 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
                 columnwise_scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
