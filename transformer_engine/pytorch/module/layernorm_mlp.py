@@ -232,7 +232,7 @@ class _LayerNormMLP(torch.autograd.Function):
             debug,
             recompute_for_bwd,
         ) = non_tensor_args
-        
+
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
             ctx.checkpoint = checkpoint
@@ -323,7 +323,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 "symmetric_ar_type": symmetric_ar_type,
                 "checkpoint": checkpoint,
                 "debug": debug,
-                "recompute_for_bwd": True # set this to true for recomputation phase
+                "recompute_for_bwd": True,  # set this to true for recomputation phase
             }
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
@@ -925,7 +925,9 @@ class _LayerNormMLP(torch.autograd.Function):
             _set_cuda_rng_state(ctx.cuda_rng_state)
 
             out = _LayerNormMLP._forward(  # recompute
-                ctx, *tensors, tuple(ctx.other_args.values()),
+                ctx,
+                *tensors,
+                tuple(ctx.other_args.values()),
             )
 
             FP8GlobalStateManager.set_autocast_state(final_autocast_state)  # restore autocast state
