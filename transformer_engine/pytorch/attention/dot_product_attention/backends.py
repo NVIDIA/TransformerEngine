@@ -19,7 +19,12 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
 )
-from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    nvtx_range_push,
+    nvtx_range_pop,
+    get_nvtx_range_context,
+)
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1447,7 +1452,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
         else:
-            with torch.cuda.nvtx.range("FusedAttnFunc.backward"):
+            with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv
                 # FP16/BF16 attention: torch.float16 or torch.bfloat16
                 # FP8 attention:       torch.float16 or torch.bfloat16
