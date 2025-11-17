@@ -117,7 +117,14 @@ model_configs_base = {
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype,
+    model_configs,
+    model,
+    ckpt_attn,
+    workspace_opt,
+    qkv_layout,
+    swa,
+    pad_between_seqs,
 ):
     """Test DotProductAttention module"""
 
@@ -306,6 +313,31 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+model_configs_num_splits = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "num_splits_1_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_num_splits])
+@pytest.mark.parametrize("model", model_configs_num_splits.keys())
+def test_dpa_num_splits(dtype, model_configs, model):
+    """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        None,
+        False,
+        False,
+    )
 
 
 model_configs_softmax = {
@@ -1152,6 +1184,8 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        # Only pass num_splits when exercising the FlashAttention path
+        num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
     max_logit = None
     if config.return_max_logit:
@@ -1786,9 +1820,10 @@ def test_mha_fp8_vs_f16(
         fp8_meta=fp8_meta,
         is_training=is_training,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if flash_attn_supported + fused_attn_supported < 1:
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
+    fused_attn_supported_f16 = False
     if not fp8_dpa_bwd:
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
@@ -1796,8 +1831,8 @@ def test_mha_fp8_vs_f16(
             qkv_layout=qkv_format.replace("hd", "h3d"),
             is_training=is_training,
         )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
+        _, fused_attn_supported_f16, _ = available_backends
+        if not fused_attn_supported_f16:
             pytest.skip("No attention backend available.")
 
     if flash_attn_supported:
@@ -1809,23 +1844,28 @@ def test_mha_fp8_vs_f16(
             dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
-    fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
+    if fused_attn_supported_fp8:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+        fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
-    fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+        fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
+            dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    if flash_attn_supported:
+    if flash_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -1838,32 +1878,33 @@ def test_mha_fp8_vs_f16(
             rmse_tol,
             True,
         )
-    logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
-    logging.debug("========== {:^25s} ==========".format("forward output"))
-    compare_and_assert(
-        fused_attn_fwd_fp8,
-        fused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "fused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-        True,
-    )
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
+            fused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "fused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+            True,
+        )
 
-    if is_training:
-        for i in range(len(param_names[:1])):
-            logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            compare_and_assert(
-                fused_attn_bwd_fp8[i],
-                fused_attn_bwd_f16[i],
-                f"fused_attn_bwd_fp8[{i}]",
-                f"fused_attn_bwd_f16[{i}]",
-                atol,
-                rtol,
-                rmse_tol,
-                True,
-            )
+        if is_training:
+            for i in range(len(param_names[:1])):
+                logging.debug("========== {:^25s} ==========".format(param_names[i]))
+                compare_and_assert(
+                    fused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"fused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                    True,
+                )
 
 
 def _run_mha_fp8_vs_f16(

@@ -135,7 +135,7 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 3ba6f82 && git submodule update --init && cd hopper/ && python setup.py install
+(2) cd flash-attention/hopper && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
@@ -233,6 +233,8 @@ class AttentionParams:
         Whether to output max_logit.
     cuda_graph: bool, default = `False`
         Whether support for cuda graph capture is needed or not.
+    num_splits: int, default = 1
+        The number of kernels to split attention to.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -263,6 +265,7 @@ class AttentionParams:
     softmax_type: str = "vanilla"
     return_max_logit: bool = False
     cuda_graph: bool = False
+    num_splits: int = 1
 
     def __eq__(self, other):
         """
@@ -338,6 +341,7 @@ def get_attention_backend(
     softmax_type = attention_params.softmax_type
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
+    num_splits = attention_params.num_splits
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -510,6 +514,18 @@ def get_attention_backend(
                 )
             use_flash_attention = False
             use_fused_attention = False
+
+    # Filter: num_splits
+    if num_splits != 1:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for num_splits")
+            use_flash_attention_2 = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention for num_splits")
+            use_fused_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for num_splits")
+            use_unfused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:
@@ -1566,8 +1582,9 @@ def _pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     if isinstance(tensor, Float8Tensor):
@@ -1622,8 +1639,9 @@ def _unpack_tensor(
     Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     if isinstance(tensor, Float8Tensor):
         unpacked.scatter_(0, indices, tensor._data)
