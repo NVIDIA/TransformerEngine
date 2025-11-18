@@ -135,7 +135,7 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 3ba6f82 && git submodule update --init && cd hopper/ && python setup.py install
+(2) cd flash-attention/hopper && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
@@ -229,6 +229,12 @@ class AttentionParams:
         Inference-related parameters. See InferenceParams for details.
     softmax_type: str, default = "vanilla"
         The type of softmax operation. See DotProductAttention for details.
+    return_max_logit: bool, default = `False`
+        Whether to output max_logit.
+    cuda_graph: bool, default = `False`
+        Whether support for cuda graph capture is needed or not.
+    num_splits: int, default = 1
+        The number of kernels to split attention to.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -257,6 +263,9 @@ class AttentionParams:
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
     softmax_type: str = "vanilla"
+    return_max_logit: bool = False
+    cuda_graph: bool = False
+    num_splits: int = 1
 
     def __eq__(self, other):
         """
@@ -330,6 +339,9 @@ def get_attention_backend(
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
     softmax_type = attention_params.softmax_type
+    return_max_logit = attention_params.return_max_logit
+    cuda_graph = attention_params.cuda_graph
+    num_splits = attention_params.num_splits
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -473,9 +485,61 @@ def get_attention_backend(
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
-            elif cudnn_version < (9, 14, 0):
-                logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0")
-                use_fused_attention = False
+            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
+            # determinism for Blackwell
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug(
+                        "Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0"
+                    )
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug(
+                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
+                            " with cuDNN < 9.18.0"
+                        )
+                        use_fused_attention = False
+
+        if device_compute_capability == (12, 0):
+            if use_flash_attention:
+                logger.debug(
+                    "Disabling FlashAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            use_flash_attention = False
+            use_fused_attention = False
+
+    # Filter: num_splits
+    if num_splits != 1:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for num_splits")
+            use_flash_attention_2 = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention for num_splits")
+            use_fused_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for num_splits")
+            use_unfused_attention = False
+
+    # Filter: Return max_logit
+    if return_max_logit:
+        if use_flash_attention:
+            use_flash_attention = False
+            logger.debug("Disabling FlashAttention for max_logit")
+        if use_fused_attention and qkv_format == "thd":
+            use_fused_attention = False
+            logger.debug("Disabling FusedAttention for max_logit with qkv_format = thd")
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
+            logger.debug("Disabling all backends for max_logit with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -542,6 +606,20 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+        ):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
+                    head_dim_qk,
+                )
+            use_fused_attention = False
+
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
@@ -611,6 +689,13 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
+        if device_compute_capability == (12, 0):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as qkv_format = thd is"
+                    " not supported for compute capability = sm120"
+                )
+            use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
@@ -913,6 +998,8 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            return_max_logit,
+            cuda_graph,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
@@ -1495,8 +1582,9 @@ def _pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     if isinstance(tensor, Float8Tensor):
@@ -1551,8 +1639,9 @@ def _unpack_tensor(
     Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     if isinstance(tensor, Float8Tensor):
         unpacked.scatter_(0, indices, tensor._data)
@@ -1647,6 +1736,78 @@ class UnpackTensor(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         return None, None, _pack_tensor(indices, grad_output)
+
+
+class ConvertTHDtoBSHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = thd to qkv_format = bshd.
+    """
+
+    @staticmethod
+    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        # pylint: disable=missing-function-docstring
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            max_seqlen,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.num_tokens = thd_tensor.shape[0]
+        return bshd_tensor
+
+    @staticmethod
+    def backward(ctx, bshd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            ctx.num_tokens,
+        )
+        return thd_tensor, None, None
+
+
+class ConvertBSHDtoTHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = bshd to qkv_format = thd.
+    """
+
+    @staticmethod
+    def forward(ctx, bshd_tensor, cu_seqlens):
+        # pylint: disable=missing-function-docstring
+        num_tokens = cu_seqlens[-1]
+        max_seqlen = bshd_tensor.shape[1]
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            num_tokens,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.max_seqlen = max_seqlen
+        return thd_tensor
+
+    @staticmethod
+    def backward(ctx, thd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            ctx.max_seqlen,
+        )
+        return bshd_tensor, None
 
 
 def get_qkv_format(

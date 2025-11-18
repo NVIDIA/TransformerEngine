@@ -36,6 +36,8 @@ __device__ inline OType sigmoid(const IType val, const Empty&) {
   return 1.f / (1.f + expf(-cval));
 }
 
+__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
+
 template <typename OType, typename IType>
 __device__ inline OType dsigmoid(const IType val, const Empty& e) {
   const float cval = val;

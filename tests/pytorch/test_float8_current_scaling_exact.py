@@ -8,9 +8,15 @@ import torch
 import pytest
 
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
+from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.custom_recipes.quantization import MMParams
+from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import (
+    CurrentScalingQuantizerRef,
+)
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -747,6 +753,132 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
             recipe1_golden_tensors=None,
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestFP8CurrentScalingNativeVsRef:
+    @staticmethod
+    def _make_quantizers(rowwise=True, columnwise=True):
+        # TE native FP8 current scaling quantizer
+        te_quant = te.Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=torch.device("cuda"),
+            rowwise=rowwise,
+            columnwise=columnwise,
+        )
+        # Reference quantizer
+        ref_quant = CurrentScalingQuantizerRef(
+            dtype=torch.float8_e4m3fn,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            pow_2_scales=False,
+            eps=0.0,
+        )
+        return te_quant, ref_quant
+
+    @pytest.mark.parametrize(
+        "M, N, dtype",
+        [
+            (128, 256, torch.bfloat16),
+        ],
+        ids=["rowwise"],
+    )
+    def test_current_scaling_quantization_versus_reference(self, M, N, dtype):
+        device = "cuda"
+        seed = 123
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+        x = torch.randn((M, N), dtype=dtype, device=device)
+
+        te_quant, ref_quant = self._make_quantizers(rowwise=True, columnwise=False)
+
+        # Native TE quantization
+        x_te = te_quant(x)
+        assert x_te._data is not None
+        qx_native = x_te._data.view(dtype=torch.float8_e4m3fn)
+        sx_native = x_te._scale_inv
+
+        # Reference quantization
+        x_ref = ref_quant.quantize(x)
+        qx_ref = x_ref.data
+        sx_ref = x_ref.scale
+
+        # Byte-for-byte equality on data and exact scale_inv match
+        torch.testing.assert_close(qx_native, qx_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(sx_native, sx_ref, atol=0.0, rtol=0.0)
+
+    @pytest.mark.parametrize(
+        "M, K, N, out_dtype, accumulate",
+        [
+            (128, 256, 96, torch.bfloat16, False),
+            (64, 128, 64, torch.float32, True),
+        ],
+        ids=["bf16_no_acc", "fp32_acc"],
+    )
+    def test_current_scaling_gemm_versus_reference(self, M, K, N, out_dtype, accumulate):
+        device = "cuda"
+        seed = 42
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+        x = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+        w = torch.randn((N, K), dtype=torch.bfloat16, device=device)
+        out = torch.randn((M, N), dtype=out_dtype, device=device) if accumulate else None
+
+        te_quant_x, ref_quant = self._make_quantizers(rowwise=True, columnwise=True)
+        te_quant_w, _ = self._make_quantizers(rowwise=True, columnwise=True)
+
+        # Native TE quantization (direct)
+        qx_native = te_quant_x(x)
+        qw_native = te_quant_w(w)
+
+        # Prepare inputs for reference qgemm
+        assert qx_native._data is not None and qw_native._data is not None
+        qx_data = qx_native._data.view(dtype=torch.float8_e4m3fn)
+        qw_data = qw_native._data.view(dtype=torch.float8_e4m3fn)
+        sx = qx_native._scale_inv
+        sw = qw_native._scale_inv
+
+        # Reference GEMM
+        m_params = MMParams(out_dtype=out_dtype, use_split_accumulator=False)
+        y_ref = ref_quant.qgemm(
+            qx=qx_data,
+            qw=qw_data,
+            m_params=m_params,
+            out_dtype=out_dtype,
+            sx=sx,
+            sw=sw,
+            bias=None,
+            out=out.clone() if accumulate else None,
+            accumulate=accumulate,
+            gemm_type=None,
+            qresult_x=None,
+            qresult_w=None,
+        )
+
+        # Native TE GEMM
+        # return type is out, bias_grad, gelu_input, extra_output
+        y_native = tex.generic_gemm(
+            qw_native,  # A
+            True,  # transa (treat (N,K) as (K,N))
+            qx_native,  # B
+            False,  # transb
+            out.clone() if accumulate else None,
+            None,  # out quantizer
+            TE_DType[out_dtype],
+            None,  # bias
+            TE_DType[torch.bfloat16],
+            False,  # use_gelu
+            None,  # gelu_input
+            False,  # use_grad
+            torch.empty(0, dtype=torch.uint8, device=device),
+            0,
+            accumulate,
+            False,  # use_split_accumulator
+        )[0]
+
+        torch.testing.assert_close(y_native, y_ref, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

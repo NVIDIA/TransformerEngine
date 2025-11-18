@@ -255,6 +255,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                  where alpha is a learnable parameter in shape [h].
                  'off-by-one' and 'learnable' softmax types are also called sink attention
                  ('zero sink' and 'learnable sink').
+    return_max_logit: Optional[bool], default = `False`
+                     If true, returns the maximum attention score that can be used in a Muon optimizer to
+                     rescale the Q and K projection weights (see `Muon is Scalable for LLM Training
+                     <https://arxiv.org/pdf/2502.16982>`_).
+                     max_logit = max(S), where S = mask(Q*K^T*softmax_scale + bias) in shape [b, h, s_q, s_kv],
+                     and max_logit is in shape [h].
 
     Parallelism parameters
     ----------------------
@@ -311,6 +317,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -394,6 +401,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
+        self.return_max_logit = return_max_logit
 
         self.softmax_type = softmax_type
         if self.softmax_type == "vanilla":
@@ -431,6 +439,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             deterministic=self.deterministic,
             **attn_kwargs,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -439,6 +448,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             **attn_kwargs,
             layer_number=layer_number,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
@@ -789,6 +799,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -963,9 +974,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = `False`
             Whether to enforce output to be in FP8 or not.
+        num_splits: Optional[int], default = 1
+            Optional split control for FlashAttention-3 only. When set, this value is forwarded
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1303,6 +1318,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
+                return_max_logit=self.return_max_logit,
+                cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1401,6 +1419,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
 
             if use_fused_attention:
@@ -1482,14 +1501,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_output=fp8_output,
                 )
 
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
-                )
-
             if use_unfused_attention:
                 allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
                 if checkpoint_core_attention:
@@ -1502,6 +1513,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         qkv_layout=qkv_layout,
                         cu_seqlens_q=cu_seqlens_q,
                         cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
@@ -1523,6 +1536,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     qkv_layout=qkv_layout,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,

@@ -33,6 +33,8 @@ from transformer_engine.pytorch.attention.dot_product_attention import DotProduc
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
 
+from transformer_engine.pytorch.cpu_offload import start_offload, is_cpu_offload_enabled
+
 # Force DotProductAttention to use a different recipe than the fp8_recipe set in autocast().
 # Useful when GEMMs and attention use different recipes. Supported values are "DelayedScaling"
 # and "Float8CurrentScaling". Use other relevant variables here to define the recipe, e.g. fp8_dpa.
@@ -971,7 +973,8 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
         # Core attention computation
         # ===========================
-
+        if is_cpu_offload_enabled():
+            start_offload(query_layer, key_layer, value_layer, offload_base_tensor=True)
         context_layer = self.core_attention(
             query_layer,
             key_layer,
