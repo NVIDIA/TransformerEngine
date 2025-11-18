@@ -39,6 +39,17 @@ jobs:
       image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
       options: --user root
     steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
       - name: 'Dependencies'
         run: |
           apt-get update
