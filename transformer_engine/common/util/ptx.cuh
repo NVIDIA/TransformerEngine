@@ -1384,9 +1384,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, floatx4 const &in,
       "}\n\t"
       : "=r"(reinterpret_cast<uint32_t &>(out))
       : "l"(reinterpret_cast<uint64_t const &>(in2[0])),
-        "l"(reinterpret_cast<uint64_t const &>(in2[1])) "l"(
-            reinterpret_cast<const uint64_t &>(scale)),
-        "r"(0x80008000));
+        "l"(reinterpret_cast<uint64_t const &>(in2[1])),
+        "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(0x80008000));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1423,8 +1422,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, floatx4 const &in,
       "}\n\t"
       : "=r"(reinterpret_cast<uint32_t &>(out))
       : "l"(reinterpret_cast<uint64_t const &>(in2[0])),
-        "l"(reinterpret_cast<uint64_t const &>(in2[1])) "l"(
-            reinterpret_cast<const uint64_t &>(scale2[0])),
+        "l"(reinterpret_cast<uint64_t const &>(in2[1])),
+        "l"(reinterpret_cast<const uint64_t &>(scale2[0])),
         "l"(reinterpret_cast<const uint64_t &>(scale2[1])), "r"(0x80008000));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
