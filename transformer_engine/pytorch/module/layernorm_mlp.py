@@ -942,7 +942,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 FP8GlobalStateManager.restore_fp8_meta_tensors(
                     ctx.other_args["module"].fp8_meta
                 )  # restore quantizers
-                
+
             # set rng state for fwd
             torch.set_rng_state(final_cpu_rng_state)
             _set_cuda_rng_state(final_cuda_rng_state)
