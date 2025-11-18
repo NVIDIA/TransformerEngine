@@ -75,6 +75,8 @@ from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
     mark_not_offload,
+    mark_activation_offload,
+
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -701,17 +703,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if not checkpoint:  # regular path, no selective activation checkpointing
 
                 if cpu_offloading:
-                    mark_not_offload(
-                        ln_weight,
-                        ln_bias,
-                        fc1_weight_final,
-                        fc1_weight,
-                        fc1_bias,
-                        fc2_weight_final,
-                        fc2_weight,
-                        fc2_bias,
+                    mark_activation_offload(
+                        inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
                     )
-
+                    
                 # Scatter intermediate/activation tensors saved for the backward pass
                 # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
                 #       shards/unshards the base weights so we don't do it ourselves
@@ -738,6 +733,17 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
                 )
 
+                if cpu_offloading:
+                    mark_not_offload(
+                        ln_weight,
+                        ln_bias,
+                        fc1_weight_final,
+                        fc1_weight,
+                        fc1_bias,
+                        fc2_weight_final,
+                        fc2_weight,
+                        fc2_bias,
+                    )
                 tensors_to_save, tensor_objects = prepare_for_saving(
                     inputmat,
                     ln_weight,
