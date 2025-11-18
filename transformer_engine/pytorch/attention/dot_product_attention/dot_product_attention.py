@@ -807,6 +807,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = 1,
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
@@ -982,6 +983,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = `False`
             Whether to enforce output to be in FP8 or not.
+        num_splits: Optional[int], default = 1
+            Optional split control for FlashAttention-3 only. When set, this value is forwarded
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         chunk_size: Optional[int], default = `None`
             If set, chunked attention will be used.
             For bshd and sbhd formats, this will result in internal reshape to (b*s/chunk_size, chunk_size h, d) or (chunk_size, b*s/chunk_size, h, d).
@@ -989,7 +994,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             Context parallelism of chunked attention is supported only for thd format.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1374,6 +1379,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
                 chunk_size=self.chunk_size,
             )
             global _attention_backends
@@ -1473,6 +1479,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
             elif use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
