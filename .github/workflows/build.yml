@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Move /var/lib/docker/
         shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+        run: mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
 
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
@@ -57,7 +57,7 @@ jobs:
 
       - name: Restore /var/lib/docker/
         shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+        run: sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
 
       - name: 'Dependencies'
         run: |
