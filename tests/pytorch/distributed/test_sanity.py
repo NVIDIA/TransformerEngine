@@ -55,11 +55,27 @@ def test_current_device(model, module):
             self_attn_mask_type="padding",
             device=f"cuda:{tensor_device}",
         )
-        seqlens_q = torch.randint(1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device=f"cuda:{tensor_device}")
-        cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}")
+        seqlens_q = torch.randint(
+            1,
+            config.max_seqlen_q,
+            [config.batch_size],
+            dtype=torch.int32,
+            device=f"cuda:{tensor_device}",
+        )
+        cu_seqlens_q = torch.zeros(
+            config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}"
+        )
         cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        seqlens_kv = torch.randint(1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device=f"cuda:{tensor_device}")
-        cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}")
+        seqlens_kv = torch.randint(
+            1,
+            config.max_seqlen_kv,
+            [config.batch_size],
+            dtype=torch.int32,
+            device=f"cuda:{tensor_device}",
+        )
+        cu_seqlens_kv = torch.zeros(
+            config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}"
+        )
         cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
         num_tokens = cu_seqlens_q[-1]
         args = [
@@ -78,11 +94,27 @@ def test_current_device(model, module):
         model = DotProductAttention(
             config.num_heads, config.head_dim_qk, qkv_format="thd", attn_mask_type="padding"
         )
-        seqlens_q = torch.randint(1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device=f"cuda:{tensor_device}")
-        cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}")
+        seqlens_q = torch.randint(
+            1,
+            config.max_seqlen_q,
+            [config.batch_size],
+            dtype=torch.int32,
+            device=f"cuda:{tensor_device}",
+        )
+        cu_seqlens_q = torch.zeros(
+            config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}"
+        )
         cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        seqlens_kv = torch.randint(1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device=f"cuda:{tensor_device}")
-        cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}")
+        seqlens_kv = torch.randint(
+            1,
+            config.max_seqlen_kv,
+            [config.batch_size],
+            dtype=torch.int32,
+            device=f"cuda:{tensor_device}",
+        )
+        cu_seqlens_kv = torch.zeros(
+            config.batch_size + 1, dtype=torch.int32, device=f"cuda:{tensor_device}"
+        )
         cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
         num_tokens = cu_seqlens_q[-1]
         args = [
@@ -100,7 +132,9 @@ def test_current_device(model, module):
         kwargs["cu_seqlens_kv"] = cu_seqlens_kv
         kwargs["max_seqlen_q"] = config.max_seqlen_q
         kwargs["max_seqlen_kv"] = config.max_seqlen_kv
-        bwd_args = [torch.randn(num_tokens, config.hidden_size, dtype=dtype, device=f"cuda:{tensor_device}")]
+        bwd_args = [
+            torch.randn(num_tokens, config.hidden_size, dtype=dtype, device=f"cuda:{tensor_device}")
+        ]
     elif module == "Linear":
         model = Linear(
             config.hidden_size,
