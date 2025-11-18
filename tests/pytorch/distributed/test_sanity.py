@@ -14,6 +14,7 @@ from transformer_engine.pytorch import (
     GroupedLinear,
     NVFP4Quantizer,
     autocast,
+    is_nvfp4_available,
 )
 from transformer_engine.common import recipe
 
@@ -24,6 +25,8 @@ from utils import ModelConfig
 model_configs = {
     "small": ModelConfig(2, 10, 2, 16),
 }
+
+nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
 
 
 @pytest.mark.parametrize("model", ["small"])
@@ -148,6 +151,7 @@ def test_current_device(model, module):
     ), "The gradient tensor should be the same as the input tensors!"
 
 
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
 def test_nvfp4_rht_cache():
     """Ensure correct RHT cache for NVFP4."""
 
@@ -163,6 +167,6 @@ def test_nvfp4_rht_cache():
 
     model = Linear(hidden_size, hidden_size, params_dtype=dtype)
     inp = torch.randn(hidden_size, hidden_size, device=torch.cuda.current_device(), dtype=dtype)
-    recipe = recipe.NVFP4BlockScaling()
-    with autocast(recipe=recipe):
+    fp4_recipe = recipe.NVFP4BlockScaling()
+    with autocast(recipe=fp4_recipe):
         _ = model(inp)
