@@ -76,7 +76,6 @@ from ..cpu_offload import (
     start_offload,
     mark_not_offload,
     mark_activation_offload,
-
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -706,7 +705,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     mark_activation_offload(
                         inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
                     )
-                    
+
                 # Scatter intermediate/activation tensors saved for the backward pass
                 # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
                 #       shards/unshards the base weights so we don't do it ourselves
@@ -834,7 +833,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
-                if in_fp8_activation_recompute_phase():
+                if in_fp8_activation_recompute_phase() or recompute_for_bwd:
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
             ctx.wgrad_store = wgrad_store
@@ -943,6 +942,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 FP8GlobalStateManager.restore_fp8_meta_tensors(
                     ctx.other_args["module"].fp8_meta
                 )  # restore quantizers
+                
             # set rng state for fwd
             torch.set_rng_state(final_cpu_rng_state)
             _set_cuda_rng_state(final_cuda_rng_state)
