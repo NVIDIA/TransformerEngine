@@ -57,6 +57,15 @@ class MetisSvdFunction():
 
     @staticmethod
     @torch.no_grad()
+    def svd_lowrank_quant_grad_output(grad_output:torch.Tensor,
+                                      grad_output_shape,
+                                      **kargs):
+        assert grad_output_shape is not None
+        grad_output = grad_output.view(grad_output_shape)
+        return MetisSvdFunction.svd_lowrank_quant(grad_output,**kargs)    
+
+    @staticmethod
+    @torch.no_grad()
     def svd_lowrank_quant(input_:torch.Tensor,
                           input_quantizer: "Quantizer", 
                           rank=60, 
@@ -66,16 +75,16 @@ class MetisSvdFunction():
                           gradacc_broadcast = False,
                           load_history = False,
                           history_list=List[Optional[torch.Tensor]]):
-        # print("-"*20+"svd_lowrank_quant begin"+"-"*20)
+
+        # for backward, input_ has already shaped into 2d tensor.
         # input_ shape [b,s,h]
+
         input_shape = input_.shape
         if broadcast_dim >= 0:
             cinput = input_.select(broadcast_dim, 0) #[s,h]
         else:
             cinput = input_
-
         original_shape = cinput.shape #[s,h]
-
         if load_history and gradacc_broadcast and is_backward :
             ker,de_svd_gemm_out = history_list
             # print("load")       
@@ -86,42 +95,33 @@ class MetisSvdFunction():
                 q=rank, 
                 niter=niter
             )
-
             ug = ug.to(input_.dtype)
             sg = sg.to(input_.dtype)
             sg = torch.diag(sg)
             vg = vg.T.to(input_.dtype)
-
             ker = (ug @ sg @ vg) #[s,h] or [b*s,h]
             if broadcast_dim >= 0:
                 ker = ker.unsqueeze(broadcast_dim) #[1,s,h]
             else:
                 ker = ker.view(input_shape) #[b,s,h]
-
             ug = input_quantizer(ug)
             vg = input_quantizer(vg)
             sg = input_quantizer(sg)
-
             gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
             de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
             #[s,h] or [b*s,h]
-
             if broadcast_dim >= 0:
                 de_svd_gemm_out = de_svd_gemm_out.unsqueeze(broadcast_dim) #[1,s,h]
             else:
                 de_svd_gemm_out = de_svd_gemm_out.view(input_shape) # [b,s,h]
-
             if gradacc_broadcast and is_backward:
                 # print("storing history_list----")
                 history_list.clear()
                 history_list.extend([ker,de_svd_gemm_out])
-
         input_res = input_ - ker #[b,s,h]
-
         out_tensor = de_svd_gemm_out + input_res #[b,s,h]
         
         output_fp4 = input_quantizer(out_tensor)
-
         return output_fp4
 
     @staticmethod

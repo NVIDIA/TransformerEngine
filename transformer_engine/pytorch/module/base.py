@@ -1108,6 +1108,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R2: bias gradient on R1.
 
         """
+        grad_output_shape = grad_output.shape
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
@@ -1147,9 +1148,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         # print("backward use metis ")
                         from .metis.quant import MetisSvdFunction
                         if ctx.metis_context.backward_lowrank_svd > 0:
-                            grad_output = MetisSvdFunction.svd_lowrank_quant(
+                            grad_output = MetisSvdFunction.svd_lowrank_quant_grad_output(
                                 grad_output, 
-                                quantizer,
+                                grad_output_shape = grad_output_shape,
+                                input_quantizer=quantizer,
                                 rank=ctx.metis_context.backward_lowrank_svd,
                                 niter=ctx.metis_context.backward_lowrank_niter,
                                 broadcast_dim=ctx.metis_context.backward_broadcast_dim,
@@ -1210,9 +1212,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # print("backward use metis ,ctx.metis_context=",ctx.metis_context)
                 from .metis.quant import MetisSvdFunction
                 if ctx.metis_context.backward_lowrank_svd > 0:
-                    grad_output = MetisSvdFunction.svd_lowrank_quant(
+                    grad_output = MetisSvdFunction.svd_lowrank_quant_grad_output(
                         grad_output, 
-                        quantizer,
+                        grad_output_shape = grad_output_shape,
+                        input_quantizer=quantizer,
                         rank=ctx.metis_context.backward_lowrank_svd,
                         niter=ctx.metis_context.backward_lowrank_niter,
                         broadcast_dim=ctx.metis_context.backward_broadcast_dim,
