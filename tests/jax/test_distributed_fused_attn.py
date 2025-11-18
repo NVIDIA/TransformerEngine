@@ -18,6 +18,7 @@ from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
     AttnMaskType,
+    AttnSoftmaxType,
     QKVLayout,
     QKVFormat,
     reorder_causal_load_balancing,
@@ -66,6 +67,7 @@ class TestDistributedSelfAttn:
         bias_shape,
         attn_mask_type,
         dtype,
+        softmax_type,
         use_shardy,
     ):
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
@@ -80,6 +82,7 @@ class TestDistributedSelfAttn:
             QKVLayout.BS3HD,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             num_head,
             num_head,
@@ -109,6 +112,7 @@ class TestDistributedSelfAttn:
             hidden,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             is_training,
@@ -142,6 +146,14 @@ class TestDistributedSelfAttn:
         ],
     )
     @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "softmax_type",
+        [
+            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
+        ],
+    )
     def test_self_attn(
         self,
         device_count,
@@ -153,6 +165,7 @@ class TestDistributedSelfAttn:
         bias_shape,
         attn_mask_type,
         dtype,
+        softmax_type,
     ):
         self.impl_test_self_attn(
             device_count,
@@ -164,6 +177,7 @@ class TestDistributedSelfAttn:
             bias_shape,
             attn_mask_type,
             dtype,
+            softmax_type,
             use_shardy=False,
         )
 
@@ -175,8 +189,23 @@ class TestDistributedSelfAttn:
             pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
         ],
     )
+    @pytest.mark.parametrize(
+        "softmax_type",
+        [
+            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
+        ],
+    )
     def test_self_attn_shardy(
-        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type, bias_shape
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        attn_bias_type,
+        bias_shape,
+        softmax_type,
     ):
         data_shape = (32, 512, 12, 64)
         self.impl_test_self_attn(
@@ -189,6 +218,7 @@ class TestDistributedSelfAttn:
             bias_shape,
             AttnMaskType.PADDING_MASK,
             jnp.bfloat16,
+            softmax_type,
             use_shardy=True,
         )
 
@@ -213,8 +243,24 @@ class TestDistributedCrossAttn:
         "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
     )
     @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "softmax_type",
+        [
+            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
+        ],
+    )
     def test_cross_attn(
-        self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape, attn_mask_type, dtype
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        attn_mask_type,
+        dtype,
+        softmax_type,
     ):
         attn_bias_type = AttnBiasType.NO_BIAS
         bias_shape = None
@@ -230,6 +276,7 @@ class TestDistributedCrossAttn:
             QKVLayout.BSHD_BS2HD,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             num_head,
             num_head,
@@ -252,6 +299,7 @@ class TestDistributedCrossAttn:
             hidden,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             is_training,
@@ -322,6 +370,8 @@ class TestDistributedContextParallelSelfAttn:
         bias_shape = None
         dropout_prob = 0.0
         is_training = True
+        # Context parallel does not support softmax_offset
+        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX
         dp_size, cp_size, tp_size = mesh_shape
 
         batch, seqlen, num_head, hidden = data_shape
@@ -343,6 +393,7 @@ class TestDistributedContextParallelSelfAttn:
             hidden,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             is_training,
@@ -366,6 +417,7 @@ class TestDistributedContextParallelSelfAttn:
                 qkv_layout,
                 attn_bias_type,
                 mask_type,
+                softmax_type,
                 dropout_prob,
                 num_head,
                 num_kv_heads,
