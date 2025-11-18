@@ -7,7 +7,16 @@ import sys
 import pytest
 import torch
 import transformer_engine
-from transformer_engine.pytorch import DotProductAttention, TransformerLayer, Linear, GroupedLinear
+from transformer_engine.pytorch import (
+    DotProductAttention,
+    TransformerLayer,
+    Linear,
+    GroupedLinear,
+    NVFP4Quantizer,
+    autocast,
+    is_nvfp4_available,
+)
+from transformer_engine.common import recipe
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
@@ -16,6 +25,8 @@ from utils import ModelConfig
 model_configs = {
     "small": ModelConfig(2, 10, 2, 16),
 }
+
+nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
 
 
 @pytest.mark.parametrize("model", ["small"])
@@ -138,3 +149,24 @@ def test_current_device(model, module):
     assert (
         tensor_device_grad == tensor_device
     ), "The gradient tensor should be the same as the input tensors!"
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+def test_nvfp4_rht_cache():
+    """Ensure correct RHT cache for NVFP4."""
+
+    num_devices = torch.cuda.device_count()
+    assert num_devices > 1, "This test requires more than one GPU!"
+
+    # Populate cache on last device.
+    with torch.cuda.device(num_devices - 1):
+        _ = NVFP4Quantizer()
+
+    hidden_size = 128
+    dtype = torch.bfloat16
+
+    model = Linear(hidden_size, hidden_size, params_dtype=dtype)
+    inp = torch.randn(hidden_size, hidden_size, device=torch.cuda.current_device(), dtype=dtype)
+    fp4_recipe = recipe.NVFP4BlockScaling()
+    with autocast(recipe=fp4_recipe):
+        _ = model(inp)

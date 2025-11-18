@@ -948,7 +948,13 @@ def _all_gather_fp8(
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
+        # Temporarily ensure rowwise usage for output tensor creation
+        # since we're gathering rowwise data, not the transpose
+        init_rowwise_usage = quantizer.rowwise_usage
+        init_columnwise_usage = quantizer.columnwise_usage
+        quantizer.set_usage(rowwise=True, columnwise=init_columnwise_usage)
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+        quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage)
     elif isinstance(inp, Float8Tensor):
         out = inp.make_like(inp, shape=out_shape)
         out._data = torch.empty(
