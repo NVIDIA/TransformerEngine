@@ -799,6 +799,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -973,6 +974,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = `False`
             Whether to enforce output to be in FP8 or not.
+        num_splits: Optional[int], default = 1
+            Optional split control for FlashAttention-3 only. When set, this value is forwarded
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
         with self.prepare_forward(
@@ -1315,6 +1320,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1413,6 +1419,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
 
             if use_fused_attention:
