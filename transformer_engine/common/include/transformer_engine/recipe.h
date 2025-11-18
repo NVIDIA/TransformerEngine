@@ -126,6 +126,16 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
                                          const NVTETensor inpB, const bool use_rowwise_amax_B,
                                          float alpha_in, NVTETensor alpha_out, cudaStream_t stream);
 
+// NVFP4 2D (16x16) partial-shard APIs
+void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h, size_t w,
+                                        size_t amax_stride_h, size_t amax_stride_w,
+                                        size_t start_offset, size_t block_len,
+                                        cudaStream_t stream);
+
+void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
+                                size_t h, size_t w, size_t scale_stride_h, size_t scale_stride_w,
+                                size_t start_offset, size_t block_len, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

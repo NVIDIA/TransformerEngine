@@ -276,6 +276,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+  // NVFP4 2D
+  m.def("nvfp4_2d_compute_partial_amax",
+        &transformer_engine::pytorch::nvfp4_2d_compute_partial_amax,
+        "Compute partial amax from master weights for NVFP4 2D", py::arg("tensor"), py::arg("amax"),
+        py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len") = 16,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_partial_cast", &transformer_engine::pytorch::nvfp4_2d_partial_cast,
+        "Partial cast from master weights for NVFP4 2D", py::arg("inp"), py::arg("out"),
+        py::arg("global_amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"),
+        py::arg("block_len") = 16, py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,

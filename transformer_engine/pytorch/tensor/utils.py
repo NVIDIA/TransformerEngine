@@ -17,6 +17,7 @@ from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
+from ..constants import NVFP4_BLOCK_SCALING_SIZE
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
@@ -437,80 +438,93 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
 
-
-def cast_master_weights_to_nvfp4(
-    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+# revisit this later
+def _cast_master_weights_to_nvfp4_2d(
+    params, group, use_fsdp_shard_model_weights=False
 ):
-    r"""Helper function to cast master weights to NVFP4 primary weights using partial shards.
+    r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
 
-    Mirrors FP8 partial-cast: compute local amax per shard, all-reduce to global amax,
-    then cast only the shard slice into NVFP4 storages. Requires backend NVFP4 partial ops.
+    Parameters
+    ----------
+    params : List of tuple, each tuple contains a model weight, a master weight, and an offset
+             indicating the starting index of the master weight in the model weight.
+    group  : The distributed group to do amax reduction. Typically it's the data parallel
+             group.
+    use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
 
-    if fsdp_shard_model_weights is None:
-        use_fsdp_shard_model_weights = False
-        fsdp_shard_model_weights = [None] * len(model_weights)
-    else:
-        use_fsdp_shard_model_weights = True
+    device = params[0][0].device
+    block_len = NVFP4_BLOCK_SCALING_SIZE
 
-    if len(model_weights) == 0:
-        return
+    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=device)
 
-    device = model_weights[0].device
-    packed_amaxes = torch.zeros(len(model_weights), dtype=torch.float32, device=device)
-
-    # Step 1: local amax per shard
-    for i, (model_weight, master_weight, start_offset, _) in enumerate(
-        zip(model_weights, master_weights, start_offsets, fsdp_shard_model_weights)
-    ):
-        if not isinstance(model_weight, NVFP4Tensor):
-            continue
-        if master_weight is None:
-            continue
-        h, w = model_weight.shape
-        try:
-            tex.nvfp4_compute_partial_amax(master_weight, packed_amaxes[i : i + 1], h, w, start_offset)
-        except AttributeError as e:
-            raise NotImplementedError(
-                "Missing NVFP4 partial amax kernel: tex.nvfp4_compute_partial_amax"
-            ) from e
-
-    # Step 2: all-reduce to global amax
-    torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
-
-    # Step 3: partial cast per shard
-    for i, (model_weight, master_weight, start_offset, model_weight_fragment) in enumerate(
-        zip(model_weights, master_weights, start_offsets, fsdp_shard_model_weights)
-    ):
-        if not isinstance(model_weight, NVFP4Tensor):
-            continue
-        if master_weight is None:
-            continue
-
+    cu_amax_sizes = [0]
+    scale_shapes: List[tuple[int, int]] = []
+    for model_weight, _, _, _ in params:
         quantizer = model_weight._get_quantizer()
-        if not isinstance(quantizer, NVFP4Quantizer):
-            raise ValueError(
-                f"cast_master_weights_to_nvfp4 expects NVFP4Quantizer, got {type(quantizer)}"
-            )
-        quantizer.set_usage(rowwise=True, columnwise=True)
-        if hasattr(model_weight, "_reset_caches"):
-            model_weight._reset_caches()
+        assert isinstance(quantizer, NVFP4Quantizer)
+        assert quantizer.with_2d_quantization, "NVFP4 2D quantization must be enabled."
+        scale_shape = quantizer.get_scale_shape(model_weight.shape, columnwise=False)
+        scale_shapes.append(scale_shape)
+        num_amaxes = scale_shape[0] * scale_shape[1]
+        cu_amax_sizes.append(cu_amax_sizes[-1] + num_amaxes)
 
-        dst_tensor = model_weight if not use_fsdp_shard_model_weights else model_weight_fragment
-        h, w = model_weight.shape
-        try:
-            tex.nvfp4_partial_cast(
-                master_weight,
-                dst_tensor,
-                packed_amaxes[i : i + 1],
-                h,
-                w,
-                start_offset,
+    packed_amaxes = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+
+    amaxes: List[torch.Tensor] = []
+    scales: List[torch.Tensor] = []
+    scale_inv_tmp: List[torch.Tensor] = []
+    fp8_scale_targets: List[torch.Tensor] = []
+
+    for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
+        scale_shape = scale_shapes[i]
+        amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
+        scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
+        inv_tmp = torch.empty_like(scale)
+
+        assert model_weight._rowwise_scale_inv is not None
+
+        amaxes.append(amax)
+        scales.append(scale)
+        scale_inv_tmp.append(inv_tmp)
+        fp8_scale_targets.append(model_weight._rowwise_scale_inv)
+
+        if master_weight is not None and master_weight.numel() > 0:
+            assert len(model_weight.shape) == 2
+            h, w = model_weight.shape
+            tex.nvfp4_2d_compute_partial_amax(
+                master_weight, amax, h, w, start_offset, block_len
             )
-        except AttributeError as e:
-            raise NotImplementedError(
-                "Missing NVFP4 partial cast kernel: tex.nvfp4_partial_cast"
-            ) from e
+
+    if packed_amaxes.numel() > 0:
+        torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    if len(amaxes) > 0:
+        multi_tensor_applier(
+        multi_tensor_compute_scale_and_scale_inv,
+        dummy_overflow_buf,
+        [amaxes, scales, scale_inv_tmp],
+        6.0,
+        False,
+        0.0,
+        )
+
+        for inv_tmp, target in zip(scale_inv_tmp, fp8_scale_targets):
+            fp8_view = inv_tmp.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
+            target.copy_(fp8_view)
+
+    for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
+        params, scales
+    ):
+        if master_weight is None or master_weight.numel() == 0:
+            continue
+
+        end_offset = start_offset + master_weight.numel()
+        if not use_fsdp_shard_model_weights:
+            model_weight_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
+        assert len(model_weight.shape) == 2
+        h, w = model_weight.shape
+        tex.nvfp4_2d_partial_cast(master_weight, model_weight_fragment, scale, h, w, start_offset, block_len)
 
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
