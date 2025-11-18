@@ -356,7 +356,6 @@ struct GroupedTensor {
   }
 };
 
-
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;

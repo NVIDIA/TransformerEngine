@@ -360,14 +360,14 @@ void CheckGroupedTensorShape(const GroupedTensor &t, const std::string &name) {
   if (is_tensor_scaling(t.scaling_mode)) {
     // For delayed tensor scaling, scale and amax should have num_tensors elements
     if (t.scale.dptr != nullptr) {
-      NVTE_CHECK(t.scale.numel() == expected_num_tensors,
-                 "Grouped tensor ", name, " scale should have ", expected_num_tensors,
-                 " elements (got ", t.scale.numel(), ")");
+      NVTE_CHECK(t.scale.numel() == expected_num_tensors, "Grouped tensor ", name,
+                 " scale should have ", expected_num_tensors, " elements (got ", t.scale.numel(),
+                 ")");
     }
     if (t.amax.dptr != nullptr) {
-      NVTE_CHECK(t.amax.numel() == expected_num_tensors,
-                 "Grouped tensor ", name, " amax should have ", expected_num_tensors,
-                 " elements (got ", t.amax.numel(), ")");
+      NVTE_CHECK(t.amax.numel() == expected_num_tensors, "Grouped tensor ", name,
+                 " amax should have ", expected_num_tensors, " elements (got ", t.amax.numel(),
+                 ")");
     }
   }
   // TODO: Add block scaling validation when needed
@@ -1042,7 +1042,8 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
   auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
   NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
   NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
-  NVTE_CHECK(param->shape.empty(), "Grouped tensor param shape is not used thus it should not be set");
+  NVTE_CHECK(param->shape.empty(),
+             "Grouped tensor param shape is not used thus it should not be set");
 
   switch (param_name) {
     case kNVTEGroupedRowwiseData:
@@ -1090,7 +1091,7 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
 }
 
 NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                               NVTEGroupedTensorParam param_name) {
+                                              NVTEGroupedTensorParam param_name) {
   if (tensor == nullptr) {
     return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
   }

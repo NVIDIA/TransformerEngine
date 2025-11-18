@@ -454,8 +454,9 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
  *  \param[in] param_name The parameter to be queried.
  *
  *  \return NVTEBasicTensor containing the parameter data.
- */NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                               NVTEGroupedTensorParam param_name);
+ */
+NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                              NVTEGroupedTensorParam param_name);
 
 /*! \brief Get the number of tensors in a grouped tensor.
  *
