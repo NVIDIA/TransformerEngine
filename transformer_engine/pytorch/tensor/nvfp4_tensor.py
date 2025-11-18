@@ -28,7 +28,7 @@ from ._quantization_helpers import _IdentityFunc
 aten = torch.ops.aten
 
 
-def get_no_random_sign_vector(device: torch.cuda.device) -> torch.Tensor:
+def get_no_random_sign_vector(device: int) -> torch.Tensor:
     """Non-random sign vector for Hadamard transform."""
     return torch.tensor([1], dtype=torch.float32, device=device)
 
@@ -45,7 +45,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     return mask.item()
 
 
-def get_wgrad_sign_vector(device: torch.cuda.device) -> torch.Tensor:
+def get_wgrad_sign_vector(device: int) -> torch.Tensor:
     """Hard-coded random signs for Hadamard transform.
 
     https://xkcd.com/221/
@@ -58,7 +58,7 @@ def get_wgrad_sign_vector(device: torch.cuda.device) -> torch.Tensor:
     )
 
 
-def get_hadamard_matrix(hadamard_dimension: int, device: torch.cuda.device) -> torch.Tensor:
+def get_hadamard_matrix(hadamard_dimension: int, device: int) -> torch.Tensor:
     """Construct a 16x16 Hadamard matrix."""
     assert hadamard_dimension == 16, "Only hadamard dimension 16 is supported."
     hadamard_scale = 1 / math.sqrt(hadamard_dimension)
@@ -90,7 +90,7 @@ def get_hadamard_matrix(hadamard_dimension: int, device: torch.cuda.device) -> t
 
 
 @functools.lru_cache(maxsize=None)
-def get_rht_matrix(with_random_sign_mask: bool, device: torch.cuda.device) -> torch.Tensor:
+def get_rht_matrix(with_random_sign_mask: bool, device: int) -> torch.Tensor:
     """Construct matrix used in random Hadamard transform."""
     hadamard_dimension = 16
     if with_random_sign_mask:
@@ -103,7 +103,7 @@ def get_rht_matrix(with_random_sign_mask: bool, device: torch.cuda.device) -> to
 
 
 @functools.lru_cache(maxsize=None)
-def get_random_sign_mask_for_rht(with_random_sign_mask: bool, device: torch.cuda.device) -> int:
+def get_random_sign_mask_for_rht(with_random_sign_mask: bool, device: int) -> int:
     """Sign mask for random Hadamard transform."""
     if with_random_sign_mask:
         return get_sign_from_vector(get_wgrad_sign_vector(device=device))
