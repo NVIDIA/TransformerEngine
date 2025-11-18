@@ -42,20 +42,21 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip 
-          pip install cmake torch ninja pydantic "importlib-metadata>=1.0" packaging pybind11 numpy einops onnxscript
+          apt-get install -y git python3 python3-venv
+          python3 -m venv venv
+          venv/bin/pip install cmake torch ninja pydantic "importlib-metadata>=1.0" packaging pybind11 numpy einops onnxscript
           apt-get clean
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install --no-cache-dir --no-build-isolation . -v --no-deps
+        run: venv/bin/pip install --no-cache-dir --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: python3 tests/pytorch/test_sanity_import.py
+        run: venv/bin/python tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
