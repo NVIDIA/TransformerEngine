@@ -190,7 +190,8 @@ _test_cuda_graphs_modules: List[str] = [
     # creating TMA descriptor for MXFP8 quantization.
     "linear",
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "mha",
     "linear_op",
@@ -232,12 +233,23 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif module == "layernorm_mlp":
+        elif module == "layernorm_mlp_nocheckpoint":
             modules = [
                 LayerNormMLP(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     params_dtype=dtype,
+                    checkpoint=False,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "layernorm_mlp_checkpoint":
+            modules = [
+                LayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                    checkpoint=True,
                 )
                 for _ in range(num_layers)
             ]
@@ -376,6 +388,17 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
+    if (
+        fp8
+        and fp8_recipe.delayed()
+        and torch.cuda.get_device_capability() >= (10, 0)
+        and module == "layernorm_mlp_checkpoint"
+    ):
+        pytest.skip(
+            "CUDA graphs not supported for LayerNormMLP "
+            "with checkpoint=True, SM>=10, "
+            "and DelayedScaling recipe"
+        )
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -402,7 +425,8 @@ def test_make_graphed_callables(
 
 _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "linear",
     "mha",
