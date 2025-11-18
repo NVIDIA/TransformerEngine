@@ -63,11 +63,7 @@ jobs:
 
       - name: Start named container
         run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
-
-      - name: Start named container
-        run: |
-          docker run --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
 
       - name: 'Dependencies'
         run: |
