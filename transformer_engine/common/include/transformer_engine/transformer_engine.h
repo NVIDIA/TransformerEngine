@@ -417,30 +417,18 @@ enum NVTEGroupedTensorParam {
   kNVTENumGroupedTensorParams
 };
 
-/*! \struct NVTEGroupedTensorInfo
- *  \brief Information needed to construct a grouped tensor parameter.
- */
-struct NVTEGroupedTensorInfo {
-  void *base_dptr;        /*!< Base pointer for contiguous layout, or nullptr */
-  void **dptr_list;       /*!< Array of pointers for non-contiguous layout, or nullptr */
-  NVTEDType dtype;        /*!< Data type */
-  size_t num_tensors;     /*!< Number of tensors in the group */
-  bool contiguous;        /*!< Whether data is contiguous */
-  size_t sum_first_dims;  /*!< Sum of first dimensions across all tensors (for validation) */
-  size_t sum_second_dims; /*!< Sum of second dimensions across all tensors (for validation) */
-};
-
 /*! \brief Create a new TE grouped tensor.
  *
  * Create a new TE grouped tensor. Before use its parameters need to be set.
  * TE grouped tensors are just wrappers on top of raw data and do not
  * own memory.
  *
+ *  \param[in] num_tensors     Number of tensors in the group (must be > 0).
  *  \param[in] scaling_mode    Scaling mode of the grouped tensor.
  *
  *  \return A new TE grouped tensor.
  */
-NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode);
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors);
 
 /*! \brief Destroy a TE grouped tensor.
  *
@@ -455,18 +443,19 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
  *
  *  \param[in/out] tensor Grouped tensor.
  *  \param[in] param_name The parameter to be set.
- *  \param[in] param The value to be set.
+ *  \param[in] param The value to be set (NVTEBasicTensor).
  */
 void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
-                                   const NVTEGroupedTensorInfo *param);
+                                   const NVTEBasicTensor *param);
 
 /*! \brief Get a value of the parameter of the grouped tensor.
  *
  *  \param[in] tensor Grouped tensor.
  *  \param[in] param_name The parameter to be queried.
- */
-NVTEGroupedTensorInfo nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                                    NVTEGroupedTensorParam param_name);
+ *
+ *  \return NVTEBasicTensor containing the parameter data.
+ */NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                               NVTEGroupedTensorParam param_name);
 
 /*! \brief Get the number of tensors in a grouped tensor.
  *

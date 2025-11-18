@@ -281,111 +281,22 @@ struct Tensor {
   }
 };
 
-struct SimpleGroupedTensor {
- private:
-  std::vector<void *> dptr_list{};
-  void *base_dptr{nullptr};
-
- public:
-  DType dtype;
-  size_t num_tensors;  // Only need for error checking
-  bool contiguous;
-  // TODO: Discuss if we can still get num_elements for each field so that we can perform shape/size validation for each field.
-  size_t
-      sum_first_dims;  // Need for block scaling scale error checking and GroupedGEMM hints (only the data shapes)
-  size_t sum_second_dims;
-
-  SimpleGroupedTensor(void *base_dptr, DType dtype, size_t num_tensors, bool contiguous,
-                      size_t sum_first_dims, size_t sum_second_dims)
-      : base_dptr(base_dptr),
-        dtype(dtype),
-        num_tensors(num_tensors),
-        contiguous(contiguous),
-        sum_first_dims(sum_first_dims),
-        sum_second_dims(sum_second_dims) {
-    NVTE_CHECK(base_dptr != nullptr, "Base pointer must not be null");
-    NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
-    NVTE_CHECK(contiguous, "Data must be contiguous");
-    NVTE_CHECK(sum_first_dims > 0 && sum_second_dims > 0,
-               "Sum of first and second dimensions must be greater than 0");
-  }
-
-  SimpleGroupedTensor(const std::vector<void *> &dptr_list, DType dtype, size_t num_tensors,
-                      bool contiguous, size_t sum_first_dims = 0, size_t sum_second_dims = 0)
-      : dptr_list(dptr_list),
-        dtype(dtype),
-        num_tensors(num_tensors),
-        contiguous(contiguous),
-        sum_first_dims(sum_first_dims),
-        sum_second_dims(sum_second_dims) {
-    NVTE_CHECK(dptr_list.size() == num_tensors && num_tensors > 0,
-               "Number of data pointers must match number of tensors");
-    NVTE_CHECK(sum_first_dims > 0 && sum_second_dims > 0,
-               "Sum of first and second dimensions must be greater than 0");
-  }
-
-  SimpleGroupedTensor()
-      : base_dptr(nullptr),
-        dtype(DType::kFloat32),
-        num_tensors(0),
-        contiguous(false),
-        sum_first_dims(0),
-        sum_second_dims(0) {}
-
-  bool has_dptr_list() const {
-    bool is_set = !dptr_list.empty();
-    NVTE_CHECK(!is_set || dptr_list.size() == num_tensors,
-               "Number of data pointers must match number of tensors");
-    return is_set;
-  }
-
-  void set_dptr_list(const std::vector<void *> &new_dptr_list) {
-    NVTE_CHECK(new_dptr_list.size() == num_tensors,
-               "Number of data pointers must match number of tensors");
-    dptr_list = new_dptr_list;
-  }
-
-  void *const *get_dptr_list() const {
-    NVTE_CHECK(has_dptr_list(), "Data pointers must be set");
-    return dptr_list.data();
-  }
-
-  void *get_base_dptr() const {
-    NVTE_CHECK(base_dptr != nullptr, "Base pointer must be set");
-    NVTE_CHECK(contiguous, "Base pointer can be used only when data is contiguous");
-    return base_dptr;
-  }
-
-  bool has_data() const { return base_dptr != nullptr || !dptr_list.empty(); }
-
-  void clear() {
-    dptr_list.clear();
-    base_dptr = nullptr;
-    dtype = DType::kFloat32;
-    num_tensors = 0;
-    contiguous = false;
-    sum_first_dims = 0;
-    sum_second_dims = 0;
-  }
-};
-
 struct GroupedTensor {
  public:
   /*
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
-  1. 1D linear layout for all fields: tensor1(dim1, dim2) | tensor2(dim1, dim2) | ... | tensorN(dim1, dim2)
-  2. All the SimpleGroupedTensor fields should store device pointer(s)
-  3. All the kernels that use GroupedTensor should check the contiguous flag and act accordingly.
-     In the case if only either contiguous or non-contiguous is supported, make sure to error out for the other case.
+  1. All data fields use SimpleTensor with contiguous 1D layout
+  2. All data is stored on device
+  3. Shape information stored in first_dims and second_dims arrays
   */
 
-  SimpleGroupedTensor data;
-  SimpleGroupedTensor columnwise_data;
-  SimpleGroupedTensor scale_inv;
-  SimpleGroupedTensor columnwise_scale_inv;
-  SimpleGroupedTensor amax;
-  SimpleGroupedTensor columnwise_amax;
-  SimpleGroupedTensor scale;  // for FP8-DS only
+  SimpleTensor data;
+  SimpleTensor columnwise_data;
+  SimpleTensor scale_inv;
+  SimpleTensor columnwise_scale_inv;
+  SimpleTensor amax;
+  SimpleTensor columnwise_amax;
+  SimpleTensor scale;  // for FP8-DS only
 
   // [TODO] Discuss whether the first_dims and second_dims should be according to layout N
   // Shape information: first_dims[i] and second_dims[i] define the shape of the i-th tensor
@@ -394,10 +305,11 @@ struct GroupedTensor {
   SimpleTensor second_dims;  // Device pointer to size_t array of length num_tensors
 
   // Cumulative sizes for indexing into contiguous layout
-  // cumulative_tensor_sizes[i] = sum of numel for tensors 0..i-1
-  SimpleTensor cumulative_tensor_sizes;  // Device pointer to size_t array of length num_tensors+1
+  // cumulative_tensor_sizes[i] = cumulative sum of numel for tensors 0..i-1
+  SimpleTensor cumulative_tensor_sizes;  // Device pointer to size_t array of length num_tensors
 
   NVTEScalingMode scaling_mode;
+  size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
 
   GroupedTensor(NVTEScalingMode scaling_mode)
@@ -408,6 +320,7 @@ struct GroupedTensor {
         amax(),
         columnwise_amax(),
         scale(),
+        num_tensors(0),
         first_dims(nullptr, {0}, DType::kInt64),
         second_dims(nullptr, {0}, DType::kInt64),
         cumulative_tensor_sizes(nullptr, {0}, DType::kInt64),
@@ -416,28 +329,13 @@ struct GroupedTensor {
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
-  bool has_data() const noexcept { return data.has_data(); }
-  bool has_columnwise_data() const noexcept { return columnwise_data.has_data(); }
-  bool has_cumulative_tensor_sizes() const noexcept {
-    return cumulative_tensor_sizes.dptr != nullptr;
-  }
-
-  size_t num_tensors() const noexcept {
-    // Priority: shape arrays first (most reliable), then data fields
-    if (!first_dims.shape.empty() && first_dims.shape[0] > 0) {
-      return first_dims.shape[0];
-    }
-    if (!second_dims.shape.empty() && second_dims.shape[0] > 0) {
-      return second_dims.shape[0];
-    }
-    if (has_data()) return data.num_tensors;
-    if (has_columnwise_data()) return columnwise_data.num_tensors;
-    return 0;
-  }
+  bool has_data() const noexcept { return data.dptr != nullptr; }
+  bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
     if (has_columnwise_data()) return columnwise_data.dtype;
+    NVTE_ERROR("Tensor has no data or columnwise data");
     return DType::kFloat32;
   }
 
@@ -452,13 +350,12 @@ struct GroupedTensor {
     first_dims.clear();
     second_dims.clear();
     cumulative_tensor_sizes.clear();
+    num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+    nvte_tensor = 0;
   }
 };
 
-//  void nvte_grouped_gemm(transa, transb, NVTEGroupedTensor* A, NVTEGroupedTensor* B, NVTEGroupedTensor* D, cudaStream_t stream);
-
-//  void nvte_grouped_quantize(NVTEGroupedTensor* input, NVTEGroupedTensor* output, QuantizationConfig* quant_config, cudaStream_t stream);
 
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
