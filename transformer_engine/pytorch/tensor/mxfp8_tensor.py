@@ -6,16 +6,17 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Any
+import warnings
 
 import torch
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
-
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
@@ -43,6 +44,18 @@ class MXFP8Quantizer(Quantizer):
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
+
+    def copy(self) -> MXFP8Quantizer:
+        """Create shallow copy"""
+
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
 
     def update_quantized(
         self,
@@ -89,6 +102,7 @@ class MXFP8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> MXFP8Tensor:
 
         # Canonicalize tensor attributes
@@ -104,24 +118,29 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.empty(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
-            device=device,
-        )
+        data = None
+        scale_inv = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+            scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty_like(data)
+            columnwise_data = torch.empty_like(data, pin_memory=pin_memory)
             columnwise_scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -298,7 +317,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         memory_format: torch.memory_format = torch.contiguous_format,
     ) -> MXFP8Tensor:
         """Returns tensor with data in provided memory format
-
         Returns `self` if data is already in correct memory format.
 
         """
@@ -314,7 +332,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-
         # View op
         if func == aten.view.default:
             tensor = args[0]
@@ -338,8 +355,338 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 fp8_dtype=tensor._fp8_dtype,
             )
 
+        if func == torch.ops.aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
+                # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
+                # If not, default to base class behavior.
+                rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
+                columnwise_matches = (
+                    src._columnwise_data is not None or dst._columnwise_data is None
+                )
+                if rowwise_matches and columnwise_matches:
+                    if dst._rowwise_data is not None:
+                        dst._rowwise_data.copy_(src._rowwise_data.detach(), *args[2:], **kwargs)
+                        dst._rowwise_scale_inv.copy_(
+                            src._rowwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
+                    if dst._columnwise_data is not None:
+                        dst._columnwise_data.copy_(
+                            src._columnwise_data.detach(), *args[2:], **kwargs
+                        )
+                        dst._columnwise_scale_inv.copy_(
+                            src._columnwise_scale_inv.detach(), *args[2:], **kwargs
+                        )
+                    return dst
+
+        # FSDP2 related functions.
+        if func == aten.split.Tensor:
+            # This is called if entire model is initialized on CUDA device and
+            # then splitted. Finally the shard needed by the process is used
+            # and other splitted shards are discarded.
+            if "dim" in kwargs:
+                dim_to_split = kwargs["dim"]
+            else:
+                dim_to_split = args[2] if len(args) > 2 else 0
+            tensor = args[0]
+            split_size = args[1]
+            dim0_size = tensor.size(0)
+            dimlast_size = math.prod(tensor.shape[1:])
+            if (
+                dim0_size % split_size != 0
+                or dim_to_split != 0
+                or split_size % MXFP8_BLOCK_SCALING_SIZE != 0
+                or dimlast_size % MXFP8_BLOCK_SCALING_SIZE != 0
+            ):
+                # Handle splitting by dequantizing and splitting the hp tensor
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            out_data = []
+            for data in [tensor._rowwise_data, tensor._columnwise_data]:
+                func_out = (
+                    data.__torch_dispatch__(
+                        func,
+                        types,
+                        [data] + list(args[1:]),
+                        kwargs,
+                    )
+                    if data is not None
+                    else None
+                )
+                out_data.append(func_out)
+
+            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+            split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
+            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
+            padding_multiples = [128, 4]
+            for scale_inv, scale_split_size, pad_multiple in zip(
+                scale_invs, split_sizes_for_scale, padding_multiples
+            ):
+                scale_inv_out = (
+                    scale_inv.__torch_dispatch__(
+                        func,
+                        types,
+                        [scale_inv, scale_split_size] + list(args[2:]),
+                        kwargs,
+                    )
+                    if scale_inv is not None
+                    else None
+                )
+                # Pad scale_inv_out to be a multiple of pad_multiple
+                if scale_inv_out is not None:
+                    current_shape = scale_inv_out.shape
+                    pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
+                    if pad_dim0 > 0:
+                        scale_inv_out = torch.nn.functional.pad(scale_inv_out, (0, 0, 0, pad_dim0))
+
+                out_data.append(scale_inv_out)
+            return [
+                MXFP8Tensor(
+                    shape=(
+                        splitted_tensor_data[0].size()
+                        if splitted_tensor_data[0] is not None
+                        else splitted_tensor_data[1].size()
+                    ),
+                    dtype=tensor.dtype,
+                    rowwise_data=splitted_tensor_data[0],
+                    rowwise_scale_inv=splitted_tensor_data[2],
+                    columnwise_data=splitted_tensor_data[1],
+                    columnwise_scale_inv=splitted_tensor_data[3],
+                    quantizer=tensor._quantizer,
+                    requires_grad=False,
+                    fp8_dtype=tensor._fp8_dtype,
+                )
+                for splitted_tensor_data in zip(*out_data)
+            ]
+        if func == torch.ops.aten.as_strided.default:
+            # Applied on unsharded param in FSDP2. In our case, this should be a no-op
+            # This is needed for the case where some MXFP8 shards need padding i.e dimension 0
+            # of the unsharded param is not a multiple of the world size. If that is the case,
+            # we down the dequantization route and weights are allgathered in high precision.
+            # If weight doesnt need padding, this is just a no-op.
+            shape = args[1]
+            strides = args[2]
+            tensor = args[0]
+            if (
+                len(shape) != 2
+                or len(strides) != 2
+                or strides[1] != 1
+                or shape[0] != tensor.shape[0]
+                or shape[1] != tensor.shape[1]
+            ):
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            return MXFP8Tensor.make_like(tensor)
+
+        if func == aten.slice.Tensor:
+            # FSDP2 needed function.
+            # We need slicing for the case where some MXFP8 weight shards need padding i.e dimension 0
+            # of the unsharded param is not a multiple of the world size. If that is the case,
+            # we down the dequantization route and weights are allgathered in high precision instead.
+            # If sharded weight doesnt have padding, this is just a no-op.
+            dim = args[1]
+            start = args[2]
+            length = args[3]
+            tensor = args[0]
+            if (
+                dim != 0
+                or length != tensor.shape[0]
+                or start != 0
+                or length % MXFP8_BLOCK_SCALING_SIZE != 0
+                or start % MXFP8_BLOCK_SCALING_SIZE != 0
+            ):
+                return super().__torch_dispatch__(func, types, args, kwargs)
+            return MXFP8Tensor.make_like(tensor)
+
+        if func == aten.new_zeros.default:
+            rowwise_data = None
+            columnwise_data = None
+            rowwise_scale_inv = None
+            columnwise_scale_inv = None
+            tensor = args[0]
+            shape = args[1]
+            first_dim = math.prod(shape[:-1])
+            last_dim = shape[-1]
+            if (
+                first_dim % MXFP8_BLOCK_SCALING_SIZE != 0
+                or last_dim % MXFP8_BLOCK_SCALING_SIZE != 0
+            ):
+                return super().__torch_dispatch__(func, types, args, kwargs)
+            rowwise_scale_inv_shape = [first_dim, last_dim // MXFP8_BLOCK_SCALING_SIZE]
+            columnwise_scale_inv_shape = [
+                first_dim // MXFP8_BLOCK_SCALING_SIZE,
+                last_dim,
+            ]
+            if tensor._rowwise_data is not None:
+                rowwise_data = tensor._rowwise_data.__torch_dispatch__(
+                    func,
+                    types,
+                    [tensor._rowwise_data] + list(args[1:]),
+                    kwargs,
+                )
+                rowwise_scale_inv = tensor._rowwise_scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [tensor._rowwise_scale_inv, rowwise_scale_inv_shape] + list(args[2:]),
+                    kwargs,
+                )
+            if tensor._columnwise_data is not None:
+                columnwise_data = tensor._columnwise_data.__torch_dispatch__(
+                    func,
+                    types,
+                    [tensor._columnwise_data] + list(args[1:]),
+                    kwargs,
+                )
+                columnwise_scale_inv = tensor._columnwise_scale_inv.__torch_dispatch__(
+                    func,
+                    types,
+                    [tensor._columnwise_scale_inv, columnwise_scale_inv_shape] + list(args[2:]),
+                    kwargs,
+                )
+            return MXFP8Tensor(
+                shape=args[1],
+                dtype=tensor.dtype,
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=columnwise_data,
+                columnwise_scale_inv=columnwise_scale_inv,
+                quantizer=tensor._quantizer.copy(),
+                requires_grad=False,
+                fp8_dtype=tensor._fp8_dtype,
+            )
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Functions FSDP2 calls before all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
+            to shard the weights.
+            orig_size (torch.Size): Original size of the weight tensor.(For us same as self.shape)
+            contiguous_orig_stride (Tuple[int]): Original stride of the weight tensor
+            (For us same as self.stride()).
+            module (FSDPModule): FSDP module. FSDP wrapped module wrapped using fully_shard
+            that contains this MXFP8 tensor.
+            mp_policy (MixedPrecisionPolicy): Mixed precision policy used by FSDP2.
+
+        Returns:
+            sharded_tensors: Tuple[torch.Tensor, ...]: Tuple of tensors
+            that need to be all-gathered.
+            metadata: Tuple[Any]: Metadata needed for reconstructing the
+            MXFP8Tensor after all-gather.
+        """
+        # pylint: disable=unused-argument
+        from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
+        fsdp_state = _get_module_fsdp_state(module)
+        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        quantizer = self._quantizer.copy()
+        # Remove padding from scale inverses before allgather
+        # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
+        rowwise_scale_inv = self._rowwise_scale_inv
+        columnwise_scale_inv = self._columnwise_scale_inv
+        shape = self.shape
+        if rowwise_scale_inv is not None:
+            # Remove padding from rowwise scale_inv
+            flattened_in_shape0 = math.prod(shape[:-1])
+            if rowwise_scale_inv.size(0) != flattened_in_shape0:
+                rowwise_scale_inv = rowwise_scale_inv[:flattened_in_shape0]
+
+        if columnwise_scale_inv is not None:
+            # Remove padding from columnwise scale_inv
+            flattened_in_shape0 = math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE
+            if columnwise_scale_inv.size(0) != flattened_in_shape0:
+                columnwise_scale_inv = columnwise_scale_inv[:flattened_in_shape0]
+
+        sharded_tensors = (self._rowwise_data, rowwise_scale_inv)
+        # If weights are resharded after forward pass, then its enough to set the quantizer usages
+        # based on whether its forward or backward pass for the allgathered weights.
+        # If not resharded after forward pass, the same weights allgathered in forward
+        # are used again in backward. And hence if we need the columnwise data/scale_inv,
+        # we need to send them as well for allgather in forward pass itself.
+        if reshard_after_forward:
+            training_state = fsdp_state._fsdp_param_group._training_state
+            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
+            # Allgather only the necessary tensors based on forward/backward pass
+            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
+            sharded_tensors = (
+                (self._columnwise_data, columnwise_scale_inv)
+                if is_backward_pass
+                else sharded_tensors
+            )
+        else:
+            if quantizer.columnwise_usage:
+                # If weights are not resharded after forward, then both
+                # rowwise and columnwise data/scale_inv need to be allgathered.
+                sharded_tensors += (self._columnwise_data, columnwise_scale_inv)
+        metadata = (self._fp8_dtype, quantizer)
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[MXFP8Tensor] = None,
+    ):
+        """Functions FSDP2 calls after all-gather of the
+        weights for both forward and backward passes.
+        Args:
+            all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
+            are all-gathered and received here as a tuple.
+            metadata (Any): metadata sent out in fsdp_pre_all_gather used for reconstructing the MXFP8Tensor.
+            param_dtype (torch.dtype): high precision dtype of the MXFP8Tensor.
+            out (Optional[torch.Tensor], optional): _description_. Defaults to None.
+        Returns:
+            Tuple[MXFP8Tensor, Tuple[torch.Tensor, ...]]: Allgathered MXFP8Tensor and tuple of internal tensors
+            used by the MXFP8Tensor that was being computed after allgather.
+        """
+        fp8_dtype, quantizer = metadata
+        rowwise_data, rowwise_scale_inv = (
+            all_gather_outputs[:2] if quantizer.rowwise_usage else (None, None)
+        )
+        columnwise_data, columnwise_scale_inv = (
+            all_gather_outputs[-2:] if quantizer.columnwise_usage else (None, None)
+        )
+
+        # Add padding to scale_inv tensors to be multiples of [128, 4]for rowwise and [4, 128] for columnwise
+        if rowwise_scale_inv is not None:
+            # Pad rowwise_scale_inv to be a multiple of [128, 4]
+            current_shape = rowwise_scale_inv.shape
+            pad_dim0 = (128 - current_shape[0] % 128) % 128
+            if pad_dim0 > 0:
+                rowwise_scale_inv = torch.nn.functional.pad(rowwise_scale_inv, (0, 0, 0, pad_dim0))
+
+        if columnwise_scale_inv is not None:
+            # Pad columnwise_scale_inv to be a multiple of [4, 128]
+            current_shape = columnwise_scale_inv.shape
+            pad_dim0 = (4 - current_shape[0] % 4) % 4
+            if pad_dim0 > 0:
+                columnwise_scale_inv = torch.nn.functional.pad(
+                    columnwise_scale_inv, (0, 0, 0, pad_dim0)
+                )
+
+        if out is not None:
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv
+            out._columnwise_data = columnwise_data
+            out._columnwise_scale_inv = columnwise_scale_inv
+            out._quantizer = quantizer
+        else:
+            out = MXFP8Tensor(
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=columnwise_data,
+                columnwise_scale_inv=columnwise_scale_inv,
+                fp8_dtype=fp8_dtype,
+                dtype=param_dtype,
+                shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
+                quantizer=quantizer,
+            )
+
+        return out, all_gather_outputs
 
     @classmethod
     def _make_in_reduce_ex(
@@ -478,10 +825,14 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != ctx.shape[-1]:
-            raise RuntimeError(
-                "MXFP8Tensor does not support reshaping inner dimension "
+            warnings.warn(
+                "MXFP8Tensor does not support reshaping inner dimension. "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                "If you are using this for FSDP2 without compiled_autograd_enabled,"
+                "then ignore this warning. Since this view is not going to be used anywhere. ",
+                stacklevel=2,
             )
+            return tensor.dequantize().view(*shape)
 
         # Construct new tensor if shape is provided
         new_rowwise_data = None

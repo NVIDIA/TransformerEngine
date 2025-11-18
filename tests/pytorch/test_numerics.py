@@ -44,7 +44,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
@@ -2703,7 +2702,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         general_gemm(
             A[i],
             B[i],
-            get_workspace(),
             dtype,
             grad=grad,
             accumulate=accumulate,
@@ -2719,7 +2717,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         out,
         [None] * z,
         dtype,
-        get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
         grad=grad,
         accumulate=accumulate,
@@ -2774,7 +2771,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     quantized_out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         quantization_params=out_quantizer,
         bias=None,
@@ -2784,7 +2780,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         quantization_params=None,
         bias=None,
@@ -2860,7 +2855,6 @@ def test_fp8_grouped_gemm(shape, accumulate):
         general_gemm(
             A_fp8[i],
             B_fp8[i],
-            get_workspace(),
             dtype,
             out=out_ref[i],
             accumulate=accumulate,
@@ -2871,7 +2865,6 @@ def test_fp8_grouped_gemm(shape, accumulate):
         out,
         [None] * z,
         dtype,
-        get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
         accumulate=accumulate,
     )
