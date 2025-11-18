@@ -388,6 +388,12 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
+    if fp8 and fp8_recipe.delayed() and torch.cuda.get_device_capability() >= (10, 0) and module == "layernorm_mlp_checkpoint":
+        pytest.skip(
+            "CUDA graphs not supported for LayerNormMLP "
+            "with checkpoint=True, SM>=10, "
+            "and DelayedScaling recipe"
+        )
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
