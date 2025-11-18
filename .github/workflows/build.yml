@@ -39,28 +39,18 @@ jobs:
       image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
       options: --user root
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 5120
-          temp-reserve-mb: 32
-          swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-
       - name: 'Dependencies'
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          apt-get clean
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install --no-build-isolation . -v --no-deps
+        run: pip install --no-cache-dir --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
