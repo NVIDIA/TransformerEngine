@@ -94,6 +94,7 @@ class _GroupedLinear(torch.autograd.Function):
             module,
             skip_fp8_weight_update,
             save_original_input,
+            debug,
         ) = non_tensor_args
 
         num_gemms = len(m_splits)
@@ -835,6 +836,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
+                debug,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 

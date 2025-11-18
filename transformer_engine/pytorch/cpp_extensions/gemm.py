@@ -276,7 +276,6 @@ def general_grouped_gemm(
             general_gemm(
                 A[i],
                 B[i],
-                workspaces[0],
                 quantization_params=quantization_params[i],
                 out_dtype=out[0].dtype,
                 layout=layout,
