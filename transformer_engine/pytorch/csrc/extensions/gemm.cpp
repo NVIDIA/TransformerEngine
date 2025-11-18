@@ -95,6 +95,11 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
   using namespace transformer_engine::pytorch::detail;
 
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace.device());
+
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
@@ -351,6 +356,11 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter) {
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace.device());
+
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
   NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
@@ -399,6 +409,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace[0].device());
 
   void* output_data_ptr = nullptr;
   if (single_output) {

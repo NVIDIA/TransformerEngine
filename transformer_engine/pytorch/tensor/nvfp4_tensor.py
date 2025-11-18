@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -176,6 +176,26 @@ class NVFP4Quantizer(Quantizer):
 
         return dst
 
+    def copy(self) -> NVFP4Quantizer:
+        """Create shallow copy"""
+
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            with_rht=self.with_rht,
+            with_post_rht_amax=self.with_post_rht_amax,
+            with_2d_quantization=self.with_2d_quantization,
+            stochastic_rounding=self.stochastic_rounding,
+        )
+        quantizer.internal = self.internal
+        quantizer.rht_matrix = self.rht_matrix
+        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
+
+        return quantizer
+
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
@@ -265,6 +285,7 @@ class NVFP4Quantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        pin_memory: bool = False,
         requires_grad: bool = False,
     ) -> NVFP4Tensor:
 
@@ -288,11 +309,18 @@ class NVFP4Quantizer(Quantizer):
         scale_inv = None
         amax_rowwise = None
         if self.rowwise_usage:
-            data = torch.empty(self.convert_shape_for_fp4(shape), dtype=torch.uint8, device=device)
+            data = torch.empty(
+                self.convert_shape_for_fp4(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
             scale_shape = self.get_scale_shape(shape, columnwise=False)
-            scale_inv = torch.empty(scale_shape, dtype=torch.uint8, device=device)
+            scale_inv = torch.empty(
+                scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
             # Allocate per tensor scale inverse. FP32 format.
-            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device)
+            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -306,12 +334,15 @@ class NVFP4Quantizer(Quantizer):
                 self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape, dtype=torch.uint8, device=device
+                columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
-            amax_columnwise = torch.zeros(1, dtype=torch.float32, device=device)
+            amax_columnwise = torch.zeros(
+                1, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
 
         # Construct FP8 tensor
         return NVFP4Tensor(
@@ -498,6 +529,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return self
         raise ValueError("NVFP4Tensor does not support different memory formats!")
 
+    def get_usages(self) -> Dict[str, bool]:
+        return {
+            "rowwise": self._rowwise_data is not None,
+            "columnwise": self._columnwise_data is not None,
+        }
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -520,16 +557,20 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             )
 
             if tensor._rowwise_data is not None:
-                rowwise_data = data_init_func(tensor._rowwise_data)
-                rowwise_scale_inv = scale_inv_init_func(tensor._rowwise_scale_inv)
-                amax_rowwise = torch.zeros_like(tensor._amax_rowwise)
+                rowwise_data = data_init_func(tensor._rowwise_data, *args[1:], **kwargs)
+                rowwise_scale_inv = scale_inv_init_func(
+                    tensor._rowwise_scale_inv, *args[1:], **kwargs
+                )
+                amax_rowwise = torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
             else:
                 rowwise_data, rowwise_scale_inv, amax_rowwise = None, None, None
 
             if tensor._columnwise_data is not None:
-                columnwise_data = data_init_func(tensor._columnwise_data)
-                columnwise_scale_inv = scale_inv_init_func(tensor._columnwise_scale_inv)
-                amax_columnwise = torch.zeros_like(tensor._amax_columnwise)
+                columnwise_data = data_init_func(tensor._columnwise_data, *args[1:], **kwargs)
+                columnwise_scale_inv = scale_inv_init_func(
+                    tensor._columnwise_scale_inv, *args[1:], **kwargs
+                )
+                amax_columnwise = torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
             else:
                 columnwise_data, columnwise_scale_inv, amax_columnwise = (
                     None,
