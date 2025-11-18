@@ -59,29 +59,23 @@ jobs:
         shell: bash -euxo pipefail {0}
         run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
 
-      - name: Start named container
-        run: |
-          docker run --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
-
       - name: 'Dependencies'
         run: |
-          docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
-            apt-get clean \
-          '
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          apt-get clean
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
+        run: pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
+        run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
