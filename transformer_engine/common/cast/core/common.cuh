@@ -30,9 +30,14 @@ inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_bl
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
-  constexpr size_t TMA_bytes = 16;
-  const size_t alignment_requirement = (TMA_bytes * 8) / typeToNumBits(t->dtype());
+  const size_t alignment_requirement = (TMA_GMEM_ALIGNMENT * 8) / typeToNumBits(t->dtype());
   return cols % alignment_requirement == 0;
+}
+
+__device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(unsigned char *p) {
+  size_t addr = reinterpret_cast<size_t>(p);
+  addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
+  return reinterpret_cast<unsigned char *>(addr);
 }
 
 namespace kernel {
