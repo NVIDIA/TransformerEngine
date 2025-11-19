@@ -23,11 +23,17 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
+from ..attention import (
+    AttnBiasType,
+    AttnMaskType,
+    AttnSoftmaxType,
+    QKVLayout,
+    SequenceDescriptor,
+)
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
-from ..softmax import SoftmaxType
+from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -120,6 +126,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
     def __call__(
@@ -144,6 +151,22 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         assert query.shape[-1] == key.shape[-1], "q, k head_dim must match."
 
         input_dtype = query.dtype
+
+        # Infer number of attention heads from query shape
+        # query shape: [..., h, d] where h is num_attention_heads
+        num_attention_heads = query.shape[-2]
+
+        # Initialize softmax_offset for learnable softmax
+        # Note: OFF_BY_ONE_SOFTMAX is handled internally by the Softmax module
+        softmax_offset = None
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
+            softmax_offset = self.param(
+                "softmax_offset",
+                nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
+                (1, num_attention_heads, 1, 1),
+                jnp.float32,
+            )
 
         if self.scale_factor is None:
             scale_factor = 1.0 / sqrt(query.shape[-1])
@@ -213,8 +236,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
-        def convert_to_softmax_type(attn_mask_type, mask):
-            """Convert the attn_mask_type to SoftmaxType"""
+        def convert_to_softmax_fusion_type(attn_mask_type, mask):
+            """Convert the attn_mask_type to SoftmaxFusionType"""
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
@@ -224,21 +247,23 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if mask is not None:
-                return SoftmaxType.SCALED_MASKED, mask
+                return SoftmaxFusionType.SCALED_MASKED, mask
             if attn_mask_type is AttnMaskType.CAUSAL_MASK:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+                return SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type is AttnMaskType.NO_MASK:
-                return SoftmaxType.SCALED, mask
+                return SoftmaxFusionType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_fusion_type, mask = convert_to_softmax_fusion_type(self.attn_mask_type, mask)
 
-        attn_weights = Softmax(softmax_type=softmax_type, scale_factor=fused_scale_factor)(
-            attn_weights, mask, bias
-        ).astype(input_dtype)
+        attn_weights = Softmax(
+            softmax_fusion_type=softmax_fusion_type,
+            softmax_type=self.softmax_type,
+            scale_factor=fused_scale_factor,
+        )(attn_weights, mask, bias, softmax_offset=softmax_offset).astype(input_dtype)
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
@@ -279,6 +304,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     context_parallel_axis: str = ""
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT
     context_checkpoint_name: str = "context"
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
     def __call__(
@@ -303,6 +329,17 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             scale_factor = self.scale_factor
         del self.scale_factor
 
+        num_attention_heads = query.shape[-2]
+        softmax_offset = None
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
+            softmax_offset = self.param(
+                "softmax_offset",
+                nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
+                (1, num_attention_heads, 1, 1),
+                jnp.float32,
+            )
+
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
@@ -320,6 +357,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -329,6 +367,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
@@ -348,6 +387,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -357,6 +397,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
@@ -371,6 +412,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -380,6 +422,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -514,6 +557,17 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_axis (str): The name of the context parallel axis.
     context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
     context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        softmax type as described in this paper:
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+        For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+        'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+        'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+        'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+        where alpha is a learnable parameter in shape [h].
+        'off-by-one' and 'learnable' softmax types are also called sink attention
+        ('zero sink' and 'learnable sink').
 
     Optimization parameters
     -----------------------
@@ -539,6 +593,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_axis: str = ""
     context_parallel_strategy: str = "DEFAULT"
     context_checkpoint_name: str = "context"
+    softmax_type: str = "vanilla"
 
     @nn.compact
     def __call__(
@@ -595,6 +650,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
         qkv_layout = QKVLayout[self.qkv_layout.upper()]
+        softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
         del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
 
         if attn_bias_type == AttnBiasType.NO_BIAS:
@@ -626,6 +682,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             self.attention_dropout,
             self.num_attention_heads,
             self.num_gqa_groups,
@@ -702,6 +759,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 window_size=self.window_size,
+                softmax_type=softmax_type,
             )(
                 query,
                 key,
@@ -726,6 +784,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_type=softmax_type,
             )(
                 query,
                 key,
@@ -1005,6 +1064,17 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Deprecated. Please refer `fuse_qkv_params`
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        softmax type as described in this paper:
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+        For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+        'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+        'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+        'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+        where alpha is a learnable parameter in shape [h].
+        'off-by-one' and 'learnable' softmax types are also called sink attention
+        ('zero sink' and 'learnable sink').
     """
 
     head_dim: int
@@ -1036,6 +1106,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scaled_query_init: bool = True
     float32_logits: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: str = "vanilla"
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -1440,6 +1511,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             scale_factor=scale_factor,
             transpose_batch_sequence=self.transpose_batch_sequence,
             window_size=self.window_size,
+            softmax_type=self.softmax_type,
         )(*dpa_args, mask, bias, deterministic=deterministic)
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -1721,6 +1793,18 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Whether to enable sequence parallelism to operations except dot.
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        Softmax type as described in this paper:
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+        For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+        'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+        'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+        'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+        where alpha is a learnable parameter in shape [h].
+        'off-by-one' and 'learnable' softmax types are also called sink attention
+        ('zero sink' and 'learnable sink').
+        Only supported for fused attention backend.
 
     Optimization parameters
     -----------------------
@@ -1786,6 +1870,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: str = "vanilla"
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
@@ -1946,6 +2031,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             bias_init=self.bias_init,
             name=mha_name,
             window_size=self.window_size,
+            softmax_type=self.softmax_type,
         )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
 
         def hidden_dropout(x, deterministic):
@@ -2024,6 +2110,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_init=self.bias_init,
                 name="encoder_decoder_attention",
                 window_size=self.window_size,
+                softmax_type=self.softmax_type,
             )(x, encoded, encoder_decoder_mask, deterministic=deterministic)
 
             y = with_sharding_constraint_by_logical_axes(

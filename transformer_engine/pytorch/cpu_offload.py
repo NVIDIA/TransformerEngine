@@ -471,6 +471,8 @@ class OffloadSynchronizer:
         """
         if self.num_of_fwds in [None, self.num_layers - 1]:
             # reset the offload synchronizer
+            for layer_id in self.layer_states:
+                self.layer_states[layer_id].release_all_memory()
             self.num_of_fwds = 0
         else:
             self.num_of_fwds += 1
