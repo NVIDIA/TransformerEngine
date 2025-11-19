@@ -4,7 +4,7 @@
 
 """Context Parallelism."""
 import os
-from typing import List, Union, Tuple
+from typing import List, Union, Optional, Tuple
 import torch
 import transformer_engine_torch as tex
 
@@ -4016,7 +4016,8 @@ def get_batch_on_this_cp_rank(
     input_ids_padded: torch.Tensor,
     labels_padded: torch.Tensor,
     position_ids_padded: torch.Tensor,
-    cp_group: torch.distributed.ProcessGroup = None,
+    cp_size: Optional[int] = None,
+    cp_rank: Optional[int] = None,
     qvk_format: str = "thd",
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
@@ -4026,14 +4027,18 @@ def get_batch_on_this_cp_rank(
 
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
+
+    If cp_rank is provided, it will slice the batch for the provided rank.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
     if qvk_format == "thd":
         # Get context parallel size and rank
-        cp_size = torch.distributed.get_world_size(group=cp_group)
         if cp_size > 1:
-            cp_rank = torch.distributed.get_rank(group=cp_group)
+            if not (0 <= cp_rank < cp_size):
+                raise ValueError(f"cp_rank must be in [0, {cp_size}), but received {cp_rank}.")
+            if cp_rank is None:
+                raise ValueError("cp_rank must be provided when cp_size > 1.")
 
             # Calculate the chunk sizes for each sequence
             total_slices_of_any_sequence = 2 * cp_size
