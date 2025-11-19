@@ -717,15 +717,16 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
 }
 
 int nvte_is_non_tn_fp8_gemm_supported() {
-  static int cached_result = 0;
-  static std::once_flag flag;
-  std::call_once(flag, []() {
-    int deviceComputeCapability =
-        transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  int num_devices = transformer_engine::cuda::num_devices();
+  static std::vector<int> cache(num_devices, -1);
+  static std::vector<std::once_flag> flags(num_devices);
+  int device_id = transformer_engine::cuda::current_device();
+  std::call_once(flags[device_id], [&]() {
+    int deviceComputeCapability = transformer_engine::cuda::sm_arch(device_id);
     // Note: this is temporary restriction and should be lifted in the future.
     // (remove the note once it's done.)
-    cached_result = (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
-                    deviceComputeCapability >= 130;
+    cache[device_id] = (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
+                       deviceComputeCapability >= 130;
   });
-  return cached_result;
+  return cache[device_id];
 }
