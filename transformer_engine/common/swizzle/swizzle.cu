@@ -713,8 +713,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
         NVTE_CHECK(output[i]->scale_inv.dptr != nullptr, "Output tensor ", i,
                    " does not have row-wise scaling factors.");
         NVTE_CHECK(m * k == output[i]->scale_inv.numel(), "Expected output tensor ", i, " to have ",
-                   m * k,
-                   " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape, ".");
+                   m * k, " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape,
+                   ".");
       }
       if (all_has_columnwise_data) {
         NVTE_CHECK(output[i]->columnwise_scale_inv.dptr != nullptr, "Output tensor ", i,
