@@ -12,8 +12,8 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 
 
-class SoftmaxType(Enum):
-    """SoftmaxType."""
+class SoftmaxFusionType(Enum):
+    """SoftmaxFusionType."""
 
     SCALED = "scaled"
     SCALED_MASKED = "scaled_masked"
@@ -24,27 +24,27 @@ def softmax(
     logits: jnp.ndarray,
     mask: Optional[jnp.ndarray] = None,
     scale_factor: Optional[float] = 1.0,
-    softmax_type: Optional[SoftmaxType] = SoftmaxType.SCALED,
+    softmax_fusion_type: Optional[SoftmaxFusionType] = SoftmaxFusionType.SCALED,
 ):
     """
     Softmax wrapper
     """
-    output = _softmax(logits, mask, scale_factor, softmax_type)
+    output = _softmax(logits, mask, scale_factor, softmax_fusion_type)
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(2, 3))
-def _softmax(logits, mask, scale_factor, softmax_type):
+def _softmax(logits, mask, scale_factor, softmax_fusion_type):
 
-    output, _ = _softmax_fwd_rule(logits, mask, scale_factor, softmax_type)
+    output, _ = _softmax_fwd_rule(logits, mask, scale_factor, softmax_fusion_type)
     return output
 
 
-def _softmax_fwd_rule(logits, mask, scale_factor, softmax_type):
-    if softmax_type is SoftmaxType.SCALED_MASKED:
+def _softmax_fwd_rule(logits, mask, scale_factor, softmax_fusion_type):
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         assert mask is not None
         output = tex.scaled_masked_softmax_fwd(logits, mask, scale_factor)
-    elif softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+    elif softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
         output = tex.scaled_upper_triang_masked_softmax_fwd(logits, scale_factor)
     else:
         output = tex.scaled_softmax_fwd(logits, scale_factor)
@@ -52,12 +52,12 @@ def _softmax_fwd_rule(logits, mask, scale_factor, softmax_type):
     return output, (output, logits, mask)
 
 
-def _softmax_bwd_rule(scale_factor, softmax_type, ctx, dz):
+def _softmax_bwd_rule(scale_factor, softmax_fusion_type, ctx, dz):
     (softmax_output, logits, mask) = ctx
 
-    if softmax_type is SoftmaxType.SCALED_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         dgrad = tex.scaled_masked_softmax_bwd(dz, softmax_output, logits, mask, scale_factor)
-    elif softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+    elif softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
         dgrad = tex.scaled_upper_triang_masked_softmax_bwd(dz, softmax_output, logits, scale_factor)
     else:
         dgrad = tex.scaled_softmax_bwd(dz, softmax_output, logits, scale_factor)

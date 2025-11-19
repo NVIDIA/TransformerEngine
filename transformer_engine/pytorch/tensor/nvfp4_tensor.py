@@ -28,9 +28,9 @@ from ._quantization_helpers import _IdentityFunc
 aten = torch.ops.aten
 
 
-def get_no_random_sign_vector() -> torch.Tensor:
+def get_no_random_sign_vector(device: int) -> torch.Tensor:
     """Non-random sign vector for Hadamard transform."""
-    return torch.tensor([1], dtype=torch.float32, device="cuda")
+    return torch.tensor([1], dtype=torch.float32, device=device)
 
 
 def get_sign_from_vector(vector: torch.Tensor) -> int:
@@ -45,7 +45,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     return mask.item()
 
 
-def get_wgrad_sign_vector() -> torch.Tensor:
+def get_wgrad_sign_vector(device: int) -> torch.Tensor:
     """Hard-coded random signs for Hadamard transform.
 
     https://xkcd.com/221/
@@ -54,11 +54,11 @@ def get_wgrad_sign_vector() -> torch.Tensor:
     return torch.tensor(
         [1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1],
         dtype=torch.float32,
-        device="cuda",
+        device=device,
     )
 
 
-def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
+def get_hadamard_matrix(hadamard_dimension: int, device: int) -> torch.Tensor:
     """Construct a 16x16 Hadamard matrix."""
     assert hadamard_dimension == 16, "Only hadamard dimension 16 is supported."
     hadamard_scale = 1 / math.sqrt(hadamard_dimension)
@@ -83,30 +83,30 @@ def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
                 [1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, -1, -1, 1],
             ],
             dtype=torch.float32,
-            device="cuda",
+            device=device,
         )
         * hadamard_scale
     )
 
 
 @functools.lru_cache(maxsize=None)
-def get_rht_matrix(with_random_sign_mask: bool) -> torch.Tensor:
+def get_rht_matrix(with_random_sign_mask: bool, device: int) -> torch.Tensor:
     """Construct matrix used in random Hadamard transform."""
     hadamard_dimension = 16
     if with_random_sign_mask:
-        signs = get_wgrad_sign_vector()
+        signs = get_wgrad_sign_vector(device=device)
     else:
-        signs = get_no_random_sign_vector()
-    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device="cuda")
-    rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension)
+        signs = get_no_random_sign_vector(device=device)
+    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device=device)
+    rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension, device=device)
     return rht_matrix.to(dtype=torch.bfloat16)
 
 
 @functools.lru_cache(maxsize=None)
-def get_random_sign_mask_for_rht(with_random_sign_mask: bool) -> int:
+def get_random_sign_mask_for_rht(with_random_sign_mask: bool, device: int) -> int:
     """Sign mask for random Hadamard transform."""
     if with_random_sign_mask:
-        return get_sign_from_vector(get_wgrad_sign_vector())
+        return get_sign_from_vector(get_wgrad_sign_vector(device=device))
     return 0
 
 
@@ -152,8 +152,10 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
-        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(with_random_sign_mask)
-        self.rht_matrix = get_rht_matrix(with_random_sign_mask)
+        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
+            with_random_sign_mask, torch.cuda.current_device()
+        )
+        self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
 
     def update_quantized(
         self,
@@ -175,6 +177,26 @@ class NVFP4Quantizer(Quantizer):
         tex.quantize(src, self, dst, noop_flag)
 
         return dst
+
+    def copy(self) -> NVFP4Quantizer:
+        """Create shallow copy"""
+
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            with_rht=self.with_rht,
+            with_post_rht_amax=self.with_post_rht_amax,
+            with_2d_quantization=self.with_2d_quantization,
+            stochastic_rounding=self.stochastic_rounding,
+        )
+        quantizer.internal = self.internal
+        quantizer.rht_matrix = self.rht_matrix
+        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
+
+        return quantizer
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""

@@ -19,7 +19,12 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
 )
-from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    nvtx_range_push,
+    nvtx_range_pop,
+    get_nvtx_range_context,
+)
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -676,6 +681,7 @@ class FlashAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -952,6 +958,7 @@ class FlashAttention(torch.nn.Module):
                 else:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
+                    fa_3_optional_forward_kwargs["num_splits"] = num_splits
                     if inference_params is None:
                         fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     else:
@@ -1445,7 +1452,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
         else:
-            with torch.cuda.nvtx.range("FusedAttnFunc.backward"):
+            with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv
                 # FP16/BF16 attention: torch.float16 or torch.bfloat16
                 # FP8 attention:       torch.float16 or torch.bfloat16
