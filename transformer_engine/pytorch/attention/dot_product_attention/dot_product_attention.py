@@ -1100,6 +1100,14 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # reshape if qkv_format = {'bshd', 'sbhd'}, and chunkify if qkv_format = 'thd'
             if chunk_size is not None and not context_parallel:
+                assert core_attention_bias_type == "no_bias", (
+                    f"Chunked attention does not support {core_attention_bias_type=}! "
+                    "Only 'no_bias' is supported with chunk_size."
+                )
+                assert attn_mask_type in ["no_mask", "causal"], (
+                    f"Chunked attention does not support {attn_mask_type=}! "
+                    "Only 'no_mask' and 'causal' are supported with chunk_size."
+                )
                 if qkv_format == "bshd":
                     original_batch_size = query_layer.shape[0]
                     assert query_layer.shape[1] % chunk_size == 0, (

@@ -3915,6 +3915,16 @@ def attn_forward_func_with_cp(
         f"Got {qkv_format=} and {chunk_size=}. "
     )
 
+    assert chunk_size is None or attn_bias_type == "no_bias", (
+        f"Chunked attention does not support {attn_bias_type=}! "
+        "Only 'no_bias' is supported with chunk_size."
+    )
+
+    assert chunk_size is None or attn_bias is None, (
+        "Chunked attention does not support attention bias! "
+        "attn_bias must be None when chunk_size is set."
+    )
+
     args = [
         is_training,
         q,
