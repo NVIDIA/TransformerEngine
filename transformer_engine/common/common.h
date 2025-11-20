@@ -301,8 +301,8 @@ struct GroupedTensor {
 
   // Shape information: first_dims[i] and last_dims[i] define the shape of the i-th tensor
   // For 2D tensors: shape[i] = (first_dims[i], last_dims[i])
-  SimpleTensor first_dims;   // Device pointer to int64_t array of length num_tensors
-  SimpleTensor last_dims;    // Device pointer to int64_t array of length num_tensors
+  SimpleTensor first_dims;  // Device pointer to int64_t array of length num_tensors
+  SimpleTensor last_dims;   // Device pointer to int64_t array of length num_tensors
 
   // Offsets for indexing into contiguous layout
   // tensor_offsets[i] = offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)

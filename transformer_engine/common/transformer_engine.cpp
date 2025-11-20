@@ -273,7 +273,6 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   CheckScaleTensorShape(t, name);
 }
 
-
 void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name) {
   NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
 
@@ -281,10 +280,10 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   auto check_shape_array = [&](const SimpleTensor &arr, const char *arr_name) {
     NVTE_CHECK(arr.dptr != nullptr, "Grouped tensor ", name, " must have ", arr_name, " allocated");
     NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
-    NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name, 
+    NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
                " must have dtype Int64");
-    NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name,
-               " size (", arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
+    NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name, " size (",
+               arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
   };
 
   // Validate all required shape arrays
@@ -294,14 +293,14 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
 }
 
 // Helper function to check scale_inv for both input and output
-static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name, 
-                                 bool is_output) {
+static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name, bool is_output) {
   const char *tensor_type = is_output ? "output" : "input";
-  
+
   // Helper to check scale_inv for both rowwise and columnwise layouts
   auto check_scales = [&](DType expected_dtype) {
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.has_data(), tensor_type, " ", name, " rowwise scale_inv must be allocated");
+      NVTE_CHECK(t.scale_inv.has_data(), tensor_type, " ", name,
+                 " rowwise scale_inv must be allocated");
       NVTE_CHECK(t.scale_inv.dtype == expected_dtype, tensor_type, " ", name,
                  " rowwise scale_inv has invalid dtype (expected ", to_string(expected_dtype),
                  ", got ", to_string(t.scale_inv.dtype), ")");
@@ -324,20 +323,24 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
     check_scales(DType::kFloat8E8M0);
   } else {
     // Non-quantized types should not have scale/scale_inv
-    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type, " ", name);
-    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type, " ", name);
+    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type,
+               " ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv not supported for non-quantized ",
+               tensor_type, " ", name);
   }
 }
 
 void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name) {
-  NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name, " not allocated");
+  NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name,
+             " not allocated");
   CheckGroupedScaleInv(t, name, false);
   CheckGroupedTensorShapeArrays(t, name);
 }
 
 void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, bool allow_empty) {
   if (!allow_empty) {
-    NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name, " not allocated");
+    NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
+               " not allocated");
   }
   // Amax validation for delayed scaling
   if (is_fp8_dtype(t.dtype()) && t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {

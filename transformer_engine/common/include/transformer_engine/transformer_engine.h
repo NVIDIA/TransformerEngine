@@ -411,9 +411,10 @@ enum NVTEGroupedTensorParam {
   kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
-  kNVTEGroupedFirstDims = 7,          /*!< First dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedLastDims = 8,           /*!< Last dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedTensorOffsets = 9,      /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTEGroupedFirstDims = 7, /*!< First dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedTensorOffsets =
+      9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
   kNVTENumGroupedTensorParams
 };
 
@@ -459,7 +460,7 @@ NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
 <<<<<<< HEAD
                                               NVTEGroupedTensorParam param_name);
 =======
-                                               NVTEGroupedTensorParam param_name);
+                                              NVTEGroupedTensorParam param_name);
 >>>>>>> 604290b3 (address comments + rework CheckGroupedIn/OutputTensor)
 
 /*! \brief Get the number of tensors in a grouped tensor.
