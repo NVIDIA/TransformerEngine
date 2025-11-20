@@ -335,6 +335,12 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const DType out_dtype);
 
+void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, size_t w,
+                                   size_t start_offset, size_t block_len);
+
+void nvfp4_2d_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
+                           size_t h, size_t w, size_t start_offset, size_t block_len);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/

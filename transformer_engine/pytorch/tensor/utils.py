@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Helper functions for using fp8 tensors as weights"""
+"""Helper functions for using fp8/nvfp4 tensors as weights"""
 
 from typing import Optional, Union, List
 import torch
@@ -43,6 +43,12 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         new_raw_data.detach().copy_(old_raw_data)
         tensor._rowwise_data = new_raw_data
         del old_raw_data
+    elif isinstance(tensor, NVFP4Tensor):
+        old_rowwise = tensor._rowwise_data
+        assert old_rowwise.dtype == new_raw_data.dtype, "The data types of raw data don't match"
+        new_rowwise_data.detach().copy_(old_rowwise)
+        tensor._rowwise_data = new_rowwise_data
+        del old_rowwise
     elif isinstance(tensor, MXFP8Tensor):
         raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
     else:
@@ -142,6 +148,44 @@ def cast_master_weights_to_fp8(
     if len(blockwise_scaling_params) > 0:
         _cast_master_weights_to_fp8_blockwise_scaling(
             blockwise_scaling_params, group, use_fsdp_shard_model_weights
+        )
+
+
+def cast_master_weights_to_nvfp4(
+    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+):
+    """Helper to cast master weights to NVFP4 primary weights."""
+
+    nvfp4_params = []
+
+    if fsdp_shard_model_weights is None:
+        use_fsdp_shard_model_weights = False
+        fsdp_shard_model_weights = [None] * len(model_weights)
+    else:
+        use_fsdp_shard_model_weights = True
+
+    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
+        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
+    ):
+        if hasattr(model_weight, "clear_high_precision_init_val"):
+            model_weight.clear_high_precision_init_val()
+
+        if master_weight is not None:
+            master_weight = master_weight.to(model_weight.dtype)
+
+        quantizer = model_weight._get_quantizer()
+        if isinstance(quantizer, NVFP4Quantizer):
+            nvfp4_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
+        else:
+            raise ValueError(
+                f"cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got {type(model_weight)}"
+            )
+
+    if len(nvfp4_params) > 0:
+        _cast_master_weights_to_nvfp4_2d(
+            nvfp4_params, group, use_fsdp_shard_model_weights=use_fsdp_shard_model_weights
         )
 
 
@@ -501,12 +545,12 @@ def _cast_master_weights_to_nvfp4_2d(
 
     if len(amaxes) > 0:
         multi_tensor_applier(
-        multi_tensor_compute_scale_and_scale_inv,
-        dummy_overflow_buf,
-        [amaxes, scales, scale_inv_tmp],
-        6.0,
-        False,
-        0.0,
+            multi_tensor_compute_scale_and_scale_inv,
+            dummy_overflow_buf,
+            [amaxes, scales, scale_inv_tmp],
+            6.0,
+            False,
+            0.0,
         )
 
         for inv_tmp, target in zip(scale_inv_tmp, fp8_scale_targets):
@@ -524,7 +568,9 @@ def _cast_master_weights_to_nvfp4_2d(
             model_weight_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
-        tex.nvfp4_2d_partial_cast(master_weight, model_weight_fragment, scale, h, w, start_offset, block_len)
+        tex.nvfp4_2d_partial_cast(
+            master_weight, model_weight_fragment, scale, h, w, start_offset, block_len
+        )
 
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
@@ -544,6 +590,9 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         elif isinstance(model_weight, Float8BlockwiseQTensor):
             # Blockwise scaling: create column-wise storage.
             model_weight._create_columnwise()
+        elif isinstance(model_weight, NVFP4Tensor):
+            # TODO: Add create_columnwise for NVFP4Tensor
+            pass
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 

@@ -18,6 +18,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     Format,
+    NVFP4BlockScaling,
     Recipe,
 )
 import transformer_engine.pytorch as te
@@ -25,8 +26,12 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8Tensor,
     Float8BlockwiseQTensor,
+    NVFP4Tensor,
 )
-from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
+from transformer_engine.pytorch.tensor import (
+    cast_master_weights_to_fp8,
+    cast_master_weights_to_nvfp4,
+)
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
 
 
@@ -44,6 +49,12 @@ def _get_raw_data(quantized_tensor):
             quantized_tensor._rowwise_data.dtype == torch.uint8
         ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
         return quantized_tensor._rowwise_data
+    elif isinstance(quantized_tensor, NVFP4Tensor):
+        assert hasattr(quantized_tensor, "_rowwise_data"), "NVFP4Tensor missing _rowwise_data"
+        assert (
+            quantized_tensor._rowwise_data.dtype == torch.uint8
+        ), "NVFP4Tensor _rowwise_data must be uint8"
+        return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
 
@@ -58,6 +69,7 @@ class MiniZero_1:
         self.weights = weights
         self.lr = lr
         self.dp_group = dp_group
+        self.quantized_format = self._detect_quantized_format()
 
         # [self.offsets[i], self.offsets[i+1]) is the range of weights[i] in the global buffer
         self.offsets = [0]
@@ -121,6 +133,15 @@ class MiniZero_1:
             [self.offsets[-1]], dtype=weight_buffer_dtype, device=weights[0].device
         )
         self.weight_buffer_slice = self.weight_buffer[rank_start:rank_end]
+        self.quantized_format = self._detect_quantized_format()
+
+    def _detect_quantized_format(self):
+        for weight in self.weights:
+            if isinstance(weight, NVFP4Tensor):
+                return "nvfp4"
+            if isinstance(weight, (Float8Tensor, Float8BlockwiseQTensor)):
+                return "fp8"
+        return None
 
     def step(self):
         # -----------------------------------------------------------------------------------------
@@ -160,12 +181,16 @@ class MiniZero_1:
         # Step 4: Cast master weights to BF16 or FP8, depending on the type of the weight
         # -----------------------------------------------------------------------------------------
         if isinstance(self.weights[0], QuantizedTensor):
-            # FP8 weights case
-            for i in range(1, len(self.weights)):
-                assert isinstance(self.weights[i], QuantizedTensor)
-            cast_master_weights_to_fp8(
-                self.weights, self.master_weights, self.start_offsets, self.dp_group
-            )
+            for weight in self.weights:
+                assert isinstance(weight, QuantizedTensor)
+            if self.quantized_format == "nvfp4":
+                cast_master_weights_to_nvfp4(
+                    self.weights, self.master_weights, self.start_offsets, self.dp_group
+                )
+            else:
+                cast_master_weights_to_fp8(
+                    self.weights, self.master_weights, self.start_offsets, self.dp_group
+                )
         else:
             # BF16 weights case
             for weight, master_weight, start_offset in zip(
@@ -352,6 +377,14 @@ class MiniFSDP:
             weight.grad = None
             weight.main_grad.zero_()
 
+    def _detect_quantized_format(self):
+        for weight in self.weights:
+            if isinstance(weight, NVFP4Tensor):
+                return "nvfp4"
+            if isinstance(weight, (Float8Tensor, Float8BlockwiseQTensor)):
+                return "fp8"
+        return None
+
     def step(self):
         """
         Perform an optimization step for the distributed sharded model.
@@ -394,10 +427,14 @@ class MiniFSDP:
                 if local_weight is None:
                     local_weights.append(None)
                     continue
-
                 local_weights.append(local_weight)
 
-            cast_master_weights_to_fp8(
+            cast_fn = (
+                cast_master_weights_to_nvfp4
+                if self.quantized_format == "nvfp4"
+                else cast_master_weights_to_fp8
+            )
+            cast_fn(
                 self.weights,
                 self.master_weights,
                 [idx[0] for idx in self.weight_indices],
@@ -562,6 +599,8 @@ def quantization_recipe(quantization) -> Recipe:
         return Float8CurrentScaling(fp8_format=fp8_format)
     elif quantization == "fp8_block":
         return Float8BlockScaling(fp8_format=fp8_format)
+    elif quantization == "nvfp4":
+        return NVFP4BlockScaling()
     else:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
@@ -672,11 +711,19 @@ def main(argv=None, namespace=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8", "fp8_cs", "fp8_block", "nvfp4"],
     )
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")
+    if args.quantization == "nvfp4":
+        nvfp4_available, reason = te.is_nvfp4_available(return_reason=True)
+        if not nvfp4_available:
+            raise RuntimeError(f"NVFP4 not available: {reason}")
+
     _test_mini_optimizer(dp_group)
     _test_cast_master_weights_to_fp8(args.quantization, dp_group)
     _test_fsdp_cast_master_weights_to_fp8(args.quantization, dp_group)

@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch import is_fp8_available, is_fp8_block_scaling_available
+from transformer_engine.pytorch import (
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_nvfp4_available,
+)
 
 
 if torch.cuda.device_count() < 2:
@@ -18,6 +22,7 @@ fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scaling_available(
     return_reason=True
 )
+nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(2, torch.cuda.device_count())
@@ -31,10 +36,12 @@ def _run_test(quantization):
     assert result.returncode == 0
 
 
-@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block"])
+@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block", "nvfp4"])
 def test_cast_master_weights_to_fp8(quantization):
     if quantization in ("fp8", "fp8_cs") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "fp8_block" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     _run_test(quantization)
