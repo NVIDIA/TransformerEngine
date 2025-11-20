@@ -10,7 +10,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.utils import torch_version
+from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention

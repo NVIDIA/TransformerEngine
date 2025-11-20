@@ -10,7 +10,7 @@ import os
 
 import torch
 
-from ...utils import torch_version
+from ...torch_version import torch_version
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
     l2normalization_fused,

@@ -13,7 +13,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.utils import torch_version
+from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
