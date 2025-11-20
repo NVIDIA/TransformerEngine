@@ -677,12 +677,14 @@ def get_cpu_offload_context(
             If True, the synchronization is done manually by the user.
             Additional argument manual_controller is returned. See more in manual control section.
     offload_stream: torch.cuda.Stream, default = None
-            If provided, the offload stream is used for offloading and reloading.
-            Otherwise, a new stream is allocated internally. It can be other than None
-            only if manual_synchronization is True.
+        If provided, the offload stream is used for offloading and reloading.
+        Otherwise, a new stream is allocated internally. It can be other than None
+        only if manual_synchronization is True.
 
-    Manual synchronization
-    ----------------------
+    Notes
+    -----
+    **Manual synchronization:**
+
     By default, layers are offloaded/reloaded asynchronously
     with respect to the current forward/backward stream with predefined synchronization,
     to ensure that activation memory usage is equal to
@@ -709,8 +711,10 @@ def get_cpu_offload_context(
     You can provide an ``offload_stream`` to be used for offload and reload operations.
     This allows for more detailed synchronization, such as delaying the start of offloading.
 
-    Example:
+    **Example:**
+
     .. code-block:: python
+
         offload_stream = torch.cuda.Stream()
         cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True, model_layers=num_layers, manual_synchronization=True, offload_stream=offload_stream)
@@ -732,8 +736,8 @@ def get_cpu_offload_context(
         for i in range(num_layers):
             out[i].sum().backward()
 
-    V1 code path
-    ------------
+    **V1 code path:**
+
     If you want to use the v1 code path for offloading,
     please set the environment variable ``NVTE_CPU_OFFLOAD_V1`` to 1.
 

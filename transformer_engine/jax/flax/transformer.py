@@ -482,8 +482,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
-
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
+        
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the attention will consider the
@@ -522,8 +522,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         where sd stands for sequence_descriptor.
 
-
-
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -549,7 +547,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           sequences to be packed in a batch, also known as sequence packing.
 
         Explanation of denotations:
-
+        
         * b: batch size
         * s: seqeuence length
         * h: num_attention_heads or num_gqa_groups
@@ -567,11 +565,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Sliding window size. The default value is no sliding window.
     max_segments_per_seq: Optional[int], default = 1
         The maximum number of segments per sequence, also used for THD format (sequence packing).
-    context_parallel_causal_load_balanced (bool):
-            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
-    context_parallel_axis (str): The name of the context parallel axis.
-    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
-    context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
+    context_parallel_causal_load_balanced: bool
+        Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+    context_parallel_axis: str
+        The name of the context parallel axis.
+    context_parallel_strategy: CPStrategy
+        The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
+    context_checkpoint_name: str
+        The name of the context checkpoint in the forward pass of fused attention.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -987,8 +988,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
-
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
+        
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the attention will consider the
@@ -1782,8 +1783,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     self_attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation in the self attention.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
-
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
+        
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the self attention will consider the
