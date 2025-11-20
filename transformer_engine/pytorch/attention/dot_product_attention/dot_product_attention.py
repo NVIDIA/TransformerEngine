@@ -819,6 +819,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -993,9 +994,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             If ``True``, there are padding tokens between individual sequences in a packed batch.
         fp8_output: Optional[bool], default = False
             Whether to enforce output to be in FP8 or not.
+        num_splits: Optional[int], default = 1
+            Optional split control for FlashAttention-3 only. When set, this value is forwarded
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1334,6 +1339,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
+                cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1432,6 +1439,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
 
             if use_fused_attention:
@@ -1511,14 +1519,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
-                )
-
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
                 )
 
             if use_unfused_attention:

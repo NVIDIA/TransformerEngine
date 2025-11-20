@@ -13,7 +13,7 @@ import transformer_engine.pytorch as te
 """
     Distributed numerics tests
 
-    These tests test the numerical corectness of the TransformerEngine layers.
+    These tests test the numerical correctness of the TransformerEngine layers.
     Tests are parametrized by the layer and fp8 precision.
     One test consists of running multiple configurations from file run_numerics.py
     Such design is due to the fact the initialization of one test is long

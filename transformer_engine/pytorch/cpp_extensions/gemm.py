@@ -6,6 +6,7 @@
 
 from typing import Iterable, Optional, Tuple, Union, List
 import os
+import functools
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
@@ -17,10 +18,44 @@ from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
+
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
 ]
+
+
+_NUM_MAX_UB_STREAMS = 3
+
+
+def get_cublas_workspace_size_bytes() -> None:
+    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
+        return 32 * 1024 * 1024 + 1024
+    return 4_194_304
+
+
+@functools.lru_cache(maxsize=None)
+def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
+    """Returns workspace for cublas GEMM."""
+    assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
+
+    if ub:
+        return torch.empty(
+            get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS,
+            dtype=torch.uint8,
+            device=device,
+        )
+    if grouped_gemm:
+        _multi_stream_cublas_workspace = []
+        for _ in range(tex.get_num_cublas_streams()):
+            _multi_stream_cublas_workspace.append(
+                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+            )
+        return _multi_stream_cublas_workspace
+
+    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -32,10 +67,31 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
+def get_tensor_device(tensor: torch.Tensor) -> int:
+    """
+    Returns tensor device as an integer.
+
+    This method is used because checking instances of
+    QuantizedTensor or Storage incurs more CPU overhead.
+    The order of attributes checked is important to also
+    minimize overhead.
+    """
+    if hasattr(tensor, "device"):
+        return tensor.device.index
+    if hasattr(tensor, "_rowwise_data") and tensor._rowwise_data is not None:
+        return tensor._rowwise_data.device.index
+    if hasattr(tensor, "_columnwise_data") and tensor._columnwise_data is not None:
+        return tensor._columnwise_data.device.index
+    if hasattr(tensor, "_data") and tensor._data is not None:
+        return tensor._data.device.index
+    if hasattr(tensor, "_transpose") and tensor._transpose is not None:
+        return tensor._transpose.device.index
+    return torch.cuda.current_device()
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
-    workspace: torch.Tensor,
     out_dtype: Optional[torch.dtype] = None,
     quantization_params: Optional[Quantizer] = None,
     gelu: bool = False,
@@ -62,6 +118,7 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
+    workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
 
     if ub_type is not None:
         assert ub is not None, (
@@ -159,7 +216,6 @@ def general_grouped_gemm(
     B: List[torch.Tensor],
     out: List[torch.Tensor],
     out_dtype: torch.dtype,
-    workspaces: List[torch.Tensor],
     layout: str = "TN",
     m_splits: Optional[List[int]] = None,
     gelu: bool = False,
@@ -187,6 +243,8 @@ def general_grouped_gemm(
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
+    workspaces = get_cublas_workspace(get_tensor_device(A[0]), False, True)
+
     if grad and use_bias:
         grad_bias = [
             torch.empty(B[i].shape[1], dtype=out[0].dtype, device="cuda") for i in range(num_gemms)

@@ -7,8 +7,8 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
-import copy
 import warnings
+import math
 
 import torch
 from torch.utils._pytree import tree_map
@@ -18,6 +18,11 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
+)
+
+_quantized_tensor_cpu_supported_ops = (
+    torch.ops.aten.empty_like.default,
+    torch.ops.aten.copy_.default,
 )
 
 
@@ -35,7 +40,7 @@ class QuantizedTensorStorage:
     XTensorStorage should contain all data members needed to
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
-    to behave like regular torch.Tensor (liek __torch_dispatch__)."""
+    to behave like regular torch.Tensor (like __torch_dispatch__)."""
 
     _quantizer: Optional[Quantizer]
 
@@ -61,6 +66,12 @@ class QuantizedTensorStorage:
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement update_usage function"
+        )
+
+    def get_usages(self) -> Dict[str, bool]:
+        """Get the usage of the tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement get_usages function"
         )
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
@@ -128,6 +139,7 @@ def prepare_for_saving(
             t, t_obj = tensor.prepare_for_saving()
             tensor_list.extend(t)
             tensor_objects_list.append(t_obj)
+
     return tensor_list, tensor_objects_list
 
 
@@ -284,10 +296,6 @@ class Quantizer(abc.ABC):
         if columnwise is not None:
             self.columnwise_usage = columnwise
 
-    def copy(self) -> Quantizer:
-        """Create shallow copy"""
-        return copy.copy(self)
-
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""
         raise NotImplementedError(
@@ -314,6 +322,13 @@ class Quantizer(abc.ABC):
         """Returns whether or not given tensor can be quantized"""
         return True
 
+    def get_usages(self) -> Dict[str, bool]:
+        """Get the usage of the quantizer"""
+        return {
+            "rowwise": self.rowwise_usage,
+            "columnwise": self.columnwise_usage,
+        }
+
 
 class QuantizedTensor(torch.Tensor):
     """Abstract base class for tensor with quantized data
@@ -325,7 +340,14 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+    def __new__(
+        cls,
+        shape: Iterable[int],
+        dtype: torch.dtype,
+        *,
+        requires_grad: bool = False,
+        device: Optional[torch.device] = None,
+    ):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -336,7 +358,7 @@ class QuantizedTensor(torch.Tensor):
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
-            device=torch.cuda.current_device(),
+            device=torch.cuda.current_device() if device is None else device,
         )
 
         return instance
@@ -366,6 +388,9 @@ class QuantizedTensor(torch.Tensor):
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement clear function"
+        )
 
     def __repr__(self, *, tensor_contents=None) -> str:
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
@@ -407,6 +432,26 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
+            if (
+                isinstance(dst, QuantizedTensor)
+                and isinstance(src, QuantizedTensor)
+                and type(dst._quantizer) is type(src._quantizer)
+                and set(src.get_usages().keys()) == set(dst.get_usages().keys())
+                and all(
+                    src.get_usages()[usage] == dst.get_usages()[usage]
+                    for usage in src.get_usages().keys()
+                )
+            ):
+
+                dst_tensors, dst_tensor_obj = dst.prepare_for_saving()
+                src_tensors, src_tensor_obj = src.prepare_for_saving()
+                for dst_tensor, src_tensor in zip(dst_tensors, src_tensors):
+                    if dst_tensor is not None:
+                        dst_tensor.copy_(src_tensor, *args[2:], **kwargs)
+                dst_tensor_obj.restore_from_saved(dst_tensors)
+                src_tensor_obj.restore_from_saved(src_tensors)
+                return None
+
             if isinstance(dst, QuantizedTensor):
                 dst.quantize_(src)
             else:
@@ -418,6 +463,36 @@ class QuantizedTensor(torch.Tensor):
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # Empty like op
+        if func == torch.ops.aten.empty_like.default:
+            tensor = args[0]
+            device = kwargs.get("device", tensor.device)
+            requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
+            pin_memory = kwargs.get("pin_memory", False)
+            usage = tensor.get_usages()
+            quantizer_usage = tensor._quantizer.get_usages()
+            tensor._quantizer.set_usage(**usage)
+            out = tensor._quantizer.make_empty(
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                device=device,
+                requires_grad=requires_grad,
+                pin_memory=pin_memory,
+            )
+            tensor._quantizer.set_usage(**quantizer_usage)
+            return out
+
+        if func == torch.ops.aten.numel.default:
+            tensor = args[0]
+            return math.prod(tensor.size())
+
+        if func == torch.ops.aten.is_pinned.default:
+            tensor = args[0]
+            for t in tensor.get_data_tensors():
+                if t is not None:
+                    return func(t)
+            return False  # Or error out?
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
@@ -433,6 +508,10 @@ class QuantizedTensor(torch.Tensor):
                 and schema_arg.alias_info.is_write
             ):
                 arg.quantize_(new_arg)
+            elif isinstance(arg, list) and isinstance(new_arg, list):
+                # Recursively handle update for lists of tensors
+                for a, na in zip(arg, new_arg):
+                    maybe_update_inplace(a, na, schema_arg)
 
         # In-place op: dequantize, perform op, and quantize
         if func._schema.is_mutable:
@@ -459,6 +538,16 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
+
+        def check_if_cpu(arg):
+            if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
+                assert (
+                    func in _quantized_tensor_cpu_supported_ops
+                ), f"QuantizedTensor on CPU does not support this operation: {func}"
+            return arg
+
+        args = tree_map(check_if_cpu, args)
+
         # Do not force the QuantizedTensor type on the returned tensor
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
 
@@ -489,20 +578,16 @@ class QuantizedTensor(torch.Tensor):
         shape: Optional[Iterable[int]] = None,
         dtype: Optional[torch.dtype] = None,
         requires_grad: bool = False,
-        data: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Create new quantized tensor
 
         By default, new tensor has the same attributes and underlying
-        data.
+        data. This function is intended to create view of tensors.
 
         """
-        if shape is None:
-            shape = data.shape if data is not None else tensor.shape
+        shape = shape if shape is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
-        if data is not None:
-            kwargs["data"] = data
         return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:
