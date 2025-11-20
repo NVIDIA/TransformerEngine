@@ -798,8 +798,8 @@ def cp_p2p_fwd_flash_attn(
     v_part,
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
-    cu_seqlens_q_padded_per_step,
-    cu_seqlens_kv_padded_per_step,
+    cu_seqlens_q_padded_per_step,  # pylint: disable=unused-argument
+    cu_seqlens_kv_padded_per_step,  # pylint: disable=unused-argument
     section,
 ):
     """Per-tile forward call of CP P2P with FlashAttention backend"""
