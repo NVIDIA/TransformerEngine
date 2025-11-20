@@ -747,7 +747,7 @@ def get_cpu_offload_context(
             offload_weights=offload_weights,
             double_buffering=double_buffering,
         )
-    
+
     if not enabled:
         if manual_synchronization:
             return contextlib.nullcontext(), lambda x: x, None
