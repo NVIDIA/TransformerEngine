@@ -3850,6 +3850,10 @@ def attn_forward_func_with_cp(
         assert (
             attn_bias_type == "no_bias"
         ), f"{attn_bias_type} bias type is not supported with hierarchical CP implementation yet!"
+        assert chunk_size is None, (
+            "Chunked attention is not supported with cp_comm_type = 'a2a+p2p'! "
+            "Use cp_comm_type = 'p2p' for chunked attention."
+        )
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
             cp_comm_type = "p2p"
@@ -3949,9 +3953,8 @@ def attn_forward_func_with_cp(
             use_flash_attn_3,
             fp8_output,
             layer_number,
+            chunk_size,
         ]
-        if cp_comm_type == "p2p":
-            args += [chunk_size]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)
