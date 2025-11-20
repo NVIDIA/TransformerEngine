@@ -120,12 +120,14 @@ def _run_layer_with_overlap(
     os.environ["PYTORCH_JIT"] = "0"
     os.environ["NVTE_TORCH_COMPILE"] = "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    os.environ["NVTE_FLASH_ATTN"] = "0"
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
     os.unsetenv("PYTORCH_JIT")
     os.unsetenv("NVTE_TORCH_COMPILE")
     os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
+    os.unsetenv("NVTE_FLASH_ATTN")
 
     if (
         result.returncode != 0
