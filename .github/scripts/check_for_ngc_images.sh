@@ -3,7 +3,7 @@
 # Configuration
 BASE_IMAGE="nvcr.io/nvidia/pytorch"
 TAG_SUFFIX="-py3"
-MONTHS_TO_CHECK=7 # Check current month and previous 6 months (total 7)
+MONTHS_TO_CHECK=5 # Check current month and previous 4 months (total 5)
 
 # Initialize an array to store existing tags
 EXISTING_TAGS=()
