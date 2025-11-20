@@ -1043,7 +1043,7 @@ class MultiheadAttention(torch.nn.Module):
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
             fp8_output=dpa_fp8_output,
-            chunk_size=self.chunk_size,
+            chunk_size=chunk_size,
         )
 
         if chunk_size is not None:

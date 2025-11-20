@@ -1134,6 +1134,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size, total_seq_len
                     )
                     max_seqlen_kv = chunk_size
+            elif chunk_size is not None and context_parallel:
+                assert qkv_format == "thd", "Chunked attention with context parallelism is supported only for thd format!"
 
             # update max_seqlen and cu_seqlens if necessary
             batch_size = None
@@ -1380,7 +1382,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
-                chunk_size=self.chunk_size,
+                chunk_size=chunk_size,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1480,6 +1482,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
                     num_splits=num_splits,
+                    chunk_size=chunk_size,
                 )
             elif use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
@@ -1559,6 +1562,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        chunk_size=chunk_size,
                     )
             elif use_unfused_attention:
                 allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"

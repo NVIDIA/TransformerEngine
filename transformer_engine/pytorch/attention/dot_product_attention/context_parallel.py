@@ -1025,8 +1025,8 @@ def cp_p2p_bwd_fused_attn(
         bwd_output_te_dtype,
         aux_tensors,
         fused_attn_backend,
-        cu_seqlens_q_padded=cu_seqlens_q_per_step[cp_size - step - 1],
-        cu_seqlens_kv_padded=cu_seqlens_kv_per_step[cp_size - step - 1],
+        cu_seqlens_q_padded=cu_seqlens_q_padded_per_step[cp_size - step - 1],
+        cu_seqlens_kv_padded=cu_seqlens_kv_padded_per_step[cp_size - step - 1],
         attn_scale=softmax_scale,
         dropout=dropout_p,
         qkv_layout=qkv_layout,
@@ -3909,6 +3909,11 @@ def attn_forward_func_with_cp(
     assert chunk_size is None or cp_comm_type in [
         "p2p"
     ], "Context parallelism only supports chunked attention with cp_comm_type = 'p2p'!"
+
+    assert chunk_size is None or qkv_format == "thd", (
+        f"Context parallelism only supports chunked attention with qkv_format = 'thd'! "
+        f"Got {qkv_format=} and {chunk_size=}. "
+    )
 
     args = [
         is_training,

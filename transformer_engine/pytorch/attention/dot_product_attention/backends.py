@@ -895,6 +895,7 @@ class FlashAttention(torch.nn.Module):
                     chunk_size=chunk_size,
                 )
         else:
+
             if is_cpu_offload_enabled():
                 mark_activation_offload(
                     query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
@@ -1916,6 +1917,7 @@ class FusedAttention(torch.nn.Module):
                     chunk_size=chunk_size,
                 )
         else:
+
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc.apply(
                     self.training,
