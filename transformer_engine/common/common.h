@@ -101,6 +101,7 @@ struct SimpleTensor {
     }
     return acc;
   }
+  bool has_data() const noexcept { return dptr != nullptr; }
 
   void clear() {
     dptr = nullptr;
@@ -287,7 +288,7 @@ struct GroupedTensor {
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
   1. All data fields use SimpleTensor with contiguous 1D layout
   2. All data is stored on device
-  3. Shape information stored in first_dims and second_dims arrays
+  3. Shape information stored in first_dims and last_dims arrays
   */
 
   SimpleTensor data;
@@ -298,21 +299,21 @@ struct GroupedTensor {
   SimpleTensor columnwise_amax;
   SimpleTensor scale;  // for FP8-DS only
 
-  // [TODO] Discuss whether the first_dims and second_dims should be according to layout N
-  // Shape information: first_dims[i] and second_dims[i] define the shape of the i-th tensor
-  // For 2D tensors: shape[i] = (first_dims[i], second_dims[i])
-  SimpleTensor first_dims;   // Device pointer to size_t array of length num_tensors
-  SimpleTensor second_dims;  // Device pointer to size_t array of length num_tensors
+  // Shape information: first_dims[i] and last_dims[i] define the shape of the i-th tensor
+  // For 2D tensors: shape[i] = (first_dims[i], last_dims[i])
+  SimpleTensor first_dims;   // Device pointer to int64_t array of length num_tensors
+  SimpleTensor last_dims;    // Device pointer to int64_t array of length num_tensors
 
-  // Cumulative sizes for indexing into contiguous layout
-  // cumulative_tensor_sizes[i] = cumulative sum of numel for tensors 0..i-1
-  SimpleTensor cumulative_tensor_sizes;  // Device pointer to size_t array of length num_tensors
+  // Offsets for indexing into contiguous layout
+  // tensor_offsets[i] = offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
+  // Usage: tensor_i_ptr = data.dptr + tensor_offsets[i]
+  SimpleTensor tensor_offsets;  // Device pointer to int64_t array of length num_tensors
 
   NVTEScalingMode scaling_mode;
   size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
 
-  GroupedTensor(NVTEScalingMode scaling_mode)
+  GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
       : data(),
         columnwise_data(),
         scale_inv(),
@@ -320,10 +321,10 @@ struct GroupedTensor {
         amax(),
         columnwise_amax(),
         scale(),
-        num_tensors(0),
-        first_dims(nullptr, {0}, DType::kInt64),
-        second_dims(nullptr, {0}, DType::kInt64),
-        cumulative_tensor_sizes(nullptr, {0}, DType::kInt64),
+        num_tensors(num_tensors),
+        first_dims(nullptr, {}, DType::kInt64),
+        last_dims(nullptr, {}, DType::kInt64),
+        tensor_offsets(nullptr, {}, DType::kInt64),
         scaling_mode(scaling_mode),
         nvte_tensor(0) {}
 
@@ -348,8 +349,8 @@ struct GroupedTensor {
     columnwise_amax.clear();
     scale.clear();
     first_dims.clear();
-    second_dims.clear();
-    cumulative_tensor_sizes.clear();
+    last_dims.clear();
+    tensor_offsets.clear();
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
@@ -859,7 +860,7 @@ GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor tensor);
 GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor tensor);
 
 // Helper functions for GroupedTensor validation
-void CheckGroupedTensorShape(const GroupedTensor &t, const std::string &name);
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name);
 void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name);
 void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name,
                               bool allow_empty = false);
