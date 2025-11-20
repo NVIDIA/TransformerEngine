@@ -43,7 +43,7 @@ runs:
       run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
 
     - name: Maximize build space
-      uses: easimon/maximize-build-space@master
+      uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
       with:
         root-reserve-mb: 5120
         temp-reserve-mb: 32
