@@ -64,6 +64,11 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                                       const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
 
+  // Ensure that cuDNN handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+
   // Input and param tensors
   auto none = py::none();
   const TensorWrapper &input_nvte = makeTransformerEngineTensor(input, none);
@@ -293,6 +298,11 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     py::object out, py::handle quantizer, DType out_dtype,
                                     const int sm_margin, const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
+
+  // Ensure that cuDNN handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();

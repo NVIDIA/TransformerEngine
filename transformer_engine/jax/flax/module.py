@@ -7,6 +7,7 @@ Wrapper module for Transformer related layers with FP8 support.
 from functools import reduce
 import operator
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
+import warnings
 
 import numpy as np
 import jax.numpy as jnp
@@ -23,8 +24,9 @@ from ..layernorm import layernorm
 from ..layernorm_dense import layernorm_dense
 from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
-from ..softmax import softmax, SoftmaxType
+from ..softmax import softmax, SoftmaxFusionType
 from ..sharding import with_sharding_constraint_by_logical_axes
+from ..attention import AttnSoftmaxType
 from ..cpp_extensions import (
     is_softmax_kernel_available,
     jax_scaled_softmax,
@@ -33,10 +35,11 @@ from ..cpp_extensions import (
 )
 from ..quantize import (
     QuantizerFactory,
-    get_quantize_config,
+    get_global_quantize_recipe,
     QuantizeMetaSet,
     TensorSource,
     get_quantize_config_with_recipe,
+    noop_quantizer_set,
 )
 
 PRNGKey = Any
@@ -170,15 +173,20 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     ----------
     scale_factor : float, default = 1.0
         Scalar for the input to softmax.
-    softmax_type : SoftmaxType, default = SoftmaxType.SCALED
+    softmax_fusion_type : SoftmaxFusionType, default = SoftmaxFusionType.SCALED
+        Indicate the type of softmax.
+    softmax_type : AttnSoftmaxType, default = AttnSoftmaxType.VANILLA_SOFTMAX
         Indicate the type of softmax.
     """
 
     scale_factor: float = 1.0
-    softmax_type: SoftmaxType = SoftmaxType.SCALED
+    softmax_fusion_type: SoftmaxFusionType = SoftmaxFusionType.SCALED
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
-    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None) -> jnp.ndarray:
+    def __call__(
+        self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None
+    ) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -186,33 +194,52 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         input_dtype = inputs.dtype
         logits = inputs
 
+        if softmax_offset is not None:
+            assert self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            softmax_offset = 0.0
+
         # use primitives
         if is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
+            self.softmax_fusion_type,
+            self.softmax_type,
+            batch,
+            heads,
+            q_seqlen,
+            k_seqlen,
+            input_dtype,
         ):
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
             mask_ = mask
-            if self.softmax_type is not SoftmaxType.SCALED_MASKED:
+            if self.softmax_fusion_type is not SoftmaxFusionType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
+            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_fusion_type)
         # use default jax based implementation
         else:
+            warnings.warn(
+                "Using unfused JAX softmax implementation instead of TE fused primitives. ",
+                UserWarning,
+                stacklevel=2,
+            )
+
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
-            if self.softmax_type is SoftmaxType.SCALED:
-                outputs = jax_scaled_softmax(logits, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_MASKED:
-                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
+            if self.softmax_fusion_type is SoftmaxFusionType.SCALED:
+                outputs = jax_scaled_softmax(logits, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
+                outputs = jax_scaled_upper_triang_masked_softmax(
+                    logits, self.scale_factor, softmax_offset
+                )
             else:
                 raise ValueError(
-                    f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED,"
-                    " SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                    f"Unsupported softmax fusion: {self.softmax_fusion_type}. softmax_fusion_type"
+                    " must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
                 )
         assert input_dtype == outputs.dtype
         return outputs
@@ -355,16 +382,16 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         Generate a set of FP8 meta for a GEMM.
         """
 
+        if fp8_recipe is None:
+            fp8_recipe = get_global_quantize_recipe()
+
+        quantize_config = get_quantize_config_with_recipe(fp8_recipe)
+
         collection_name = (
             variable_collection
             if variable_collection is not None
-            else get_quantize_config().COLLECTION_NAME
+            else quantize_config.COLLECTION_NAME
         )
-
-        if fp8_recipe is None:
-            quantize_config = get_quantize_config()
-        else:
-            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
 
         x_meta = quantize_config.get_quantize_flax_meta(
             self, collection_name, postfix, TensorSource.X, "x"
@@ -492,7 +519,11 @@ class DenseGeneral(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        quantizer_set = self.generate_quantizer_set(
+            quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
+
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
@@ -505,9 +536,6 @@ class DenseGeneral(TransformerEngineBase):
         else:
             bias = None
 
-        quantizer_set = self.generate_quantizer_set(
-            quantization_checkpoint_name=self.quantization_checkpoint_name
-        )
         contract_ind = tuple(range(0, len(axis)))
         y = dense(
             inputs,
@@ -712,7 +740,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         )
 
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -763,7 +791,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             kernel_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -1042,7 +1070,7 @@ class LayerNormMLP(TransformerEngineBase):
         # TODO(Phuong): use fuse_layernorm for high-precision
         # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            ffn1_quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -1128,7 +1156,7 @@ class LayerNormMLP(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn1_quantizer_set == noop_quantizer_set:
             kernel_1 = kernel_1.astype(input_dtype)
 
         hidden_size = inputs.shape[-1]
@@ -1140,7 +1168,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel_2_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn2_quantizer_set == noop_quantizer_set:
             kernel_2 = kernel_2.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))

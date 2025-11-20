@@ -40,6 +40,8 @@ from transformer_engine.jax.quantize import (
     QuantizerFactory,
     QuantizeLayout,
     noop_quantizer_set,
+    QuantizeMetaSet,
+    QuantizeMeta,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -1457,7 +1459,12 @@ class TestDense:
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
 
-        quantizer_set = QuantizerFactory.create_set(fp8_recipe=recipe)
+        quantizer_set = QuantizerFactory.create_set(
+            fp8_recipe=recipe,
+            quantize_meta_set=QuantizeMetaSet(
+                x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
+            ),
+        )
 
         n_iterations = 3 if recipe.delayed() else 1
         with use_jax_gemm(enabled=with_jax_gemm):
@@ -1516,7 +1523,12 @@ class TestFusedDense:
 
         gamma = jax.random.normal(subkeys[2], (k,)).astype(jnp.bfloat16)
 
-        quantizer_set = QuantizerFactory.create_set(fp8_recipe=recipe)
+        quantizer_set = QuantizerFactory.create_set(
+            fp8_recipe=recipe,
+            quantize_meta_set=QuantizeMetaSet(
+                x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
+            ),
+        )
 
         if norm_type == "layernorm":
             beta = jax.random.normal(subkeys[3], (k,)).astype(jnp.bfloat16)
@@ -1605,6 +1617,9 @@ class TestFusedDense:
         quantizer_sets = QuantizerFactory.create_set(
             n_quantizer_sets=2,
             fp8_recipe=recipe,
+            quantize_meta_set=QuantizeMetaSet(
+                x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
+            ),
         )
 
         if norm_type == "layernorm":
