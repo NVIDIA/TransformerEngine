@@ -315,12 +315,12 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   };
 
   // Determine expected dtype based on data type and scaling mode
-  if (is_fp8_dtype(t.dtype()) && is_tensor_scaling_mode(t.scaling_mode)) {
+  if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
-  } else if (is_fp4_dtype(t.dtype())) {
-    check_scales(DType::kFloat8E4M3);
   } else if (is_mxfp8_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E8M0);
+  } else if (is_nvfp4_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat8E4M3);
   } else {
     // Non-quantized types should not have scale/scale_inv
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type,
@@ -902,8 +902,6 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
   auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
   NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
   NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
-  NVTE_CHECK(param->shape.empty(),
-             "Grouped tensor param shape is not used thus it should not be set");
 
   switch (param_name) {
     case kNVTEGroupedRowwiseData:
