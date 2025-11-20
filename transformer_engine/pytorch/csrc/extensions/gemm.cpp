@@ -639,6 +639,7 @@ std::optional<std::vector<at::Tensor>> te_general_device_initiated_grouped_gemm(
       inputA_and_SF_addrs = at::empty(num_gemms * 2, options);
     }
     int gemm_m;
+    auto* inputA_and_SF_addr_ptr = inputA_and_SF_addrs.data_ptr<uint64_t>();
     for (size_t i = 0; i < num_gemms; i++) {
       transformer_engine::Tensor* inputA = convertNVTETensor(te_A_vector[i]);
       gemm_m = transa ? inputA->flat_first_dim() : inputA->flat_last_dim();
@@ -647,17 +648,18 @@ std::optional<std::vector<at::Tensor>> te_general_device_initiated_grouped_gemm(
       } else {
         NVTE_CHECK(inputA->has_columnwise_data(), "Input A is missing column-wise usage");
       }
-      inputA_and_SF_addrs[i] =
+      inputA_and_SF_addr_ptr[i] =
           transa ? static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(inputA->data.dptr))
                  : static_cast<uint64_t>(
                        reinterpret_cast<std::uintptr_t>(inputA->columnwise_data.dptr));
-      inputA_and_SF_addrs[num_gemms + i] =
+      inputA_and_SF_addr_ptr[num_gemms + i] =
           transa ? static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(inputA->scale_inv.dptr))
                  : static_cast<uint64_t>(
                        reinterpret_cast<std::uintptr_t>(inputA->columnwise_scale_inv.dptr));
     }
     // H2D copy
-    at::Tensor inputA_and_SF_addrs_cuda = inputA_and_SF_addrs.to("cuda", /*non_blocking=*/true);
+    at::Tensor inputA_and_SF_addrs_cuda = at::from_blob(workspace[0].data_ptr(), {num_gemms * 2}, torch::TensorOptions().dtype(torch::kUInt64).device(torch::kCUDA));
+    inputA_and_SF_addrs_cuda.copy_(inputA_and_SF_addrs, /*non_blocking=*/true);
 
     auto te_D = makeTransformerEngineTensor((*D)[0]);
     te_D_vector.emplace_back(te_D.data());
@@ -741,14 +743,16 @@ std::optional<std::vector<at::Tensor>> te_general_device_initiated_grouped_gemm(
       outputD_addrs = at::empty(num_gemms, options);
     }
 
+    auto* outputD_addrs_ptr = outputD_addrs.data_ptr<uint64_t>();
     for (size_t i = 0; i < num_gemms; i++) {
       transformer_engine::Tensor* outputD = convertNVTETensor(te_D_vector[i]);
       NVTE_CHECK(outputD->has_data(), "Input D is missing row-wise usage");
-      outputD_addrs[i] =
+      outputD_addrs_ptr[i] =
           static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(outputD->data.dptr));
     }
     // H2D copy
-    at::Tensor outputD_addrs_cuda = outputD_addrs.to("cuda", /*non_blocking=*/true);
+    at::Tensor outputD_addrs_cuda = at::from_blob(workspace[0].data_ptr(), {num_gemms}, torch::TensorOptions().dtype(torch::kUInt64).device(torch::kCUDA));
+    outputD_addrs_cuda.copy_(outputD_addrs, /*non_blocking=*/true);
 
     auto wsp = makeTransformerEngineTensor(workspace[0].data_ptr(),
                                            std::vector<size_t>{workspaceSize}, DType::kByte);

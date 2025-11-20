@@ -166,7 +166,7 @@ void generic_moe_gemm_kernelLauncher(ElementInput *A, ElementSF *SFA, const void
     throw std::runtime_error("TE CUTLASS device grouped gemm workspace is null");
   }
 
-  size_t offset = 0;
+  size_t offset = get_aligned_offset(num_experts * 2 * sizeof(uint64_t), 128); // inputA_and_SF_addrs
   auto ptr_A = reinterpret_cast<typename GemmGrouped::ElementA *>(A);
   auto ptr_A_list = reinterpret_cast<typename GemmGrouped::ElementA **>(
       reinterpret_cast<char *>(workspace) + offset);
@@ -652,7 +652,7 @@ void generic_moe_gemm_wgrad_kernelLauncher(ElementInput *A, ElementSF *SFA, Elem
     throw std::runtime_error("TE CUTLASS device grouped gemm workspace is null");
   }
 
-  size_t offset = 0;
+  size_t offset = get_aligned_offset(num_experts * sizeof(uint64_t), 128); // outputD_addrs
   auto ptr_A = reinterpret_cast<typename GemmGrouped::ElementA *>(A);
   auto ptr_A_list = reinterpret_cast<typename GemmGrouped::ElementA **>(
       reinterpret_cast<char *>(workspace) + offset);
