@@ -13,4 +13,3 @@ from packaging.version import Version as PkgVersion
 def torch_version() -> tuple[int, ...]:
     """Get PyTorch version"""
     return PkgVersion(str(torch.__version__)).release
-
