@@ -501,7 +501,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Scale factor to apply on query. When :attr:`None` is present, the scale factor is equal
         to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
         need to apply scale on query, which is to set :attr:`scale_factor=1.`.
-    transpose_batch_sequence: bool, default = False
+    TODO(KshitijLakhani): Reset this to bool only with default False arg in TransformerEngine v2.12
+    transpose_batch_sequence: bool | None, default = None (however, default is forced to False in post_init)
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
@@ -532,7 +533,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
-    transpose_batch_sequence: bool = False
+    transpose_batch_sequence: bool | None = None
     window_size: Optional[Tuple[int, int]] = None
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
@@ -541,8 +542,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_checkpoint_name: str = "context"
 
     def __post_init__(self):
-        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.13
-        warnings.warn("transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10")
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
+        # None implies that the user is relying on defaults, hence warn the user and set the new defaults
+        if self.transpose_batch_sequence is None:
+            warnings.warn("transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10")
+            self.transpose_batch_sequence = False
         super().__post_init__()
 
     @nn.compact
@@ -993,7 +997,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence: bool, default = False
+    TODO(KshitijLakhani): Reset this to bool only with default False arg in TransformerEngine v2.12
+    transpose_batch_sequence: bool | None, default = None (however, default is forced to False in post_init)
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -1035,7 +1040,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
-    transpose_batch_sequence: bool = False
+    transpose_batch_sequence: bool | None = None
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
@@ -1051,8 +1056,11 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
     def __post_init__(self):
         # Deal with changed defaults in API
-        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.13
-        warnings.warn("transpose_batch_sequence defaults to False in MultiHeadAttention starting TransformerEngine v2.10")
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
+        # None implies that the user is relying on defaults, hence warn the user and set the new defaults
+        if self.transpose_batch_sequence is None:
+            warnings.warn("transpose_batch_sequence defaults to False in MultiHeadAttention starting TransformerEngine v2.10")
+            self.transpose_batch_sequence = False
         # Deal with the deprecated parameters
         if self.num_heads is not None:
             self.num_attention_heads = self.num_heads
