@@ -74,7 +74,13 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_2_1", "cp_3_2", "cp_3_3", "cp_1_4"]  # Added cp_1_4 for chunked attention
+    configs = [
+        "cp_1_0",
+        "cp_2_1",
+        "cp_3_2",
+        "cp_3_3",
+        "cp_1_4",
+    ]  # Added cp_1_4 for chunked attention
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
@@ -118,9 +124,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             " type."
         )
     if config.chunk_size is not None and qkv_format != "thd":
-        pytest.skip(
-            "Chunked attention with context parallelism is supported only for thd format!"
-        )
+        pytest.skip("Chunked attention with context parallelism is supported only for thd format!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
     available_backends, *_ = get_available_attention_backends(
         config,

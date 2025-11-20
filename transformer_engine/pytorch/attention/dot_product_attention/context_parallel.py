@@ -3911,7 +3911,7 @@ def attn_forward_func_with_cp(
     ], "Context parallelism only supports chunked attention with cp_comm_type = 'p2p'!"
 
     assert chunk_size is None or qkv_format == "thd", (
-        f"Context parallelism only supports chunked attention with qkv_format = 'thd'! "
+        "Context parallelism only supports chunked attention with qkv_format = 'thd'! "
         f"Got {qkv_format=} and {chunk_size=}. "
     )
 
