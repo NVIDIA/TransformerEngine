@@ -483,7 +483,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
         Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
-        
+
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the attention will consider the
@@ -547,7 +547,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           sequences to be packed in a batch, also known as sequence packing.
 
         Explanation of denotations:
-        
+
         * b: batch size
         * s: seqeuence length
         * h: num_attention_heads or num_gqa_groups
@@ -989,7 +989,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
         Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
-        
+
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the attention will consider the
@@ -1784,7 +1784,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         This parameter specifies the type of attention mask to be applied during the softmax
         operation in the self attention.
         Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
-        
+
         Each described below:
 
         * ``no_mask``: No attention mask is applied. This means the self attention will consider the
