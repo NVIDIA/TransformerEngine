@@ -747,6 +747,11 @@ def get_cpu_offload_context(
             offload_weights=offload_weights,
             double_buffering=double_buffering,
         )
+    
+    if not enabled:
+        if manual_synchronization:
+            return contextlib.nullcontext(), lambda x: x, None
+        return contextlib.nullcontext(), lambda x: x
 
     if not offload_weights and not offload_activations:
         raise ValueError(
@@ -763,6 +768,8 @@ def get_cpu_offload_context(
 
         # Weights offloading is deprecated but we maintain backward compatibility by doing nothing.
         if not offload_activations:
+            if manual_synchronization:
+                return contextlib.nullcontext(), lambda x: x, None
             return contextlib.nullcontext(), lambda x: x
 
     if TEDebugState.debug_enabled:
@@ -848,15 +855,13 @@ def get_cpu_offload_context(
 
     cpu_offload_context = _CpuOffloadContext()
 
-    if enabled:
-        if manual_synchronization:
-            return (
-                cpu_offload_context,
-                cpu_offload_context.synchronization_function,
-                offload_synchronizer,
-            )
+    if manual_synchronization:
         return (
             cpu_offload_context,
             cpu_offload_context.synchronization_function,
+            offload_synchronizer,
         )
-    return contextlib.nullcontext(), lambda x: x
+    return (
+        cpu_offload_context,
+        cpu_offload_context.synchronization_function,
+    )
