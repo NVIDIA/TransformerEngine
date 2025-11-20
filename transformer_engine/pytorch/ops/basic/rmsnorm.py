@@ -249,7 +249,7 @@ class RMSNorm(BasicOperation):
     ) -> torch.Tensor:
         """Every operand in this function has a defined ONNX translation."""
         weight = self.weight + 1 if self.zero_centered_gamma else self.weight
-        
+
         # Manual RMSNorm: variance = mean(x^2), normalized = x / sqrt(variance + eps)
         variance = input_.pow(2).mean(-1, keepdim=True)
         normalized = input_ * torch.rsqrt(variance + self.eps)
