@@ -18,6 +18,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    NVFP4BlockScaling,
     Format,
     Recipe,
 )
@@ -25,11 +26,17 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_fp8_block_scaling_available,
+    is_nvfp4_available,
     QuantizedTensor,
     Float8Tensor,
     Float8BlockwiseQTensor,
+    NVFP4Tensor,
 )
-from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
+from transformer_engine.pytorch.tensor import (
+    cast_master_weights_to_fp8,
+    cast_master_weights_to_nvfp4,
+)
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
 
 
@@ -59,6 +66,12 @@ def _get_raw_data(quantized_tensor):
         assert (
             quantized_tensor._rowwise_data.dtype == torch.uint8
         ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
+        return quantized_tensor._rowwise_data
+    elif isinstance(quantized_tensor, NVFP4Tensor):
+        assert hasattr(quantized_tensor, "_rowwise_data"), "NVFP4Tensor missing _rowwise_data"
+        assert (
+            quantized_tensor._rowwise_data.dtype == torch.uint8
+        ), "NVFP4Tensor _rowwise_data must be uint8"
         return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
@@ -207,10 +220,19 @@ class MiniZero_1:
         # -----------------------------------------------------------------------------------------
         # Step 4: Cast master weights to BF16 or FP8, depending on the type of the weight
         # -----------------------------------------------------------------------------------------
-        if isinstance(self.weights[0], QuantizedTensor):
-            # FP8 weights case
-            for i in range(1, len(self.weights)):
-                assert isinstance(self.weights[i], QuantizedTensor)
+        first_weight = self.weights[0]
+        if isinstance(first_weight, NVFP4Tensor):
+            for weight in self.weights:
+                assert isinstance(weight, NVFP4Tensor)
+            cast_master_weights_to_nvfp4(
+                self.weights,
+                self.master_weights,
+                self.start_offsets,
+                self.dp_group,
+            )
+        elif isinstance(first_weight, QuantizedTensor):
+            for weight in self.weights:
+                assert isinstance(weight, QuantizedTensor)
             cast_master_weights_to_fp8(
                 self.weights,
                 self.master_weights,
@@ -412,8 +434,23 @@ class MiniFSDP:
             # Update the master weight using gradient descent
             master_weight -= grad * self.lr
 
-        # Step 3: Cast master weights to FP8 or BF16 precision
-        if isinstance(self.weights[0], QuantizedTensor):
+        # Step 3: Cast master weights to quantized or BF16 precision
+        first_weight = self.weights[0]
+        if isinstance(first_weight, NVFP4Tensor):
+            local_weights = []
+            for local_weight in self.local_weights:
+                if local_weight is None:
+                    local_weights.append(None)
+                    continue
+                local_weights.append(local_weight)
+            cast_master_weights_to_nvfp4(
+                self.weights,
+                self.master_weights,
+                [idx[0] for idx in self.weight_indices],
+                self.dp_group,
+                local_weights,
+            )
+        elif isinstance(first_weight, QuantizedTensor):
             local_weights = []
             for local_weight in self.local_weights:
                 if local_weight is None:
@@ -670,6 +707,84 @@ def _test_fsdp_cast_master_weights_to_fp8(
         torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
 
 
+def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processing):
+    available, reason = is_nvfp4_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    rank = dist.get_rank(dp_group)
+    world_size = dist.get_world_size(dp_group)
+
+    torch.manual_seed(12345)
+    torch.cuda.manual_seed(12345)
+
+    mock_groups = [dist.new_group(ranks=[i]) for i in range(world_size)]
+    mock_group = mock_groups[rank]
+
+    linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
+    nvfp4_recipe = NVFP4BlockScaling()
+
+    with te.quantized_model_init(
+        enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
+    ):
+        model_nvfp4 = nn.Sequential(
+            te.Linear(128, 256 + 16, **linear_kwargs),
+            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(256 * 3, 128, **linear_kwargs),
+        )
+
+    model = nn.Sequential(
+        te.Linear(128, 256 + 16, **linear_kwargs),
+        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(256 * 3, 128, **linear_kwargs),
+    )
+
+    for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
+        high_precision_init_val = w_nvfp4.get_high_precision_init_val()
+        w.data.copy_(high_precision_init_val)
+
+    for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
+        w_nvfp4.main_grad = torch.zeros_like(w_nvfp4, dtype=torch.float32, device="cuda")
+        w.main_grad = torch.zeros_like(w, dtype=torch.float32, device="cuda")
+
+    optimizer_nvfp4 = MiniZero_1(
+        [w for w in model_nvfp4.parameters()], 10.0, dp_group, manual_post_all_gather_processing
+    )
+    optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
+
+    for _ in range(100):
+        for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
+            w_nvfp4.main_grad.zero_()
+            w.main_grad.zero_()
+
+        inputs = [
+            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+        ]
+        x = inputs[rank]
+
+        with te.autocast(
+            enabled=True,
+            recipe=nvfp4_recipe,
+            amax_reduction_group=mock_group,
+        ):
+            y_nvfp4 = model_nvfp4(x)
+
+        y = model(x)
+
+        targets = [torch.randn_like(y) for _ in range(world_size)]
+        target = targets[rank]
+        loss_nvfp4 = nn.MSELoss()(y_nvfp4, target)
+        loss = nn.MSELoss()(y, target)
+
+        loss_nvfp4.backward()
+        loss.backward()
+
+        optimizer_nvfp4.step()
+        optimizer.step()
+
+        torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
+
+
 def run_parallel_tests() -> None:
     """Run parallel tests"""
 
@@ -708,6 +823,11 @@ def run_parallel_tests() -> None:
             _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
             _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
 
+    nvfp4_available, _ = is_nvfp4_available(return_reason=True)
+    if nvfp4_available:
+        for post_ag_processing in manual_post_all_gather_processings:
+            _test_cast_master_weights_to_nvfp4(dp_group, post_ag_processing)
+
     dist.destroy_process_group()
 
 
@@ -739,6 +859,40 @@ def main() -> None:
     args = parser.parse_args()
     if args.parallel:
         run_parallel_tests()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA."
+)
+def test_nvfp4_partial_cast_matches_full() -> None:
+    available, reason = is_nvfp4_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    torch.manual_seed(1234)
+    device = torch.device("cuda")
+    shape = (64, 64)
+    master_weight = torch.randn(shape, dtype=torch.float32, device=device)
+
+    quantizer = NVFP4Quantizer(rowwise=True, columnwise=False, with_2d_quantization=True)
+    nvfp4_tensor = quantizer(master_weight.to(torch.bfloat16))
+    assert isinstance(nvfp4_tensor, NVFP4Tensor)
+
+    reference_data = nvfp4_tensor._rowwise_data.detach().clone()
+    reference_scale = nvfp4_tensor._rowwise_scale_inv.detach().clone()
+
+    nvfp4_tensor._rowwise_data.zero_()
+    nvfp4_tensor._rowwise_scale_inv.zero_()
+
+    cast_master_weights_to_nvfp4(
+        [nvfp4_tensor],
+        [master_weight.clone()],
+        [0],
+        None,
+    )
+
+    torch.testing.assert_close(nvfp4_tensor._rowwise_data, reference_data)
+    torch.testing.assert_close(nvfp4_tensor._rowwise_scale_inv, reference_scale)
 
 
 if __name__ == "__main__":
