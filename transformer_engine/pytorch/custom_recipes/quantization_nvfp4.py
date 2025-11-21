@@ -18,9 +18,9 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
     """
     Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
 
-    Usage with CustomRecipe and fp8_autocast:
+    Usage with CustomRecipe and autocast:
         custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
-        with fp8_autocast(fp8_recipe=custom_recipe):
+        with autocast(fp8_recipe=custom_recipe):
             output = model(input)
     """
     if role == "linear_input":
@@ -338,7 +338,7 @@ def get_wgrad_sign_vector() -> torch.Tensor:
 
 
 class NVFP4QuantizerRef(Quantizer):
-    """NVFP4 quantizer for middleware between Transformer Engine and Kitchen"""
+    """Reference implementation of NVFP4 quantizer"""
 
     def __init__(
         self,
