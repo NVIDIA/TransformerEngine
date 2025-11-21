@@ -276,20 +276,45 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name) {
   NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
 
-  // Helper lambda to validate shape arrays (first_dims, last_dims, tensor_offsets)
+  // Helper lambda to validate shape arrays
+  // All three arrays are OPTIONAL:
+  // - first_dims: empty if all tensors have same first dimension
+  // - last_dims: empty if all tensors have same last dimension
+  // - tensor_offsets: empty if all tensors have same shape (offsets are predictable)
   auto check_shape_array = [&](const SimpleTensor &arr, const char *arr_name) {
-    NVTE_CHECK(arr.dptr != nullptr, "Grouped tensor ", name, " must have ", arr_name, " allocated");
-    NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
-    NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
-               " must have dtype Int64");
-    NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name, " size (",
-               arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
+    if (arr.dptr != nullptr) {
+      NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
+      NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
+                 " must have dtype Int64");
+      NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name, " size (",
+                 arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
+    }
   };
 
-  // Validate all required shape arrays
+  // Validate shape arrays (all optional)
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
   check_shape_array(t.tensor_offsets, "tensor_offsets");
+  
+  // tensor_offsets is required if any dimension varies
+  // (i.e., required unless all_same_shape())
+  if (!t.all_same_shape()) {
+    NVTE_CHECK(t.tensor_offsets.dptr != nullptr, "Grouped tensor ", name,
+               " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
+  }
+  
+  // Validate data shape based on dimension uniformity
+  if (t.has_data()) {
+    if (t.all_same_shape() || t.all_same_first_dim() || t.all_same_last_dim()) {
+      // When at least one dimension is uniform: data should be 2D
+      NVTE_CHECK(t.data.shape.size() == 2, "Grouped tensor ", name,
+                 " data must be 2D when at least one dimension is uniform");
+    } else {
+      // Both dimensions vary: data should be 1D (flattened)
+      NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name,
+                 " data must be 1D when both dimensions vary");
+    }
+  }
 }
 
 // Helper function to check scale_inv for both input and output

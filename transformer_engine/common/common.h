@@ -286,9 +286,19 @@ struct GroupedTensor {
  public:
   /*
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
-  1. All data fields use SimpleTensor with contiguous 1D layout
-  2. All data is stored on device
-  3. Shape information stored in first_dims and last_dims arrays
+  
+  Shape Representation:
+  - first_dims and last_dims are OPTIONAL (can be empty if dimension is uniform across all tensors)
+  - If first_dims is empty: all tensors have the same first dimension
+  - If last_dims is empty: all tensors have the same last dimension
+  - If both are empty: all tensors have identical shapes
+  - If both are set: each tensor has unique shape (first_dims[i], last_dims[i])
+  
+  Data Layout:
+  - data.shape is 2D when at least one dimension is uniform (all_same_first_dim() || all_same_last_dim())
+  - data.shape is 1D when both dimensions vary (varying_both_dims())
+  
+  All data is stored on device in contiguous layout.
   */
 
   SimpleTensor data;
@@ -299,15 +309,17 @@ struct GroupedTensor {
   SimpleTensor columnwise_amax;
   SimpleTensor scale;  // for FP8-DS only
 
-  // Shape information: first_dims[i] and last_dims[i] define the shape of the i-th tensor
-  // For 2D tensors: shape[i] = (first_dims[i], last_dims[i])
-  SimpleTensor first_dims;  // Device pointer to int64_t array of length num_tensors
-  SimpleTensor last_dims;   // Device pointer to int64_t array of length num_tensors
+  // Shape information (OPTIONAL - empty if dimension is uniform across all tensors)
+  // first_dims[i] = first dimension of tensor i (empty if all tensors have same first dim)
+  // last_dims[i] = last dimension of tensor i (empty if all tensors have same last dim)
+  SimpleTensor first_dims;  // Device pointer to int64_t array of length num_tensors (or empty)
+  SimpleTensor last_dims;   // Device pointer to int64_t array of length num_tensors (or empty)
 
-  // Offsets for indexing into contiguous layout
-  // tensor_offsets[i] = offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
-  // Usage: tensor_i_ptr = data.dptr + tensor_offsets[i]
-  SimpleTensor tensor_offsets;  // Device pointer to int64_t array of length num_tensors
+  // Offsets for indexing into contiguous layout (OPTIONAL - not needed if all_same_shape())
+  // tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
+  // Usage: tensor_i_ptr = (char*)data.dptr + tensor_offsets[i] * element_size
+  // If empty and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
+  SimpleTensor tensor_offsets;  // Device pointer to int64_t array of length num_tensors (or empty)
 
   NVTEScalingMode scaling_mode;
   size_t num_tensors;
@@ -332,6 +344,26 @@ struct GroupedTensor {
 
   bool has_data() const noexcept { return data.dptr != nullptr; }
   bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
+  
+  bool all_same_first_dim() const noexcept { return first_dims.shape.empty(); }
+  bool all_same_last_dim() const noexcept { return last_dims.shape.empty(); }
+  bool all_same_shape() const noexcept { 
+    return first_dims.shape.empty() && last_dims.shape.empty(); 
+  }
+  bool varying_both_dims() const noexcept {
+    return !first_dims.shape.empty() && !last_dims.shape.empty();
+  }
+
+  size_t get_common_first_dim() const noexcept { 
+    NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
+    NVTE_CHECK(data.shape.size() == 2, "Data must be 2D");
+    return data.shape[0] / num_tensors; 
+  }
+  size_t get_common_last_dim() const noexcept { 
+    NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors thus cannot get common last dim");
+    NVTE_CHECK(data.shape.size() == 2, "Data must be 2D for getting common last dim");
+    return data.shape[1] / num_tensors; 
+  }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
