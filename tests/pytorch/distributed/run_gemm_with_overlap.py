@@ -24,10 +24,8 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
 )
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.module.base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_cublas_workspace_size_bytes,
-)
+from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
+from transformer_engine.pytorch.module.base import fill_userbuffers_buffer_for_all_gather
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -417,10 +415,6 @@ def _main(opts):
             std=opts.std,
         )
 
-    # Allocate cuBLAS workspace
-    workspace_size = 3 * get_cublas_workspace_size_bytes()
-    workspace = torch.empty(workspace_size, dtype=torch.uint8, device="cuda")
-
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
     if opts.bulk_overlap:
         ker_g = torch.transpose(kernel_t, 0, 1)
@@ -617,7 +611,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel_t_fp8,
             gemm_inp,
-            workspace,
             out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
             quantization_params=out_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
@@ -635,7 +628,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel2_t_fp8,
             gemm2_inp,
-            workspace,
             out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
             quantization_params=out2_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
@@ -648,7 +640,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel_t,
             gemm_inp,
-            workspace,
             out_dtype=torch.bfloat16,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,

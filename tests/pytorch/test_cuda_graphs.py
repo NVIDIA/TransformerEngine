@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Iterable, List, Union
+from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
 import torch
@@ -160,6 +160,20 @@ def get_outputs(
     return values
 
 
+def reset_graphs(
+    graphed_callables: Union[Callable, Tuple[Callable, ...], Dict[Tuple[int, int], Callable]],
+) -> None:
+    """Reset CUDA graphs."""
+    if isinstance(graphed_callables, tuple) or isinstance(graphed_callables, list):
+        for callable in graphed_callables:
+            callable.reset()
+    elif isinstance(graphed_callables, dict):
+        for callable in graphed_callables.values():
+            callable.reset()
+    else:
+        graphed_callables.reset()
+
+
 class _Sequential(torch.nn.Sequential):
     """Sequential model that forwards keyword arguments to modules"""
 
@@ -176,7 +190,8 @@ _test_cuda_graphs_modules: List[str] = [
     # creating TMA descriptor for MXFP8 quantization.
     "linear",
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "mha",
     "linear_op",
@@ -218,12 +233,23 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif module == "layernorm_mlp":
+        elif module == "layernorm_mlp_nocheckpoint":
             modules = [
                 LayerNormMLP(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     params_dtype=dtype,
+                    checkpoint=False,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "layernorm_mlp_checkpoint":
+            modules = [
+                LayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                    checkpoint=True,
                 )
                 for _ in range(num_layers)
             ]
@@ -322,7 +348,12 @@ def _test_cuda_graphs(
             output.backward(grad_output)
         optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if graph_mode == "full":
+        reset_graphs(model)
+    elif graph_mode == "individual":
+        reset_graphs(modules)
+    return outputs
 
 
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
@@ -357,6 +388,17 @@ def test_make_graphed_callables(
             )
         if fp8_params:
             pytest.skip("NVFP4 params not supported")
+    if (
+        fp8
+        and fp8_recipe.delayed()
+        and torch.cuda.get_device_capability() >= (10, 0)
+        and module == "layernorm_mlp_checkpoint"
+    ):
+        pytest.skip(
+            "CUDA graphs not supported for LayerNormMLP "
+            "with checkpoint=True, SM>=10, "
+            "and DelayedScaling recipe"
+        )
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -383,7 +425,8 @@ def test_make_graphed_callables(
 
 _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     "transformer",
-    "layernorm_mlp",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
     "layernorm_linear",
     "linear",
     "mha",
@@ -468,7 +511,10 @@ def _test_cuda_graphs_with_dot_product_attention(
         output = model(*inputs)
         output.backward(grad_output)
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
 
 
 @pytest.mark.parametrize("dtype", dtypes)
@@ -553,7 +599,10 @@ def _test_cuda_graphs_with_kwargs(
             output.backward(grad_output)
         optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
 
 
 def test_make_graphed_callables_with_kwargs(
@@ -668,7 +717,10 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         optimizer.step()
 
     outputs = [y for _, y in sorted(outputs.items())]
-    return get_outputs(model, outputs)
+    outputs = get_outputs(model, outputs)
+    if with_graph:
+        reset_graphs(layer_forwards)
+    return outputs
 
 
 def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
