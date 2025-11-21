@@ -214,7 +214,7 @@ def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
     out: List[torch.Tensor],
-    quantization_params: Optional[Quantizer],
+    quantization_params: List[Optional[Quantizer]],
     out_dtype: torch.dtype,
     layout: str = "TN",
     m_splits: Optional[List[int]] = None,
