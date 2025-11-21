@@ -545,7 +545,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
         # None implies that the user is relying on defaults, hence warn the user and set the new defaults
         if self.transpose_batch_sequence is None:
-            warnings.warn("transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10")
+            warnings.warn(
+                "transpose_batch_sequence defaults to False in DotProductAttention starting"
+                " TransformerEngine v2.10"
+            )
             self.transpose_batch_sequence = False
         super().__post_init__()
 
@@ -1059,7 +1062,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
         # None implies that the user is relying on defaults, hence warn the user and set the new defaults
         if self.transpose_batch_sequence is None:
-            warnings.warn("transpose_batch_sequence defaults to False in MultiHeadAttention starting TransformerEngine v2.10")
+            warnings.warn(
+                "transpose_batch_sequence defaults to False in MultiHeadAttention starting"
+                " TransformerEngine v2.10"
+            )
             self.transpose_batch_sequence = False
         # Deal with the deprecated parameters
         if self.num_heads is not None:
