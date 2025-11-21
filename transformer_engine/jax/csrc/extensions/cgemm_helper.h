@@ -157,6 +157,27 @@ class CommunicatorHandler {
   std::vector<std::string> _nccl_id_file_name;
 };
 
+struct CollectiveGemmPlan {
+  std::unique_ptr<NVTECommGemmCtx> cublasmp_context;
+  std::unique_ptr<CommOverlapCore> userbuffers_context;
+
+  CollectiveGemmPlan(void *ctx) {
+    if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+      cublasmp_context.reset(reinterpret_cast<NVTECommGemmCtx *>(ctx));
+    } else {
+      userbuffers_context.reset(reinterpret_cast<CommOverlapCore *>(ctx));
+    }
+  }
+
+  void *get_context() {
+    if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+      return reinterpret_cast<void *>(cublasmp_context.get());
+    } else {
+      return reinterpret_cast<void *>(userbuffers_context.get());
+    }
+  }
+}
+
 // Plan registry for caching collective GEMM executors
 class CollectiveGemmPlanRegistry {
  public:
@@ -165,18 +186,14 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  NVTECommGemmCtx *get_cublasmp_context();
-
-  CommOverlapCore *get_userbuffers_context(std::vector<size_t> buffer_shape, DType dtype,
-                                           JAXX_Collective_Op collective_op);
+  CollectiveGemmPlan *get_plan(std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op);
 
  private:
   CollectiveGemmPlanRegistry() {}
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<NVTECommGemmCtx>> cublasmp_plan_map;
-  std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> userbuffers_plan_map;
+  std::unordered_map<int64_t, std::unique_ptr<CollectiveGemmPlan>> plan_map;
 
 };
 

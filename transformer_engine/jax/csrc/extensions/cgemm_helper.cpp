@@ -161,7 +161,7 @@ int GetCgemmNumMaxStreams() {
   return config.num_max_streams;
 }
 
-CommOverlapCore *CollectiveGemmPlanRegistry::get_userbuffers_context(
+CollectiveGemmPlan *CollectiveGemmPlanRegistry::get_plan(
     std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
@@ -194,29 +194,26 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_userbuffers_context(
                "(2) num_devices_per_process == 1 (single device per process)");
   }
 
-  std::unique_ptr<CommOverlapCore> ctx;
-  ctx = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
-      comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
-      cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-      cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
-
-  CommOverlapCore *ctx_ptr = ctx.get();
-  plan_map[plan_id] = std::move(ctx);
-  return ctx_ptr;
-}
-
-NVTECommGemmCtx *get_cublasmp_context() {
-  std::unique_ptr<NVTECommGemmCtx> ctx = nvte_comm_gemm_ctx_create(
-      comm_handler.get_comm_for_current_device(), comm_handler.num_total_devices,
-      comm_handler.get_global_rank());
-
-  NVTECommGemmCtx *ctx_ptr = ctx.get();
-  plan_map[plan_id] = std::move(ctx);
-  return ctx_ptr;
+  std::unique_ptr<CollectiveGemmPlan> plan;
+  if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+    auto ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(),
+                                         comm_handler.num_total_devices,
+                                         comm_handler.get_global_rank());
+    plan = std::make_unique<CollectiveGemmPlan>(reinterpret_cast<void *>(ctx));
+  } else {
+    auto ctx = CommOverlapP2PBase(
+        buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
+        comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+        comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
+        comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
+        cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
+        cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
+        cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+    plan = std::make_unique<CollectiveGemmPlan>(reinterpret_cast<void *>(ctx));
+  }
+  CollectiveGemmPlan *plan_ptr = plan.get();
+  plan_map[plan_id] = std::move(plan);
+  return plan_ptr;
 }
 
 void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
