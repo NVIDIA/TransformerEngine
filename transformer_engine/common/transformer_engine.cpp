@@ -315,6 +315,13 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
                  " data must be 1D when both dimensions vary");
     }
   }
+  
+  // If both data and columnwise_data are present, they must have the same total size
+  if (t.has_data() && t.has_columnwise_data()) {
+    NVTE_CHECK(t.data.numel() == t.columnwise_data.numel(), "Grouped tensor ", name,
+               " data and columnwise_data must have same total size (got ", t.data.numel(),
+               " vs ", t.columnwise_data.numel(), ")");
+  }
 }
 
 // Helper function to check scale_inv for both input and output
