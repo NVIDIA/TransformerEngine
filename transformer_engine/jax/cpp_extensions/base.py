@@ -193,7 +193,7 @@ def register_primitive(cls, outer_only=False):
         inner_p = core.Primitive(cls.name)
         dispatch.prim_requires_devices_during_lowering.add(inner_p)
         inner_p.multiple_results = cls.multiple_results
-        # Define eager execution implementation
+        # Define eager execution implementation (by invoking it's MLIR lowering)
         inner_p.def_impl(partial(xla.apply_primitive, inner_p))
         inner_p.def_abstract_eval(cls.abstract)
         mlir.register_lowering(inner_p, cls.lowering, platform="cuda")
