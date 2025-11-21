@@ -781,90 +781,88 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
   }
 }
 
-__device__ __forceinline__ uint32_t
-mul_cvt_bf16_to_fp4_8x_round_to_nearest(const uint64_t in03, const uint64_t in47,
-                                        const bf16 scaling_coefficient) {
+__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
+    const uint64_t in03, const uint64_t in47, const bf16 scaling_coefficient) {
   uint32_t out_8x = 0;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
     asm volatile(
-      "{\n"
-      ".reg.f32 zero; \n\t"
-      "mov.b32 zero, 0; \n\t"
-      ".reg.b16 scaling_coeff; \n\t"
-      "mov.b16 scaling_coeff, %3; \n\t"
-      ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-      "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-      "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+        "{\n"
+        ".reg.f32 zero; \n\t"
+        "mov.b32 zero, 0; \n\t"
+        ".reg.b16 scaling_coeff; \n\t"
+        "mov.b16 scaling_coeff, %3; \n\t"
+        ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+        "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+        "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
 
-      ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-      "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+        ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+        "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
 
-      ".reg.b8 f0, f1, f2, f3; \n\t"
-      // Elements reordered to match e2m1x4 packing order (v1,v0)
-      "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
-      "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
-      "mov.b32 %0, {f0, f1, f2, f3};\n"
-      "}"
-      : "=r"(out_8x)
-      : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
+        ".reg.b8 f0, f1, f2, f3; \n\t"
+        // Elements reordered to match e2m1x4 packing order (v1,v0)
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
+        "mov.b32 %0, {f0, f1, f2, f3};\n"
+        "}"
+        : "=r"(out_8x)
+        : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
   } else {
     NVTE_DEVICE_ERROR(
-    "FP4 cvt PTX instructions are architecture-specific. "
-    "Try recompiling with sm_XXXa instead of sm_XXX.");
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return out_8x;
 }
 
-__device__ __forceinline__ uint32_t
-mul_cvt_bf16_to_fp4_8x_stochastic_rounding(const uint64_t in03, const uint64_t in47,
-                                           const bf16 scaling_coefficient, const uint32_t rbits03,
-                                           const uint32_t rbits47) {
+__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
+    const uint64_t in03, const uint64_t in47, const bf16 scaling_coefficient,
+    const uint32_t rbits03, const uint32_t rbits47) {
   uint32_t out_8x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
     asm volatile(
-      "{\n"
-      ".reg.f32 zero; \n\t"
-      "mov.b32 zero, 0; \n\t"
-      ".reg.b16 scaling_coeff; \n\t"
-      "mov.b16 scaling_coeff, %3; \n\t"
-      ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-      "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-      "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+        "{\n"
+        ".reg.f32 zero; \n\t"
+        "mov.b32 zero, 0; \n\t"
+        ".reg.b16 scaling_coeff; \n\t"
+        "mov.b16 scaling_coeff, %3; \n\t"
+        ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+        "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+        "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
 
-      ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-      "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-      "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+        ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+        "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+        "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
 
-      ".reg.b16 b03, b47; \n\t"
-      // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
-      "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
-      "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
-      "mov.b32 %0, {b03, b47};\n"
-      "}"
-      : "=r"(out_8x)
-      : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
-        "r"(rbits03), "r"(rbits47));
+        ".reg.b16 b03, b47; \n\t"
+        // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
+        "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
+        "mov.b32 %0, {b03, b47};\n"
+        "}"
+        : "=r"(out_8x)
+        : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
+          "r"(rbits03), "r"(rbits47));
   } else {
     NVTE_DEVICE_ERROR(
-    "FP4 cvt PTX instructions are architecture-specific. "
-    "Try recompiling with sm_XXXa instead of sm_XXX.");
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
   return out_8x;
 }
@@ -1718,47 +1716,49 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
 }
 
 // Loads single BF16/FP16 element from shared memory state space
-__device__ __forceinline__ bf16
-ld_shared_b16(const bf16 * __restrict__ src_smem) {
+__device__ __forceinline__ bf16 ld_shared_b16(const bf16 *__restrict__ src_smem) {
   const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
   bf16 dst;
-  asm volatile("ld.shared.b16 %0, [%1];" : "=h"(reinterpret_cast<uint16_t &>(dst)) : "r"(src_smem_ptr));
+  asm volatile("ld.shared.b16 %0, [%1];"
+               : "=h"(reinterpret_cast<uint16_t &>(dst))
+               : "r"(src_smem_ptr));
   return dst;
 }
 
 // Loads pair of BF16/FP16 values from shared memory state space
-__device__ __forceinline__ bf16x2
-ld_shared_b32(const bf16x2 * __restrict__ src_smem) {
+__device__ __forceinline__ bf16x2 ld_shared_b32(const bf16x2 *__restrict__ src_smem) {
   const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
   bf16x2 dst;
-  asm volatile("ld.shared.b32 %0, [%1];" : "=r"(reinterpret_cast<uint32_t &>(dst)) : "r"(src_smem_ptr));
+  asm volatile("ld.shared.b32 %0, [%1];"
+               : "=r"(reinterpret_cast<uint32_t &>(dst))
+               : "r"(src_smem_ptr));
   return dst;
 }
 
 // Loads 8x BF16 values from shared memory state space
-__device__ __forceinline__ void
-ld_shared_b128(uint64_t& elts03, uint64_t& elts47, const bf16 * __restrict__ src_smem) {
+__device__ __forceinline__ void ld_shared_b128(uint64_t &elts03, uint64_t &elts47,
+                                               const bf16 *__restrict__ src_smem) {
   const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
   asm volatile(
-    "{\n\t"
-    ".reg.b128 xy; \n\t"
-    "ld.shared.b128 xy, [%2]; \n\t"
-    "mov.b128 {%0, %1}, xy; \n"
-    "}\n"
-    : "=l"(elts03), "=l"(elts47)
-    : "r"(src_smem_ptr));
+      "{\n\t"
+      ".reg.b128 xy; \n\t"
+      "ld.shared.b128 xy, [%2]; \n\t"
+      "mov.b128 {%0, %1}, xy; \n"
+      "}\n"
+      : "=l"(elts03), "=l"(elts47)
+      : "r"(src_smem_ptr));
 }
 
 // Vectorized store of x8 FP4 elements into shared memory state space
-__device__ __forceinline__ void
-st_shared_b32(fp4e2m1x2 * __restrict__ dst_smem, uint32_t fp4_pack_x8) {
+__device__ __forceinline__ void st_shared_b32(fp4e2m1x2 *__restrict__ dst_smem,
+                                              uint32_t fp4_pack_x8) {
   const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
   asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(fp4_pack_x8));
 }
 
 // Vectorized store of x16 FP4 elements into shared memory state space
-__device__ __forceinline__ void
-st_shared_b64(fp4e2m1x2 * __restrict__ dst_smem, uint64_t fp4_pack_x16) {
+__device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
+                                              uint64_t fp4_pack_x16) {
   const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
