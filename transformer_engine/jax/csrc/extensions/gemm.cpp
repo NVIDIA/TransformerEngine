@@ -301,14 +301,14 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
         const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
         const int n = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
         const int k_local = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
-        const int k = k_local * ctx->nranks;  // convert contracting dimension to global size
+        const int k = k_local * cublasmp_ctx->nranks;  // convert contracting dimension to global size
         
         NVTE_CHECK_CUBLASMP(
             nvte_gemm_reduce_scatter(cublasmp_ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(),
                                      bias_.data(), pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
                                      use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
       } else {
-        auto ubuf_out_ = TensorWrapper(ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
+        auto ubuf_out_ = TensorWrapper(userbuffers_ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
         NVTE_CHECK(out_.numel() == output->element_count(),
                   "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
                   " elements ", to_string_like(out_shape), " but got ", output->element_count(),
@@ -324,7 +324,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
         // GEMM dims in column-major order
         const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
         const int n_local = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
-        const int n = n_local * ctx->nranks;  // convert all-gathered dimension to global size
+        const int n = n_local * cublasmp_ctx->nranks;  // convert all-gathered dimension to global size
         const int k = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
 
         NVTE_CHECK_CUBLASMP(
