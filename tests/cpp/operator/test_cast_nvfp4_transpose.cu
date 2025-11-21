@@ -384,7 +384,7 @@ void compare_nvfp4_tensors(const std::string& name,
                                     ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
                     if constexpr (print_detailed_summary) {
                         mismatch_messages.push_back(msg);
-    
+
                         // Optional: limit number of detailed messages to avoid overwhelming output
                         if (mismatch_messages.size() <= 100) {
                             std::cout << "Error in tensor " << name << ": " << msg << std::endl;
@@ -401,7 +401,7 @@ void compare_nvfp4_tensors(const std::string& name,
         // Always report summary - either success or failure
         std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
         std::cout << "Total elements checked: " << (rows * cols) << std::endl;
-    
+
         if (total_mismatches > 0) {
             std::cout << "STATUS: FAILED for output" << std::endl;
             std::cout << "Total mismatches found: " << total_mismatches << std::endl;
@@ -410,7 +410,7 @@ void compare_nvfp4_tensors(const std::string& name,
                 std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
             }
             std::cout << "============================" << std::endl;
-    
+
             GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
         } else {
             std::cout << "STATUS: PASSED for output" << std::endl;
