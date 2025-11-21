@@ -268,7 +268,7 @@ def general_grouped_gemm(
                 out[i] = out_init[start_idx : start_idx + size]
                 start_idx += size
         for i in range(num_gemms):
-            general_gemm(
+            _, bias_or_grad, _, _ = general_gemm(
                 A[i],
                 B[i],
                 quantization_params=quantization_params[i],
@@ -280,6 +280,8 @@ def general_grouped_gemm(
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
             )
+            if grad and use_bias:
+                grad_bias[i] = bias_or_grad
         if single_output:
             out = out_init
 
