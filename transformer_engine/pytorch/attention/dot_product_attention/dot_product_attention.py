@@ -1104,17 +1104,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                     f"Chunked attention does not support {core_attention_bias_type=}! "
                     "Only 'no_bias' is supported with chunk_size."
                 )
-                assert attn_mask_type in ["no_mask", "causal"], (
-                    f"Chunked attention does not support {attn_mask_type=}! "
-                    "Only 'no_mask' and 'causal' are supported with chunk_size."
-                )
+                # For bshd/sbhd: no padding masks allowed; for thd: all masks are OK
+                if qkv_format in ["bshd", "sbhd"]:
+                    assert attn_mask_type in ["no_mask", "causal", "causal_bottom_right"], (
+                        f"Chunked attention does not support {attn_mask_type=}! "
+                        f"Only 'no_mask', 'causal', and 'causal_bottom_right' are supported with chunk_size and {qkv_format=}."
+                    )
                 if qkv_format == "bshd":
                     original_batch_size = query_layer.shape[0]
                     assert query_layer.shape[1] % chunk_size == 0, (
                         f"sequence length = {query_layer.shape[1]} must be divisible by chunk size"
                         f" = {chunk_size}!"
                     )
-                    total_seq_len = original_batch_size * query_layer.shape[1]
                     query_layer, key_layer, value_layer = [
                         x.reshape(-1, chunk_size, *x.shape[2:])
                         for x in [query_layer, key_layer, value_layer]

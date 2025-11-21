@@ -236,7 +236,7 @@ class AttentionParams:
     num_splits: int, default = 1
         The number of kernels to split attention to.
     chunk_size: int, default = None
-        Chunk size for context parallelism.
+        The size of chunks for chunked attention.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -517,18 +517,6 @@ def get_attention_backend(
                     " for compute capability = sm120"
                 )
             use_flash_attention = False
-            use_fused_attention = False
-        if use_flash_attention and chunk_size is not None and qkv_format == "thd":
-            logger.debug(
-                "Disabling FlashAttention as it does not support chunked attention in FP8"
-                " with qkv_format = thd"
-            )
-            use_flash_attention = False
-        if use_fused_attention and chunk_size is not None and qkv_format == "thd":
-            logger.debug(
-                "Disabling FusedAttention as it does not support chunked attention in FP8"
-                " with qkv_format = thd"
-            )
             use_fused_attention = False
 
     # Filter: num_splits
@@ -818,12 +806,6 @@ def get_attention_backend(
                     " chunked attention for THD format"
                 )
                 use_flash_attention = False
-                if pad_between_seqs:
-                    logger.debug(
-                        "Disabling FusedAttention as it does not support context parallelism with"
-                        " chunked attention, THD format, and pad_between_seqs = True"
-                    )
-                    use_fused_attention = False
 
     if context_parallel and use_fused_attention:
         if "bottom_right" in attn_mask_type:
