@@ -304,7 +304,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
           nvte_gemm_reduce_scatter(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
                                    pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
                                    use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
-
+#endif
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
 #ifndef NVTE_WITH_CUBLASMP
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
