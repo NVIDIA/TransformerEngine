@@ -297,13 +297,13 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       // GEMM dims in column-major order
       const int m = (transa) ? rhs_shape[0] : rhs_shape[1];
       const int n = (transb) ? lhs_shape[1] : lhs_shape[0];
-      const int k = (transa) ? rhs_shape[1] : rhs_shape[0];
+      const int k_local = (transa) ? rhs_shape[1] : rhs_shape[0];
+      const int k = k_local * ctx->nranks;  // convert contracting dimension to global size
 
-      k *= ctx->nranks;  // convert contracting dimension to global size
       NVTE_CHECK_CUBLASMP(
           nvte_gemm_reduce_scatter(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
                                   pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
-                                  use_split_accumulator, 0, stream, CUBLASMP_MATMUL_ALGO_SPLIT_P2P));
+                                  use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
 
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
 #ifndef NVTE_WITH_CUBLASMP
@@ -322,14 +322,14 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 #else
       // GEMM dims in column-major order
       const int m = (transa) ? rhs_shape[0] : rhs_shape[1];
-      const int n = (transb) ? lhs_shape[1] : lhs_shape[0];
+      const int n_local = (transb) ? lhs_shape[1] : lhs_shape[0];
+      const int n = n_local * ctx->nranks;  // convert all-gathered dimension to global size
       const int k = (transa) ? rhs_shape[1] : rhs_shape[0];
 
-      n *= ctx->nranks;  // convert all-gathered dimension to global size
       NVTE_CHECK_CUBLASMP(
-          nvte_all_gather_gemm(_ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
+          nvte_all_gather_gemm(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
                                pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
-                               use_split_accumulator, 0, stream, CUBLASMP_MATMUL_ALGO_SPLIT_P2P));
+                               use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
 #endif
     }
   }

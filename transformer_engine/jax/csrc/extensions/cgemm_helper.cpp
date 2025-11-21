@@ -203,8 +203,7 @@ CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> b
       cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 #else
   ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(),
-                                  comm_handler.num_total_devices, comm_handler.get_global_rank(),
-                                  te::cuda::current_device());
+                                  comm_handler.num_total_devices, comm_handler.get_global_rank());
 #endif
 
   CollectiveGemmCtx *ctx_ptr = ctx.get();

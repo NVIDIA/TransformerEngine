@@ -158,9 +158,9 @@ class CommunicatorHandler {
 };
 
 #ifndef NVTE_WITH_CUBLASMP
-typedef CollectiveGemmCtx CommOverlapCore;
+typedef CommOverlapCore CollectiveGemmCtx;
 #else
-typedef CollectiveGemmCtx CommGemmCtx;
+typedef NVTECommGemmCtx CollectiveGemmCtx;
 #endif
 
 // Plan registry for caching collective GEMM executors
