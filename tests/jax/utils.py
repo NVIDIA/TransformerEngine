@@ -1515,11 +1515,14 @@ def assert_allclose(
     with np.printoptions(threshold=sys.maxsize):
         mismatch_mask = ~np.isclose(actual, desired, **tols) # True means mismatch
         diff_indices = np.argwhere(mismatch_mask)
+        seq_set = set()
         for idx in diff_indices:
             idx_tuple = tuple(idx)
-            mismatch_counter += 1
+            seq_set.add(idx_tuple[1])
+            mismatch_counter += 1   
             if mismatch_counter < 1024:
                 print(f"Index {idx_tuple}: a={actual[idx_tuple]}, d={desired[idx_tuple]}")
+        print(f"{sorted(seq_set)}")
         # Batch 0 and head 0
         # for seq_idx in range(actual.shape[1]):
         #     #print("Mismatch at positions:\n", np.argwhere(mismatch_mask[0,:,0,:])) # Pick indices where mask is True

@@ -598,7 +598,7 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
+                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=12
             )
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
             # TODO(rewang): record only self attention and find the reason of cross attention
@@ -644,9 +644,9 @@ class FusedAttnRunner:
             self.window_size,
         )
         # KL tet code
-        import sys
-        with np.printoptions(threshold=sys.maxsize):
-            print(f"self.mask: \n {self.mask}")
+        # import sys
+        # with np.printoptions(threshold=sys.maxsize):
+        #     print(f"self.mask: \n {self.mask}")
 
         if self.cp_size > 1 and self.cp_load_balanced:
             if self.qkv_layout.is_thd():
