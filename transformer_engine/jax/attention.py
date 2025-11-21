@@ -531,7 +531,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
 
-    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation 
+    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
     # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
     # It does not need to involve SW for this mask's creation
 
