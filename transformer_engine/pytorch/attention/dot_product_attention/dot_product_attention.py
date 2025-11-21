@@ -1107,8 +1107,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 # For bshd/sbhd: no padding masks allowed; for thd: all masks are OK
                 if qkv_format in ["bshd", "sbhd"]:
                     assert attn_mask_type in ["no_mask", "causal", "causal_bottom_right"], (
-                        f"Chunked attention does not support {attn_mask_type=}! "
-                        f"Only 'no_mask', 'causal', and 'causal_bottom_right' are supported with chunk_size and {qkv_format=}."
+                        f"Chunked attention does not support {attn_mask_type=}! Only 'no_mask',"
+                        " 'causal', and 'causal_bottom_right' are supported with chunk_size and"
+                        f" {qkv_format=}."
                     )
                 if qkv_format == "bshd":
                     original_batch_size = query_layer.shape[0]
