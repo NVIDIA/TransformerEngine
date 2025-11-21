@@ -121,7 +121,7 @@ def cross_entropy_backward(
         element_mul_kernel[(n_rows,)](
             _input,
             _input.stride(-2),
-            grad_output,
+            grad_output.contiguous(),
             1 if grad_output.numel() > 1 else 0,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
