@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 set -eoxu pipefail
 
 export NVTE_PYTORCH_FORCE_BUILD=TRUE
