@@ -295,14 +295,15 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
   check_shape_array(t.tensor_offsets, "tensor_offsets");
-  
+
   // tensor_offsets is required if any dimension varies
   // (i.e., required unless all_same_shape())
   if (!t.all_same_shape()) {
-    NVTE_CHECK(t.tensor_offsets.dptr != nullptr, "Grouped tensor ", name,
-               " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
+    NVTE_CHECK(
+        t.tensor_offsets.dptr != nullptr, "Grouped tensor ", name,
+        " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
   }
-  
+
   // Validate data shape based on dimension uniformity
   if (t.has_data()) {
     if (t.all_same_shape() || t.all_same_first_dim() || t.all_same_last_dim()) {
@@ -315,12 +316,12 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
                  " data must be 1D when both dimensions vary");
     }
   }
-  
+
   // If both data and columnwise_data are present, they must have the same total size
   if (t.has_data() && t.has_columnwise_data()) {
     NVTE_CHECK(t.data.numel() == t.columnwise_data.numel(), "Grouped tensor ", name,
-               " data and columnwise_data must have same total size (got ", t.data.numel(),
-               " vs ", t.columnwise_data.numel(), ")");
+               " data and columnwise_data must have same total size (got ", t.data.numel(), " vs ",
+               t.columnwise_data.numel(), ")");
   }
 }
 

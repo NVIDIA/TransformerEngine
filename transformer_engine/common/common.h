@@ -286,18 +286,18 @@ struct GroupedTensor {
  public:
   /*
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
-  
+
   Shape Representation:
   - first_dims and last_dims are OPTIONAL (can be empty if dimension is uniform across all tensors)
   - If first_dims is empty: all tensors have the same first dimension
   - If last_dims is empty: all tensors have the same last dimension
   - If both are empty: all tensors have identical shapes
   - If both are set: each tensor has unique shape (first_dims[i], last_dims[i])
-  
+
   Data Layout:
   - data.shape is 2D when at least one dimension is uniform (all_same_first_dim() || all_same_last_dim())
   - data.shape is 1D when both dimensions vary (varying_both_dims())
-  
+
   All data is stored on device in contiguous layout.
   */
 
@@ -344,25 +344,26 @@ struct GroupedTensor {
 
   bool has_data() const noexcept { return data.dptr != nullptr; }
   bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
-  
+
   bool all_same_first_dim() const noexcept { return first_dims.shape.empty(); }
   bool all_same_last_dim() const noexcept { return last_dims.shape.empty(); }
-  bool all_same_shape() const noexcept { 
-    return first_dims.shape.empty() && last_dims.shape.empty(); 
+  bool all_same_shape() const noexcept {
+    return first_dims.shape.empty() && last_dims.shape.empty();
   }
   bool varying_both_dims() const noexcept {
     return !first_dims.shape.empty() && !last_dims.shape.empty();
   }
 
-  size_t get_common_first_dim() const noexcept { 
+  size_t get_common_first_dim() const noexcept {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
     NVTE_CHECK(data.shape.size() == 2, "Data must be 2D");
-    return data.shape[0] / num_tensors; 
+    return data.shape[0] / num_tensors;
   }
-  size_t get_common_last_dim() const noexcept { 
-    NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors thus cannot get common last dim");
+  size_t get_common_last_dim() const noexcept {
+    NVTE_CHECK(all_same_last_dim(),
+               "Last dim varies across tensors thus cannot get common last dim");
     NVTE_CHECK(data.shape.size() == 2, "Data must be 2D for getting common last dim");
-    return data.shape[1] / num_tensors; 
+    return data.shape[1] / num_tensors;
   }
 
   DType dtype() const {
