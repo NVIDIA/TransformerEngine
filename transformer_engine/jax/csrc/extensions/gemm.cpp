@@ -280,11 +280,11 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                ", out_shape[1]=", out_shape[1]);
     auto ctx = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, buffer_dtype,
                                                                      collective_op);
+    auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
+    
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
 #ifndef NVTE_WITH_CUBLASMP
       auto ubuf_out_ = TensorWrapper(ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
-      // Prepare the auxiliary buffer for the reduce-scattered GEMM output
-      auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
       NVTE_CHECK(out_.numel() == output->element_count(),
                  "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
                  " elements ", to_string_like(out_shape), " but got ", output->element_count(),
@@ -302,14 +302,12 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       NVTE_CHECK_CUBLASMP(
           nvte_gemm_reduce_scatter(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
-                                  pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
-                                  use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
+                                   pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
+                                   use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
 
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
 #ifndef NVTE_WITH_CUBLASMP
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
-
-      auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
       NVTE_CHECK(out_.numel() == output->element_count(),
                  "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
                  " elements ", to_string_like(out_shape), " but got ", output->element_count(),
