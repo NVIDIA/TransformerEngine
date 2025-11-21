@@ -139,10 +139,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 template <typename IType, bool kWidthAligned>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    nvfp4_2d_partial_cast_kernel(const IType *input, uint8_t *output, const float *scale_ptr,
+    nvfp4_2d_partial_cast_kernel(const IType *input, uint8_t *output, const float *decode_scale_ptr,
                                  const size_t scale_stride_h, const size_t scale_stride_w,
-                                 const size_t h, const size_t w, const size_t start_offset,
-                                 const size_t len) {
+                                 const float *global_scale_ptr, const size_t h, const size_t w,
+                                 const size_t start_offset, const size_t len) {
   constexpr int kNumOutputElemsPerBank = 4;
   constexpr int kThreadsPerWarp = 32;
   constexpr int kLoopsPerRow = (kTileDim + kThreadsPerWarp - 1) / kThreadsPerWarp;
@@ -156,8 +156,19 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   const size_t shard_end = start_offset + len;
   const IType *input_minus_offset = input - start_offset;
 
-  const float tile_scale = scale_ptr[tile_h * scale_stride_h + tile_w * scale_stride_w];
-  const float2 scale_vec = make_float2(tile_scale, tile_scale);
+  float global_encode_scale = global_scale_ptr[0];
+  if (global_encode_scale <= 0.f) {
+    global_encode_scale = 1.f;
+  }
+  const float global_decode_scale = 1.0f / global_encode_scale;
+
+  const float tile_decode_scale =
+      decode_scale_ptr[tile_h * scale_stride_h + tile_w * scale_stride_w];
+  float tile_encode_val = (tile_decode_scale > 0.f)
+                              ? 1.0f / (tile_decode_scale * global_decode_scale)
+                              : TypeExtrema<float>::max;
+  tile_encode_val = fminf(tile_encode_val, TypeExtrema<float>::max);
+  const float2 scale_vec = make_float2(tile_encode_val, tile_encode_val);
 
   bool skip_store = true;
   for (int i = 0; i < kRowsPerWarp; ++i) {
@@ -290,10 +301,10 @@ void nvfp4_2d_compute_partial_amax(const Tensor inp, Tensor amax, size_t h, size
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale, size_t h,
-                           size_t w, size_t scale_stride_h, size_t scale_stride_w,
-                           size_t start_offset, size_t block_len, const DType out_dtype,
-                           cudaStream_t stream) {
+void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
+                           const Tensor global_scale, size_t h, size_t w, size_t scale_stride_h,
+                           size_t scale_stride_w, size_t start_offset, size_t block_len,
+                           const DType out_dtype, cudaStream_t stream) {
   NVTE_CHECK(block_len == 16, "NVFP4 2D supports 16x16 tiles only (block_len = 16).");
   NVTE_CHECK(out.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
 
@@ -318,7 +329,8 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale, siz
                   reinterpret_cast<const inp_dtype *>(inp.data.dptr),
                   reinterpret_cast<uint8_t *>(out.data.dptr),
                   reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
-                  h, w, start_offset, len);))
+                  reinterpret_cast<const float *>(global_scale.data.dptr), h, w, start_offset,
+                  len);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -336,15 +348,16 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
       amax_stride_w, start_offset, block_len, stream);
 }
 
-void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out,
-                                const NVTETensor scale, size_t h, size_t w,
+void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
+                                const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream) {
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_2d_partial_cast(
-      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out), *convertNVTETensorCheck(scale), h,
-      w, scale_stride_h, scale_stride_w, start_offset, block_len, stream);
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out), *convertNVTETensorCheck(scale),
+      *convertNVTETensorCheck(global_scale), h, w, scale_stride_h, scale_stride_w, start_offset,
+      block_len, stream);
 }
 
 void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_rowwise_amax_A,

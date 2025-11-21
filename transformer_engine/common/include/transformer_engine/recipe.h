@@ -133,8 +133,9 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
                                         cudaStream_t stream);
 
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
-                                size_t h, size_t w, size_t scale_stride_h, size_t scale_stride_w,
-                                size_t start_offset, size_t block_len, cudaStream_t stream);
+                                const NVTETensor global_scale, size_t h, size_t w,
+                                size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
+                                size_t block_len, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

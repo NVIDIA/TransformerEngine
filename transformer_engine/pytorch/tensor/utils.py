@@ -519,12 +519,17 @@ def _cast_master_weights_to_nvfp4_2d(
     scales: List[torch.Tensor] = []
     scale_inv_tmp: List[torch.Tensor] = []
     fp8_scale_targets: List[torch.Tensor] = []
+    global_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
+    global_amax_views: List[torch.Tensor] = [
+        global_amaxes[i : i + 1] for i in range(len(params))
+    ]
 
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
         scale_shape = scale_shapes[i]
         amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
         scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
         inv_tmp = torch.empty_like(scale)
+        global_amax_view = global_amax_views[i]
 
         assert model_weight._rowwise_scale_inv is not None
 
@@ -539,27 +544,49 @@ def _cast_master_weights_to_nvfp4_2d(
             tex.nvfp4_2d_compute_partial_amax(
                 master_weight, amax, h, w, start_offset, block_len
             )
+            tex.compute_amax(master_weight, global_amax_view)
 
     if packed_amaxes.numel() > 0:
         torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
 
-    if len(amaxes) > 0:
-        multi_tensor_applier(
-            multi_tensor_compute_scale_and_scale_inv,
-            dummy_overflow_buf,
-            [amaxes, scales, scale_inv_tmp],
-            6.0,
-            False,
-            0.0,
-        )
+    if global_amaxes.numel() > 0:
+        torch.distributed.all_reduce(global_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
 
+    global_scale_tensor = global_amaxes.clone()
+    if len(amaxes) > 0:
+        finfo = torch.finfo(torch.float32)
+        fp4_max = 6.0
+        fp8_max = 448.0
+        tiny = finfo.tiny
+
+        safe_global_amax = torch.clamp(global_amaxes, min=tiny)
+        global_encode_scales = torch.clamp((fp8_max * fp4_max) / safe_global_amax, max=finfo.max)
+        global_encode_scales = torch.where(
+            global_amaxes > 0, global_encode_scales, torch.ones_like(global_encode_scales)
+        )
+        global_scale_tensor.copy_(global_encode_scales)
+        global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
+
+        for amax_tensor, scale_tensor, inv_tmp_tensor, global_scale in zip(
+            amaxes, scales, scale_inv_tmp, global_scale_views
+        ):
+            per_block_decode_scale = torch.clamp(
+                (amax_tensor / fp4_max) * global_scale, max=finfo.max
+            )
+            scale_tensor.copy_(per_block_decode_scale)
+            inv_tmp_tensor.copy_(per_block_decode_scale)
+        # Update _rowwise_scale_inv with reduced per-block decode scales.
         for inv_tmp, target in zip(scale_inv_tmp, fp8_scale_targets):
             fp8_view = inv_tmp.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
             target.copy_(fp8_view)
+    else:
+        global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-    for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
-        params, scales
-    ):
+    for (
+        (model_weight, master_weight, start_offset, model_weight_fragment),
+        per_block_decode_scale,
+        global_scale,
+    ) in zip(params, scales, global_scale_views):
         if master_weight is None or master_weight.numel() == 0:
             continue
 
@@ -569,7 +596,14 @@ def _cast_master_weights_to_nvfp4_2d(
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
         tex.nvfp4_2d_partial_cast(
-            master_weight, model_weight_fragment, scale, h, w, start_offset, block_len
+            master_weight,
+            model_weight_fragment,
+            per_block_decode_scale,
+            global_scale,
+            h,
+            w,
+            start_offset,
+            block_len,
         )
 
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
