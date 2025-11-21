@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 # Configuration
 BASE_IMAGE="nvcr.io/nvidia/pytorch"
 TAG_SUFFIX="-py3"
