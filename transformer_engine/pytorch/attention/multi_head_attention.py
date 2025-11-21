@@ -787,20 +787,16 @@ class MultiheadAttention(torch.nn.Module):
             else:
                 # For non-CP, we can chunk the input tensor.
                 if self.qkv_format == "bshd":
-                    total_seq_len = hidden_states.shape[1] * hidden_states.shape[0]
                     hidden_states = hidden_states.reshape(-1, chunk_size, *input_shape[2:])
                 elif self.qkv_format == "sbhd":
-                    total_seq_len = hidden_states.shape[1] * hidden_states.shape[0]
                     hidden_states = hidden_states.reshape(chunk_size, -1, *hidden_states.shape[2:])
-                else:  # thd
-                    total_seq_len = hidden_states.shape[0]
                 if cu_seqlens_q is not None:
                     cu_seqlens_q, cu_seqlens_q_padded = dpa_utils.thd_chunkify(
-                        cu_seqlens_q, cu_seqlens_q_padded, chunk_size, total_seq_len
+                        cu_seqlens_q, cu_seqlens_q_padded, chunk_size
                     )
                 if cu_seqlens_kv is not None:
                     cu_seqlens_kv, cu_seqlens_kv_padded = dpa_utils.thd_chunkify(
-                        cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size, total_seq_len
+                        cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size
                     )
                 max_seqlen_q = max_seqlen_kv = chunk_size
 

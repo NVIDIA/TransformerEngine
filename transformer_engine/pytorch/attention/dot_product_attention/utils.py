@@ -2290,7 +2290,6 @@ def thd_chunkify(
     cu_seqlens: torch.Tensor,
     cu_seqlens_padded: torch.Tensor,
     chunk_size: int,
-    total_seq_len: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Perform chunkification of sequences stored in `thd` format when chunked
@@ -2306,16 +2305,14 @@ def thd_chunkify(
     -------
     Given original sequence lengths `[10, 20]` with three padding tokens
     appended to the second sequence and `chunk_size = 8`, the sequences are
-    split into `[8, 2]` and `[8, 8, 2 (+3 padding)]`.
+    split into `[8, 2]` and `[8, 8, 4 (+3 padding)]`.
 
         cu_seqlens        : [0, 10, 30]  →  [0, 8, 10, 18, 30]
         cu_seqlens_padded : [0, 10, 33]  →  [0, 8, 10, 18, 33]
-
-    `total_seq_len` denotes the total number of (padded) tokens in the input
-    tensor—that is, the length of the `t` dimension in `thd` layout.
     """
     if cu_seqlens_padded is None:
         cu_seqlens_padded = cu_seqlens
+    total_seq_len = cu_seqlens_padded[-1].item()
     new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify(
         cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size
     )
@@ -2329,7 +2326,6 @@ def thd_chunkify_p2p(
     chunk_size: int,
     cp_rank: int,
     cp_size: int,
-    total_seq_len: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Utility function used in chunked attention support for thd P2P context parallelism.
@@ -2339,7 +2335,7 @@ def thd_chunkify_p2p(
     at the beginning. In this case returned cu_seqlens will be used both as
     a cu_seqlens_q and as a cu_seqlens_kv.
     """
-
+    total_seq_len = cu_seqlens_padded[-1].item()
     new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify_p2p(
         cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size, cp_rank, cp_size
     )
@@ -2347,7 +2343,7 @@ def thd_chunkify_p2p(
     return new_cu_seqlens, new_cu_seqlens_padded
 
 
-def thd_seq_tweak_below_diagonal(
+def thd_chunkify_p2p_below_diagonal(
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_kv_halfs: torch.Tensor,
     cu_seqlens_padded: torch.Tensor,
@@ -2387,7 +2383,7 @@ def thd_seq_tweak_below_diagonal(
     )
 
 
-def thd_seq_tweak_above_diagonal(
+def thd_chunkify_p2p_above_diagonal(
     cu_seqlens_q_halfs: torch.Tensor,
     cu_seqlens_kv: torch.Tensor,
     cu_seqlens_padded: torch.Tensor,

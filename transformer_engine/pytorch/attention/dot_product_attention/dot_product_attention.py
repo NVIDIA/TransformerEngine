@@ -1125,21 +1125,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                         f"sequence length = {query_layer.shape[0]} must be divisible by chunk size"
                         f" = {chunk_size}!"
                     )
-                    total_seq_len = original_batch_size * query_layer.shape[0]
                     query_layer, key_layer, value_layer = [
                         x.reshape(chunk_size, -1, *x.shape[2:])
                         for x in [query_layer, key_layer, value_layer]
                     ]
-                else:
-                    total_seq_len = query_layer.shape[0]
                 if cu_seqlens_q is not None:
                     cu_seqlens_q, cu_seqlens_q_padded = dpa_utils.thd_chunkify(
-                        cu_seqlens_q, cu_seqlens_q_padded, chunk_size, total_seq_len
+                        cu_seqlens_q, cu_seqlens_q_padded, chunk_size
                     )
                     max_seqlen_q = chunk_size
                 if cu_seqlens_kv is not None:
                     cu_seqlens_kv, cu_seqlens_kv_padded = dpa_utils.thd_chunkify(
-                        cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size, total_seq_len
+                        cu_seqlens_kv, cu_seqlens_kv_padded, chunk_size
                     )
                     max_seqlen_kv = chunk_size
             elif chunk_size is not None and context_parallel:

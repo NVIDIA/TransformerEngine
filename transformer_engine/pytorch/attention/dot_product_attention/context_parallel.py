@@ -514,14 +514,12 @@ def cp_p2p_fwd_prepare_qkv(
             cu_seqlens_q_per_step = cu_seqlens_q // cp_size
             cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
             if chunk_size is not None:
-                num_tokens = q_part.shape[0]
                 cu_seqlens_q_per_step, cu_seqlens_q_padded_per_step = dpa_utils.thd_chunkify_p2p(
                     cu_seqlens_q_per_step,
                     cu_seqlens_q_padded_per_step,
                     chunk_size,
                     rank,
                     cp_size,
-                    num_tokens,
                 )
                 cu_seqlens_kv_per_step, cu_seqlens_kv_padded_per_step = dpa_utils.thd_chunkify_p2p(
                     cu_seqlens_kv_per_step,
@@ -529,7 +527,6 @@ def cp_p2p_fwd_prepare_qkv(
                     chunk_size,
                     rank,
                     cp_size,
-                    num_tokens,
                 )
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
@@ -570,7 +567,7 @@ def cp_p2p_fwd_prepare_qkv(
                     cu_seqlens_kv_per_step,
                     cu_seqlens_q_padded_per_step,
                     cu_seqlens_kv_padded_per_step,
-                ) = dpa_utils.thd_seq_tweak_below_diagonal(
+                ) = dpa_utils.thd_chunkify_p2p_below_diagonal(
                     cu_seqlens_q_per_step,
                     cu_seqlens_kv_per_step,
                     cu_seqlens_q_padded,
@@ -626,7 +623,7 @@ def cp_p2p_fwd_prepare_qkv(
                     cu_seqlens_kv_per_step,
                     cu_seqlens_q_padded_per_step,
                     cu_seqlens_kv_padded_per_step,
-                ) = dpa_utils.thd_seq_tweak_above_diagonal(
+                ) = dpa_utils.thd_chunkify_p2p_above_diagonal(
                     cu_seqlens_q_per_step,
                     cu_seqlens_kv_per_step,
                     cu_seqlens_q_padded,
