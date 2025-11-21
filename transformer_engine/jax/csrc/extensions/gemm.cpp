@@ -101,29 +101,34 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
 
   // Init UB buffer
   if (collective_op != JAXX_Collective_Op::NONE) {
-    auto &comm_handler = CommunicatorHandler::get();
-    std::vector<size_t> lhs_shape = {
-        product(lhs.dimensions(), 0, lhs_axis_boundary),
-        product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
-    std::vector<size_t> rhs_shape = {
-        product(rhs.dimensions(), 0, rhs_axis_boundary),
-        product(rhs.dimensions(), rhs_axis_boundary, rhs.dimensions().size())};
+    if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+      auto _ = CollectiveGemmPlanRegistry::getInstance().get_cublasmp_context();
+    } else {
+      auto &comm_handler = CommunicatorHandler::get();
+      std::vector<size_t> lhs_shape = {
+          product(lhs.dimensions(), 0, lhs_axis_boundary),
+          product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
+      std::vector<size_t> rhs_shape = {
+          product(rhs.dimensions(), 0, rhs_axis_boundary),
+          product(rhs.dimensions(), rhs_axis_boundary, rhs.dimensions().size())};
 
-    std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
-                                     (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
+      std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
+                                      (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
 
-    std::vector<size_t> buffer_shape{0, 0};
-    DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-    if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
-      buffer_shape[1] = lhs_shape[1];
-      buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-      buffer_shape[0] = out_shape[0];
-      buffer_shape[1] = out_shape[1];
+      std::vector<size_t> buffer_shape{0, 0};
+      DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
+      if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+        buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
+        buffer_shape[1] = lhs_shape[1];
+        buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
+      } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+        buffer_shape[0] = out_shape[0];
+        buffer_shape[1] = out_shape[1];
+      }
+
+      auto _ = CollectiveGemmPlanRegistry::getInstance().get_userbuffers_context(
+          buffer_shape, buffer_dtype, collective_op);
     }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, buffer_dtype,
-                                                                   collective_op);
   }
   return ffi_with_cuda_error_check();
 }
@@ -278,57 +283,67 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     }
     NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
                ", out_shape[1]=", out_shape[1]);
-    auto ctx = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, buffer_dtype,
-                                                                     collective_op);
+
+    bool use_cublasmp = getenv<bool>("NVTE_WITH_CUBLASMP", false);
+    NVTECommGemmCtx *cublasmp_ctx = nullptr;
+    CommOverlapCore *userbuffers_ctx = nullptr;
+    if (use_cublasmp) {
+      cublasmp_ctx = CollectiveGemmPlanRegistry::getInstance().get_cublasmp_context();
+    } else {
+      userbuffers_ctx = CollectiveGemmPlanRegistry::getInstance().get_userbuffers_context(
+          buffer_shape, buffer_dtype, collective_op);
+    }
+
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
-
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-#ifndef NVTE_WITH_CUBLASMP
-      auto ubuf_out_ = TensorWrapper(ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
-      NVTE_CHECK(out_.numel() == output->element_count(),
-                 "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
-                 " elements ", to_string_like(out_shape), " but got ", output->element_count(),
-                 " elements ", to_string_like(output->dimensions()));
+      if (use_cublasmp) {
+        // GEMM dims in column-major order
+        const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
+        const int n = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
+        const int k_local = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
+        const int k = k_local * ctx->nranks;  // convert contracting dimension to global size
+        
+        NVTE_CHECK_CUBLASMP(
+            nvte_gemm_reduce_scatter(cublasmp_ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(),
+                                     bias_.data(), pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
+                                     use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
+      } else {
+        auto ubuf_out_ = TensorWrapper(ctx->get_ubuf_dptr(), buffer_shape, out_dtype);
+        NVTE_CHECK(out_.numel() == output->element_count(),
+                  "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
+                  " elements ", to_string_like(out_shape), " but got ", output->element_count(),
+                  " elements ", to_string_like(output->dimensions()));
 
-      // Launch GEMM+RS
-      ctx->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_, pre_gelu_,
-                            workspace_, grad, false, use_split_accumulator, out_, stream);
-#else
-      // GEMM dims in column-major order
-      const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
-      const int n = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
-      const int k_local = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
-      const int k = k_local * ctx->nranks;  // convert contracting dimension to global size
-
-      NVTE_CHECK_CUBLASMP(
-          nvte_gemm_reduce_scatter(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
-                                   pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
-                                   use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
-#endif
+        // Launch GEMM+RS
+        userbuffers_ctx->split_overlap_rs(
+            rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_, pre_gelu_, workspace_,
+            grad, false, use_split_accumulator, out_, stream);
+      }
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
-#ifndef NVTE_WITH_CUBLASMP
-      auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
-      NVTE_CHECK(out_.numel() == output->element_count(),
-                 "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
-                 " elements ", to_string_like(out_shape), " but got ", output->element_count(),
-                 " elements ", to_string_like(output->dimensions()));
-      // Copy the distributed LHS operand into the local chunk of the communication buffer
-      ctx->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
-      // Launch AG+GEMM
-      ctx->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                            workspace_, grad, false, use_split_accumulator, aux_out_, stream);
-#else
-      // GEMM dims in column-major order
-      const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
-      const int n_local = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
-      const int n = n_local * ctx->nranks;  // convert all-gathered dimension to global size
-      const int k = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
+      if (use_cublasmp) {
+        // GEMM dims in column-major order
+        const int m = (rhs_transposed) ? rhs_shape[0] : rhs_shape[1];
+        const int n_local = (lhs_transposed) ? lhs_shape[1] : lhs_shape[0];
+        const int n = n_local * ctx->nranks;  // convert all-gathered dimension to global size
+        const int k = (rhs_transposed) ? rhs_shape[1] : rhs_shape[0];
 
-      NVTE_CHECK_CUBLASMP(
-          nvte_all_gather_gemm(ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(), bias_.data(),
-                               pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
-                               use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
-#endif
+        NVTE_CHECK_CUBLASMP(
+            nvte_all_gather_gemm(cublasmp_ctx, m, n, k, rhs_.data(), lhs_.data(), out_.data(),
+                                 bias_.data(), pre_gelu_.data(), rhs_transposed, lhs_transposed, grad,
+                                 use_split_accumulator, 0, stream, kNVTECommGemmAlgoSplitP2P));
+      } else {
+        auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
+        NVTE_CHECK(out_.numel() == output->element_count(),
+                  "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
+                  " elements ", to_string_like(out_shape), " but got ", output->element_count(),
+                  " elements ", to_string_like(output->dimensions()));
+        // Copy the distributed LHS operand into the local chunk of the communication buffer
+        userbuffers_ctx->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
+        // Launch AG+GEMM
+        userbuffers_ctx->split_overlap_ag(
+            rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_, workspace_,
+            grad, false, use_split_accumulator, aux_out_, stream);
+      }
     }
   }
 

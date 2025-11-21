@@ -63,6 +63,11 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
 
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
                                int tp_size) {
+  if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_cublasmp_context();
+    return;
+  }
+
   // Validate inputs
   NVTE_CHECK(num_devices_per_process == 1,
              "num_devices_per_process must be == 1, got num_devices_per_process=",
@@ -138,8 +143,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_context(buffer_shape, DType::kFloat32,
-                                                                 JAXX_Collective_Op::ALL_GATHER);
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_userbuffers_context(
+      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -157,9 +162,8 @@ int GetCgemmNumMaxStreams() {
   return config.num_max_streams;
 }
 
-CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> buffer_shape,
-                                                           DType dtype,
-                                                           JAXX_Collective_Op collective_op) {
+CommOverlapCore *CollectiveGemmPlanRegistry::get_userbuffers_context(
+    std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -191,8 +195,7 @@ CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> b
                "(2) num_devices_per_process == 1 (single device per process)");
   }
 
-  std::unique_ptr<CollectiveGemmCtx> ctx;
-#ifndef NVTE_WITH_CUBLASMP
+  std::unique_ptr<CommOverlapCore> ctx;
   ctx = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
       comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
@@ -201,12 +204,18 @@ CollectiveGemmCtx *CollectiveGemmPlanRegistry::get_context(std::vector<size_t> b
       cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
       cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
-#else
+
+  CommOverlapCore *ctx_ptr = ctx.get();
+  plan_map[plan_id] = std::move(ctx);
+  return ctx_ptr;
+}
+
+NVTECommGemmCtx *get_cublasmp_context() {
+  std::unique_ptr<NVTECommGemmCtx> ctx;
   ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(),
                                   comm_handler.num_total_devices, comm_handler.get_global_rank());
-#endif
 
-  CollectiveGemmCtx *ctx_ptr = ctx.get();
+  NVTECommGemmCtx *ctx_ptr = ctx.get();
   plan_map[plan_id] = std::move(ctx);
   return ctx_ptr;
 }
