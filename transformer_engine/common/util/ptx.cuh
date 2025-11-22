@@ -1749,19 +1749,23 @@ __device__ __forceinline__ void ld_shared_b128(uint64_t &elts03, uint64_t &elts4
       : "r"(src_smem_ptr));
 }
 
+#if FP4_TYPE_SUPPORTED
 // Vectorized store of x8 FP4 elements into shared memory state space
 __device__ __forceinline__ void st_shared_b32(fp4e2m1x2 *__restrict__ dst_smem,
                                               uint32_t fp4_pack_x8) {
   const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
   asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(fp4_pack_x8));
 }
+#endif
 
 // Vectorized store of x16 FP4 elements into shared memory state space
+#if FP4_TYPE_SUPPORTED
 __device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
                                               uint64_t fp4_pack_x16) {
   const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
+#endif
 }  // namespace ptx
 
 namespace {
