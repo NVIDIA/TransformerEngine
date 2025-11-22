@@ -164,10 +164,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
   const float tile_decode_scale =
       decode_scale_ptr[tile_h * scale_stride_h + tile_w * scale_stride_w];
+  constexpr float kFp32Max = 3.402823466e+38F;
   float tile_encode_val = (tile_decode_scale > 0.f)
                               ? 1.0f / (tile_decode_scale * global_decode_scale)
-                              : TypeExtrema<float>::max;
-  tile_encode_val = fminf(tile_encode_val, TypeExtrema<float>::max);
+                              : kFp32Max;
+  tile_encode_val = fminf(tile_encode_val, kFp32Max);
   const float2 scale_vec = make_float2(tile_encode_val, tile_encode_val);
 
   bool skip_store = true;
@@ -304,7 +305,7 @@ void nvfp4_2d_compute_partial_amax(const Tensor inp, Tensor amax, size_t h, size
 void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
                            const Tensor global_scale, size_t h, size_t w, size_t scale_stride_h,
                            size_t scale_stride_w, size_t start_offset, size_t block_len,
-                           const DType out_dtype, cudaStream_t stream) {
+                           cudaStream_t stream) {
   NVTE_CHECK(block_len == 16, "NVFP4 2D supports 16x16 tiles only (block_len = 16).");
   NVTE_CHECK(out.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
 
