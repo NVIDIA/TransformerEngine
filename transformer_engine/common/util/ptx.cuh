@@ -122,6 +122,8 @@ constexpr bool is_supported_arch() {
                          ptx::FamilySpecific<120>)
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
+#define ARCH_HAS_REDUX_F32  \
+  NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
