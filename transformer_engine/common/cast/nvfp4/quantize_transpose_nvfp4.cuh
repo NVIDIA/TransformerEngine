@@ -1161,17 +1161,17 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   using namespace quantize_transpose_kernel;
   using namespace ptx;
 
-  if (!use_2d_quantization && input.dtype() == DType::kBFloat16) {
-    quantize_transpose_persistent_1D(input, noop, output, quant_config, stream);
-    return;
-  }
-
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
+
+  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16) && return_transpose) {
+    quantize_transpose_persistent_1D(input, noop, output, quant_config, stream);
+    return;
+  }
 
   constexpr bool COMPUTE_ACTIVATIONS = false;
   using ParamOP = Empty;
