@@ -265,6 +265,20 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
                                                         float max_fp8, int force_pow_2_scales,
                                                         float epsilon, cudaStream_t stream);
 
+/*!
+ * \brief Perform grouped-tensor absolute maximum reduction (amax)
+ *
+ *  This function is experimental and the API is not stable. Group_ prefix means contiguous input concatenated
+ *
+ *  \param[in]      input           Input tensor, assumed contiguous in memory and split on dimension 0.
+ *  \param[in,out]  outputs         Array of output tensors.
+ *  \param[in]      split_sections  Array specifying splits in dimension 0 for each output tensor.
+ *  \param[in]      num_tensors     Number of output tensors, must be > 0.
+ *  \param[in]      stream          CUDA stream used for the operation.
+ */
+void nvte_group_tensor_amax(const NVTETensor input, NVTETensor *outputs, const int *split_sections,
+                            const size_t num_tensors, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

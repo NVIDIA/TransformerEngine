@@ -10,6 +10,7 @@
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/hadamard_transform.h>
+#include <transformer_engine/multi_tensor.h>
 
 #include <cuda/barrier>
 
@@ -554,7 +555,7 @@ void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
 
 }  // namespace transformer_engine
 
-// Naming convention: "Group" kernels here means contiguous input concatenated 
+// Naming convention: "Group" kernels here means contiguous input concatenated
 // While "Multi" kernels are processing a list of pointers, like the zero amax kernel
 
 // Group hadamard transform API is unlike other multi-input & multi-output APIs
