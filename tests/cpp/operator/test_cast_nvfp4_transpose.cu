@@ -349,7 +349,6 @@ void compare_nvfp4_tensors(const std::string& name,
                            const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
                            const int rows, const int cols,
                            double atol = 1e-5, double rtol = 1e-8) {
-    constexpr bool print_detailed_summary = false;
     std::vector<std::string> mismatch_messages;
     size_t total_mismatches = 0;
 
@@ -382,42 +381,36 @@ void compare_nvfp4_tensors(const std::string& name,
                                     std::to_string(t) + " vs " + std::to_string(r) +
                                     " (abs_diff: " + std::to_string(fabs(t - r)) +
                                     ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
-                    if constexpr (print_detailed_summary) {
-                        mismatch_messages.push_back(msg);
+                    mismatch_messages.push_back(msg);
 
-                        // Optional: limit number of detailed messages to avoid overwhelming output
-                        if (mismatch_messages.size() <= 100) {
-                            std::cout << "Error in tensor " << name << ": " << msg << std::endl;
-                        }
-                    } else {
-                        GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
+                    // Optional: limit number of detailed messages to avoid overwhelming output
+                    if (mismatch_messages.size() <= 100) {
+                        std::cout << "Error in tensor " << name << ": " << msg << std::endl;
                     }
                 }
             }
         }
     }
 
-    if constexpr (print_detailed_summary) {
-        // Always report summary - either success or failure
-        std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
-        std::cout << "Total elements checked: " << (rows * cols) << std::endl;
+    // Always report summary - either success or failure
+    std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
+    std::cout << "Total elements checked: " << (rows * cols) << std::endl;
 
-        if (total_mismatches > 0) {
-            std::cout << "STATUS: FAILED for output" << std::endl;
-            std::cout << "Total mismatches found: " << total_mismatches << std::endl;
-            std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
-            if (mismatch_messages.size() > 100) {
-                std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
-            }
-            std::cout << "============================" << std::endl;
-
-            GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
-        } else {
-            std::cout << "STATUS: PASSED for output" << std::endl;
-            std::cout << "All elements match within tolerance!" << std::endl;
-            std::cout << "Tensor " << name << " is IDENTICAL to reference" << std::endl;
-            std::cout << "============================" << std::endl;
+    if (total_mismatches > 0) {
+        std::cout << "STATUS: FAILED for output" << std::endl;
+        std::cout << "Total mismatches found: " << total_mismatches << std::endl;
+        std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
+        if (mismatch_messages.size() > 100) {
+            std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
         }
+        std::cout << "============================" << std::endl;
+
+        GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
+    } else {
+        std::cout << "STATUS: PASSED for output" << std::endl;
+        std::cout << "All elements match within tolerance!" << std::endl;
+        std::cout << "Tensor " << name << " is IDENTICAL to reference" << std::endl;
+        std::cout << "============================" << std::endl;
     }
 }
 
