@@ -179,7 +179,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     }
   }
 
-  // with or without RHT, use nvte_multi_hadamard_transform_amax
+  // with or without RHT, use nvte_group_hadamard_transform_amax
   // out.amax is the rowwise amax, out.columnwise_amax is the columnwise amax
   // rowwise amax will be the amax of original amax(input)
   // columnwise amax will be the amax of the amax(RHT(input.t))
@@ -192,7 +192,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_multi_hadamard_transform_amax(
+        nvte_group_hadamard_transform_amax(
             input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
             split_sections.data(), num_tensors, 0, quantizer->rht_matrix_random_sign_mask_t,
             stream);
@@ -219,7 +219,7 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
       output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
     }
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_tensor_amax(input.data(),
+      nvte_group_tensor_amax(input.data(),
                              reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                              split_sections.data(), num_tensors, stream);
     });

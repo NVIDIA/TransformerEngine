@@ -223,7 +223,7 @@ __global__ void MultiAmaxMemcpyD2DKernelPreRHT(MultiAmaxArgs args) {
 template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM_X, int BUFF_DIM_Y,
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
-__global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor_map_input,
+__global__ void GroupHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                            const MultiAmaxArgs args, uint16_t random_sign_mask,
                                            uint16_t random_sign_mask_t, uint64_t num_rows,
                                            uint64_t row_length) {
@@ -386,11 +386,11 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
 // broadcast_pre_rht_amax: when it's true, hadamard transform will be disabled
 // if at this time, the amax buffers for output expects both amax_rowwise and amax_colwise
 // then call MultiAmaxMemcpyD2DKernelPreRHT to D2D copy the amax values
-void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
+void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
                                    const int* split_sections, size_t num_tensors,
                                    uint16_t random_sign_mask, uint16_t random_sign_mask_t,
                                    bool broadcast_pre_rht_amax, cudaStream_t stream) {
-  NVTE_API_CALL(multi_hadamard_transform_amax);
+  NVTE_API_CALL(group_hadamard_transform_amax);
 #if CUDA_VERSION >= 12080
 
   // Check input tensor
@@ -530,7 +530,7 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
               // Add padding in case shmem ptr is not aligned to 128 bytes.
               shmem_bytes = (shmem_bytes + 128);
 
-              auto kernel = MultiHadamardAmaxTmaKernel<
+              auto kernel = GroupHadamardAmaxTmaKernel<
                   IType, kHadamardDimension, kChunkBlockYSmall, kChunkBlockXSmall, kBuffDimY,
                   kBuffDimX, kThreadBlockX * kThreadsPerWarp, kThreadBlockY, kReturnPreRhtAmax,
                   kReturnIdentityAmax, kReturnTransposedAmax>;
@@ -554,21 +554,22 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
 
 }  // namespace transformer_engine
 
-// Multi hadamard transform API is unlike other multi-input & multi-output APIs
-// Multi hadamard transform will take in a single input tensor, and directly calculate amax
+// Naming convention: "Group" kernels here means contiguous input concatenated 
+// While "Multi" kernels are processing a list of pointers, like the zero amax kernel
+
+// Group hadamard transform API is unlike other multi-input & multi-output APIs
+// Group hadamard transform will take in a single input tensor, and directly calculate amax
 // with optional RHT transform. That's because we can assume the input tensor list to be
 // contiguous in memory, so the tensors are only splitted in dimension 0.
 // RHT transform is 16x16, so as long as each split of the input has 16 multiple shape
 // in dimension 0, we can treat the entire input as a single tensor.
 // Although mathmatically 16 multple is enough for this function to be correct,
 // for this kernel, we required 64 multiple of 16 in dimension 0 for better performance.
-// Note: currently assumes split_sections is a list of integers in CPU
-// TODO: split_sections could be a tensor for device initiated API
-void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
+void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
                                         const int* split_sections, const size_t num_tensors,
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_hadamard_transform_amax);
+  NVTE_API_CALL(nvte_group_hadamard_transform_amax);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
 
@@ -577,16 +578,16 @@ void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
   for (size_t i = 0; i < num_tensors; ++i) {
     output_list[i] = convertNVTETensorCheck(outputs[i]);
   }
-  // Call the multi-tensor Hadamard transform amax implementation.
-  multi_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors,
+  // Call the group tensor Hadamard transform amax implementation.
+  group_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors,
                                 static_cast<uint16_t>(random_sign_mask),
                                 static_cast<uint16_t>(random_sign_mask_t), false, stream);
 }
 
-// Multi-tensor amax without doing hadamard transform
-void nvte_multi_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
+// Grouped-tensor amax without doing hadamard transform
+void nvte_group_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
                             const size_t num_tensors, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_hadamard_transform_amax);
+  NVTE_API_CALL(nvte_group_hadamard_transform_amax);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
 
@@ -596,6 +597,6 @@ void nvte_multi_tensor_amax(const NVTETensor input, NVTETensor* outputs, const i
     output_list[i] = convertNVTETensorCheck(outputs[i]);
   }
 
-  multi_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors, 0, 0, true,
+  group_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors, 0, 0, true,
                                 stream);
 }
