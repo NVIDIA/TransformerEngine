@@ -35,26 +35,52 @@ jobs:
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
-      options: --user root
     steps:
-      - name: 'Dependencies'
-        run: |
-          apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+      - name: Move /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
+
+      - name: Start named container
+        run: |
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
+
+      - name: 'Dependencies'
+        run: |
+          docker exec builder bash -c '\
+            apt-get update && \
+            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
+            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
+            apt-get clean \
+          '
+
       - name: 'Build'
-        run: pip install --no-build-isolation . -v --no-deps
+        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: python3 tests/pytorch/test_sanity_import.py
+        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
@@ -78,22 +104,47 @@ jobs:
   all:
     name: 'All'
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/nvidia/jax:jax
-      options: --user root
     steps:
-      - name: 'Dependencies'
-        run: |
-          pip install pybind11[global] einops onnxscript
-          pip install torch --index-url https://download.pytorch.org/whl/cu130
+      - name: Move /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
+
+      - name: Start named container
+        run: |
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
+
+      - name: 'Dependencies'
+        run: |
+          docker exec builder bash -c '\
+            pip install pybind11[global] einops onnxscript && \
+            pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
+          '
+
       - name: 'Build'
-        run: pip install --no-build-isolation . -v --no-deps
+        run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py
+        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
