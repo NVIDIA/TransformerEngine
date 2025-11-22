@@ -122,8 +122,7 @@ constexpr bool is_supported_arch() {
                          ptx::FamilySpecific<120>)
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
-#define ARCH_HAS_REDUX_F32  \
-  NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>)
+#define ARCH_HAS_REDUX_F32 NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
@@ -1084,13 +1083,13 @@ __device__ __forceinline__ void reduce_sync_max_abs_f32(float &out, float const 
     asm volatile("redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;" : "=f"(out) : "f"(in));
   } else {
     asm volatile(
-      "{\n\t"
-      ".reg.b32 val;\n"
-      "abs.f32 val, %1;\n"
-      "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-      "}\n\t"
-      : "=r"(reinterpret_cast<uint32_t &>(out))
-      : "f"(in));
+        "{\n\t"
+        ".reg.b32 val;\n"
+        "abs.f32 val, %1;\n"
+        "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t &>(out))
+        : "f"(in));
   }
 }
 
