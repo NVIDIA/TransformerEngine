@@ -248,7 +248,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+                                  (cols % 32 == 0) && output_tensor->has_data() &&
+                                  is_supported_by_CC_100();
 
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {
