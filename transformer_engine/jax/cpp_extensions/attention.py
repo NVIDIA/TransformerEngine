@@ -1619,17 +1619,19 @@ class _FusedAttnCPWithAllGatherHelper:
             length=max_segments_per_seq
         )[1:]
         # print(f"{seqlens_all=}")
+        seqlens_all_pad_neg = jnp.where(seqlens_all==0, -1, seqlens_all)
         
         # Pad 0 at start prior to cumsum
-        seqlens_padded = jnp.concatenate([jnp.array([0]), seqlens_all])
+        #seqlens_padded = jnp.concatenate([jnp.array([0]), seqlens_all])
         # print(f"{seqlens_padded=}")
-        cum_seqlens_padded = jnp.cumsum(seqlens_padded) # TODO:Momentarily comment off
+        #cum_seqlens_padded = jnp.cumsum(seqlens_padded) # TODO:Momentarily comment off
         #print(f"{cum_seqlens_padded=}")
     
-        return max_new_segments_per_seq, seqlens_padded
+        return max_new_segments_per_seq, seqlens_all_pad_neg
     
     #QUESTION: Do take a look at other implementations to check if flattening required ?
-    def q_seqoffsets_for_striped_for_rank(self, q_segment_pos, q_num_segments, max_segments_per_seq):
+    # TODO: q_num_segments not needed
+    def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, q_num_segments, max_segments_per_seq):
         q_segment_pos_flat = q_segment_pos.reshape(-1)
         # QUESTION: Will this logic be affected if end padding stripes (i.e. seg pos =0) are present in between seg pos !=0
         # e.g. 01230000124567
@@ -1638,20 +1640,38 @@ class _FusedAttnCPWithAllGatherHelper:
             (q_segment_pos_flat[1:] != q_segment_pos_flat[:-1] + 1)  # Segment pos changed
         ])
         #print(f"{segment_changes=}")
+        # Remove any padded region segment changes
+        segment_changes_masked = jnp.where(q_segment_ids!=0, segment_changes, False)
+        #print(f"{segment_changes_masked=}")
+        # Get the indices for segment changes (these are the offsets)
         max_size = q_segment_pos_flat.shape[0]
-        seq_offsets_2 = jnp.argwhere(segment_changes, size=max_size, fill_value=-1).flatten()
+        seq_offsets_2 = jnp.argwhere(segment_changes_masked, size=max_segments_per_seq, fill_value=-1).flatten()
+        #print(f"{seq_offsets_2=}")
+        #seq_offsets = jnp.where(seq_offsets_2 !=-1, seq_offsets_2, seq_offsets_2[q_num_segments])
+        return seq_offsets_2
+        #print(f"{seq_offsets=}")
+        # q_segment_pos_flat = q_segment_pos.reshape(-1)
+        # # QUESTION: Will this logic be affected if end padding stripes (i.e. seg pos =0) are present in between seg pos !=0
+        # # e.g. 01230000124567
+        # segment_changes = jnp.concatenate([
+        #     jnp.array([True]),  # First valid element starts a segment
+        #     (q_segment_pos_flat[1:] != q_segment_pos_flat[:-1] + 1)  # Segment pos changed
+        # ])
+        # #print(f"{segment_changes=}")
+        # max_size = q_segment_pos_flat.shape[0]
+        # seq_offsets_2 = jnp.argwhere(segment_changes, size=max_size, fill_value=-1).flatten()
         
-        # Create index array (static shape)
-        seq_offsets_2_indices = jnp.arange(seq_offsets_2.shape[0])
-        # Create a mask (False: do not clip to the edge element, True: clip to edge element)
-        mask = seq_offsets_2_indices >= q_num_segments
-        # Get fill value dynamically by calculating the edge index
-        edge_index = jnp.clip(q_num_segments - 1, 0, seq_offsets_2.shape[0] - 1)
-        fill_value = seq_offsets_2[edge_index]
+        # # Create index array (static shape)
+        # seq_offsets_2_indices = jnp.arange(seq_offsets_2.shape[0])
+        # # Create a mask (False: do not clip to the edge element, True: clip to edge element)
+        # mask = seq_offsets_2_indices >= q_num_segments
+        # # Get fill value dynamically by calculating the edge index
+        # edge_index = jnp.clip(q_num_segments - 1, 0, seq_offsets_2.shape[0] - 1)
+        # fill_value = seq_offsets_2[edge_index]
         
-        seq_offsets = jnp.where(mask, fill_value, seq_offsets_2)
+        # seq_offsets = jnp.where(mask, fill_value, seq_offsets_2)
         
-        return seq_offsets[:max_segments_per_seq]
+        # return seq_offsets[:max_segments_per_seq]
 
 
     # Per rank!
@@ -1676,8 +1696,8 @@ class _FusedAttnCPWithAllGatherHelper:
             size=max_size,
             fill_value=-1
         )[0]
-        valid_segment_ids = kv_segment_ids_flat[non_zero_indices]
-        valid_segment_pos = kv_segment_pos_flat[non_zero_indices]
+        valid_segment_ids = jnp.where(non_zero_indices >= 0, kv_segment_ids_flat[non_zero_indices], 0)
+        valid_segment_pos = jnp.where(non_zero_indices >= 0, kv_segment_pos_flat[non_zero_indices], 0)
         actual_valid = valid_segment_ids != 0
         #print(f"{valid_segment_ids=}, {valid_segment_pos=}")
 
@@ -1685,26 +1705,28 @@ class _FusedAttnCPWithAllGatherHelper:
         segment_changes = jnp.concatenate([
             ((valid_segment_ids[1:] != valid_segment_ids[:-1]) & actual_valid[1:])|  # Segment ID changed and not non zero
             (valid_segment_pos[1:] != valid_segment_pos[:-1] + 1),  # Position not consecutive
-            jnp.array([True]),  # Last valid element ends a segment
+            jnp.array([actual_valid[-1]])  # Last valid element ends a segment
         ])
          # Use the indices from segment_changes to pick out the offset value (which in turn will be the seq length for that segment)
-        segment_changes_valid = jnp.where(segment_changes & actual_valid, size=max_size, fill_value=-1)[0]
+        segment_changes_valid = jnp.where(segment_changes & actual_valid, size=max_segments_per_seq, fill_value=-1)[0]
         #print(f"{segment_changes_valid=}")
         # Remove any
         safe_indices = jnp.maximum(segment_changes_valid, 0)
         #print(f"{safe_indices=}")
-        selected_values = jnp.where(safe_indices !=0, valid_segment_pos[safe_indices] + 1, 0)
-        seqlens = jnp.concatenate([jnp.array([0]), jnp.where(segment_changes_valid >= 0, selected_values, 0)[:-1]])
-        seqlens_cumsum_padded = jnp.cumsum(seqlens)
+        selected_values = jnp.where(safe_indices !=0, valid_segment_pos[safe_indices] + 1, -1)
+        # seqlens = jnp.concatenate([jnp.array([0]), jnp.where(segment_changes_valid >= 0, selected_values, 0)[:-1]])
+        # seqlens_cumsum_padded = jnp.cumsum(seqlens)
         #print(f"{result=}")
-        return jnp.count_nonzero(selected_values).astype(int), seqlens[:max_segments_per_seq]
+        return jnp.count_nonzero(selected_values).astype(int), selected_values
     
     #QUESTION: Do take a look at other implementations to check if flattening required ?
-    def kv_seqoffsets_for_striped_for_rank(self, kv_segment_pos, kv_segment_ids, kv_segment_pos_ag, kv_num_segments, max_segments_per_seq):
+    # TODO: kv_num_segments not needed
+    def kv_seqoffsets_for_striped_for_rank(self, kv_segment_pos, kv_segment_ids, kv_segment_pos_ag, kv_segment_ids_ag, kv_num_segments, max_segments_per_seq):
         # Calculate the segment pos change mask
         kv_segment_pos_flat = kv_segment_pos.reshape(-1)
         kv_segment_ids_flat = kv_segment_ids.reshape(-1)
         kv_segment_pos_ag_flat = kv_segment_pos_ag.reshape(-1)
+        kv_segment_ids_ag_flat = kv_segment_ids_ag.reshape(-1)
         #print(f"{kv_segment_pos_flat=}, {kv_segment_ids_flat=}")
         # segment_changes=Array([ True, False, False, False,  True,  True, False, False,  True,
         #       False, False, False,  True,  True,  True,  True], dtype=bool)
@@ -1716,15 +1738,16 @@ class _FusedAttnCPWithAllGatherHelper:
             jnp.array([True]),  # Assume valid element starts a segment
             (kv_segment_pos_flat[1:] != kv_segment_pos_flat[:-1] + 1)  # Segment pos changed
         ])
+        segment_changes_first_true_masked = jnp.where(kv_segment_ids_flat!=0, segment_changes_first_true, False)
         #segment_changes = jnp.where(kv_segment_ids_flat[0]==1, segment_changes_first_true, segment_changes_first_true)
         #print(f"{segment_changes_first_true=}")
 
         # Get segment change indices for rank
         #print(f"{jnp.size(segment_changes_first_true)=}")
-        segment_changes_indices = jnp.argwhere(segment_changes_first_true, size=jnp.size(segment_changes_first_true), fill_value=-1).flatten()
+        segment_changes_indices = jnp.argwhere(segment_changes_first_true_masked, size=max_segments_per_seq, fill_value=-1).flatten()
         #print(f"{segment_changes_indices=}")
         # Get segment ids associated with the segment_changes_indices for rank
-        segment_ids = kv_segment_ids_flat[segment_changes_indices]
+        segment_ids = jnp.where(segment_changes_indices >= 0, kv_segment_ids_flat[segment_changes_indices], -1)
         #print(f"{segment_ids=}")
 
         # Get segment change indices for AG
@@ -1732,23 +1755,26 @@ class _FusedAttnCPWithAllGatherHelper:
             jnp.array([True]),  # Assume valid element starts a segment
             (kv_segment_pos_ag_flat[1:] != kv_segment_pos_ag_flat[:-1] + 1)  # Segment pos changed
         ])
+        segment_changes_ag_first_true_masked = jnp.where(kv_segment_ids_ag_flat!=0, segment_changes_ag_first_true, False)
         #print(f"{segment_changes_ag_first_true=}")
         # Get segment change indices for AG
         #print(f"{jnp.size(segment_changes_ag_first_true)=}")
-        segment_changes_ag_indices = jnp.argwhere(segment_changes_ag_first_true, size=jnp.size(segment_changes_ag_first_true), fill_value=-1).flatten()
+        segment_changes_ag_indices = jnp.argwhere(segment_changes_ag_first_true_masked, size=jnp.size(segment_changes_ag_first_true_masked), fill_value=-1).flatten()
         #print(f"{segment_changes_ag_indices=}")
+        
 
         # Use the segment ids picked per rank to get the offsets from the AG indices
-        seq_offsets = jnp.where(segment_ids !=0, segment_changes_ag_indices[segment_ids-1], 0)
-        #print(f"{seq_offsets=}")
-        indices = jnp.arange(0, seq_offsets.size)
-        #print(f"{indices=}")
-        #print(f"{kv_num_segments=}")
-        arr = jnp.ones_like(seq_offsets) * seq_offsets[kv_num_segments-1]
-        #print(f"{arr=}")
-        seq_offsets_truncated = jnp.where(indices >= kv_num_segments, arr, seq_offsets)
+        seq_offsets = jnp.where(segment_ids !=0, segment_changes_ag_indices[segment_ids-1], -1)
+        return seq_offsets
+        # #print(f"{seq_offsets=}")
+        # indices = jnp.arange(0, seq_offsets.size)
+        # #print(f"{indices=}")
+        # #print(f"{kv_num_segments=}")
+        # arr = jnp.ones_like(seq_offsets) * seq_offsets[kv_num_segments-1]
+        # #print(f"{arr=}")
+        # seq_offsets_truncated = jnp.where(indices >= kv_num_segments, arr, seq_offsets)
         #print(f"{seq_offsets_truncated=}")
-        return seq_offsets_truncated[:max_segments_per_seq]   
+        # return seq_offsets_truncated[:max_segments_per_seq]   
     #TODO: Come up with better names/organization for the new four functions
     # def kv_seqoffsets_for_striped_for_rank(self, kv_segment_pos, kv_segment_ids, kv_segment_pos_ag, kv_num_segments, max_segments_per_seq):
     #     # Calculate the segment pos change mask
@@ -2165,9 +2191,9 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
                 adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(max_seqlen=kv_max_seqlen, cp_size=cp_size)
                 q_num_segments_for_rank, q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(_q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq)
-                q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
+                q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(q_segment_ids=_q_segment_ids ,q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
                 kv_num_segments_for_rank, kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(kv_segment_ids=_kv_segment_ids, kv_segment_pos=_kv_segment_pos, max_segments_per_seq=adjusted_max_segments_per_seq)
-                kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(kv_segment_pos=_kv_segment_pos, kv_segment_ids=_kv_segment_ids, kv_segment_pos_ag=kv_segment_pos_ag, kv_num_segments=kv_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
+                kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(kv_segment_pos=_kv_segment_pos, kv_segment_ids=_kv_segment_ids, kv_segment_pos_ag=kv_segment_pos_ag, kv_segment_ids_ag=kv_segment_ids_ag,kv_num_segments=kv_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
                 #kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
                 
                 output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
