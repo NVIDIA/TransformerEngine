@@ -1432,6 +1432,7 @@ class _FusedAttnCPWithAllGatherHelper:
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
+            softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
             dropout_probability=self.config.dropout_probability,
@@ -1645,7 +1646,7 @@ class _FusedAttnCPWithAllGatherHelper:
         #print(f"{segment_changes_masked=}")
         # Get the indices for segment changes (these are the offsets)
         max_size = q_segment_pos_flat.shape[0]
-        seq_offsets_2 = jnp.argwhere(segment_changes_masked, size=max_segments_per_seq, fill_value=-1).flatten()
+        seq_offsets_2 = jnp.argwhere(segment_changes_masked, size=max_segments_per_seq+1, fill_value=-1).flatten()
         #print(f"{seq_offsets_2=}")
         #seq_offsets = jnp.where(seq_offsets_2 !=-1, seq_offsets_2, seq_offsets_2[q_num_segments])
         return seq_offsets_2
@@ -1744,7 +1745,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         # Get segment change indices for rank
         #print(f"{jnp.size(segment_changes_first_true)=}")
-        segment_changes_indices = jnp.argwhere(segment_changes_first_true_masked, size=max_segments_per_seq, fill_value=-1).flatten()
+        segment_changes_indices = jnp.argwhere(segment_changes_first_true_masked, size=max_segments_per_seq+1, fill_value=-1).flatten()
         #print(f"{segment_changes_indices=}")
         # Get segment ids associated with the segment_changes_indices for rank
         segment_ids = jnp.where(segment_changes_indices >= 0, kv_segment_ids_flat[segment_changes_indices], -1)
@@ -2145,7 +2146,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[4] = seed_sharding
+        arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
         if DEBUG:
@@ -2158,6 +2159,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             k,
             v,
             bias,
+            softmax_offset,
             seed,
             q_seqlen,
             kv_seqlen,
@@ -2182,7 +2184,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             # Each rank receives the ag k and v along with the ag kv seg ids and kv seg offsets
             # Each rank sees the sharded view for 5 tensors -> q, _q_segment_ids, _q_segment_pos, 
             # _kv_segment_ids, _kv_segment_pos -> Note these have also been reordered before passing in.
-            def _cross_attn(idx, q, k, v, bias, kv_segment_ids_ag, kv_segment_pos_ag, seed):
+            def _cross_attn(idx, q, k, v, bias, softmax_offset, kv_segment_ids_ag, kv_segment_pos_ag, seed):
                 # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
                 # Do not forget to unset the segment_ids and segment_pos so that the seqlens_from_segment_ids_pos() function
                 # does not go down that route but instead just picks the seqlens and offsets passed onto it
@@ -2201,6 +2203,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     k, #ag
                     v, #ag
                     bias,
+                    softmax_offset,
                     seed,
                     q_seqlens_for_rank,
                     kv_seqlens_for_rank,
@@ -2218,7 +2221,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             # Only the pos is needed for kv offsets calculation
             _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(_kv_segment_ids, _kv_segment_pos)
             functions = [
-                partial(_cross_attn, idx, q, k_ag, v_ag, bias, _kv_segment_ids_ag, _kv_segment_pos_ag, seed)
+                partial(_cross_attn, idx, q, k_ag, v_ag, bias, softmax_offset, _kv_segment_ids_ag, _kv_segment_pos_ag, seed)
                 for idx in range(cp_size)
             ]
 

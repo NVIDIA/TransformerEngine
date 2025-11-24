@@ -204,6 +204,7 @@ def register_primitive(cls, outer_only=False):
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
     outer_p.multiple_results = cls.multiple_results
     # Define the eager execution implementation
+    outer_p.def_impl(cls.outer_impl)
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
