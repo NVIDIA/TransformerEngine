@@ -23,7 +23,6 @@ from .quantize import (
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
-    get_quantize_config,
 )
 
 
@@ -73,7 +72,7 @@ def layernorm_dense(
         - Quantization is applied to both the normalized input and kernel
     """
 
-    if not get_quantize_config().is_fp8_enabled():
+    if quantizer_set == noop_quantizer_set:
         input_dtype = x.dtype
         kernel = kernel.astype(input_dtype)
 
@@ -236,8 +235,8 @@ def _layernorm_dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(TensorUsage.RHS_TRANS),
+        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
+        casted_kernel.get_tensor(TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         mu,

@@ -18,6 +18,7 @@ from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
 from transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
 
@@ -72,6 +73,35 @@ class AttnMaskType(Enum):
             AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
             AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
         ]
+
+
+class AttnSoftmaxType(Enum):
+    """
+    VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+    OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)),
+    LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+    where alpha is a learnable parameter in shape [H].
+    """
+
+    VANILLA_SOFTMAX = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
+    OFF_BY_ONE_SOFTMAX = NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX
+    LEARNABLE_SOFTMAX = NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX
+
+    @classmethod
+    def from_str(cls, softmax_type: str) -> "AttnSoftmaxType":
+        """Convert string to AttnSoftmaxType: 'vanilla', 'off_by_one', or 'learnable'."""
+        softmax_type_map = {
+            "vanilla": cls.VANILLA_SOFTMAX,
+            "off_by_one": cls.OFF_BY_ONE_SOFTMAX,
+            "learnable": cls.LEARNABLE_SOFTMAX,
+        }
+        result = softmax_type_map.get(softmax_type)
+        if result is None:
+            raise ValueError(
+                f"Unknown softmax_type: {softmax_type}. "
+                "Valid options: 'vanilla', 'off_by_one', 'learnable'"
+            )
+        return result
 
 
 class QKVFormat(Enum):
@@ -301,6 +331,7 @@ def is_fused_attn_kernel_available(
     qkv_layout,
     attn_bias_type,
     attn_mask_type,
+    softmax_type,
     dropout_probability,
     q_num_heads,
     kv_num_heads,
@@ -313,6 +344,7 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
+    window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
@@ -322,6 +354,7 @@ def is_fused_attn_kernel_available(
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_probability,
             q_num_heads,
             kv_num_heads,
@@ -329,7 +362,7 @@ def is_fused_attn_kernel_available(
             kv_max_seqlen,
             head_dim_qk,
             head_dim_v,
-            (-1, -1) if window_size is None else window_size,
+            window_size_tuple,
         )
 
     return make_helper(attn_mask_type).is_fused_attn_kernel_available()
@@ -497,6 +530,11 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
+
+    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
+    # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
+    # It does not need to involve SW for this mask's creation
+
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
     if (attn_mask_type.is_causal() and window_size is None) or (
         window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
@@ -557,21 +595,6 @@ def _segment_ids_pos_to_seqlens_offsets(
             jnp.greater_equal,
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
-
-    # TODO(KshitijLakhani): Evaluate if swa_mask is needed to procure seqlen and offsets
-    swa_mask = (
-        make_swa_mask(
-            segment_pos_q,
-            segment_pos_kv,
-            window_size,
-            dtype=jnp.bool,
-            segment_ids_q=segment_ids_q,
-            segment_ids_kv=segment_ids_kv,
-        )
-        if attn_mask_type.is_bottom_right()
-        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
-    )
-    attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
@@ -786,6 +809,7 @@ def _legacy_fused_attn(
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -793,6 +817,7 @@ def _legacy_fused_attn(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -815,6 +840,7 @@ def _legacy_fused_attn(
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
         qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
@@ -863,10 +889,12 @@ def _legacy_fused_attn(
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -900,6 +928,7 @@ def fused_attn_thd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -937,6 +966,7 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
@@ -945,6 +975,7 @@ def fused_attn_thd(
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
@@ -957,15 +988,17 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
+    softmax_offset: Optional[jnp.ndarray],
     sequence_descriptor: SequenceDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -979,11 +1012,13 @@ def _fused_attn(
     output, _ = _fused_attn_fwd_rule(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type,
         attn_mask_type,
         qkv_layout,
+        softmax_type,
         scaling_factor,
         dropout_probability,
         is_training,
@@ -1000,11 +1035,13 @@ def _fused_attn(
 def _fused_attn_fwd_rule(
     qkv,
     bias,
+    softmax_offset,
     sequence_descriptor,
     seed,
     attn_bias_type,
     attn_mask_type,
     qkv_layout,
+    softmax_type,
     scaling_factor,
     dropout_probability,
     is_training,
@@ -1018,10 +1055,12 @@ def _fused_attn_fwd_rule(
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -1041,6 +1080,7 @@ def _fused_attn_fwd_rule(
         sequence_descriptor,
         softmax_aux,
         rng_state,
+        softmax_offset,
         output,
     )
 
@@ -1049,6 +1089,7 @@ def _fused_attn_bwd_rule(
     attn_bias_type,
     attn_mask_type,
     qkv_layout,
+    softmax_type,
     scaling_factor,
     dropout_probability,
     is_training,
@@ -1068,11 +1109,13 @@ def _fused_attn_bwd_rule(
         sequence_descriptor,
         softmax_aux,
         rng_state,
+        softmax_offset,
         output,
     ) = ctx
-    grad_qkv, grad_bias = tex.fused_attn_bwd(
+    grad_qkv, grad_bias, grad_softmax_offset = tex.fused_attn_bwd(
         qkv,
         bias,
+        softmax_offset,
         softmax_aux,
         rng_state,
         output,
@@ -1080,6 +1123,7 @@ def _fused_attn_bwd_rule(
         sequence_descriptor,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -1092,9 +1136,12 @@ def _fused_attn_bwd_rule(
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
+    if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        grad_softmax_offset = None
     return (
         grad_qkv,
         grad_bias,
+        grad_softmax_offset,
         None,
         None,
     )
@@ -1111,6 +1158,7 @@ def fused_attn(
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -1120,6 +1168,7 @@ def fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1139,6 +1188,7 @@ def fused_attn(
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
         qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
@@ -1153,6 +1203,9 @@ def fused_attn(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
+        softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
+            [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
+            If provided, this parameter will receive gradients during backpropagation.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1200,6 +1253,7 @@ def fused_attn(
             seed,
             attn_bias_type=attn_bias_type,
             attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
             qkv_layout=qkv_layout,
             scaling_factor=scaling_factor,
             dropout_probability=dropout_probability,
@@ -1208,15 +1262,18 @@ def fused_attn(
             context_parallel_strategy=context_parallel_strategy,
             context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
             context_parallel_axis=context_parallel_axis,
+            softmax_offset=softmax_offset,
         )
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
+        softmax_type=softmax_type,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
