@@ -295,7 +295,10 @@ struct GroupedTensor {
   - If both are set: each tensor has unique shape (first_dims[i], last_dims[i])
 
   Data Layout:
-  - data.shape is 2D when at least one dimension is uniform (all_same_first_dim() || all_same_last_dim())
+  - data.shape is 2D when at least one dimension is uniform (all_same_first_dim() || all_same_last_dim()), as follows:
+    + [~sum_of_first_dims, common_last_dim] when varying fist dims but not last dim
+    + [common_first_dim, ~sum_of_last_dims] when varying last dims but not first dim
+    + [num_tensors * common_first_dim, common_last_dim] when both dimensions are uniform
   - data.shape is 1D when both dimensions vary (varying_both_dims())
 
   All data is stored on device in contiguous layout.
@@ -356,16 +359,19 @@ struct GroupedTensor {
 
   size_t get_common_first_dim() const noexcept {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
-    NVTE_CHECK(!varying_both_dims(), "Both dimensions vary thus cannot get common first dim");
-    NVTE_CHECK(data.shape.size() == 2, "Data must be 2D");
-    return data.shape[0] / num_tensors;
+    NVTE_CHECK(has_data() && data.shape.size() == 2, "Data must be allocated and 2D");
+    if (all_same_shape()) {
+      // When both dims are uniform: data.shape = [M * num_tensors, N]
+      return data.shape[0] / num_tensors;
+    } else {
+      // When varying last dims but not first dim: data.shape = [common_first_dim, ~sum_of_last_dims]
+      return data.shape[0];
+    }
   }
   size_t get_common_last_dim() const noexcept {
-    NVTE_CHECK(all_same_last_dim(),
-               "Last dim varies across tensors thus cannot get common last dim");
-    NVTE_CHECK(!varying_both_dims(), "Both dimensions vary thus cannot get common last dim");
-    NVTE_CHECK(data.shape.size() == 2, "Data must be 2D for getting common last dim");
-    return data.shape[1] / num_tensors;
+    NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors");
+    NVTE_CHECK(has_data() && data.shape.size() == 2, "Data must be allocated and 2D");
+    return data.shape[1];
   }
 
   DType dtype() const {
