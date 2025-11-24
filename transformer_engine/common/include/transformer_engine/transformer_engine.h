@@ -411,10 +411,9 @@ enum NVTEGroupedTensorParam {
   kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
-  kNVTEGroupedFirstDims = 7, /*!< First dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedTensorOffsets =
-      9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTEGroupedFirstDims = 7,          /*!< First dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedLastDims = 8,           /*!< Last dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedTensorOffsets = 9,      /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
   kNVTENumGroupedTensorParams
 };
 
@@ -424,12 +423,14 @@ enum NVTEGroupedTensorParam {
  * TE grouped tensors are just wrappers on top of raw data and do not
  * own memory.
  *
- *  \param[in] num_tensors     Number of tensors in the group (must be > 0).
  *  \param[in] scaling_mode    Scaling mode of the grouped tensor.
+ *  \param[in] num_tensors     Number of tensors in the group (must be > 0).
+ *  \param[in] logical_shape   Logical 2D shape of the grouped data.
  *
  *  \return A new TE grouped tensor.
  */
-NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors);
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                              NVTEShape logical_shape);
 
 /*! \brief Destroy a TE grouped tensor.
  *
@@ -482,6 +483,14 @@ NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
  *  \return Scaling mode of the grouped tensor.
  */
 NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor);
+
+/*! \brief Get the logical shape of a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Logical 2D shape.
+ */
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 
 #ifdef __cplusplus
 }  // extern "C"

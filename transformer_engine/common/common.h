@@ -288,20 +288,22 @@ struct GroupedTensor {
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
 
   Shape Representation:
-  - first_dims and last_dims are OPTIONAL (can be empty if dimension is uniform across all tensors)
-  - If first_dims is empty: all tensors have the same first dimension
-  - If last_dims is empty: all tensors have the same last dimension
-  - If both are empty: all tensors have identical shapes
-  - If both are set: each tensor has unique shape (first_dims[i], last_dims[i])
+  - logical_shape: 2D shape representing the conceptual layout (REQUIRED)
+    + When all_same_shape(): [num_tensors * M, N] where each tensor is (M, N)
+    + When varying_first_dim(): [~sum_of_first_dims, N] where N is common
+    + When varying_last_dim(): [M, ~sum_of_last_dims] where M is common
+    + When varying_both_dims(): [1, total_elements] (fully flattened)
+  
+  - first_dims and last_dims are OPTIONAL (empty if dimension is uniform)
+    + Empty first_dims: all tensors have the same first dimension
+    + Empty last_dims: all tensors have the same last dimension
+    + Both empty: all tensors have identical shapes
+    + Both set: each tensor has unique shape (first_dims[i], last_dims[i])
 
   Data Layout:
-  - data.shape is 2D when at least one dimension is uniform (all_same_first_dim() || all_same_last_dim()), as follows:
-    + [~sum_of_first_dims, common_last_dim] when varying fist dims but not last dim
-    + [common_first_dim, ~sum_of_last_dims] when varying last dims but not first dim
-    + [num_tensors * common_first_dim, common_last_dim] when both dimensions are uniform
-  - data.shape is 1D when both dimensions vary (varying_both_dims())
-
-  All data is stored on device in contiguous layout.
+  - ALL data fields are stored as 1D flattened arrays (data, columnwise_data, scale_inv, etc.)
+  - logical_shape provides the conceptual 2D interpretation
+  - All data is stored on device in contiguous layout
   */
 
   SimpleTensor data;
@@ -318,12 +320,17 @@ struct GroupedTensor {
   SimpleTensor first_dims;  // Device pointer to int64_t array of length num_tensors (or empty)
   SimpleTensor last_dims;   // Device pointer to int64_t array of length num_tensors (or empty)
 
-  // Offsets for indexing into contiguous layout (OPTIONAL - not needed if all_same_shape())
+  // Offsets for indexing into contiguous 1D layout (OPTIONAL - not needed if all_same_shape())
   // tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
   // Usage: tensor_i_ptr = (char*)data.dptr + tensor_offsets[i] * element_size
   // If empty and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
   SimpleTensor tensor_offsets;  // Device pointer to int64_t array of length num_tensors (or empty)
 
+  // Logical shape: conceptual 2D shape of the grouped data (REQUIRED)
+  // Represents how the 1D flattened data should be interpreted as 2D
+  // Always 2D with positive dimensions
+  NVTEShape logical_shape;
+  
   NVTEScalingMode scaling_mode;
   size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
@@ -340,6 +347,7 @@ struct GroupedTensor {
         first_dims(nullptr, {}, DType::kInt64),
         last_dims(nullptr, {}, DType::kInt64),
         tensor_offsets(nullptr, {}, DType::kInt64),
+        logical_shape(nvte_make_shape(nullptr, 0)),
         scaling_mode(scaling_mode),
         nvte_tensor(0) {}
 
@@ -359,19 +367,20 @@ struct GroupedTensor {
 
   size_t get_common_first_dim() const noexcept {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
-    NVTE_CHECK(has_data() && data.shape.size() == 2, "Data must be allocated and 2D");
+    NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
     if (all_same_shape()) {
-      // When both dims are uniform: data.shape = [M * num_tensors, N]
-      return data.shape[0] / num_tensors;
+      // When both dims are uniform: logical_shape = [num_tensors * M, N]
+      return logical_shape.data[0] / num_tensors;
     } else {
-      // When varying last dims but not first dim: data.shape = [common_first_dim, ~sum_of_last_dims]
-      return data.shape[0];
+      // When varying last dims but not first dim: logical_shape = [M, sum_of_last_dims]
+      return logical_shape.data[0];
     }
   }
   size_t get_common_last_dim() const noexcept {
     NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors");
-    NVTE_CHECK(has_data() && data.shape.size() == 2, "Data must be allocated and 2D");
-    return data.shape[1];
+    NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+    // For both uniform and varying first dim cases: logical_shape[1] is the common last dim
+    return logical_shape.data[1];
   }
 
   DType dtype() const {
@@ -392,6 +401,7 @@ struct GroupedTensor {
     first_dims.clear();
     last_dims.clear();
     tensor_offsets.clear();
+    logical_shape = nvte_make_shape(nullptr, 0);
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;

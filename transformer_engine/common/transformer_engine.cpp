@@ -304,24 +304,31 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
         " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
   }
 
-  // Validate data shape based on dimension uniformity
+  // Validate logical_shape
+  NVTE_CHECK(t.logical_shape.ndim == 2, "Grouped tensor ", name, " logical_shape must be 2D");
+  NVTE_CHECK(t.logical_shape.data[0] > 0 && t.logical_shape.data[1] > 0,
+             "Grouped tensor ", name, " logical_shape must have positive dimensions");
+  
+  // Validate all data fields are 1D (flattened)
   if (t.has_data()) {
-    if (t.all_same_shape() || t.all_same_first_dim() || t.all_same_last_dim()) {
-      // When at least one dimension is uniform: data should be 2D
-      NVTE_CHECK(t.data.shape.size() == 2, "Grouped tensor ", name,
-                 " data must be 2D when at least one dimension is uniform");
-    } else {
-      // Both dimensions vary: data should be 1D (flattened)
-      NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name,
-                 " data must be 1D when both dimensions vary");
-    }
+    NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name, " data must be 1D");
   }
-
-  // If both data and columnwise_data are present, they must have the same total size
-  if (t.has_data() && t.has_columnwise_data()) {
-    NVTE_CHECK(t.data.numel() == t.columnwise_data.numel(), "Grouped tensor ", name,
-               " data and columnwise_data must have same total size (got ", t.data.numel(), " vs ",
-               t.columnwise_data.numel(), ")");
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.shape.size() == 1, "Grouped tensor ", name,
+               " columnwise_data must be 1D");
+  }
+  
+  // Validate data size matches logical_shape
+  size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
+  if (t.has_data()) {
+    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name,
+               " data size (", t.data.numel(), ") must match logical_shape size (",
+               expected_numel, ")");
+  }
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
+               " columnwise_data size (", t.columnwise_data.numel(),
+               ") must match logical_shape size (", expected_numel, ")");
   }
 }
 
@@ -918,10 +925,16 @@ int nvte_is_non_tn_fp8_gemm_supported() {
 }
 
 // Grouped Tensor C API implementations
-NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors) {
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                              NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
+  NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+  NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
+             "Logical shape must have positive dimensions");
   NVTEGroupedTensor ret =
       transformer_engine::GroupedTensorAllocator::instance().Allocate(scaling_mode, num_tensors);
+  auto *t = transformer_engine::convertNVTEGroupedTensorCheck(ret);
+  t->logical_shape = logical_shape;
   return ret;
 }
 
@@ -1032,4 +1045,12 @@ NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor)
   }
   const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
   return t.scaling_mode;
+}
+
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return nvte_make_shape(nullptr, 0);
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.logical_shape;
 }
