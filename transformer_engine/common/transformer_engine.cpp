@@ -381,12 +381,17 @@ void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, b
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
                " not allocated");
   }
-  // Amax validation for delayed scaling
-  if (is_fp8_dtype(t.dtype()) && t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-    NVTE_CHECK(t.amax.has_data(), "Output ", name, " amax must be allocated");
-    NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Output ", name, " amax must be Float32");
+  
+  // Only perform dtype-specific validation if data is allocated
+  if (t.has_data() || t.has_columnwise_data()) {
+    // Amax validation for delayed scaling
+    if (is_fp8_dtype(t.dtype()) && t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      NVTE_CHECK(t.amax.has_data(), "Output ", name, " amax must be allocated");
+      NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Output ", name, " amax must be Float32");
+    }
+    CheckGroupedScaleInv(t, name, true);
   }
-  CheckGroupedScaleInv(t, name, true);
+  
   CheckGroupedTensorShapeArrays(t, name);
 }
 
@@ -514,15 +519,18 @@ class GroupedTensorAllocator {
 
   ~GroupedTensorAllocator() {}
 
-  NVTEGroupedTensor Allocate(NVTEScalingMode mode, size_t num_tensors) {
+  NVTEGroupedTensor Allocate(NVTEScalingMode mode, size_t num_tensors, NVTEShape logical_shape) {
     std::lock_guard<std::mutex> lock(mutex);
     if (!free_list.empty()) {
       uintptr_t index = free_list.back();
       NVTEGroupedTensor ret = reinterpret_cast<NVTEGroupedTensor>(index);
       free_list.pop_back();
-      // 1-based indexing - reinitialize the tensor
+      // 1-based indexing - fully reinitialize the tensor to avoid stale data
+      memory[index - 1].clear();
       memory[index - 1].scaling_mode = mode;
       memory[index - 1].num_tensors = num_tensors;
+      memory[index - 1].logical_shape = logical_shape;
+      memory[index - 1].nvte_tensor = ret;
       return ret;
     }
     if (memory.size() < memory.capacity()) {
@@ -531,6 +539,7 @@ class GroupedTensorAllocator {
       size = memory.size();
       // 1-based indexing
       uintptr_t index = memory.size();
+      t.logical_shape = logical_shape;
       t.nvte_tensor = reinterpret_cast<NVTEGroupedTensor>(index);
       return reinterpret_cast<NVTEGroupedTensor>(index);
     }
@@ -930,15 +939,13 @@ int nvte_is_non_tn_fp8_gemm_supported() {
 
 // Grouped Tensor C API implementations
 NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
-                                             NVTEShape logical_shape) {
+                                              NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
   NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
   NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
              "Logical shape must have positive dimensions");
   NVTEGroupedTensor ret =
-      transformer_engine::GroupedTensorAllocator::instance().Allocate(scaling_mode, num_tensors);
-  auto *t = transformer_engine::convertNVTEGroupedTensorCheck(ret);
-  t->logical_shape = logical_shape;
+      transformer_engine::GroupedTensorAllocator::instance().Allocate(scaling_mode, num_tensors, logical_shape);
   return ret;
 }
 
