@@ -365,7 +365,7 @@ struct GroupedTensor {
     return !first_dims.shape.empty() && !last_dims.shape.empty();
   }
 
-  size_t get_common_first_dim() const noexcept {
+  size_t get_common_first_dim() const {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
     NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
     if (all_same_shape()) {
@@ -376,7 +376,7 @@ struct GroupedTensor {
       return logical_shape.data[0];
     }
   }
-  size_t get_common_last_dim() const noexcept {
+  size_t get_common_last_dim() const {
     NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors");
     NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
     // For both uniform and varying first dim cases: logical_shape[1] is the common last dim
