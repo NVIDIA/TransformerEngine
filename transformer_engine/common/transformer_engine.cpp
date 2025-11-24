@@ -306,9 +306,9 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
 
   // Validate logical_shape
   NVTE_CHECK(t.logical_shape.ndim == 2, "Grouped tensor ", name, " logical_shape must be 2D");
-  NVTE_CHECK(t.logical_shape.data[0] > 0 && t.logical_shape.data[1] > 0,
-             "Grouped tensor ", name, " logical_shape must have positive dimensions");
-  
+  NVTE_CHECK(t.logical_shape.data[0] > 0 && t.logical_shape.data[1] > 0, "Grouped tensor ", name,
+             " logical_shape must have positive dimensions");
+
   // Validate all data fields are 1D (flattened)
   if (t.has_data()) {
     NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name, " data must be 1D");
@@ -317,13 +317,12 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
     NVTE_CHECK(t.columnwise_data.shape.size() == 1, "Grouped tensor ", name,
                " columnwise_data must be 1D");
   }
-  
+
   // Validate data size matches logical_shape
   size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
   if (t.has_data()) {
-    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name,
-               " data size (", t.data.numel(), ") must match logical_shape size (",
-               expected_numel, ")");
+    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name, " data size (",
+               t.data.numel(), ") must match logical_shape size (", expected_numel, ")");
   }
   if (t.has_columnwise_data()) {
     NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
@@ -926,7 +925,7 @@ int nvte_is_non_tn_fp8_gemm_supported() {
 
 // Grouped Tensor C API implementations
 NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
-                                              NVTEShape logical_shape) {
+                                             NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
   NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
   NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,

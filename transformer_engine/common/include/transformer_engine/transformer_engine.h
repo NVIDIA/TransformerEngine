@@ -411,9 +411,10 @@ enum NVTEGroupedTensorParam {
   kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
-  kNVTEGroupedFirstDims = 7,          /*!< First dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedLastDims = 8,           /*!< Last dimension sizes (device pointer to int64_t array) */
-  kNVTEGroupedTensorOffsets = 9,      /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTEGroupedFirstDims = 7, /*!< First dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedTensorOffsets =
+      9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
   kNVTENumGroupedTensorParams
 };
 
@@ -430,7 +431,7 @@ enum NVTEGroupedTensorParam {
  *  \return A new TE grouped tensor.
  */
 NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
-                                              NVTEShape logical_shape);
+                                             NVTEShape logical_shape);
 
 /*! \brief Destroy a TE grouped tensor.
  *
