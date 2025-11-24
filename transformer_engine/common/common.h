@@ -356,12 +356,14 @@ struct GroupedTensor {
 
   size_t get_common_first_dim() const noexcept {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
+    NVTE_CHECK(!varying_both_dims(), "Both dimensions vary thus cannot get common first dim");
     NVTE_CHECK(data.shape.size() == 2, "Data must be 2D");
     return data.shape[0] / num_tensors;
   }
   size_t get_common_last_dim() const noexcept {
     NVTE_CHECK(all_same_last_dim(),
                "Last dim varies across tensors thus cannot get common last dim");
+    NVTE_CHECK(!varying_both_dims(), "Both dimensions vary thus cannot get common last dim");
     NVTE_CHECK(data.shape.size() == 2, "Data must be 2D for getting common last dim");
     return data.shape[1] / num_tensors;
   }
