@@ -381,7 +381,7 @@ void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, b
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
                " not allocated");
   }
-  
+
   // Only perform dtype-specific validation if data is allocated
   if (t.has_data() || t.has_columnwise_data()) {
     // Amax validation for delayed scaling
@@ -391,7 +391,7 @@ void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, b
     }
     CheckGroupedScaleInv(t, name, true);
   }
-  
+
   CheckGroupedTensorShapeArrays(t, name);
 }
 
@@ -939,13 +939,13 @@ int nvte_is_non_tn_fp8_gemm_supported() {
 
 // Grouped Tensor C API implementations
 NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
-                                              NVTEShape logical_shape) {
+                                             NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
   NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
   NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
              "Logical shape must have positive dimensions");
-  NVTEGroupedTensor ret =
-      transformer_engine::GroupedTensorAllocator::instance().Allocate(scaling_mode, num_tensors, logical_shape);
+  NVTEGroupedTensor ret = transformer_engine::GroupedTensorAllocator::instance().Allocate(
+      scaling_mode, num_tensors, logical_shape);
   return ret;
 }
 
