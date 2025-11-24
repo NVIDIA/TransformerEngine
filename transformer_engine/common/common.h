@@ -293,7 +293,7 @@ struct GroupedTensor {
     + When varying_first_dim(): [~sum_of_first_dims, N] where N is common
     + When varying_last_dim(): [M, ~sum_of_last_dims] where M is common
     + When varying_both_dims(): [1, total_elements] (fully flattened)
-
+  
   - first_dims and last_dims are OPTIONAL (empty if dimension is uniform)
     + Empty first_dims: all tensors have the same first dimension
     + Empty last_dims: all tensors have the same last dimension
@@ -330,7 +330,7 @@ struct GroupedTensor {
   // Represents how the 1D flattened data should be interpreted as 2D
   // Always 2D with positive dimensions
   NVTEShape logical_shape;
-
+  
   NVTEScalingMode scaling_mode;
   size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
@@ -386,8 +386,8 @@ struct GroupedTensor {
   DType dtype() const {
     if (has_data()) return data.dtype;
     if (has_columnwise_data()) return columnwise_data.dtype;
-    NVTE_ERROR("Tensor has no data or columnwise data");
-    return DType::kFloat32;
+    // Fallback, used e.g. in workspace or when allow_empty=true
+    return data.dtype;
   }
 
   void clear() {
