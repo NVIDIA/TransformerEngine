@@ -110,9 +110,9 @@ def make_row_id_map(
     grid = (num_tokens,)
     _row_id_map_pass_3_kernel[grid](
         row_id_map,
-        num_experts,
         row_id_map.stride(0),
         row_id_map.stride(1),
+        num_experts,
         triton.next_power_of_2(num_experts),
     )
     return row_id_map

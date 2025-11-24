@@ -156,12 +156,11 @@ def _row_id_map_pass_2_kernel(
 def _row_id_map_pass_3_kernel(
     # pointers
     row_id_map_ptr,
-    # sizes
-    num_experts,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
     # metas
+    num_experts: tl.constexpr,
     LOAD_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
