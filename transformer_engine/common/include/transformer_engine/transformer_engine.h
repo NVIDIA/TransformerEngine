@@ -445,7 +445,8 @@ inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
  *  \param[in] DType      TE Datatype of interest
  */
 inline bool is_high_precision_dtype(const DType t) {
-  return t == DType::kFloat64 || t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
+  return t == DType::kFloat64 || t == DType::kFloat32 || t == DType::kBFloat16 ||
+         t == DType::kFloat16;
 }
 
 /*! \struct TensorWrapper

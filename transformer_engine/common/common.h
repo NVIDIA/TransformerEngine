@@ -423,12 +423,13 @@ struct BitsNumber {
 template <typename T>
 struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1, fp64
+  using types =
+      std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1, fp64
 #if CUDA_VERSION >= 12080
-                           ,
-                           fp8e8m0
+                 ,
+                 fp8e8m0
 #endif
-                           >;
+                 >;
 #else
   using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp64
 #if CUDA_VERSION >= 12080
