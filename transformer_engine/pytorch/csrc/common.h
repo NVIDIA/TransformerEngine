@@ -347,6 +347,7 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt64:
+    case transformer_engine::DType::kFloat64:
       return 64;
     case transformer_engine::DType::kInt32:
     case transformer_engine::DType::kFloat32:
@@ -376,6 +377,8 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
       return torch::kInt64;
     case transformer_engine::DType::kFloat32:
       return at::kFloat;
+    case transformer_engine::DType::kFloat64:
+      return at::kDouble;
     case transformer_engine::DType::kFloat16:
       return at::kHalf;
     case transformer_engine::DType::kBFloat16:
@@ -401,6 +404,8 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
       return transformer_engine::DType::kFloat16;
     case at::kFloat:
       return transformer_engine::DType::kFloat32;
+    case at::kDouble:
+      return transformer_engine::DType::kFloat64;
     case at::kBFloat16:
       return transformer_engine::DType::kBFloat16;
     case at::kBool:

@@ -33,6 +33,7 @@ enum NVTEDType {
   kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
   kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
   kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
+  kNVTEFloat64 = 11,    /*!< 64-bit float */
   kNVTENumTypes         /*!< Number of supported types */
 };
 
@@ -418,6 +419,7 @@ enum class DType {
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
   kFloat4E2M1 = 10,
+  kFloat64 = 11,
   kNumTypes
 };
 
@@ -443,7 +445,7 @@ inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
  *  \param[in] DType      TE Datatype of interest
  */
 inline bool is_high_precision_dtype(const DType t) {
-  return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
+  return t == DType::kFloat64 || t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
 }
 
 /*! \struct TensorWrapper

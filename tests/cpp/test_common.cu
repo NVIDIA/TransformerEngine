@@ -58,6 +58,7 @@ const std::string &typeName(DType type) {
     {DType::kInt32, "int32"},
     {DType::kInt64, "int64"},
     {DType::kFloat32, "float32"},
+    {DType::kFloat64, "float64"},
     {DType::kFloat16, "float16"},
     {DType::kBFloat16, "bfloat16"},
     {DType::kFloat8E4M3, "float8e4m3"},
