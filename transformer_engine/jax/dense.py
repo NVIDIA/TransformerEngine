@@ -15,7 +15,6 @@ import warnings
 import jax
 import jax.numpy as jnp
 
-from transformer_engine_jax import QuantizeLayout
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
@@ -27,6 +26,7 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
+    QuantizeLayout,
 )
 
 
