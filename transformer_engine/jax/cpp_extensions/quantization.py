@@ -497,6 +497,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         x_spec = get_padded_spec(arg_infos[0])
         amax_spec = get_padded_spec(arg_infos[2])
+        sr_rng_state_spec = get_padded_spec(arg_infos[3])
         out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*x_spec),
@@ -551,11 +552,14 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         )
 
         arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
-        arg_shardings[3] = NamedSharding(
-            mesh,
-            PartitionSpec(tuple(x for x in x_spec if x is not None), None),
-            desc="BaseDBiasQuantizePrimitive.sr_rng_state",
-        )
+        if len(sr_rng_state_spec) > 1:
+            # sr_rng_state shape [n_devices, state_per_device]
+            sr_rng_state_spec = (*tuple(x for x in x_spec if x is not None), None)
+            arg_shardings[3] = NamedSharding(
+                mesh,
+                PartitionSpec(*sr_rng_state_spec),
+                desc="BaseDBiasQuantizePrimitive.sr_rng_state",
+            )
         arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
@@ -654,10 +658,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         dbias = input_spec[flatten_axis:] if is_dbias else (prefix + "_dbias",)
         amax = (BATCHING + prefix + "_amax",)
         scale = (BATCHING + prefix + "_scale",)
-        sr_rng_state = (
-            BATCHING + prefix + "_sr_rng_state_partition_axis",
-            BATCHING + prefix + "sr_rng_state_data_axis",
-        )
+        sr_rng_state = (BATCHING + prefix + "_sr_rng_state",)
+        if value_types[3].shape != [0]:
+            sr_rng_state = (
+                BATCHING + prefix + "_sr_rng_state_devices",
+                prefix + "sr_rng_state_data",
+            )
 
         post_rht_amax = (BATCHING + prefix + "_post_rht_amax",)
         rht_matrix = (BATCHING + prefix + "_rht_matrix_1", BATCHING + prefix + "_rht_matrix_2")
@@ -849,7 +855,7 @@ def _quantize_dbias_impl(
     if force_1x_quantization:
         q_layout = QuantizeLayout.ROWWISE
 
-    sr_rng_state = None
+    sr_rng_state = jnp.empty((0,), jnp.uint32)
     if quantizer.scaling_mode.is_nvfp4_scaling:
         # Only NVFP4 scaling modes support stochastic rounding
         if quantizer.stochastic_rounding_rng_state is not None:
@@ -866,11 +872,7 @@ def _quantize_dbias_impl(
         x.data,
         scale,
         amax,
-        (
-            sr_rng_state
-            if sr_rng_state is not None
-            else jnp.empty((get_num_devices_in_mesh(), 1), jnp.uint32)
-        ),
+        sr_rng_state,
         post_rht_amax if post_rht_amax is not None else jnp.zeros((1,), jnp.float32),
         rht_matrix,
         out_dtype=quantizer.q_dtype,
@@ -880,7 +882,7 @@ def _quantize_dbias_impl(
         scale_dtype=quantizer.get_scale_dtype(),
         is_dbias=is_dbias if not quantizer.scaling_mode.is_nvfp4_scaling else False,
         is_outer=True,
-        stochastic_rounding=sr_rng_state is not None,
+        stochastic_rounding=sr_rng_state.size != 0,
         use_rht=use_rht,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
