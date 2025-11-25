@@ -621,8 +621,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
-        # NVFP4 reuses FP8 GlobalStateManager
-        self.primary_weights_in_nvfp4 = FP8GlobalStateManager.with_fp8_parameters()
         self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
@@ -1266,7 +1264,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
-                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                columnwise_usage = torch.is_grad_enabled()
+                if isinstance(quantizer, NVFP4Quantizer) and quantizer.with_2d_quantization:
+                    # NVFP4 2D stores only rowwise data/scale
+                    columnwise_usage = False
+                quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
                 quantizer.internal = False
                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
                     device_mesh = dtensor_param.device_mesh
@@ -1279,7 +1281,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
-
+                
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
@@ -1329,40 +1331,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 setattr(self, name, param)
             else:
                 setattr(self, name, dtensor_param)
-
-            # NVFP4 primary weights path
-            if self.primary_weights_in_nvfp4 and fp8_meta_index is not None:
-
-                high_precision_init_val = None
-                if self.preserve_high_precision_init_val:
-                    high_precision_init_val = getattr(self, name).detach().cpu()
-
-                quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
-                if quantizer is None:
-                    raise RuntimeError("Weight quantizer has not been initialized")
-                if not isinstance(quantizer, NVFP4Quantizer):
-                    # Skip if this meta index is not NVFP4 (e.g., activations)
-                    pass
-                else:
-                    quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
-                    quantizer.internal = False
-                    nvfp4_param = quantizer(getattr(self, name))
-                    nvfp4_param = torch.nn.Parameter(nvfp4_param)
-                    if high_precision_init_val is not None:
-                        def get(self_):
-                            if hasattr(self_, "_high_precision_init_val"):
-                                return self_._high_precision_init_val
-                            return None
-
-                        def clear(self_):
-                            if hasattr(self_, "_high_precision_init_val"):
-                                del self_._high_precision_init_val
-
-                        nvfp4_param._high_precision_init_val = high_precision_init_val
-                        nvfp4_param.get_high_precision_init_val = MethodType(get, nvfp4_param)
-                        nvfp4_param.clear_high_precision_init_val = MethodType(clear, nvfp4_param)
-
-                    setattr(self, name, nvfp4_param)
 
     @abstractmethod
     def forward(self):

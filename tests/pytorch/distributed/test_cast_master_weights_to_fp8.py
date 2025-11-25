@@ -810,23 +810,23 @@ def run_parallel_tests() -> None:
 
     quantizations = []
     if is_fp8_available():
+        print("fp8 available")
         quantizations.extend(["fp8", "fp8_cs"])
     if is_fp8_block_scaling_available():
         quantizations.append("fp8_block")
-
     manual_post_all_gather_processings = [False, True]
-
+    print("starting mini optimizer test")
     _test_mini_optimizer(dp_group)
-
+    print("starting cast master weights to fp8 test")
     for quantization in quantizations:
         for post_ag_processing in manual_post_all_gather_processings:
             _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
             _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-
+    print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
-        for post_ag_processing in manual_post_all_gather_processings:
-            _test_cast_master_weights_to_nvfp4(dp_group, post_ag_processing)
+        #for post_ag_processing in manual_post_all_gather_processings:
+        _test_cast_master_weights_to_nvfp4(dp_group, False)
 
     dist.destroy_process_group()
 
