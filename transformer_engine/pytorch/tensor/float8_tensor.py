@@ -713,9 +713,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, t_shape] + list(args[2:]),
                     kwargs,
                 )
-            # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
-            quantizer = tensor._quantizer
+            quantizer = tensor._quantizer  # Deep-copied in constructor
             out_tensor = Float8Tensor(
                 data=func_out,
                 shape=func_out.shape,
