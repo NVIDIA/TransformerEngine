@@ -59,11 +59,6 @@ def _validate_mesh_resource_configuration(mesh_resource):
         and get_mesh_axis_size(mesh_resource.fsdp_resource) > 1
     )
 
-    assert not (is_dp_enabled and is_fsdp_enabled), (
-        "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
-        f" Got dp_resource={mesh_resource.dp_resource} and"
-        f" fsdp_resource={mesh_resource.fsdp_resource}"
-    )
     assert not (is_tp_enabled and is_tpsp_enabled), (
         "Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time."
         f" Got tp_resource={mesh_resource.tp_resource} and"
