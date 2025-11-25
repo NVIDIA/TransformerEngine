@@ -501,7 +501,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kFloat64: {                                  \
-      using type = float;                                    \
+      using type = double;                                   \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kFloat16: {                                  \
