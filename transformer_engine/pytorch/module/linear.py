@@ -130,7 +130,7 @@ class _Linear(torch.autograd.Function):
             symmetric_ar_type,
             save_original_input,
             debug,
-            use_metis,
+            enable_metis,
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -183,7 +183,7 @@ class _Linear(torch.autograd.Function):
                 assert not isinstance(
                     input_quantizer, Float8Quantizer
                 ), "DelayedScaling recipe is not supported with save_original_input"
-
+        # print(f"use_metis=={use_metis},LinearLowbitContext=", LinearLowbitContext())
         if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
             # Cast local input tensor if needed
@@ -230,7 +230,7 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if isinstance(inputmat, QuantizedTensorStorage):
                     inputmat.update_usage(rowwise_usage=True)
-                elif use_metis and LinearLowbitContext.enable_activation_svd:
+                elif enable_metis and LinearLowbitContext.use_metis and LinearLowbitContext.enable_activation_svd:
                     # ------------------------------------------------------
                     # Forward x SVD
                     # Note: x = U @ S @ V
@@ -245,14 +245,14 @@ class _Linear(torch.autograd.Function):
                         is_backward=False,
                     )
                     own_quantized_input = True
-                else:
-                    if input_quantizer is None:
-                        raise ValueError("Missing quantizer for input tensor")
-                    input_quantizer.set_usage(
-                        rowwise=True, columnwise=backward_needs_input and not save_original_input
-                    )
-                    inputmat = input_quantizer(inputmat)
-                    own_quantized_input = True
+                # else:
+                if input_quantizer is None:
+                    raise ValueError("Missing quantizer for input tensor")
+                input_quantizer.set_usage(
+                    rowwise=True, columnwise=backward_needs_input and not save_original_input
+                )
+                inputmat = input_quantizer(inputmat)
+                own_quantized_input = True
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
@@ -501,11 +501,11 @@ class _Linear(torch.autograd.Function):
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
-            ctx.use_metis = use_metis
-            if use_metis:
-                # Load metis lowbit context
-                ctx.metis_context = LinearLowbitContext().clone()
-                ctx.svd_grad_output_history = svd_grad_output_history
+
+            # Load metis lowbit context
+            ctx.enable_metis = enable_metis
+            ctx.metis_context = LinearLowbitContext().clone()
+            ctx.svd_grad_output_history = svd_grad_output_history
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -1117,7 +1117,7 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
-        use_metis: bool = False,
+        enable_metis: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1133,7 +1133,7 @@ class Linear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
         self.name = name
-        self.use_metis = use_metis
+        self.enable_metis = enable_metis
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.svd_grad_output_history = []
@@ -1488,7 +1488,7 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
-                self.use_metis,
+                self.enable_metis,
                 self.svd_grad_output_history,
             )
             out = linear_fn(

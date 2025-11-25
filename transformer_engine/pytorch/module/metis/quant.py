@@ -39,6 +39,7 @@ class MetisSvdFunction():
 
     @staticmethod
     @torch.no_grad()
+    @torch.compile
     def svd_quant_gemm(x,y,output_dtype,output_quantizer = None,layout="TN",nvtx_label=""):
         
         nvtx_range_push(f"transformer_engine.MetisSvdFunction.svd_quant_gemm_{nvtx_label}.gemm")
@@ -57,15 +58,17 @@ class MetisSvdFunction():
 
     @staticmethod
     @torch.no_grad()
+    @torch.compile
     def svd_lowrank_quant_grad_output(grad_output:torch.Tensor,
                                       grad_output_shape,
                                       **kargs):
         assert grad_output_shape is not None
         grad_output = grad_output.view(grad_output_shape)
-        return MetisSvdFunction.svd_lowrank_quant(grad_output,**kargs)    
+        return MetisSvdFunction.svd_lowrank_quant(grad_output,**kargs)
 
     @staticmethod
     @torch.no_grad()
+    @torch.compile
     def svd_lowrank_quant(input_:torch.Tensor,
                           input_quantizer: "Quantizer", 
                           rank=60, 
@@ -85,16 +88,18 @@ class MetisSvdFunction():
         else:
             cinput = input_
         original_shape = cinput.shape #[s,h]
-        if load_history and gradacc_broadcast and is_backward :
+        if load_history and gradacc_broadcast and is_backward:
             ker,de_svd_gemm_out = history_list
             # print("load")       
         else:
             cinput = cinput.view(-1, original_shape[-1]) #[s,h] or [b*s,h]
+            # print(f"cinput shape==",cinput.shape)
             ug, sg, vg = torch.svd_lowrank(
                 cinput.to(torch.float32), 
                 q=rank, 
                 niter=niter
             )
+            # print("running svd")
             ug = ug.to(input_.dtype)
             sg = sg.to(input_.dtype)
             sg = torch.diag(sg)
@@ -118,11 +123,25 @@ class MetisSvdFunction():
                 # print("storing history_list----")
                 history_list.clear()
                 history_list.extend([ker,de_svd_gemm_out])
-        input_res = input_ - ker #[b,s,h]
-        out_tensor = de_svd_gemm_out + input_res #[b,s,h]
-        
-        output_fp4 = input_quantizer(out_tensor)
-        return output_fp4
+        # de_svd_gemm_out
+        # ker
+        def fused_add_sub(input_, ker, de_svd_gemm_out):
+            # input_: [b, s, h]
+            # ker:    [b, s, h]
+            # de_svd_gemm_out: [b, s, h]
+
+            # 原逻辑：input_res = input_ - ker
+            #         out_tensor = de_svd_gemm_out + input_res
+            # fuse 后就是:
+            return de_svd_gemm_out + (input_ - ker)
+        # compiled_fused_add_sub = torch.compile(fused_add_sub)
+        compiled_fused_add_sub = fused_add_sub
+        # input_res = input_ - ker #[b,s,h]
+        # out_tensor = de_svd_gemm_out + input_res #[b,s,h]
+        out_tensor = compiled_fused_add_sub(input_,ker,de_svd_gemm_out)
+        # output_fp4 = input_quantizer(out_tensor)
+        # return out_tensor
+        return out_tensor
 
     @staticmethod
     @torch.no_grad()

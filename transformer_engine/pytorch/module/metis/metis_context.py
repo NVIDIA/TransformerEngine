@@ -26,7 +26,10 @@ class LinearLowbitContext:
     forward_svd_rank = -1
     enable_weight_svd = False
     gradacc_broadcast = False
+
+    # 动态改变的参数
     load_history=False
+    use_metis = True
 
     def __repr__(self) -> str:
         """Pretty full-text representation of LinearLowbitContext."""
@@ -112,4 +115,13 @@ def load_svd_history():
     finally:
         LinearLowbitContext.load_history = old_gradacc_status
 
+@contextmanager
+def no_use_metis():
+    old_use_metis_status = LinearLowbitContext.use_metis
+    LinearLowbitContext.use_metis = True
+    # setattr(LinearLowbitContext, "gradacc_broadcast", True)
+    try:
+        yield
+    finally:
+        LinearLowbitContext.use_metis = old_use_metis_status
     

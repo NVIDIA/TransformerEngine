@@ -1144,7 +1144,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         Float8BlockwiseQTensorStorage,
                     ),
                 ):
-                    if hasattr(ctx,"use_metis") and ctx.use_metis and ctx.metis_context.enable_backward_svd:
+                    if ctx.enable_metis and ctx.metis_context.use_metis and ctx.metis_context.enable_backward_svd:
                         # print("backward use metis ")
                         from .metis.quant import MetisSvdFunction
                         if ctx.metis_context.backward_lowrank_svd > 0:
@@ -1208,7 +1208,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):
-            if hasattr(ctx,"use_metis") and ctx.use_metis and ctx.metis_context.enable_backward_svd:
+            if ctx.enable_metis and ctx.metis_context.use_metis and ctx.metis_context.enable_backward_svd:
                 # print("backward use metis ,ctx.metis_context=",ctx.metis_context)
                 from .metis.quant import MetisSvdFunction
                 if ctx.metis_context.backward_lowrank_svd > 0:
@@ -1225,9 +1225,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         history_list=ctx.svd_grad_output_history
                     )
                 else:
-                    grad_output = MetisSvdFunction.svd_fullrank_quant(grad_output, quantizer)
-            else:        
-                grad_output = quantizer(grad_output)
+                    grad_output = MetisSvdFunction.svd_fullrank_quant(grad_output, quantizer)      
+            grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
     def register_parameter(self, name, param, **kwargs):

@@ -174,12 +174,13 @@ class MetisLinear(TransformerEngineBaseModule):
             "save_original_input": save_original_input,
             "name": name,
         }
+        # print("Metis linear==",LinearLowbitContext())
         if LinearLowbitContext.enable_lowbit and not LinearLowbitContext.enable_weight_svd:
             # only quantize activation
-            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=True,init_method=init_method,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(in_features,out_features,bias=bias,enable_metis=True,init_method=init_method,**self.commonMetisSvdFunction_args)
         else:
             # only quantize weight
-            self.linear_residual = Linear(in_features,out_features,bias=bias,use_metis=False,init_method=init_method,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(in_features,out_features,bias=bias,enable_metis=False,init_method=init_method,**self.commonMetisSvdFunction_args)
         # debugpy.breakpoint()
         if LinearLowbitContext.enable_weight_svd:
 
@@ -263,7 +264,7 @@ class MetisLinear(TransformerEngineBaseModule):
                     LinearLowbitContext.forward_svd_rank, # v.shape[0] // 30, 
                     init_method=partial(MetisLinear.init_tensor_with_data,v[: LinearLowbitContext.forward_svd_rank, :]),
                     bias = False,
-                    use_metis=True,
+                    enable_metis=True,
                     **self.commonMetisSvdFunction_args
                     )
                 self.ulinear = Linear(
@@ -281,7 +282,7 @@ class MetisLinear(TransformerEngineBaseModule):
                     v.shape[0], # v.shape[0] // 30, 
                     init_method=partial(MetisLinear.init_tensor_with_data,v),
                     bias=False,
-                    use_metis=True,
+                    enable_metis=True,
                     **self.commonMetisSvdFunction_args,
                     )
                 self.ulinear = Linear(
@@ -372,13 +373,13 @@ class MetisLinear(TransformerEngineBaseModule):
 
             # 主分支（线性残差）
             if hasattr(self, "linear_residual"):
-                lines.append(indent(f"linear_residual: {repr(self.linear_residual)} # use_metis={self.linear_residual.use_metis}\n", 6))
+                lines.append(indent(f"linear_residual: {repr(self.linear_residual)} # enable_metis={self.linear_residual.enable_metis}\n", 6))
 
             # SVD 分支
             if hasattr(self, "vlinear"):
-                lines.append(indent(f"vlinear: {repr(self.vlinear)} # use_metis={self.vlinear.use_metis}\n", 6))
+                lines.append(indent(f"vlinear: {repr(self.vlinear)} # enable_metis={self.vlinear.enable_metis}\n", 6))
             if hasattr(self, "ulinear"):
-                lines.append(indent(f"ulinear: {repr(self.ulinear)} # use_metis={self.ulinear.use_metis}\n", 6))
+                lines.append(indent(f"ulinear: {repr(self.ulinear)} # enable_metis={self.ulinear.enable_metis}\n", 6))
             lines.append(indent(f"s: Tensor(shape={tuple(self.s.shape)}, dtype={self.s.dtype})\n", 6))
 
             return "".join(lines) + ")"
@@ -387,6 +388,6 @@ class MetisLinear(TransformerEngineBaseModule):
         else:
             lines = [header + ",\n"]
             # lines.append("  submodules:\n")
-            lines.append("      linear_residual: " + repr(self.linear_residual) + f"# use_metis={self.linear_residual.use_metis}" + "\n")
+            lines.append("      linear_residual: " + repr(self.linear_residual) + f"# enable_metis={self.linear_residual.enable_metis}" + "\n")
             lines.append(")")
             return "".join(lines)
