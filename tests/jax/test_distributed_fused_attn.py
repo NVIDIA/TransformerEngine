@@ -507,7 +507,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[-1],
+        [DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[-1]],
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -516,6 +516,13 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize(
         "stripe_height",
         [pytest.param(64, id="STRIPE-64"), pytest.param(128, id="STRIPE-128")],
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="window_size(-1, -1)"),
+            pytest.param((5, 0), id="window_size(5, 0)"),
+        ],
     )
     def test_context_parallel_allgather_striped_attn(
         self,
@@ -529,8 +536,11 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        window_size,
         stripe_height,
     ):
+        if window_size != (-1, -1) and not qkv_layout.is_thd():
+            pytest.skip("Sliding window attention is only supported for THD layout")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -544,6 +554,7 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.ALL_GATHER,
             use_shardy=False,
+            window_size=window_size,
             stripe_height=stripe_height,
         )
 
