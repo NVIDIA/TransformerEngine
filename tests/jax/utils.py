@@ -1507,6 +1507,7 @@ def assert_allclose(
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
+
     # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 

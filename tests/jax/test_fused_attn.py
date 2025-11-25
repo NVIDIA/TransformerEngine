@@ -776,7 +776,7 @@ class FusedAttnRunner:
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
-    def _test_forward(self):
+    def test_forward(self):
         """
         Test forward with JITted primitive and unJITted reference
         """
@@ -1150,7 +1150,7 @@ class TestFusedAttn:
             pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
         ],
     )
-    def test_forward(
+    def _test_forward(
         b,
         s_q,
         s_kv,

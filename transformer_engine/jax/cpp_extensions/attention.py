@@ -1297,8 +1297,6 @@ class _FusedAttnCPWithAllGatherHelper:
         if self.config.attn_bias_type != AttnBiasType.NO_BIAS:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
-        # TODO: Should AttnMaskType.PADDING_CAUSAL_MASK be allowed for CP + AG + THD + Striped ?
-        # TODO: Should Should AttnMaskType.NO_MASK be allowed for CP + AG + THD + Striped ?
         allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
         if self.config.qkv_layout.is_thd():
             allowed_masks.append(AttnMaskType.PADDING_CAUSAL_MASK)
@@ -1308,6 +1306,7 @@ class _FusedAttnCPWithAllGatherHelper:
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
         # TODO: For now do not all  CP + AG + THD + Striped with NO_MASK
+        # TODO: For now do not allow CP + AG + THD + Striped with NO_MASK
         if self.config.attn_mask_type is AttnMaskType.NO_MASK and self.config.qkv_layout.is_thd():
             raise ValueError(f"{header} only supports CAUSAL_MASK for THD types")
 
@@ -1330,24 +1329,23 @@ class _FusedAttnCPWithAllGatherHelper:
         if (
             self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK
             and not self.config.qkv_layout.is_thd()
-        ):  # BSHD only ?
+        ):  # BSHD AG case only
             return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
         if (
             self.config.attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK
             and self.config.qkv_layout.is_thd()
-        ):  # THD only ?
+        ):  # THD AG case only
             return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
         return self.config.attn_mask_type
 
     def get_adjusted_max_segments_per_seq(self, max_seqlen, cp_size):
-        # Estimating
+        # Estimating adjusted max segments per seq
         return (
             max_seqlen // (self.config.stripe_size * cp_size)
         ) + self.config.max_segments_per_seq
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
-        # TODO: Should the max_segments_per_seq be different ?
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
@@ -1365,8 +1363,7 @@ class _FusedAttnCPWithAllGatherHelper:
         )
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
-        """Returns a _FusedAttnConfig for single CP step call to fused attention."""
-        # TODO: Should the max_segments_per_seq be different ?
+        """Returns a _FusedAttnConfig for single CP step call (made via a striped AG primitive) to fused attention."""
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=self.get_adjusted_mask(),
@@ -1384,7 +1381,7 @@ class _FusedAttnCPWithAllGatherHelper:
         )
 
     def all_gather_kv(self, k, v):
-        """Performs a all-gather of k and v over context parallel ranks."""
+        """Performs an all-gather of k and v over context parallel ranks."""
 
         def ag(x):
             x = lax_paral_op(
@@ -1406,8 +1403,7 @@ class _FusedAttnCPWithAllGatherHelper:
         return k, v  # fall through
 
     def all_gather_segment_ids_and_pos(self, kv_segment_ids, kv_segment_pos):
-        """Performs a all-gather of k and v over context parallel ranks."""
-
+        """Performs an all-gather of kv segment ids and kv segment pos over context parallel ranks."""
         kv_segment_ids = lax_paral_op(
             kv_segment_ids, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
         )
@@ -1424,7 +1420,6 @@ class _FusedAttnCPWithAllGatherHelper:
                     kv_segment_pos, cp_size, 1, True, self.config.stripe_size
                 )
                 return kv_segment_ids_ag, kv_segment_pos_ag
-            # TODO: Is the dual chunk case needed ?
         return kv_segment_ids, kv_segment_pos  # fall through
 
     def reduce_scatter_dkv(self, dk, dv):
@@ -1509,17 +1504,25 @@ class _FusedAttnCPWithAllGatherHelper:
 
         return dk, dv  # fall through
 
+    # Extract the q seqlens for striped primitive (post AG) from the sharded q seg ids and seg pos
+    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # non_zero_indices = [[ 0,  1,  2,  3,  8,  9, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1]]
+    # segment_changes = [[ True, False, False, False,  True, False, False, False,  True, False, False, False,  True,  True,  True,  True]]
+    # seqlens_pre = [[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0]]
+    # seqlens_all_pad_neg = [[ 4,  4,  4, -1, -1, -1, -1]]
     def q_seqlens_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
-        # Create mask for non-zero segment IDs
+        # Create mask for non-zero seg ids and get the non-zero indices associated with the same
         non_zero_mask = q_segment_ids != 0
-        # Calculate indices from mask
         max_size = q_segment_ids.shape[-1]
-        # Get non-zero indices for each row (need to vmap underlying jnp.nonzero calls made by jnp.where)
         non_zero_indices = jax.vmap(
             lambda mask_row: jnp.where(mask_row, size=max_size, fill_value=-1)[0]
         )(non_zero_mask)
 
-        # Pick non zero seg ids and seg pos using take_along_axis
+        # Pick non-zero seg ids and seg pos using take_along_axis to index within the seg ids and pos
         # Clip -1 to 0 for safe indexing
         clipped_indices = jnp.clip(non_zero_indices, 0, None)
         valid_segment_ids = jnp.where(
@@ -1528,13 +1531,11 @@ class _FusedAttnCPWithAllGatherHelper:
         valid_segment_pos = jnp.where(
             non_zero_indices >= 0, jnp.take_along_axis(q_segment_pos, clipped_indices, axis=-1), 0
         )
-
-        # Create mask for actual valid entries (not padding)
+        # Create a mask for actual valid entries (not padding)
         actual_valid = valid_segment_ids != 0
-
-        # Detect segment changes, accounting for padding
         # First element is True only if it's actually valid
         first_is_segment = actual_valid[..., 0:1]
+
         # Detect segment breaks in the valid tokens only (not full seq)
         # Padding will always be true as the segment change condition is being applied
         # on the valid segments (which have padding at the end so they'll always trigger True)
@@ -1555,12 +1556,18 @@ class _FusedAttnCPWithAllGatherHelper:
             lambda sp_row: jnp.bincount(sp_row, length=max_segments_per_seq + 1)[1:]
         )(seqlens_pre)
         seqlens_all_pad_neg = jnp.where(seqlens_all == 0, -1, seqlens_all)
-        max_new_segments_per_seq = 0  # TODO: Remove
-        return max_new_segments_per_seq, seqlens_all_pad_neg
+        return seqlens_all_pad_neg
 
-    def q_seqoffsets_for_striped_for_rank(
-        self, q_segment_ids, q_segment_pos, q_num_segments, max_segments_per_seq
-    ):
+    # Extract the q seqoffets for striped primitive (post AG) from the sharded q seg ids and seg pos
+    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # segment_changes = [[ True, False, False, False,  True, False, False, False,  True, False, False, False,  True, False, False, False]]
+    # segment_changes_masked = [[ True, False, False, False, False, False, False, False,  True, False, False, False,  True, False, False, False]]
+    # seq_offsets =  [[ 0,  8, 12, -1, -1, -1, -1, -1]]
+    def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
         segment_changes = jnp.concatenate(
             [
                 jnp.full(
@@ -1574,17 +1581,25 @@ class _FusedAttnCPWithAllGatherHelper:
         segment_changes_masked = jnp.where(q_segment_ids != 0, segment_changes, False)
         # Get the indices for segment changes (these are the offsets)
         max_size = q_segment_pos.shape[-1]
-        seq_offsets_2 = jax.vmap(
+        seq_offsets = jax.vmap(
             lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
         )(segment_changes_masked)
-        return seq_offsets_2
+        return seq_offsets
 
+    # Extract the kv seqlens for striped primitive (post AG) from the sharded kv seg ids and seg pos
+    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # non_zero_mask = [[ True,  True,  True,  True, False, False, False, False,  True, True,  True,  True,  True,  True,  True,  True]]
+    # non_zero_indices = [[ 0,  1,  2,  3,  8,  9, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1]]
+    # segment_changes = [[False, False, False,  True, False, False, False,  True, False, False, False,  True,  True,  True,  True, False]]
+    # selected_values = [[ 4, 15, 31, -1, -1, -1, -1, -1]]
     def kv_seqlens_for_striped_for_rank(self, kv_segment_ids, kv_segment_pos, max_segments_per_seq):
-        # Create mask for non-zero segment IDs
+        # Create mask for non-zero seg ids and get the non-zero indices associated with the same
         non_zero_mask = kv_segment_ids != 0
-        # Filter to only non-zero segments
         max_size = kv_segment_ids.shape[-1]
-        # Get non-zero indices for each row (need to vmap underlying jnp.nonzero calls made by jnp.where)
         non_zero_indices = jax.vmap(
             lambda mask_row: jnp.where(mask_row, size=max_size, fill_value=-1)[0]
         )(non_zero_mask)
@@ -1599,10 +1614,8 @@ class _FusedAttnCPWithAllGatherHelper:
             non_zero_indices >= 0, jnp.take_along_axis(kv_segment_pos, clipped_indices, axis=-1), 0
         )
         actual_valid = valid_segment_ids != 0
-
-        # Detect segment changes, accounting for padding
-        # First element is True only if it's actually valid
         first_is_segment = actual_valid[..., 0:1]
+
         # Detect segment breaks (only for non-zero segments)
         segment_changes = jnp.concatenate(
             [
@@ -1615,14 +1628,12 @@ class _FusedAttnCPWithAllGatherHelper:
             ],
             axis=-1,
         )
-
-        # Get the indices for segment changes - apply vmap per row
+        # Get the indices for segment changes
         segment_changes_valid = jax.vmap(
             lambda sc_row, av_row: jnp.where(
                 sc_row & av_row, size=max_segments_per_seq, fill_value=-1
             )[0]
         )(segment_changes, actual_valid)
-        # Safe indices
         safe_indices = jnp.maximum(segment_changes_valid, 0)
         # Select values using take_along_axis per row
         selected_values = jnp.where(
@@ -1630,17 +1641,42 @@ class _FusedAttnCPWithAllGatherHelper:
             jnp.take_along_axis(valid_segment_pos, safe_indices, axis=-1) + 1,
             -1,
         )
-        # Count non-zero per row or total
-        num_segments = jnp.count_nonzero(selected_values > 0, axis=-1).astype(int)  # Per row
-        return num_segments, selected_values
+        return selected_values
 
+    # Extract the kv seqoffsets for striped primitive (post AG) from the sharded kv seg ids and seg pos,
+    # AG kv seg ids and seg pos.
+    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # kv_segment_ids_ag = [[1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    #                       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    #                       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+    # kv_segment_pos_ag = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+    #                       18, 19, 20, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    #                       15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    #                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # segment_changes_first_true_masked = [[ True, False, False, False, False, False, False, False, True,
+    #                                       False, False, False,  True, False, False, False]]
+    # segment_changes_indices = [[ 0,  8, 12, -1, -1, -1, -1, -1, -1]]
+    # segment_ids = [[ 1,  2,  2, -1, -1, -1, -1, -1, -1]]
+    # segment_changes_ag_first_true_masked = [[ True, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False,  True, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False]
+    # segment_changes_ag_indices = [[ 0, 21, -1, -1, -1, -1, -1, -1, -1]]
+    # seq_offsets = [[ 0, 21, 21, -1, -1, -1, -1, -1, -1]]
     def kv_seqoffsets_for_striped_for_rank(
         self,
         kv_segment_pos,
         kv_segment_ids,
         kv_segment_pos_ag,
         kv_segment_ids_ag,
-        kv_num_segments,
         max_segments_per_seq,
     ):
         # Calculate the segment pos change mask
@@ -1648,7 +1684,7 @@ class _FusedAttnCPWithAllGatherHelper:
             [
                 jnp.full(
                     (kv_segment_pos.shape[0], 1), True, dtype=bool
-                ),  # Assume valid element starts a segment
+                ),  # Assume valid element starts a segment and mask afterwards
                 (kv_segment_pos[..., 1:] != kv_segment_pos[..., :-1] + 1),  # Segment pos changed
             ],
             axis=-1,
@@ -1671,7 +1707,7 @@ class _FusedAttnCPWithAllGatherHelper:
             [
                 jnp.full(
                     (kv_segment_pos.shape[0], 1), True, dtype=bool
-                ),  # Assume valid element starts a segment
+                ),  # Assume valid element starts a segment and mask afterwards
                 (
                     kv_segment_pos_ag[..., 1:] != kv_segment_pos_ag[..., :-1] + 1
                 ),  # Segment pos changed
@@ -2049,39 +2085,34 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 idx, q, k, v, bias, softmax_offset, kv_segment_ids_ag, kv_segment_pos_ag, seed
             ):
                 # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
-                # Do not forget to unset the segment_ids and segment_pos so that the seqlens_from_segment_ids_pos() function
-                # does not go down that route but instead just picks the seqlens and offsets passed onto it
+                # Unset the segment_ids and segment_pos by passing placeholders so that the seqlens_from_segment_ids_pos()
+                # does not go down that route but instead just picks the pre-computed seqlens and offsets passed onto it
 
                 kv_max_seqlen = k.shape[1]
                 # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
                 adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(
                     max_seqlen=kv_max_seqlen, cp_size=cp_size
                 )
-                q_num_segments_for_rank, q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
+                q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
                     _q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq
                 )
                 q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(
                     q_segment_ids=_q_segment_ids,
                     q_segment_pos=_q_segment_pos,
-                    q_num_segments=q_num_segments_for_rank,
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
-                kv_num_segments_for_rank, kv_seqlens_for_rank = (
-                    helper.kv_seqlens_for_striped_for_rank(
-                        kv_segment_ids=_kv_segment_ids,
-                        kv_segment_pos=_kv_segment_pos,
-                        max_segments_per_seq=adjusted_max_segments_per_seq,
-                    )
+                kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos=_kv_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
                 kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(
                     kv_segment_pos=_kv_segment_pos,
                     kv_segment_ids=_kv_segment_ids,
                     kv_segment_pos_ag=kv_segment_pos_ag,
                     kv_segment_ids_ag=kv_segment_ids_ag,
-                    kv_num_segments=kv_num_segments_for_rank,
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
-                # kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
 
                 output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                     q,  # sharded for rank
@@ -2094,16 +2125,17 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     kv_seqlens_for_rank,
                     q_seq_offsets_for_rank,
                     kv_seq_offsets_for_rank,
-                    q_seqlen,  # Should be empty ids but using placeholder
-                    kv_seqlen,  # Should be empty poss but using placeholder
-                    q_seq_offsets,  # Should be empty ids but using placeholder
-                    k_seq_offsets,  # Should be empty pos but using placeholder
+                    q_seqlen,  # q seg ids should be empty ids so just passing q seqlens (empty) instead
+                    kv_seqlen,  # kv seg ids should be empty ids so just passing kv seqlens (empty) instead
+                    q_seq_offsets,  # q seg pos should be empty pos so just passing q seqoffsets (empty) instead
+                    k_seq_offsets,  # kv seg pos should be empty pos so just passing kv seqoffsets (empty) instead
                     config=helper.get_step_config_for_striped(
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
                 )
                 return output, softmax_aux, rng_state
 
+            # AG the k, v, kv_segment_ids and kv_segment_pos
             k_ag, v_ag = helper.all_gather_kv(k, v)
             _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(
                 _kv_segment_ids, _kv_segment_pos
@@ -2123,7 +2155,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 )
                 for idx in range(cp_size)
             ]
-
             return lax.switch(cp_rank, functions)
 
         return mesh, impl, out_shardings, arg_shardings
@@ -2151,7 +2182,6 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
 
-        # TODO: Confirm the deletion
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
         k_spec = get_padded_spec(arg_infos[1])
@@ -2214,39 +2244,34 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                 kv_segment_pos_ag,
             ):
                 # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
-                # Do not forget to unset the segment_ids and segment_pos so that the seqlens_from_segment_ids_pos() function
-                # does not go down that route but instead just picks the seqlens and offsets passed onto it
+                # Unset the segment_ids and segment_pos by passing placeholders so that the seqlens_from_segment_ids_pos()
+                # does not go down that route but instead just picks the pre-computed seqlens and offsets passed onto it
 
                 kv_max_seqlen = k.shape[1]
                 # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
                 adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(
                     max_seqlen=kv_max_seqlen, cp_size=cp_size
                 )
-                q_num_segments_for_rank, q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
+                q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
                     _q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq
                 )
                 q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(
                     q_segment_ids=_q_segment_ids,
                     q_segment_pos=_q_segment_pos,
-                    q_num_segments=q_num_segments_for_rank,
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
-                kv_num_segments_for_rank, kv_seqlens_for_rank = (
-                    helper.kv_seqlens_for_striped_for_rank(
-                        kv_segment_ids=_kv_segment_ids,
-                        kv_segment_pos=_kv_segment_pos,
-                        max_segments_per_seq=adjusted_max_segments_per_seq,
-                    )
+                kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos=_kv_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
                 kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(
                     kv_segment_pos=_kv_segment_pos,
                     kv_segment_ids=_kv_segment_ids,
                     kv_segment_pos_ag=kv_segment_pos_ag,
                     kv_segment_ids_ag=kv_segment_ids_ag,
-                    kv_num_segments=kv_num_segments_for_rank,
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
-                # kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
 
                 dq_local, dk_local, dv_local, dbias_local, _ = FusedAttnBwdPrimitive.impl(
                     q,  # sharded for rank
@@ -2262,28 +2287,17 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     kv_seqlens_for_rank,
                     q_seq_offsets_for_rank,
                     kv_seq_offsets_for_rank,
-                    q_seqlen,  # Should be empty ids but using placeholder
-                    kv_seqlen,  # Should be empty poss but using placeholder
-                    q_seq_offsets,  # Should be empty ids but using placeholder
-                    k_seq_offsets,  # Should be empty pos but using placeholder
+                    q_seqlen,  # q seg ids should be empty ids so just passing q seqlens (empty) instead
+                    kv_seqlen,  # kv seg ids should be empty ids so just passing kv seqlens (empty) instead
+                    q_seq_offsets,  # q seg pos should be empty pos so just passing q seqoffsets (empty) instead
+                    k_seq_offsets,  # kv seg pos should be empty pos so just passing kv seqoffsets (empty) instead
                     config=helper.get_step_config_for_striped(
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
                 )
-
-                # pad dk/dv to be unsliced shape so we can reduce scatter over all ranks.
-                # if config.attn_mask_type != AttnMaskType.NO_MASK:
-                #     pad_length = kv_max_seqlen - kv_seqlens_for_rank[sub_idx]
-                #     dk_local, dv_local = helper.pad_kv(dk_local, dv_local, pad_length)
-
-                # results.append((dq_local, dk_local, dv_local, dbias_local))
-
-                # dq_local = jnp.concatenate((results[0][0], results[1][0]), axis=1)
-                # dk_local_pad = results[0][1] + results[1][1]
-                # dv_local_pad = results[0][2] + results[1][2]
-                # return dq_local, dk_local_pad, dv_local_pad, results[1][3]
                 return dq_local, dk_local, dv_local, dbias_local
 
+            # AG the k, v, kv_segment_ids and kv_segment_pos
             k_ag, v_ag = helper.all_gather_kv(k, v)
             _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(
                 _kv_segment_ids, _kv_segment_pos
@@ -2313,6 +2327,7 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
             ]
 
             dq, dk_local, dv_local, dbias = lax.switch(cp_rank, functions)
+            # RS the dk and dv
             dk, dv = helper.reduce_scatter_dkv(dk_local, dv_local)
 
             # Return dummy dsoftmax_offset for arity matching (all-gather CP doesn't use it)
@@ -3418,6 +3433,7 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnStripedFwdPrimitive.outer_primitive
             else:
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
+
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,

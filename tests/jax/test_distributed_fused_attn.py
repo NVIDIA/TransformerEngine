@@ -436,7 +436,6 @@ class TestDistributedContextParallelSelfAttn:
         # and exception if the step backend is not supported. This was a deliberate API
         # decision to keep the CP size or flag out of the function.
         has_backend = check_has_backend_for_mask(attn_mask_type)
-        # TODO: For PADDING_CAUSAL_MASK ?
         if cp_size > 1 and attn_mask_type == AttnMaskType.CAUSAL_MASK:
             has_backend &= check_has_backend_for_mask(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK)
 

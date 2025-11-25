@@ -393,6 +393,7 @@ def reorder_causal_load_balancing(
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped
         return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False, stripe_size)
     raise ValueError(f"Unsupported {strategy=}")
 
@@ -404,6 +405,7 @@ def inverse_reorder_causal_load_balancing(
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped
         return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True, stripe_size)
     raise ValueError(f"Unsupported {strategy=}")
 
@@ -538,13 +540,12 @@ def _segment_ids_pos_to_seqlens_offsets(
     # It does not need to involve SW for this mask's creation
 
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    # TODO: Un comment the fast path
-    # if (attn_mask_type.is_causal() and window_size is None) or (
-    #     window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
-    # ):
-    #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-    #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
-    #     )
+    if (attn_mask_type.is_causal() and window_size is None) or (
+        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    ):
+        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+        )
 
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
@@ -1217,7 +1218,7 @@ def fused_attn(
             [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
             If provided, this parameter will receive gradients during backpropagation.
         stripe_size (int):
-            Indicates the striping height to be used when using ReorderStrategy.Striped.
+            Indicates the striping size to be used when using ReorderStrategy.Striped.
             Currently, a stripe_size > 1 is only allowed for CP + THD + Striped + AG
             0 indicates no striping strategy
     Returns:
