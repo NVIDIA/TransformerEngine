@@ -491,29 +491,9 @@ class FusedAttnRunner:
         else:
             pytest.fail(f"PyTest attempted to use an unrecognized bias_layout = {self.bias_shape}!")
 
-        # self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
-        # self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
-        # self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
-        # KL test code
-        q_np = np.zeros(q_shape, self.dtype)
-        k_np = np.zeros(k_shape, self.dtype)
-        token_numbers_q = range(self.max_seqlen_q)
-        token_numbers_k = range(self.max_seqlen_kv)
-        for batch_idx in range(q_shape[0]):
-            for token_idx in token_numbers_q:
-                q_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * (
-                    token_idx + 1
-                )
-            for token_idx in token_numbers_k:
-                k_np[batch_idx][token_idx][0] = np.ones(self.head_dim_qk, self.dtype) * np.sqrt(
-                    self.head_dim_qk
-                )
-            v_np = np.ones(v_shape, self.dtype)
-            # Set cols at multiples
-            v_np[0, ::4, 0, :] = np.arange(v_np.shape[3])
-            self.q = jnp.array(q_np)
-            self.k = jnp.array(k_np)
-            self.v = jnp.array(v_np)
+        self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
+        self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
+        self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape._1HSS:
@@ -579,8 +559,6 @@ class FusedAttnRunner:
                     min_segment_size = 1
                     if min_segment_len is not None:
                         min_segment_size = min_segment_len[i][seg_id]
-                    # KL test code
-                    min_segment_size = 4
                     segment_size = rng.integers(min_segment_size, max_segment_size + 1)
                     if current_pos + segment_size > sequence_length:
                         break
@@ -603,7 +581,7 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=12
+                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
             # TODO(rewang): record only self attention and find the reason of cross attention
