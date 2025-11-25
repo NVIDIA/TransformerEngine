@@ -10,6 +10,7 @@
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/hadamard_transform.h>
+#include <transformer_engine/multi_tensor.h>
 
 #include <cuda/barrier>
 
@@ -20,6 +21,20 @@
 
 namespace transformer_engine {
 namespace {
+
+constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB, expand 64 if needed
+struct MultiAmaxArgs {
+  // (output) Amax buffer for pre-RHT amax buffer
+  void* output_pre_rht_amax_list[kMaxTensorsPerKernel];
+  // (output) Amax buffer for RHT identity amax buffer
+  void* output_identity_amax_list[kMaxTensorsPerKernel];
+  // (output) Amax buffer for RHT transpose amax buffer
+  void* output_transpose_amax_list[kMaxTensorsPerKernel];
+  // Prefix sum (with leading zero) of split_sections of each tensor of input
+  int split_sections_range[kMaxTensorsPerKernel + 1];
+  // Number of tensors (splits) being processed by kernel
+  int num_tensors;
+};
 
 constexpr int kThreadsPerWarp = 32;
 
@@ -162,30 +177,72 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
   }
 }
 
-__launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_pre_rht_amax_ptr,
-                                                    float* __restrict__ output_identity_amax_ptr,
-                                                    float* __restrict__ output_transpose_amax_ptr) {
-  if (output_pre_rht_amax_ptr != nullptr) {
-    *output_pre_rht_amax_ptr = 0;
+// args: the mult-tensor amax arguments
+__global__ void MultiZeroAmaxKernel(MultiAmaxArgs args) {
+  int num_tensors = args.num_tensors;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (; tid < num_tensors; tid += stride) {
+    float* output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tid]);
+    float* output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tid]);
+    float* output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tid]);
+    if (output_pre_rht_amax_ptr != nullptr) {
+      *output_pre_rht_amax_ptr = 0;
+    }
+    if (output_identity_amax_ptr != nullptr) {
+      *output_identity_amax_ptr = 0;
+    }
+    if (output_transpose_amax_ptr != nullptr) {
+      *output_transpose_amax_ptr = 0;
+    }
   }
-  if (output_identity_amax_ptr != nullptr) {
-    *output_identity_amax_ptr = 0;
-  }
-  if (output_transpose_amax_ptr != nullptr) {
-    *output_transpose_amax_ptr = 0;
+}
+
+// args: the mult-tensor amax arguments
+__global__ void MultiAmaxMemcpyD2DKernelPreRHT(MultiAmaxArgs args) {
+  int num_tensors = args.num_tensors;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (; tid < num_tensors; tid += stride) {
+    float* output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tid]);
+    float* output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tid]);
+    float* output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tid]);
+    if (output_pre_rht_amax_ptr != nullptr) {
+      float pre_rht_amax = *output_pre_rht_amax_ptr;
+      if (output_identity_amax_ptr != nullptr) {
+        *output_identity_amax_ptr = pre_rht_amax;
+      }
+      if (output_transpose_amax_ptr != nullptr) {
+        *output_transpose_amax_ptr = pre_rht_amax;
+      }
+    }
   }
 }
 
 template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM_X, int BUFF_DIM_Y,
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
-__global__ void HadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor_map_input,
-                                      float* __restrict__ output_pre_rht_amax_ptr,
-                                      float* __restrict__ output_identity_amax_ptr,
-                                      float* __restrict__ output_transpose_amax_ptr,
-                                      uint16_t random_sign_mask, uint16_t random_sign_mask_t,
-                                      uint64_t num_rows, uint64_t row_length) {
+__global__ void GroupHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                           const MultiAmaxArgs args, uint16_t random_sign_mask,
+                                           uint16_t random_sign_mask_t, uint64_t num_rows,
+                                           uint64_t row_length) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+  float* output_pre_rht_amax_ptr;
+  float* output_identity_amax_ptr;
+  float* output_transpose_amax_ptr;
+
+  // calculate the global offset in Y direction to access the correct amax buffer
+  int global_offset_y = blockIdx.y * CHUNK_DIM_Y;
+  int tensor_id = 0;
+  while (args.split_sections_range[tensor_id + 1] <= global_offset_y) {
+    ++tensor_id;
+  }
+  output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tensor_id]);
+  output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tensor_id]);
+  output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tensor_id]);
 
   static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y && CHUNK_DIM_Y % BUFF_DIM_Y == 0);
   static_assert(CHUNK_DIM_X >= BUFF_DIM_X && CHUNK_DIM_X % BUFF_DIM_X == 0);
@@ -325,251 +382,16 @@ __global__ void HadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-template <typename T, int kHadamardDimension, bool kComputeIdentity, bool kComputeTransposed,
-          bool kReturnIdentity, bool kReturnTransposed, bool kUpdateIdentityAmax,
-          bool kUpdateTransposeAmax, bool kOutputTrueTransposed>
-__global__ void HadamardTransformKernel(const T* __restrict__ input, T* __restrict__ output,
-                                        T* __restrict__ output_t, uint16_t random_sign_mask,
-                                        uint16_t random_sign_mask_t, uint64_t num_input_rows,
-                                        uint64_t num_input_cols, float* __restrict__ amax,
-                                        float* __restrict__ amax_t, bool inverse_hadamard) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  static_assert(kHadamardDimension == 16, "Currently only hadamard dimension 16 is supported.");
-
-  // The whole threadblock will share the same smem.
-  extern __shared__ __align__(16) T smem[];
-
-  // Each 32 threads process a 16x16 matrix. There is a (y, z) grid of 16x16.
-  // If y = 4, z = 4, then each threadblock is processing a 4x4 grid of 16x16 matrices.
-  int32_t tid = threadIdx.x;
-  int32_t warp_id = threadIdx.y * blockDim.z + threadIdx.z;
-  int32_t local_bx = threadIdx.y;
-  int32_t local_by = threadIdx.z;
-
-  // Define the register fragments
-  uint32_t a_frag[4];    // A matrix fragment
-  uint32_t b_frag_i[4];  // Transposed Hadamard matrix fragment, used for A @ B(col major)
-  uint32_t b_frag_t[4];  // Hadamard matrix fragment, used for A.T @ B.T(col major)
-  uint32_t c_frag[4];    // Result fragment
-
-  // row and col for each thread. 32 threads will work together in 128 chunk to
-  // load the data from global memory to shared memory.
-  uint32_t row = tid / (kHadamardDimension * sizeof(T) / sizeof(uint4));
-  uint32_t col = tid % (kHadamardDimension * sizeof(T) / sizeof(uint4));
-
-  uint32_t smem_index = tid;
-
-  uint32_t input_start_col = (blockIdx.x * blockDim.y + local_bx) * kHadamardDimension;
-  uint32_t input_start_row = (blockIdx.y * blockDim.z + local_by) * kHadamardDimension;
-
-  bool load = (input_start_col < num_input_cols) && (input_start_row < num_input_rows);
-  if (!load) {
-    // Out of bound, we are returning early. No thread divergence since the whole warp
-    // will return early.
-    return;
-  }
-
-  uint64_t global_offset = input_start_col + input_start_row * num_input_cols;
-  uint64_t global_offset_t =
-      kOutputTrueTransposed ? (input_start_row + input_start_col * num_input_rows) : global_offset;
-
-  T* base_smem = smem + kHadamardDimension * kHadamardDimension * warp_id;
-
-  uint32_t* smem_b32 = reinterpret_cast<uint32_t*>(base_smem);
-  uint4* smem_b128 = reinterpret_cast<uint4*>(base_smem);
-
-  // Asynchronously load the data from global memory to shared memory.
-  const uint4* input_b128 = reinterpret_cast<const uint4*>(input + global_offset);
-  // Each 16x16 chunk is divided into 4 8x8 matrices, we are trying to load each
-  // 8x8 chunks consecutively into the smem, so we could leverage ldmatrix m8n8x4
-  // to load the data in the tensor core swizzled format.
-  __pipeline_memcpy_async(&smem_b128[smem_index],
-                          &input_b128[row * num_input_cols / (sizeof(uint4) / sizeof(T)) + col],
-                          sizeof(uint4));
-  __pipeline_commit();  // Commit the memcpy. Wait when we are in the computation.
-
-  if (inverse_hadamard) {
-    get_hadamard_matrix_fragment<kComputeIdentity, kComputeTransposed,
-                                 /*kInverseHadamard=*/true,
-                                 /*kInverseHadamardTransposed=*/true>(b_frag_i, random_sign_mask,
-                                                                      b_frag_t, random_sign_mask_t);
-  } else {
-    get_hadamard_matrix_fragment<kComputeIdentity, kComputeTransposed,
-                                 /*kInverseHadamard=*/false,
-                                 /*kInverseHadamardTransposed=*/false>(
-        b_frag_i, random_sign_mask, b_frag_t, random_sign_mask_t);
-  }
-
-  float local_amax = 0.0;
-  float local_amax_t = 0.0;
-  uint32_t local_amax_reg = *reinterpret_cast<uint32_t*>(&local_amax);
-  uint32_t local_amax_t_reg = *reinterpret_cast<uint32_t*>(&local_amax_t);
-  __pipeline_wait_prior(0);
-
-  __syncwarp();  // ensure all lanes finished their cp.async before reading smem
-
-  // Load the A to a_frag.
-  if constexpr (kComputeIdentity) {
-    load_matrix_16x16_from_shared<false>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], smem_b32,
-                                         kHadamardDimension);
-
-    // 16x16 @ 16x16 leveraging all threads in the warp.
-    mma_m16_n16_k16_b16_b16_b16_noacc<kUpdateIdentityAmax>(
-        a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag_i[0], b_frag_i[1], b_frag_i[2],
-        b_frag_i[3], c_frag[0], c_frag[1], c_frag[2], c_frag[3], local_amax_reg);
-
-    // Store the result to the shared memory in non-transposed order.
-    if constexpr (kReturnIdentity) {
-      uint4* output_b128 = reinterpret_cast<uint4*>(output + global_offset);
-      store_matrix_16x16_to_global<false>(c_frag[0], c_frag[1], c_frag[2], c_frag[3], output_b128,
-                                          num_input_cols);
-    }
-  }
-
-  if constexpr (kComputeTransposed) {
-    if (kComputeIdentity) {
-      matrix_transpose_m8_n8_b16_inplace(a_frag[0]);
-      matrix_transpose_m8_n8_b16_inplace(a_frag[1]);
-      matrix_transpose_m8_n8_b16_inplace(a_frag[2]);
-      matrix_transpose_m8_n8_b16_inplace(a_frag[3]);
-    } else {
-      load_matrix_16x16_from_shared<true>(a_frag[0],
-                                          a_frag[2],  // NOTE: intentional index swapping
-                                          a_frag[1],  // NOTE: intentional index swapping
-                                          a_frag[3], smem_b32, kHadamardDimension);
-    }
-
-    mma_m16_n16_k16_b16_b16_b16_noacc<kUpdateTransposeAmax>(
-        a_frag[0],
-        // 2,1 is used if we are using movmatrix instruction.
-        // Thus loading the matrix in 2,1 order will just be normal.
-        // This is to be compatible with the movmatrix instruction.
-        a_frag[2],  // NOTE: intentional index swapping for transpose purpose.
-        a_frag[1],  // NOTE: intentional index swapping for transpose purpose.
-        a_frag[3], b_frag_t[0], b_frag_t[1], b_frag_t[2], b_frag_t[3], c_frag[0], c_frag[1],
-        c_frag[2], c_frag[3], local_amax_t_reg);
-
-    // Store the result to the shared memory in non-transposed order.
-    if constexpr (kReturnTransposed) {
-      uint4* output_t_b128 = reinterpret_cast<uint4*>(output_t + global_offset_t);
-      store_matrix_16x16_to_global<!kOutputTrueTransposed>(
-          c_frag[0], c_frag[1], c_frag[2], c_frag[3], output_t_b128,
-          kOutputTrueTransposed ? num_input_rows : num_input_cols);
-    }
-  }
-
-  if constexpr (kUpdateIdentityAmax) {
-    unpack_max_of_packed_bf16(local_amax_reg, local_amax);
-    local_amax = warp_reduce_max<kThreadsPerWarp>(local_amax);
-    // broadcast the amax to all threads in a warp from the lane 0
-    constexpr int lane_zero = 0;
-    local_amax = __shfl_sync(0xFFFFFFFF, local_amax, lane_zero);
-    // atomic CAS to output memory.
-    if (tid % kThreadsPerWarp == 0) {
-      atomicMaxFloat(amax, local_amax);
-    }
-  }
-  if constexpr (kUpdateTransposeAmax) {
-    unpack_max_of_packed_bf16(local_amax_t_reg, local_amax_t);
-    local_amax_t = warp_reduce_max<kThreadsPerWarp>(local_amax_t);
-    // broadcast the amax to all threads in a warp from the lane 0
-    constexpr int lane_zero = 0;
-    local_amax_t = __shfl_sync(0xFFFFFFFF, local_amax_t, lane_zero);
-    // atomic CAS to output memory.
-    if (tid % kThreadsPerWarp == 0) {
-      atomicMaxFloat(amax_t, local_amax_t);
-    }
-  }
-#else
-  NVTE_DEVICE_ERROR("Kernel is only supported on SM 9.0+.");
-#endif  // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-}
-
 }  // namespace
 
-void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
-                        uint16_t random_sign_mask_t, cudaStream_t stream) {
-  NVTE_API_CALL(hadamard_transform);
-
-  // Check tensors
-  // NOTE (frsun): This is non-intuitive, we are writing the result of
-  // transposed RHT to the output of rowwise.
-  NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Input tensor must be BF16 tensor, but scaling mode is ",
-             to_string(input_.scaling_mode), ".");
-  NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
-             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
-  NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
-  NVTE_CHECK(output_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Output tensor must be simple tensor, but scaling mode is ",
-             to_string(output_.scaling_mode), ".");
-  const SimpleTensor& input = input_.data;
-  SimpleTensor output;
-  SimpleTensor& output_t = output_.data;
-
-  // Check requested outputs
-  const bool return_identity = output.dptr != nullptr;
-  const bool return_transposed = output_t.dptr != nullptr;
-  if (!return_identity && !return_transposed) {  // Nothing to do/ill-defined behavior.
-    return;
-  }
-
-  checkCuDriverContext(stream);
-
-  const size_t ndim = input.shape.size();
-  const size_t row_length = input.shape[ndim - 1];
-  size_t num_rows = 1;
-  for (size_t i = 0; i < ndim - 1; ++i) {
-    num_rows *= input.shape[i];
-  }
-
-  using IType = bf16;
-
-  constexpr int kHadamardDimension = 16;
-  NVTE_CHECK(row_length % kHadamardDimension == 0,
-             "row_length must be divisible by hadamard_dimension.");
-  NVTE_CHECK(num_rows % kHadamardDimension == 0,
-             "num_rows must be divisible by hadamard_dimension");
-
-  constexpr uint64_t kThreadBlockX = 4;
-  // Configure 4 is used for Hopper, 8 is used for Blackwell for extra memory bandwidth.
-  constexpr uint64_t kThreadBlockY = 4;
-
-  uint64_t kNumWarpsPerSM = kThreadBlockX * kThreadBlockY;
-
-  // The shared memory number of bytes required for **the whole threadblock**.
-  size_t shmem_bytes = kHadamardDimension * kHadamardDimension * sizeof(IType) * kNumWarpsPerSM;
-
-  dim3 block(kThreadsPerWarp, kThreadBlockX, kThreadBlockY);
-
-  dim3 grid(DIVUP(row_length / kHadamardDimension, kThreadBlockX),
-            DIVUP(num_rows / kHadamardDimension, kThreadBlockY));
-
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      return_transposed, kReturnTransposed,
-
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          return_identity, kReturnIdentity,
-
-          auto kernel =
-              HadamardTransformKernel<IType, kHadamardDimension, kReturnIdentity, kReturnTransposed,
-                                      kReturnIdentity, kReturnTransposed, false, false, true>;
-
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes);
-
-          kernel<<<grid, block, shmem_bytes, stream>>>(
-              reinterpret_cast<const IType*>(input.dptr), reinterpret_cast<IType*>(output.dptr),
-              reinterpret_cast<IType*>(output_t.dptr), random_sign_mask, random_sign_mask_t,
-              num_rows, row_length, nullptr, nullptr, false);););
-
-  NVTE_CHECK_CUDA(cudaGetLastError());
-}
-
-// Kernel that will apply the 16x16 hadamard transform the input and input.T, and then
-// get the absolute max value of the result.
-void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
-                             uint16_t random_sign_mask_t, cudaStream_t stream) {
-  NVTE_API_CALL(hadamard_transform_amax);
+// broadcast_pre_rht_amax: when it's true, hadamard transform will be disabled
+// if at this time, the amax buffers for output expects both amax_rowwise and amax_colwise
+// then call MultiAmaxMemcpyD2DKernelPreRHT to D2D copy the amax values
+void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
+                                   const size_t* split_sections, size_t num_tensors,
+                                   uint16_t random_sign_mask, uint16_t random_sign_mask_t,
+                                   bool broadcast_pre_rht_amax, cudaStream_t stream) {
+  NVTE_API_CALL(group_hadamard_transform_amax);
 #if CUDA_VERSION >= 12080
 
   // Check input tensor
@@ -581,24 +403,67 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   const SimpleTensor& input = input_.data;
 
-  // Check amax tensors
-  SimpleTensor& output_pre_rht_amax = output_.amax;
-  SimpleTensor output_identity_amax;
-  SimpleTensor& output_transpose_amax = output_.columnwise_amax;
+  // TODO: validate num_tensors and split_sections
+  // assert if num_tensors is greater than kMaxTensorsPerKernel
+  // will expand 64 to higher value if needed
+  // if input size is going to exceed 4KB kernel launch limit, will then support multi-launch
+  NVTE_CHECK(num_tensors <= kMaxTensorsPerKernel,
+             "Number of tensors should be less than or equal to ", kMaxTensorsPerKernel);
 
-  // Check requested outputs
-  const bool return_pre_rht_amax = output_pre_rht_amax.dptr != nullptr;
-  const bool return_identity_amax = output_identity_amax.dptr != nullptr;
-  const bool return_transposed_amax = output_transpose_amax.dptr != nullptr;
-  if (!return_identity_amax && !return_transposed_amax &&
-      !return_pre_rht_amax) {  // Nothing to do/ill-defined behavior.
-    return;
+  // check split_sections
+  // TODO: support m_splits_tensor for device initiated API
+  NVTE_CHECK(split_sections != nullptr, "split_sections should not be nullptr");
+
+  MultiAmaxArgs kernel_args;
+  kernel_args.num_tensors = 0;
+  kernel_args.split_sections_range[0] = 0;
+  bool all_return_pre_rht_amax = true;
+  bool all_return_identity_amax = true;
+  bool all_return_transposed_amax = true;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    void* output_pre_rht_amax_ptr = output_list[i]->amax.dptr;
+    // disable RHT(x) for now, only RHT_T(x) should be used
+    void* output_identity_amax_ptr = nullptr;
+    void* output_transpose_amax_ptr = output_list[i]->columnwise_amax.dptr;
+    all_return_pre_rht_amax &= (output_pre_rht_amax_ptr != nullptr);
+    all_return_identity_amax &= (output_identity_amax_ptr != nullptr);
+    all_return_transposed_amax &= (output_transpose_amax_ptr != nullptr);
+    // sanity check split_sections component to see if it's 64 multiple for each element
+    NVTE_CHECK(split_sections[i] % 64 == 0, "component ", i,
+               " of split_sections should be 64 multiple");
+    // also skip adding this tensor to the kernel args there are zero elements in this split
+    if (split_sections[i] == 0) {
+      continue;
+    }
+    // fill in kernel arguments
+    kernel_args.output_pre_rht_amax_list[kernel_args.num_tensors] = output_pre_rht_amax_ptr;
+    kernel_args.output_identity_amax_list[kernel_args.num_tensors] = output_identity_amax_ptr;
+    kernel_args.output_transpose_amax_list[kernel_args.num_tensors] = output_transpose_amax_ptr;
+    kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
+        kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
+    kernel_args.num_tensors++;
   }
 
-  // Zero out amaxes if needed
-  ZeroAmaxKernel<<<1, 1, 0, stream>>>(reinterpret_cast<float*>(output_pre_rht_amax.dptr),
-                                      reinterpret_cast<float*>(output_identity_amax.dptr),
-                                      reinterpret_cast<float*>(output_transpose_amax.dptr));
+  NVTE_CHECK(all_return_pre_rht_amax || all_return_identity_amax || all_return_transposed_amax,
+             "At least one of return_pre_rht_amax, return_identity_amax, or return_transposed_amax "
+             "must be true");
+  // currently we haven't supported all_return_identity_amax, assert error if it's mistakenly enabled
+  NVTE_CHECK(!all_return_identity_amax,
+             "Currently RHT transform should only be applied to transposed input");
+
+  if (broadcast_pre_rht_amax) {
+    NVTE_CHECK(all_return_pre_rht_amax,
+               "broadcast_pre_rht_amax is only supported when we compute pre-RHT amax");
+    // if all_return_identity_amax and all_return_transposed_amax both are false, there is no need to broadcast anything
+    broadcast_pre_rht_amax &= (all_return_identity_amax || all_return_transposed_amax);
+  }
+
+  // Multi zero out multiple amaxes if needed
+  // Curretly don't support multi-launch when num_tensors is larger than kMaxTensorsPerKernel
+  // let the number of threads equal to number of tensors, use 1 block, kMaxTensorsPerKernel threads per block
+  dim3 block_setup_amax(kMaxTensorsPerKernel);
+  dim3 grid_setup_amax(1);
+  MultiZeroAmaxKernel<<<grid_setup_amax, block_setup_amax, 0, stream>>>(kernel_args);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   checkCuDriverContext(stream);
@@ -618,8 +483,9 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   NVTE_CHECK(num_rows % kHadamardDimension == 0,
              "num_rows must be divisible by hadamard_dimension");
 
-  constexpr uint64_t kChunkBlockXSmall = 128;
-  constexpr uint64_t kChunkBlockYSmall = 128;
+  // four (1x4) 64x64 sub-tiles for ping-pong overlap
+  constexpr uint64_t kChunkBlockXSmall = 256;
+  constexpr uint64_t kChunkBlockYSmall = 64;
   constexpr uint64_t kBuffDimX = 64;
   constexpr uint64_t kBuffDimY = 64;
 
@@ -646,13 +512,13 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      return_transposed_amax, kReturnTransposedAmax,
+      (all_return_transposed_amax && !broadcast_pre_rht_amax), kReturnTransposedAmax,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          return_identity_amax, kReturnIdentityAmax,
+          (all_return_identity_amax && !broadcast_pre_rht_amax), kReturnIdentityAmax,
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              return_pre_rht_amax, kReturnPreRhtAmax,
+              all_return_pre_rht_amax, kReturnPreRhtAmax,
 
               // *2 for ping-pong
               size_t in_sh_size = kBuffDimX * kBuffDimY * 2 * sizeof(IType);
@@ -662,18 +528,20 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
               // Add padding in case shmem ptr is not aligned to 128 bytes.
               shmem_bytes = (shmem_bytes + 128);
 
-              auto kernel = HadamardAmaxTmaKernel<
+              auto kernel = GroupHadamardAmaxTmaKernel<
                   IType, kHadamardDimension, kChunkBlockYSmall, kChunkBlockXSmall, kBuffDimY,
                   kBuffDimX, kThreadBlockX * kThreadsPerWarp, kThreadBlockY, kReturnPreRhtAmax,
                   kReturnIdentityAmax, kReturnTransposedAmax>;
               cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    shmem_bytes);
 
-              kernel<<<grid, block, shmem_bytes, stream>>>(
-                  tensor_map_input, reinterpret_cast<float*>(output_pre_rht_amax.dptr),
-                  reinterpret_cast<float*>(output_identity_amax.dptr),
-                  reinterpret_cast<float*>(output_transpose_amax.dptr), random_sign_mask,
-                  random_sign_mask_t, num_rows, row_length);)));
+              kernel<<<grid, block, shmem_bytes, stream>>>(tensor_map_input, kernel_args,
+                                                           random_sign_mask, random_sign_mask_t,
+                                                           num_rows, row_length);
+              if (broadcast_pre_rht_amax) {
+                MultiAmaxMemcpyD2DKernelPreRHT<<<grid_setup_amax, block_setup_amax, 0, stream>>>(
+                    kernel_args);
+              })));
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
@@ -684,20 +552,53 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
 
 }  // namespace transformer_engine
 
-void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int random_sign_mask,
-                             int random_sign_mask_t, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_hadamard_transform);
+// Naming convention: "Group" kernels here means contiguous input concatenated
+// While "Multi" kernels are processing a list of pointers, like the zero amax kernel
+
+// Group hadamard transform API is unlike other multi-input & multi-output APIs
+// Group hadamard transform will take in a single input tensor, and directly calculate amax
+// with optional RHT transform. That's because we can assume the input tensor list to be
+// contiguous in memory, so the tensors are only splitted in dimension 0.
+// RHT transform is 16x16, so as long as each split of the input has 16 multiple shape
+// in dimension 0, we can treat the entire input as a single tensor.
+// Although mathmatically 16 multple is enough for this function to be correct,
+// for this kernel, we required 64 multiple of 16 in dimension 0 for better performance.
+void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
+                                        const size_t* split_sections, size_t num_tensors,
+                                        int random_sign_mask, int random_sign_mask_t,
+                                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_hadamard_transform_amax);
   using namespace transformer_engine;
-  hadamard_transform(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
-                     static_cast<uint16_t>(random_sign_mask),
-                     static_cast<uint16_t>(random_sign_mask_t), stream);
+  if (num_tensors == 0) {
+    return;
+  }
+
+  Tensor* input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor*> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+  // Call the group tensor Hadamard transform amax implementation.
+  group_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors,
+                                static_cast<uint16_t>(random_sign_mask),
+                                static_cast<uint16_t>(random_sign_mask_t), false, stream);
 }
 
-void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int random_sign_mask,
-                                  int random_sign_mask_t, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_hadamard_transform_amax);
+// Grouped-tensor amax without doing hadamard transform
+void nvte_group_amax(const NVTETensor input, NVTETensor* outputs, const size_t* split_sections,
+                     size_t num_tensors, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_amax);
   using namespace transformer_engine;
-  hadamard_transform_amax(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
-                          static_cast<uint16_t>(random_sign_mask),
-                          static_cast<uint16_t>(random_sign_mask_t), stream);
+  if (num_tensors == 0) {
+    return;
+  }
+
+  Tensor* input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor*> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+
+  group_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors, 0, 0, true,
+                                stream);
 }

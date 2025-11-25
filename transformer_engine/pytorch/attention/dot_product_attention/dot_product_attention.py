@@ -1033,14 +1033,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 query_layer.shape[-1] == key_layer.shape[-1]
             ), "Queries and keys must have the same head dimension!"
             head_dim_qk, head_dim_v = query_layer.shape[-1], value_layer.shape[-1]
-            assert (
-                head_dim_qk == self.hidden_size_per_attention_head_k
-            ), f"Keys have head_dim = {head_dim_qk}, "
-            "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
-            assert (
-                head_dim_v == self.hidden_size_per_attention_head_v
-            ), f"Values have head_dim = {head_dim_v}, "
-            "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
+            assert head_dim_qk == self.hidden_size_per_attention_head_k, (
+                f"Keys have head_dim = {head_dim_qk}, but expected head_dim ="
+                f" {self.hidden_size_per_attention_head_k}!"
+            )
+            assert head_dim_v == self.hidden_size_per_attention_head_v, (
+                f"Values have head_dim = {head_dim_v}, but expected head_dim ="
+                f" {self.hidden_size_per_attention_head_v}!"
+            )
             assert num_gqa_groups == self.num_gqa_groups_per_partition, (
                 "Keys and values must have num_gqa_group ="
                 f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
