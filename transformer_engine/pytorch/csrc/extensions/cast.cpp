@@ -704,7 +704,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
                                std::vector<TensorWrapper> &output_list,
-                               const std::vector<int> &split_sections,
+                               const std::vector<size_t> &split_sections,
                                const std::vector<NVFP4Quantizer *> &quantizers) {
   // Check tensor lists
   const size_t num_tensors = split_sections.size();
@@ -887,9 +887,9 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
     }
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_tensor_amax(input.data(),
-                             reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-                             split_sections.data(), num_tensors, stream);
+      nvte_group_amax(input.data(),
+                      reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+                      split_sections.data(), num_tensors, stream);
     });
     for (size_t i = 0; i < num_tensors; i++) {
       output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
@@ -911,7 +911,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 }  // namespace
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<int> &split_sections,
+                                       const std::vector<size_t> &split_sections,
                                        std::vector<py::handle> quantizer_list) {
   init_extension();
 
@@ -942,8 +942,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   const size_t dim0_stride =
       input_shape[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape[0];
   for (size_t i = 0; i < num_splits; ++i) {
-    NVTE_CHECK(split_sections[i] >= 0, "Attempted to split tensor with shape=", input_shape,
-               " along dim 0 with split_sections=", split_sections);
     NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape[0],
                "Attempted to split tensor with shape=", input_shape,
                " along dim 0 with split_sections=", split_sections);

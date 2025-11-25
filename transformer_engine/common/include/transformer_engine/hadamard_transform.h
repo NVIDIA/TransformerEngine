@@ -61,21 +61,28 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
                                                     const NVTEQuantizationConfig quant_config,
                                                     cudaStream_t stream);
 
-/*!
- * \brief Perform grouped-tensor Hadamard transform absolute maximum reduction (amax) with optional randomized Hadamard transform.
+/*! \brief Split a tensor along dimension 0 and compute RHT amaxes for each split.
  *
- *  This function is experimental and the API is not stable. Group_ prefix means contiguous input concatenated
+ *  This function is experimental and the API is not stable.
  *
- *  \param[in]      input                Input tensor to apply Hadamard transform, assumed contiguous in memory and split on dimension 0.
- *  \param[in,out]  outputs              Array of output tensors.
- *  \param[in]      split_sections       Array of splits in dimension 0 for each output tensor.
- *  \param[in]      num_tensors          Number of output tensors, must be > 0.
- *  \param[in]      random_sign_mask     16-bit (int) sign mask for transform.
- *  \param[in]      random_sign_mask_t   16-bit (int) sign mask for transform (transposed).
- *  \param[in]      stream               CUDA stream used for the operation.
+ *  This is intended for quantizing to NVFP4 with random Hadamard
+ *  transforms (RHT). For each tensor split, compute the maximum
+ *  absolute value (amax) and populate the row-wise amax of the
+ *  corresponding output tensor. Also, compute the amax after a
+ *  transposed RHT and populate the column-wise amax of the
+ *  corresponding output tensor.
+ *
+ *  \param[in]      input               Input tensor.
+ *  \param[in,out]  outputs             Array of NVFP4 output tensors. Only the row-wise and
+ *                                      column-wise amaxes are updated.
+ *  \param[in]      split_sections      Size of each tensor split along dimension 0.
+ *  \param[in]      num_tensors         Number of tensor splits.
+ *  \param[in]      random_sign_mask    16-bit sign mask for RHT.
+ *  \param[in]      random_sign_mask_t  16-bit sign mask for transposed RHT.
+ *  \param[in]      stream              CUDA stream used for the operation.
  */
 void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
-                                        const int* split_sections, const size_t num_tensors,
+                                        const size_t* split_sections, size_t num_tensors,
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream);
 

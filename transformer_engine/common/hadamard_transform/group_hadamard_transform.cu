@@ -387,8 +387,8 @@ __global__ void GroupHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
 // broadcast_pre_rht_amax: when it's true, hadamard transform will be disabled
 // if at this time, the amax buffers for output expects both amax_rowwise and amax_colwise
 // then call MultiAmaxMemcpyD2DKernelPreRHT to D2D copy the amax values
-void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& output_list,
-                                   const int* split_sections, size_t num_tensors,
+void group_hadamard_transform_amax(const Tensor &input_, std::vector<Tensor*> &output_list,
+                                   const size_t *split_sections, size_t num_tensors,
                                    uint16_t random_sign_mask, uint16_t random_sign_mask_t,
                                    bool broadcast_pre_rht_amax, cudaStream_t stream) {
   NVTE_API_CALL(group_hadamard_transform_amax);
@@ -441,9 +441,6 @@ void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
     kernel_args.output_transpose_amax_list[kernel_args.num_tensors] = output_transpose_amax_ptr;
     kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
         kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
-    // check overflow
-    NVTE_CHECK(kernel_args.split_sections_range[kernel_args.num_tensors + 1] >= 0,
-               "split_sections_range overflow the int32_t");
     kernel_args.num_tensors++;
   }
 
@@ -566,13 +563,15 @@ void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
 // in dimension 0, we can treat the entire input as a single tensor.
 // Although mathmatically 16 multple is enough for this function to be correct,
 // for this kernel, we required 64 multiple of 16 in dimension 0 for better performance.
-void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
-                                        const int* split_sections, const size_t num_tensors,
+void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor *outputs,
+                                        const size_t *split_sections, size_t num_tensors,
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_hadamard_transform_amax);
   using namespace transformer_engine;
-  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  if (num_tensors == 0) {
+    return;
+  }
 
   Tensor* input_tensor = convertNVTETensorCheck(input);
   std::vector<Tensor*> output_list(num_tensors);
@@ -586,11 +585,14 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
 }
 
 // Grouped-tensor amax without doing hadamard transform
-void nvte_group_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
-                            const size_t num_tensors, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_hadamard_transform_amax);
+void nvte_group_amax(const NVTETensor input, NVTETensor *outputs,
+                            const size_t *split_sections, size_t num_tensors,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_amax);
   using namespace transformer_engine;
-  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  if (num_tensors == 0) {
+    return;
+  }
 
   Tensor* input_tensor = convertNVTETensorCheck(input);
   std::vector<Tensor*> output_list(num_tensors);
