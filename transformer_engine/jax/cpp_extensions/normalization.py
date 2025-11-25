@@ -16,7 +16,7 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Norm_Type, QuantizeLayout
+from transformer_engine_jax import NVTE_Norm_Type
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
@@ -37,6 +37,7 @@ from ..quantize import (
     Quantizer,
     DelayedScaleQuantizer,
     ScalingMode,
+    QuantizeLayout,
 )
 
 

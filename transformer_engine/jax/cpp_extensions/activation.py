@@ -15,7 +15,7 @@ from jax.sharding import PartitionSpec
 
 import numpy as np
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Activation_Type, QuantizeLayout
+from transformer_engine_jax import NVTE_Activation_Type
 from .base import BasePrimitive, register_primitive
 from .misc import (
     jax_dtype_to_te_dtype,
@@ -34,6 +34,7 @@ from ..quantize import (
     Quantizer,
     DelayedScaleQuantizer,
     ScalingMode,
+    QuantizeLayout,
 )
 
 

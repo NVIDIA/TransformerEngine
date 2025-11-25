@@ -24,7 +24,6 @@ from transformer_engine_jax import (
     get_device_compute_capability,
     initialize_cgemm_communicator,
     get_cgemm_num_max_streams,
-    QuantizeLayout,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -45,6 +44,7 @@ from ..quantize import (
     apply_padding_to_scale_inv,
     get_quantize_config_with_recipe,
     get_global_quantize_recipe,
+    QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
