@@ -617,16 +617,6 @@ class FusedAttnRunner:
             )
             self.segment_pos_q = self.segment_pos_kv = None
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
-        print(
-            f"self.segment_ids_q: {self.segment_ids_q}, \n self.segment_pos_q:"
-            f" {self.segment_pos_q}, \n self.pad_q: {self.pad_q}, \n self.seqlens_q:"
-            f" {self.seqlens_q}, \n self.offsets_q: { self.offsets_q} \n"
-        )
-        print(
-            f"self.segment_ids_kv: {self.segment_ids_kv}, \n self.segment_pos_kv:"
-            f" {self.segment_pos_kv}, \n self.pad_kv: {self.pad_kv}, \n self.seqlens_kv:"
-            f" {self.seqlens_kv}, \n self.offsets_kv: { self.offsets_kv} \n"
-        )
 
         # For reference code
         self.mask = make_mask(
@@ -637,10 +627,6 @@ class FusedAttnRunner:
             self.attn_mask_type,
             self.window_size,
         )
-        # KL tet code
-        # import sys
-        # with np.printoptions(threshold=sys.maxsize):
-        #     print(f"self.mask: \n {self.mask}")
 
         if self.cp_size > 1 and self.cp_load_balanced:
             if self.qkv_layout.is_thd():
@@ -790,7 +776,7 @@ class FusedAttnRunner:
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
-    def test_forward(self):
+    def _test_forward(self):
         """
         Test forward with JITted primitive and unJITted reference
         """

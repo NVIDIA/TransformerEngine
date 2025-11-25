@@ -328,11 +328,8 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
-    # TODO: Change the id to CPx2
     pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
-    # KL test code
-    pytest.param([2, 8, 16, 64], id="2-8xCP-16-64"),
 ]
 
 
@@ -358,8 +355,6 @@ class TestDistributedContextParallelSelfAttn:
         num_segments_per_seq=0,
     ):
         if qkv_layout.is_thd():
-            # if cp_strategy == CPStrategy.ALL_GATHER:
-            #     pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and (
                 cp_strategy == CPStrategy.RING or cp_strategy == CPStrategy.ALL_GATHER
             ):
@@ -389,10 +384,6 @@ class TestDistributedContextParallelSelfAttn:
         data_shape = batch, seqlen, num_head, hidden
 
         num_kv_heads = num_head // kv_groups
-
-        # KL code For AG case only
-        # stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
-
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -459,7 +450,6 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        # KL code
         runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
