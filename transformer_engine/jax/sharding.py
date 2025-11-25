@@ -44,19 +44,12 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
 
 def _validate_mesh_resource_configuration(mesh_resource):
     """Validate that the mesh resource configuration is consistent and conflict-free."""
-    is_dp_enabled = (
-        mesh_resource.dp_resource is not None and get_mesh_axis_size(mesh_resource.dp_resource) > 1
-    )
     is_tp_enabled = (
         mesh_resource.tp_resource is not None and get_mesh_axis_size(mesh_resource.tp_resource) > 1
     )
     is_tpsp_enabled = (
         mesh_resource.tpsp_resource is not None
         and get_mesh_axis_size(mesh_resource.tpsp_resource) > 1
-    )
-    is_fsdp_enabled = (
-        mesh_resource.fsdp_resource is not None
-        and get_mesh_axis_size(mesh_resource.fsdp_resource) > 1
     )
 
     assert not (is_tp_enabled and is_tpsp_enabled), (
