@@ -359,7 +359,9 @@ class TestDistributedContextParallelSelfAttn:
         if qkv_layout.is_thd():
             # if cp_strategy == CPStrategy.ALL_GATHER:
             #     pytest.skip("THD doesn't support all gather context parallelism.")
-            if not load_balanced and (cp_strategy == CPStrategy.RING or cp_strategy == CPStrategy.ALL_GATHER):
+            if not load_balanced and (
+                cp_strategy == CPStrategy.RING or cp_strategy == CPStrategy.ALL_GATHER
+            ):
                 pytest.skip(f"THD + {cp_strategy=} doesn't support unbalanced context parallelism.")
 
         assert not use_scan_ring or cp_strategy == CPStrategy.RING
@@ -388,7 +390,7 @@ class TestDistributedContextParallelSelfAttn:
         num_kv_heads = num_head // kv_groups
 
         # KL code For AG case only
-        #stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
+        # stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
 
         runner = FusedAttnRunner(
             batch,
@@ -441,7 +443,7 @@ class TestDistributedContextParallelSelfAttn:
         # and exception if the step backend is not supported. This was a deliberate API
         # decision to keep the CP size or flag out of the function.
         has_backend = check_has_backend_for_mask(attn_mask_type)
-        #TODO: For PADDING_CAUSAL_MASK ?
+        # TODO: For PADDING_CAUSAL_MASK ?
         if cp_size > 1 and attn_mask_type == AttnMaskType.CAUSAL_MASK:
             has_backend &= check_has_backend_for_mask(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK)
 

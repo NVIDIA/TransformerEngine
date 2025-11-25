@@ -1587,7 +1587,7 @@ class _FusedAttnCPWithAllGatherHelper:
             return pad(dk, npad), pad(dv, npad)
 
         return dk, dv  # fall through
-    
+
     def q_seqlens_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
         # Create mask for non-zero segment IDs
         non_zero_mask = q_segment_ids != 0
@@ -1616,33 +1616,46 @@ class _FusedAttnCPWithAllGatherHelper:
         first_is_segment = actual_valid[..., 0:1]
         # Detect segment breaks in the valid tokens only (not full seq)
         # Padding will always be true as the segment change condition is being applied
-        # on the valid segments (which have padding at the end so they'll always trigger True) 
-        segment_changes = jnp.concatenate([
-            first_is_segment,  # First valid element starts a segment
-            (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1]) |
-            #((valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1) & actual_valid[..., 1:])
-            (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1)
-        ], axis=-1)
+        # on the valid segments (which have padding at the end so they'll always trigger True)
+        segment_changes = jnp.concatenate(
+            [
+                first_is_segment,  # First valid element starts a segment
+                (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1]) |
+                # ((valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1) & actual_valid[..., 1:])
+                (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1),
+            ],
+            axis=-1,
+        )
         new_segment_ids = jnp.cumsum(segment_changes, axis=-1)
-        seqlens_pre = jax.vmap(lambda av_row, nsi_row: jnp.where(av_row, nsi_row, 0).astype(jnp.int32))(actual_valid, new_segment_ids)
-        seqlens_all = jax.vmap(lambda sp_row : jnp.bincount(
-            sp_row,
-            length=max_segments_per_seq+1
-        )[1:])(seqlens_pre)
-        seqlens_all_pad_neg = jnp.where(seqlens_all==0, -1, seqlens_all)
-        max_new_segments_per_seq = 0 #TODO: Remove
+        seqlens_pre = jax.vmap(
+            lambda av_row, nsi_row: jnp.where(av_row, nsi_row, 0).astype(jnp.int32)
+        )(actual_valid, new_segment_ids)
+        seqlens_all = jax.vmap(
+            lambda sp_row: jnp.bincount(sp_row, length=max_segments_per_seq + 1)[1:]
+        )(seqlens_pre)
+        seqlens_all_pad_neg = jnp.where(seqlens_all == 0, -1, seqlens_all)
+        max_new_segments_per_seq = 0  # TODO: Remove
         return max_new_segments_per_seq, seqlens_all_pad_neg
 
-    def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, q_num_segments, max_segments_per_seq):
-        segment_changes = jnp.concatenate([
-            jnp.full((q_segment_pos.shape[0], 1), True, dtype=bool),  # First valid element starts a segment
-            (q_segment_pos[...,1:] != q_segment_pos[...,:-1] + 1)  # Segment pos changed
-        ], axis=-1)
+    def q_seqoffsets_for_striped_for_rank(
+        self, q_segment_ids, q_segment_pos, q_num_segments, max_segments_per_seq
+    ):
+        segment_changes = jnp.concatenate(
+            [
+                jnp.full(
+                    (q_segment_pos.shape[0], 1), True, dtype=bool
+                ),  # First valid element starts a segment
+                (q_segment_pos[..., 1:] != q_segment_pos[..., :-1] + 1),  # Segment pos changed
+            ],
+            axis=-1,
+        )
         # Remove any padded region segment changes
         segment_changes_masked = jnp.where(q_segment_ids != 0, segment_changes, False)
         # Get the indices for segment changes (these are the offsets)
         max_size = q_segment_pos.shape[-1]
-        seq_offsets_2 = jax.vmap(lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq+1, fill_value=-1)[0])(segment_changes_masked)
+        seq_offsets_2 = jax.vmap(
+            lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+        )(segment_changes_masked)
         return seq_offsets_2
 
     def kv_seqlens_for_striped_for_rank(self, kv_segment_ids, kv_segment_pos, max_segments_per_seq):
@@ -1724,9 +1737,13 @@ class _FusedAttnCPWithAllGatherHelper:
         )
 
         # Get segment change indices for rank
-        segment_changes_indices = jax.vmap(lambda sc_row: jnp.where(sc_row, size=max_segments_per_seq+1, fill_value=-1)[0])(segment_changes_first_true_masked)
+        segment_changes_indices = jax.vmap(
+            lambda sc_row: jnp.where(sc_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+        )(segment_changes_first_true_masked)
         # Get segment ids associated with the segment_changes_indices for rank
-        segment_ids = jax.vmap(lambda sci_row, ksi_row: jnp.where(sci_row>=0, ksi_row[sci_row], -1))(segment_changes_indices, kv_segment_ids)
+        segment_ids = jax.vmap(
+            lambda sci_row, ksi_row: jnp.where(sci_row >= 0, ksi_row[sci_row], -1)
+        )(segment_changes_indices, kv_segment_ids)
 
         # Get segment change indices for AG
         segment_changes_ag_first_true = jnp.concatenate(
@@ -1744,14 +1761,16 @@ class _FusedAttnCPWithAllGatherHelper:
             kv_segment_ids_ag != 0, segment_changes_ag_first_true, False
         )
         # Get segment change indices for AG
-        segment_changes_ag_indices = jax.vmap(lambda scag_row: jnp.where(scag_row, size=max_segments_per_seq+1, fill_value=-1)[0])(segment_changes_ag_first_true_masked)
+        segment_changes_ag_indices = jax.vmap(
+            lambda scag_row: jnp.where(scag_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+        )(segment_changes_ag_first_true_masked)
 
         # Use the segment ids picked per rank to get the offsets from the AG indices
         seq_offsets = jax.vmap(
             lambda si_row, sca_row: jnp.where(si_row > 0, sca_row[si_row - 1], -1)
         )(segment_ids, segment_changes_ag_indices)
         return seq_offsets
-   
+
 
 class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
     """
