@@ -158,9 +158,7 @@ struct Tensor {
   bool has_data() const noexcept { return data.has_data(); }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
-  bool has_columnwise_data() const noexcept {
-    return columnwise_data.has_data();
-  }
+  bool has_columnwise_data() const noexcept { return columnwise_data.has_data(); }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
@@ -358,12 +356,8 @@ struct GroupedTensor {
 
   bool all_same_first_dim() const noexcept { return !first_dims.has_data(); }
   bool all_same_last_dim() const noexcept { return !last_dims.has_data(); }
-  bool all_same_shape() const noexcept {
-    return !first_dims.has_data() && !last_dims.has_data();
-  }
-  bool varying_both_dims() const noexcept {
-    return first_dims.has_data() && last_dims.has_data();
-  }
+  bool all_same_shape() const noexcept { return !first_dims.has_data() && !last_dims.has_data(); }
+  bool varying_both_dims() const noexcept { return first_dims.has_data() && last_dims.has_data(); }
 
   size_t get_common_first_dim() const {
     NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
