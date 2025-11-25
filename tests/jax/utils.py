@@ -1509,17 +1509,18 @@ def assert_allclose(
         desired = desired.astype(jnp.float32)
     # KL test code
     import sys
+
     mismatch_counter = 0
     has_nonzero = jnp.any(actual != 0)
     print(f"has_nonzero: {has_nonzero}")
     with np.printoptions(threshold=sys.maxsize):
-        mismatch_mask = ~np.isclose(actual, desired, **tols) # True means mismatch
+        mismatch_mask = ~np.isclose(actual, desired, **tols)  # True means mismatch
         diff_indices = np.argwhere(mismatch_mask)
         seq_set = set()
         for idx in diff_indices:
             idx_tuple = tuple(idx)
             seq_set.add(idx_tuple[1])
-            mismatch_counter += 1   
+            mismatch_counter += 1
             if mismatch_counter < 1024:
                 print(f"Index {idx_tuple}: a={actual[idx_tuple]}, d={desired[idx_tuple]}")
         print(f"{sorted(seq_set)}")

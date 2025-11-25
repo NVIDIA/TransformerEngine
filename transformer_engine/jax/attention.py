@@ -386,7 +386,9 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1):
+def reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1
+):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
@@ -396,7 +398,7 @@ def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: in
 
 
 def inverse_reorder_causal_load_balancing(
-    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1 
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_height: int = 1
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
@@ -536,7 +538,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     # It does not need to involve SW for this mask's creation
 
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    #TODO: Un comment the fast path
+    # TODO: Un comment the fast path
     # if (attn_mask_type.is_causal() and window_size is None) or (
     #     window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
     # ):
@@ -555,7 +557,7 @@ def _segment_ids_pos_to_seqlens_offsets(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
-    #jax.debug.breakpoint()
+    # jax.debug.breakpoint()
     # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
     attn_mask = segment_mask
     if attn_mask_type.is_bottom_right():
@@ -602,7 +604,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
         attn_mask_with_id, max_segments_per_seq
     )
-    #jax.debug.breakpoint()
+    # jax.debug.breakpoint()
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
@@ -682,7 +684,7 @@ class SequenceDescriptor:
                 window_size,
                 max_segments_per_seq,
             )
-            #jax.debug.breakpoint()
+            # jax.debug.breakpoint()
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
@@ -1077,7 +1079,7 @@ def _fused_attn_fwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
-        stripe_height=stripe_height
+        stripe_height=stripe_height,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1142,7 +1144,7 @@ def _fused_attn_bwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
-        stripe_height=stripe_height
+        stripe_height=stripe_height,
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
@@ -1217,7 +1219,7 @@ def fused_attn(
         softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
             [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
             If provided, this parameter will receive gradients during backpropagation.
-        stripe_height (int): 
+        stripe_height (int):
             Indicates the striping height to be used when using ReorderStrategy.Striped.
             Currently, a stripe_height > 1 is only allowed for CP + THD + Striped + AG
             0 indicates no striping strategy
