@@ -355,6 +355,7 @@ class TestDistributedContextParallelSelfAttn:
         use_scan_ring=False,
         window_size=None,
         stripe_height=0,
+        num_segments_per_seq=0,
     ):
         if qkv_layout.is_thd():
             # if cp_strategy == CPStrategy.ALL_GATHER:
@@ -417,6 +418,7 @@ class TestDistributedContextParallelSelfAttn:
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
             stripe_height=stripe_height,
+            num_segments_per_seq=num_segments_per_seq,
         )
 
         def check_has_backend_for_mask(mask_type):
@@ -524,6 +526,10 @@ class TestDistributedContextParallelSelfAttn:
             pytest.param((5, 0), id="window_size(5, 0)"),
         ],
     )
+    @pytest.mark.parametrize(
+        "num_segments_per_seq",
+        [pytest.param(2, id="SEG-2"), pytest.param(11, id="SEG-11")],
+    )
     def test_context_parallel_allgather_striped_attn(
         self,
         device_count,
@@ -538,6 +544,7 @@ class TestDistributedContextParallelSelfAttn:
         load_balanced,
         window_size,
         stripe_height,
+        num_segments_per_seq,
     ):
         if window_size != (-1, -1) and not qkv_layout.is_thd():
             pytest.skip("Sliding window attention is only supported for THD layout")
@@ -556,6 +563,7 @@ class TestDistributedContextParallelSelfAttn:
             use_shardy=False,
             window_size=window_size,
             stripe_height=stripe_height,
+            num_segments_per_seq=num_segments_per_seq,
         )
 
     @pytest_parametrize_wrapper(
