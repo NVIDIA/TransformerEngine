@@ -351,7 +351,7 @@ class TestDistributedContextParallelSelfAttn:
         use_shardy,
         use_scan_ring=False,
         window_size=None,
-        stripe_height=0,
+        stripe_size=0,
         num_segments_per_seq=0,
     ):
         if qkv_layout.is_thd():
@@ -408,7 +408,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
-            stripe_height=stripe_height,
+            stripe_size=stripe_size,
             num_segments_per_seq=num_segments_per_seq,
         )
 
@@ -506,7 +506,7 @@ class TestDistributedContextParallelSelfAttn:
         [pytest.param(True, id="BALANCED")],
     )
     @pytest.mark.parametrize(
-        "stripe_height",
+        "stripe_size",
         [pytest.param(64, id="STRIPE-64"), pytest.param(128, id="STRIPE-128")],
     )
     @pytest.mark.parametrize(
@@ -533,7 +533,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
         window_size,
-        stripe_height,
+        stripe_size,
         num_segments_per_seq,
     ):
         if window_size != (-1, -1) and not qkv_layout.is_thd():
@@ -552,7 +552,7 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.ALL_GATHER,
             use_shardy=False,
             window_size=window_size,
-            stripe_height=stripe_height,
+            stripe_size=stripe_size,
             num_segments_per_seq=num_segments_per_seq,
         )
 
@@ -721,10 +721,10 @@ class TestReorderCausalLoadBalancing:
     @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD, QKVFormat.THD])
     @pytest.mark.parametrize(
-        "reorder_strategy, stripe_height",
+        "reorder_strategy, stripe_size",
         REORDER_STRATEGY,
     )
-    def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_height):
+    def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_size):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
         seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
@@ -733,15 +733,15 @@ class TestReorderCausalLoadBalancing:
 
         if reorder_strategy == ReorderStrategy.Striped:
             seq_lens = shape[seq_dim]
-            if seq_lens < (cp_size * stripe_height):
-                pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_height=}")
+            if seq_lens < (cp_size * stripe_size):
+                pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_size=}")
 
         ref = tensor.copy()
 
         reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
         inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
 
-        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim, stripe_height)
-        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_height)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim, stripe_size)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_size)
 
         assert jnp.array_equal(inversed, ref)

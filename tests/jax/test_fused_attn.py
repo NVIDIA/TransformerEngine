@@ -353,7 +353,7 @@ class FusedAttnRunner:
     bias_shape: BiasShape
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
-    stripe_height: int = 0
+    stripe_size: int = 0
     num_segments_per_seq: int = 0
 
     # Specifies sharding resources for distributed tests
@@ -640,14 +640,14 @@ class FusedAttnRunner:
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
-                stripe_height=self.stripe_height,
+                stripe_size=self.stripe_size,
             )
             self.cp_inverse_reorder_fn = partial(
                 inverse_reorder_causal_load_balancing,
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
-                stripe_height=self.stripe_height,
+                stripe_size=self.stripe_size,
             )
         else:
             # no-ops for non cp or non load balanced
@@ -808,7 +808,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
-            "stripe_height": self.stripe_height,
+            "stripe_size": self.stripe_size,
         }
 
         customcall_fused_dpa_jit = jit(
@@ -904,7 +904,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
-            "stripe_height": self.stripe_height,
+            "stripe_size": self.stripe_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout

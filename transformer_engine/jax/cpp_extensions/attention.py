@@ -73,7 +73,7 @@ __all__ = [
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
-        "stripe_height",
+        "stripe_size",
     ],
 )
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ class _FusedAttnConfig:
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring + THD + SWA
-    stripe_height: int  # Only for CP + Striped. For, Ring P2P , stripe_height=1 only.
+    stripe_size: int  # Only for CP + Striped. For, Ring P2P , stripe_size=1 only.
 
 
 @dataclass(frozen=True)
@@ -1235,26 +1235,26 @@ def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contig
 
 
 def reorder_causal_striped(
-    tensor, cp_size: int, seq_dim: int, is_inverse: bool, stripe_height: int = 1
+    tensor, cp_size: int, seq_dim: int, is_inverse: bool, stripe_size: int = 1
 ):
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
-    if origin_shape[seq_dim] % (cp_size * stripe_height) != 0:
+    if origin_shape[seq_dim] % (cp_size * stripe_size) != 0:
         raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_height but got"
-            f" {origin_shape[seq_dim]=}, {cp_size=}, {stripe_height=}, {cp_size*stripe_height=}"
+            "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_size but got"
+            f" {origin_shape[seq_dim]=}, {cp_size=}, {stripe_size=}, {cp_size*stripe_size=}"
         )
 
     if not is_inverse:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[origin_shape[seq_dim] // (cp_size * stripe_height), cp_size, stripe_height],
+            *[origin_shape[seq_dim] // (cp_size * stripe_size), cp_size, stripe_size],
             *origin_shape[seq_dim + 1 :],
         ]
     else:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[cp_size, origin_shape[seq_dim] // (cp_size * stripe_height), stripe_height],
+            *[cp_size, origin_shape[seq_dim] // (cp_size * stripe_size), stripe_size],
             *origin_shape[seq_dim + 1 :],
         ]
 
@@ -1286,8 +1286,8 @@ class _FusedAttnCPWithAllGatherHelper:
                 f" {','.join(map(str, allowed_layouts))} got: {self.config.qkv_layout}"
             )
 
-        if (not self.config.qkv_layout.is_thd() and self.config.stripe_height != 0) or (
-            self.config.qkv_layout.is_thd() and self.config.stripe_height == 0
+        if (not self.config.qkv_layout.is_thd() and self.config.stripe_size != 0) or (
+            self.config.qkv_layout.is_thd() and self.config.stripe_size == 0
         ):
             raise ValueError(
                 f"{header} only supports Dual Chunk load balancing with BSHD layouts and Striped"
@@ -1342,7 +1342,7 @@ class _FusedAttnCPWithAllGatherHelper:
     def get_adjusted_max_segments_per_seq(self, max_seqlen, cp_size):
         # Estimating
         return (
-            max_seqlen // (self.config.stripe_height * cp_size)
+            max_seqlen // (self.config.stripe_size * cp_size)
         ) + self.config.max_segments_per_seq
 
     def get_step_config(self) -> _FusedAttnConfig:
@@ -1361,7 +1361,7 @@ class _FusedAttnCPWithAllGatherHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
-            stripe_height=self.config.stripe_height,
+            stripe_size=self.config.stripe_size,
         )
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
@@ -1380,7 +1380,7 @@ class _FusedAttnCPWithAllGatherHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
-            stripe_height=self.config.stripe_height,
+            stripe_size=self.config.stripe_size,
         )
 
     def all_gather_kv(self, k, v):
@@ -1393,7 +1393,7 @@ class _FusedAttnCPWithAllGatherHelper:
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
                 if self.config.qkv_layout.is_thd():
-                    x = reorder_causal_striped(x, cp_size, 1, True, self.config.stripe_height)
+                    x = reorder_causal_striped(x, cp_size, 1, True, self.config.stripe_size)
                 else:
                     x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
             return x
@@ -1418,10 +1418,10 @@ class _FusedAttnCPWithAllGatherHelper:
             cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
             if self.config.qkv_layout.is_thd():
                 kv_segment_ids_ag = reorder_causal_striped(
-                    kv_segment_ids, cp_size, 1, True, self.config.stripe_height
+                    kv_segment_ids, cp_size, 1, True, self.config.stripe_size
                 )
                 kv_segment_pos_ag = reorder_causal_striped(
-                    kv_segment_pos, cp_size, 1, True, self.config.stripe_height
+                    kv_segment_pos, cp_size, 1, True, self.config.stripe_size
                 )
                 return kv_segment_ids_ag, kv_segment_pos_ag
             # TODO: Is the dual chunk case needed ?
@@ -1434,7 +1434,7 @@ class _FusedAttnCPWithAllGatherHelper:
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
                 if self.config.qkv_layout.is_thd():
-                    x = reorder_causal_striped(x, cp_size, 1, False, self.config.stripe_height)
+                    x = reorder_causal_striped(x, cp_size, 1, False, self.config.stripe_size)
                 else:
                     x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
 
@@ -2414,7 +2414,7 @@ class _FusedAttnCPWithP2PHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
-            stripe_height=self.config.stripe_height,
+            stripe_size=self.config.stripe_size,
         )
 
     def stack_kv(self, k, v):
@@ -3297,7 +3297,7 @@ def fused_attn_fwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
-    stripe_height: int = 0,
+    stripe_size: int = 0,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3336,7 +3336,7 @@ def fused_attn_fwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
-        stripe_height (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        stripe_size (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -3402,7 +3402,7 @@ def fused_attn_fwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
-        stripe_height=stripe_height,
+        stripe_size=stripe_size,
     )
 
     primitive = None
@@ -3452,7 +3452,7 @@ def fused_attn_bwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
-    stripe_height: int = 0,
+    stripe_size: int = 0,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3492,7 +3492,7 @@ def fused_attn_bwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
-        stripe_height (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        stripe_size (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         Tuple[jnp.ndarray, ...], jnp.ndarray:
         - The first tuple contains the gradients with respect to the input `qkv` tensors in the
@@ -3565,7 +3565,7 @@ def fused_attn_bwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
-        stripe_height=stripe_height,
+        stripe_size=stripe_size,
     )
 
     primitive = None
