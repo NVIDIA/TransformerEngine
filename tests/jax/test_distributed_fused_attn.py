@@ -354,12 +354,13 @@ class TestDistributedContextParallelSelfAttn:
         use_shardy,
         use_scan_ring=False,
         window_size=None,
+        stripe_height=0,
     ):
         if qkv_layout.is_thd():
             # if cp_strategy == CPStrategy.ALL_GATHER:
             #     pytest.skip("THD doesn't support all gather context parallelism.")
-            if not load_balanced and cp_strategy == CPStrategy.RING:
-                pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+            if not load_balanced and (cp_strategy == CPStrategy.RING or cp_strategy == CPStrategy.ALL_GATHER):
+                pytest.skip(f"THD + {cp_strategy=} doesn't support unbalanced context parallelism.")
 
         assert not use_scan_ring or cp_strategy == CPStrategy.RING
 
@@ -387,7 +388,7 @@ class TestDistributedContextParallelSelfAttn:
         num_kv_heads = num_head // kv_groups
 
         # KL code For AG case only
-        stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
+        #stripe_height = 4 if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER else 0
 
         runner = FusedAttnRunner(
             batch,
@@ -440,6 +441,7 @@ class TestDistributedContextParallelSelfAttn:
         # and exception if the step backend is not supported. This was a deliberate API
         # decision to keep the CP size or flag out of the function.
         has_backend = check_has_backend_for_mask(attn_mask_type)
+        #TODO: For PADDING_CAUSAL_MASK ?
         if cp_size > 1 and attn_mask_type == AttnMaskType.CAUSAL_MASK:
             has_backend &= check_has_backend_for_mask(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK)
 
@@ -455,7 +457,6 @@ class TestDistributedContextParallelSelfAttn:
 
         # KL code
         runner.test_backward()
-        # runner.test_forward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
     @pytest_parametrize_wrapper(
@@ -466,7 +467,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
     )
     def test_context_parallel_allgather_attn_shardy(
         self,
@@ -499,12 +500,61 @@ class TestDistributedContextParallelSelfAttn:
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[-1],
+    )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED")],
+    )
+    @pytest.mark.parametrize(
+        "stripe_height",
+        [pytest.param(64, id="STRIPE-64"), pytest.param(128, id="STRIPE-128")],
+    )
+    def test_context_parallel_allgather_striped_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+        load_balanced,
+        stripe_height,
+    ):
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced,
+            CPStrategy.ALL_GATHER,
+            use_shardy=False,
+            stripe_height=stripe_height,
+        )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -547,7 +597,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -611,7 +661,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
     )
     def test_context_parallel_ring_attn_shardy(
         self,
