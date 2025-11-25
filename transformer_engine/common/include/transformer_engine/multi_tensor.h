@@ -265,6 +265,22 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
                                                         float max_fp8, int force_pow_2_scales,
                                                         float epsilon, cudaStream_t stream);
 
+/*! \brief Split a tensor along dimension 0 and compute the amax for each split.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  For each tensor split, compute the maximum absolute value (amax)
+ *  and populate the amax of the corresponding output tensor.
+ *
+ *  \param[in]      input            Input tensor.
+ *  \param[in,out]  amaxes           Array of output tensors. Only the amax is updated.
+ *  \param[in]      split_sections   Size of each tensor split along dimension 0.
+ *  \param[in]      num_tensors      Number of tensor splits.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_amax(const NVTETensor input, NVTETensor *outputs, const size_t *split_sections,
+                     size_t num_tensors, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

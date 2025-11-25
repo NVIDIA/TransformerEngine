@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    get_align_size_for_quantization,
+)
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -1829,9 +1832,7 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            split_size = 16
-            if recipe.mxfp8() or recipe.nvfp4():
-                split_size = 32
+            split_size = get_align_size_for_quantization(recipe)
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
@@ -2137,9 +2138,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
-        align_size = 16
-        if recipe.mxfp8() or recipe.nvfp4():
-            align_size = 32
+        align_size = get_align_size_for_quantization(recipe)
         padded_tokens_per_expert = [
             (num_tokens + align_size - 1) // align_size * align_size
             for num_tokens in tokens_per_expert
