@@ -1493,7 +1493,10 @@ class _FusedAttnCPWithAllGatherHelper:
         def rs(x):
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
+                if self.config.qkv_layout.is_thd():
+                    x = reorder_causal_striped(x, cp_size, 1, False, self.config.stripe_height)
+                else:
+                    x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
 
             return lax_paral_op(
                 x,
@@ -2359,7 +2362,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 return output, softmax_aux, rng_state
 
             k_ag, v_ag = helper.all_gather_kv(k, v)
-            # Only the pos is needed for kv offsets calculation
             _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(_kv_segment_ids, _kv_segment_pos)
             functions = [
                 partial(_cross_attn, idx, q, k_ag, v_ag, bias, softmax_offset, _kv_segment_ids_ag, _kv_segment_pos_ag, seed)
@@ -2372,6 +2374,175 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
 
 
 register_primitive(FusedAttnCPStripedWithAllGatherFwdPrimitive)
+
+class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
+    """
+    Fused Attention Backward with Context Parallelism and Striped Load Balancing Primitive.
+
+    This context parallel implementation uses all-gather to collect KV and dKV inputs from context parallel ranks.
+    The gradients are subsequently reduce-scattered back to each context parallel rank.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        assert (
+            not is_context_parallel or config.window_size[0] == -1
+        ), "Sliding window attention is not supported when context parallelism is enabled"
+        if not is_context_parallel:
+            return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+
+        # Ensure we can support this configuration with context parallelism.
+        helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
+        helper.check_supported()
+
+        #TODO: Confirm the deletion
+        del result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        softmax_offset_spec = get_padded_spec(arg_infos[4])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (
+            dq_sharding,
+            dk_sharding,
+            dv_sharding,
+            dbias_sharding,
+            dsoftmax_offset_sharding,
+        )
+
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_offset,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+
+            # See comment in FusedAttnCPFwdPrimitive.partition for why we define this function.
+            def _cross_attn_bwd(
+                idx,
+                q,
+                k,
+                v,
+                bias,
+                softmax_offset,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_seqlen,
+                kv_seqlen,
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,
+            ):
+                # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
+                # Do not forget to unset the segment_ids and segment_pos so that the seqlens_from_segment_ids_pos() function
+                # does not go down that route but instead just picks the seqlens and offsets passed onto it
+                
+                kv_max_seqlen = k.shape[1]
+                # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
+                adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(max_seqlen=kv_max_seqlen, cp_size=cp_size)
+                q_num_segments_for_rank, q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(_q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq)
+                q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(q_segment_ids=_q_segment_ids ,q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
+                kv_num_segments_for_rank, kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(kv_segment_ids=_kv_segment_ids, kv_segment_pos=_kv_segment_pos, max_segments_per_seq=adjusted_max_segments_per_seq)
+                kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(kv_segment_pos=_kv_segment_pos, kv_segment_ids=_kv_segment_ids, kv_segment_pos_ag=kv_segment_pos_ag, kv_segment_ids_ag=kv_segment_ids_ag,kv_num_segments=kv_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
+                #kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(q_segment_pos=_q_segment_pos, q_num_segments=q_num_segments_for_rank, max_segments_per_seq=adjusted_max_segments_per_seq)
+                
+                dq_local, dk_local, dv_local, dbias_local, _ = FusedAttnBwdPrimitive.impl(
+                    q, #sharded for rank
+                    k, #ag
+                    v, #ag
+                    bias,
+                    softmax_offset,
+                    softmax_aux,
+                    rng_state,
+                    output,
+                    doutput,
+                    q_seqlens_for_rank,
+                    kv_seqlens_for_rank,
+                    q_seq_offsets_for_rank,
+                    kv_seq_offsets_for_rank,
+                    q_seqlen, #Should be empty ids but using placeholder
+                    kv_seqlen, #Should be empty poss but using placeholder
+                    q_seq_offsets, #Should be empty ids but using placeholder
+                    k_seq_offsets, #Should be empty pos but using placeholder
+                    config=helper.get_step_config_for_striped(max_seqlen=kv_max_seqlen, cp_size=cp_size),
+                )
+
+                # pad dk/dv to be unsliced shape so we can reduce scatter over all ranks.
+                # if config.attn_mask_type != AttnMaskType.NO_MASK:
+                #     pad_length = kv_max_seqlen - kv_seqlens_for_rank[sub_idx]
+                #     dk_local, dv_local = helper.pad_kv(dk_local, dv_local, pad_length)
+
+                # results.append((dq_local, dk_local, dv_local, dbias_local))
+
+                # dq_local = jnp.concatenate((results[0][0], results[1][0]), axis=1)
+                # dk_local_pad = results[0][1] + results[1][1]
+                # dv_local_pad = results[0][2] + results[1][2]
+                # return dq_local, dk_local_pad, dv_local_pad, results[1][3]
+                return dq_local, dk_local, dv_local, dbias_local 
+
+            k_ag, v_ag = helper.all_gather_kv(k, v)
+            _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(_kv_segment_ids, _kv_segment_pos)
+
+            functions = [
+                partial(
+                    _cross_attn_bwd,
+                    idx,
+                    q,
+                    k_ag,
+                    v_ag,
+                    bias,
+                    softmax_offset,
+                    softmax_aux,
+                    rng_state,
+                    output,
+                    doutput,
+                    q_seqlen,
+                    kv_seqlen,
+                    _q_segment_ids,
+                    _kv_segment_ids_ag,
+                    _q_segment_pos,
+                    _kv_segment_pos_ag,
+                )
+                for idx in range(cp_size)
+            ]
+
+            dq, dk_local, dv_local, dbias = lax.switch(cp_rank, functions)
+            dk, dv = helper.reduce_scatter_dkv(dk_local, dv_local)
+
+            # Return dummy dsoftmax_offset for arity matching (all-gather CP doesn't use it)
+            dummy_dsoftmax_offset = jnp.empty_like(softmax_offset)
+            return dq, dk, dv, dbias, dummy_dsoftmax_offset
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnCPStripedWithAllGatherBwdPrimitive)
 
 @dataclass(frozen=True)
 class _FusedAttnCPWithP2PHelper:
@@ -3501,6 +3672,7 @@ def fused_attn_bwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    stripe_height: int = 0,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3540,6 +3712,7 @@ def fused_attn_bwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        stripe_height (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         Tuple[jnp.ndarray, ...], jnp.ndarray:
         - The first tuple contains the gradients with respect to the input `qkv` tensors in the
@@ -3599,7 +3772,6 @@ def fused_attn_bwd(
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
         ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
 
-    #TODO: stripe_height hardcoded for now as bwd is not being tests
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -3613,13 +3785,16 @@ def fused_attn_bwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
-        stripe_height=0,
+        stripe_height=stripe_height,
     )
 
     primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
+            if qkv_layout.is_thd():
+                primitive = FusedAttnCPStripedWithAllGatherBwdPrimitive.outer_primitive
+            else:
+                primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
         case CPStrategy.RING:
             if qkv_layout.is_thd():
                 primitive = FusedRingAttnStripedBwdPrimitive.outer_primitive

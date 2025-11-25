@@ -1109,6 +1109,7 @@ def _fused_attn_bwd_rule(
     context_checkpoint_name,
     ctx,
     dz,
+    stripe_height
 ):
     del context_checkpoint_name
     (
@@ -1141,6 +1142,7 @@ def _fused_attn_bwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_height=stripe_height
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
