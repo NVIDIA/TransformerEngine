@@ -454,8 +454,8 @@ class TestDistributedContextParallelSelfAttn:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
         #KL code
-        #runner.test_backward()
-        runner.test_forward()
+        runner.test_backward()
+        #runner.test_forward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
     @pytest_parametrize_wrapper(

@@ -925,7 +925,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
-            #"stripe_height": self.stripe_height,
+            "stripe_height": self.stripe_height,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
