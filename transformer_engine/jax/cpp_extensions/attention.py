@@ -1630,6 +1630,7 @@ class _FusedAttnCPWithAllGatherHelper:
             length=max_segments_per_seq+1
         )[1:])(seqlens_pre)
         seqlens_all_pad_neg = jnp.where(seqlens_all==0, -1, seqlens_all)
+        max_new_segments_per_seq = 0 #TODO: Remove
         return max_new_segments_per_seq, seqlens_all_pad_neg
 
     def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, q_num_segments, max_segments_per_seq):
