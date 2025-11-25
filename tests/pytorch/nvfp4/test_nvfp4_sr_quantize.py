@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+from typing import List, Tuple
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -161,7 +163,7 @@ def group_quantize_fp4(
     use_RHT: bool,
     split_sections: list[int],
     use_tex_split_quantize: bool = True,
-) -> torch.Tensor:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     Group quantize function with toggle between tex.split_quantize and manual split/call methods.
 

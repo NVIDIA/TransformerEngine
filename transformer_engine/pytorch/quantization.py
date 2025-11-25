@@ -115,7 +115,7 @@ def get_default_recipe() -> Recipe:
     return get_default_fp8_recipe()
 
 
-def get_align_size_for_quantization(recipe: Recipe):
+def get_align_size_for_quantization(recipe: Recipe) -> int:
     """Get the alignment size for quantization."""
     if recipe.mxfp8():
         return 32
