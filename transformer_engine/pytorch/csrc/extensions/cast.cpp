@@ -560,14 +560,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     for (size_t i = 0; i < num_tensors; ++i) {
       // FP4 data is aligned to 256B
       const auto offset = roundup(buffer_size, 256);
-      if (offset != buffer_size) { contiguous_data_and_scale = false; }
+      if (offset != buffer_size) {
+        contiguous_data_and_scale = false;
+      }
       data_offsets.push_back(offset);
       buffer_size = offset + (product(rowwise_data_shapes[i]) + 1) / 2;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
       // Scales are aligned to 16B
       const auto offset = roundup(buffer_size, 16);
-      if (offset != buffer_size) { contiguous_data_and_scale = false; }
+      if (offset != buffer_size) {
+        contiguous_data_and_scale = false;
+      }
       scale_offsets.push_back(offset);
       buffer_size = offset + product(rowwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -618,14 +622,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     for (size_t i = 0; i < num_tensors; ++i) {
       // FP4 data is aligned to 256B
       const auto offset = roundup(buffer_size, 256);
-      if (offset != buffer_size) { contiguous_data_and_scale = false; }
+      if (offset != buffer_size) {
+        contiguous_data_and_scale = false;
+      }
       data_offsets.push_back(offset);
       buffer_size = offset + (product(columnwise_data_shapes[i]) + 1) / 2;
     }
     for (size_t i = 0; i < num_tensors; ++i) {
       // Scales are aligned to 16B
       const auto offset = roundup(buffer_size, 16);
-      if (offset != buffer_size) { contiguous_data_and_scale = false; }
+      if (offset != buffer_size) {
+        contiguous_data_and_scale = false;
+      }
       scale_offsets.push_back(offset);
       buffer_size = offset + product(columnwise_scale_shapes[i]) * scale_elem_size;
     }
@@ -708,22 +716,19 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<NVFP4Quantizer *> &quantizers) {
   // Check tensor lists
   const size_t num_tensors = split_sections.size();
-  NVTE_CHECK(input_list.size() == num_tensors,
-             "Expected ", num_tensors, " input tensors, but got ",
+  NVTE_CHECK(input_list.size() == num_tensors, "Expected ", num_tensors, " input tensors, but got ",
              input_list.size(), ".");
-  NVTE_CHECK(output_list.size() == num_tensors,
-             "Expected ", num_tensors, " output tensors, but got ",
-             output_list.size(), ".");
-  NVTE_CHECK(quantizers.size() == num_tensors,
-             "Expected ", num_tensors, " NVFP4 quantizers, but got ",
-             quantizers.size(), ".");
+  NVTE_CHECK(output_list.size() == num_tensors, "Expected ", num_tensors,
+             " output tensors, but got ", output_list.size(), ".");
+  NVTE_CHECK(quantizers.size() == num_tensors, "Expected ", num_tensors,
+             " NVFP4 quantizers, but got ", quantizers.size(), ".");
 
   // Trivial cases
   if (num_tensors == 0) {
     return;
   }
   if (input.numel() == 0) {
-    for (const auto &tensor: input_list) {
+    for (const auto &tensor : input_list) {
       NVTE_CHECK(tensor.numel() == 0,
                  "Input tensor has zero elements but got split with non-zero elements");
     }
@@ -781,8 +786,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // Perform multi-tensor quantization
   if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
     // Check that config is supported
-    NVTE_CHECK(input.dtype() == DType::kBFloat16,
-               "RHT is only supported for bfloat16 input");
+    NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
 
     // Compute amaxes
     if (quantizer.with_post_rht_amax) {
@@ -792,8 +796,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_hadamard_transform_amax(
             input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-            split_sections.data(), num_tensors, 0, quantizer.rht_matrix_random_sign_mask_t,
-            stream);
+            split_sections.data(), num_tensors, 0, quantizer.rht_matrix_random_sign_mask_t, stream);
       });
     } else {
       // RHT is enabled, but amax is pre-RHT amax
@@ -825,10 +828,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                             static_cast<DType>(out_rowwise_scale_inv.dtype),
                                             out_rowwise_scale_inv.shape);
           out_rowwise.set_amax(out_rowwise_amax.data_ptr,
-                               static_cast<DType>(out_rowwise_amax.dtype),
-                               out_rowwise_amax.shape);
-          nvte_quantize_v2(input_list[i].data(), out_rowwise.data(), quant_config_list[i],
-                           stream);
+                               static_cast<DType>(out_rowwise_amax.dtype), out_rowwise_amax.shape);
+          nvte_quantize_v2(input_list[i].data(), out_rowwise.data(), quant_config_list[i], stream);
         }
 
         // RHT + NVFP4 quantize for column-wise data
@@ -887,8 +888,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
     }
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_amax(input.data(),
-                      reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+      nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                       split_sections.data(), num_tensors, stream);
     });
     for (size_t i = 0; i < num_tensors; i++) {
@@ -964,20 +964,17 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
-  if (std::all_of(quantizer_list.begin(),
-                  quantizer_list.end(),
+  if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                   [](const py::handle &quantizer) -> bool {
                     return detail::IsFloat8BlockwiseQuantizers(quantizer.ptr());
                   })) {
     allocation_method = AllocationMethod::BULK_FP8_BLOCKWISE;
-  } else if (std::all_of(quantizer_list.begin(),
-                         quantizer_list.end(),
+  } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                          [](const py::handle &quantizer) -> bool {
                            return detail::IsMXFP8Quantizers(quantizer.ptr());
                          })) {
     allocation_method = AllocationMethod::BULK_MXFP8;
-  } else if (std::all_of(quantizer_list.begin(),
-                         quantizer_list.end(),
+  } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                          [](const py::handle &quantizer) -> bool {
                            return detail::IsNVFP4Quantizers(quantizer.ptr());
                          })) {
@@ -989,67 +986,68 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
   switch (allocation_method) {
-  case AllocationMethod::BULK_FP8_BLOCKWISE: {
-    // Bulk allocation for FP8 block-scaling tensors
-    std::vector<Float8BlockQuantizer *> blockwise_quantizers;
-    for (auto &quantizer : quantizer_cpp_list) {
-      blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
+    case AllocationMethod::BULK_FP8_BLOCKWISE: {
+      // Bulk allocation for FP8 block-scaling tensors
+      std::vector<Float8BlockQuantizer *> blockwise_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
+      }
+      std::tie(output_py_list, output_cpp_list) =
+          bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
+      break;
     }
-    std::tie(output_py_list, output_cpp_list) =
-      bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
-    break;
-  }
-  case AllocationMethod::BULK_MXFP8: {
-    // Bulk allocation for MXFP8 tensors
-    std::vector<MXFP8Quantizer *> mxfp8_quantizers;
-    for (auto &quantizer : quantizer_cpp_list) {
-      mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
+    case AllocationMethod::BULK_MXFP8: {
+      // Bulk allocation for MXFP8 tensors
+      std::vector<MXFP8Quantizer *> mxfp8_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
+      }
+      std::tie(output_py_list, output_cpp_list) =
+          bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
+      break;
     }
-    std::tie(output_py_list, output_cpp_list) =
-      bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
-    break;
-  }
-  case AllocationMethod::BULK_NVFP4: {
-    // Bulk allocation for NVFP4 tensors
-    std::vector<NVFP4Quantizer *> nvfp4_quantizers;
-    for (auto &quantizer : quantizer_cpp_list) {
-      nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+    case AllocationMethod::BULK_NVFP4: {
+      // Bulk allocation for NVFP4 tensors
+      std::vector<NVFP4Quantizer *> nvfp4_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+      }
+      bool contiguous_data_and_scale;
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
+          bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
+      if (!contiguous_data_and_scale) {
+        // Avoid fused quantize kernel if data is not contiguous
+        quantization_method = QuantizationMethod::UNFUSED;
+      }
+      break;
     }
-    bool contiguous_data_and_scale;
-    std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
-      bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
-    if (!contiguous_data_and_scale) {
-      // Avoid fused quantize kernel if data is not contiguous
-      quantization_method = QuantizationMethod::UNFUSED;
+    default: {
+      // Allocate output tensors individually
+      for (size_t i = 0; i < num_splits; ++i) {
+        auto [output_cpp, output_py] =
+            quantizer_cpp_list[i]->create_tensor(split_shapes[i], input_dtype);
+        output_cpp_list.emplace_back(std::move(output_cpp));
+        output_py_list.emplace_back(std::move(output_py));
+      }
     }
-    break;
-  }
-  default: {
-    // Allocate output tensors individually
-    for (size_t i = 0; i < num_splits; ++i) {
-      auto [output_cpp, output_py] =
-          quantizer_cpp_list[i]->create_tensor(split_shapes[i], input_dtype);
-      output_cpp_list.emplace_back(std::move(output_cpp));
-      output_py_list.emplace_back(std::move(output_py));
-    }
-  }
   }
 
   // Quantize into output tensors
   switch (quantization_method) {
-  case QuantizationMethod::FUSED_NVFP4: {
-    // Fused NVFP4 quantize kernel
-    auto input_nvte = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
-    std::vector<NVFP4Quantizer *> nvfp4_quantizers;
-    for (auto &quantizer : quantizer_cpp_list) {
-      nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+    case QuantizationMethod::FUSED_NVFP4: {
+      // Fused NVFP4 quantize kernel
+      auto input_nvte = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
+      std::vector<NVFP4Quantizer *> nvfp4_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
+      }
+      split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
+                                nvfp4_quantizers);
+      break;
     }
-    split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections, nvfp4_quantizers);
-    break;
-  }
-  default:
-    // General multi-tensor quantization
-    multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+    default:
+      // General multi-tensor quantization
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
   return output_py_list;
