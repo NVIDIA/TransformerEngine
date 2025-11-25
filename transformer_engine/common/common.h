@@ -101,7 +101,7 @@ struct SimpleTensor {
     }
     return acc;
   }
-  bool has_data() const noexcept { return dptr != nullptr; }
+  bool has_data() const noexcept { return dptr != nullptr && numel() > 0; }
 
   void clear() {
     dptr = nullptr;
@@ -155,11 +155,11 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept { return data.dptr != nullptr; }
+  bool has_data() const noexcept { return data.has_data(); }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept {
-    return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
+    return columnwise_data.has_data();
   }
 
   DType dtype() const {
@@ -353,16 +353,16 @@ struct GroupedTensor {
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
-  bool has_data() const noexcept { return data.dptr != nullptr; }
-  bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
+  bool has_data() const noexcept { return data.has_data(); }
+  bool has_columnwise_data() const noexcept { return columnwise_data.has_data(); }
 
-  bool all_same_first_dim() const noexcept { return first_dims.shape.empty(); }
-  bool all_same_last_dim() const noexcept { return last_dims.shape.empty(); }
+  bool all_same_first_dim() const noexcept { return !first_dims.has_data(); }
+  bool all_same_last_dim() const noexcept { return !last_dims.has_data(); }
   bool all_same_shape() const noexcept {
-    return first_dims.shape.empty() && last_dims.shape.empty();
+    return !first_dims.has_data() && !last_dims.has_data();
   }
   bool varying_both_dims() const noexcept {
-    return !first_dims.shape.empty() && !last_dims.shape.empty();
+    return first_dims.has_data() && last_dims.has_data();
   }
 
   size_t get_common_first_dim() const {
