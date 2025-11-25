@@ -23,7 +23,8 @@ from utils import EncoderLayer as RefEncoderLayer
 from transformer_engine.common import recipe
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.quantize import (
-    get_quantize_config,
+    get_global_quantize_recipe,
+    get_quantize_config_with_recipe,
     ScalingMode,
     is_fp8_available,
     update_collections,
@@ -82,6 +83,7 @@ _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
 _KEY_OF_WINDOW_SIZE = "window_size"
+_KEY_OF_SOFTMAX_TYPE = "softmax_type"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -275,6 +277,14 @@ ATTRS = [
         _KEY_OF_RELATIVE_EMBEDDING: True,
         _KEY_OF_SELF_ATTN_BIAS_TYPE: "post_scale_bias",
     },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+    },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
+    },
 ]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -358,7 +368,7 @@ class BaseRunner:
 
         ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        if get_quantize_config().is_fp8_enabled():
+        if get_quantize_config_with_recipe(get_global_quantize_recipe()).is_fp8_enabled():
             for _ in range(4):
                 _, updated_state = jax.value_and_grad(self._loss_fn, argnums=(3,), has_aux=False)(
                     inputs,
@@ -368,14 +378,24 @@ class BaseRunner:
                     test_layer,
                 )
                 if (
-                    get_quantize_config().get_scaling_mode(TensorSource.X)
+                    get_quantize_config_with_recipe(get_global_quantize_recipe()).get_scaling_mode(
+                        TensorSource.X
+                    )
                     == ScalingMode.DELAYED_TENSOR_SCALING
                 ):
                     _, updated_quantize_meta = flax.core.pop(
-                        updated_state[0], get_quantize_config().COLLECTION_NAME
+                        updated_state[0],
+                        get_quantize_config_with_recipe(
+                            get_global_quantize_recipe()
+                        ).COLLECTION_NAME,
                     )
                     test_others = update_collections(
-                        {get_quantize_config().COLLECTION_NAME: updated_quantize_meta}, test_others
+                        {
+                            get_quantize_config_with_recipe(
+                                get_global_quantize_recipe()
+                            ).COLLECTION_NAME: updated_quantize_meta
+                        },
+                        test_others,
                     )
                     del updated_quantize_meta
                 del updated_state
@@ -407,6 +427,9 @@ class EncoderRunner(BaseRunner):
         "attention/qkv/ln_bias": "pre_attention_layer_norm/ln_bias",
         "attention/query/scale": "pre_attention_layer_norm/scale",
         "attention/query/ln_bias": "pre_attention_layer_norm/ln_bias",
+        "attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "attention/DotProductAttention_0/softmax_offset"
+        ),
         "mlp/wi_kernel": "mlp/wi/kernel",
         "mlp/wi_bias": "mlp/wi/bias",
         "mlp/wo_kernel": "mlp/wo/kernel",
@@ -452,10 +475,16 @@ class DecoderRunner(BaseRunner):
         "encoder_decoder_attention/qkv/ln_bias": "pre_cross_attention_layer_norm/ln_bias",
         "encoder_decoder_attention/query/scale": "pre_cross_attention_layer_norm/scale",
         "encoder_decoder_attention/query/ln_bias": "pre_cross_attention_layer_norm/ln_bias",
+        "encoder_decoder_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "encoder_decoder_attention/DotProductAttention_0/softmax_offset"
+        ),
         "self_attention/qkv/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/qkv/ln_bias": "pre_self_attention_layer_norm/ln_bias",
         "self_attention/query/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/query/ln_bias": "pre_self_attention_layer_norm/ln_bias",
+        "self_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "self_attention/DotProductAttention_0/softmax_offset"
+        ),
         "mlp/wi_kernel": "mlp/wi/kernel",
         "mlp/wi_bias": "mlp/wi/bias",
         "mlp/wo_kernel": "mlp/wo/kernel",

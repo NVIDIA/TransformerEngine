@@ -34,11 +34,23 @@ inline size_t product(const std::vector<size_t> &shape) {
   return ret;
 }
 
-enum class QuantizeLayout {
+enum class JAXX_Quantize_Layout : int64_t {
   ROWWISE,
   COLWISE,
   ROWWISE_COLWISE,
 };
+
+inline bool is_quantize_rowwise(const JAXX_Quantize_Layout &layout) {
+  return layout == JAXX_Quantize_Layout::ROWWISE || layout == JAXX_Quantize_Layout::ROWWISE_COLWISE;
+}
+
+inline bool is_quantize_colwise(const JAXX_Quantize_Layout &layout) {
+  return layout == JAXX_Quantize_Layout::COLWISE || layout == JAXX_Quantize_Layout::ROWWISE_COLWISE;
+}
+
+inline bool is_quantize_2x2x(const JAXX_Quantize_Layout &layout) {
+  return layout == JAXX_Quantize_Layout::ROWWISE_COLWISE;
+}
 
 enum class JAXX_Scaling_Mode : int64_t {
   NO_SCALING = 0,

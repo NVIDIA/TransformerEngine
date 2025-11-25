@@ -15,6 +15,74 @@
 #include "fused_attn_fp8.h"
 #include "utils.h"
 
+namespace {
+// Helper function to create a tensor view with modified shape and optional pointer offset
+transformer_engine::Tensor make_tensor_view(const transformer_engine::Tensor *source,
+                                            const std::vector<size_t> &shape,
+                                            size_t offset_bytes = 0) {
+  transformer_engine::Tensor view = *source;
+  if (offset_bytes > 0) {
+    view.data.dptr = static_cast<void *>(static_cast<int8_t *>(source->data.dptr) + offset_bytes);
+  }
+  view.data.shape = shape;
+  view.nvte_tensor = 0;  // Mark as unmanaged/local tensor view
+  return view;
+}
+
+// Helper function to calculate stride in bytes for packed QKV tensor unpacking
+size_t calculate_qkv_stride(NVTE_QKV_Layout_Group layout_group, transformer_engine::DType dtype,
+                            size_t h, size_t d) {
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    stride = (transformer_engine::typeToNumBits(dtype) * h * d) / 8;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    stride = (transformer_engine::typeToNumBits(dtype) * d) / 8;
+  }
+  return stride;
+}
+
+// Helper function to determine unpacked shape for QKV packed tensor
+std::vector<size_t> calculate_qkv_unpacked_shape(const transformer_engine::Tensor *qkv_tensor,
+                                                 size_t h, size_t d) {
+  std::vector<size_t> unpacked_shape;
+  if (qkv_tensor->data.shape.size() == 4) {
+    // T3HD or TH3D (4D) -> THD (3D): remove dimension "3" at position 1
+    unpacked_shape = {qkv_tensor->data.shape[0], h, d};
+  } else {
+    // BS3HD/SB3HD or BSH3D/SBH3D (5D) -> BSHD/SBHD (4D): remove dimension "3" at position 2
+    unpacked_shape = {qkv_tensor->data.shape[0], qkv_tensor->data.shape[1], h, d};
+  }
+  return unpacked_shape;
+}
+
+// Helper function to calculate stride for packed KV tensor unpacking
+size_t calculate_kv_stride(NVTE_QKV_Layout_Group layout_group, transformer_engine::DType dtype,
+                           size_t h_kv, size_t d) {
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    stride = (transformer_engine::typeToNumBits(dtype) * h_kv * d) / 8;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    stride = (transformer_engine::typeToNumBits(dtype) * d) / 8;
+  }
+  return stride;
+}
+
+// Helper function to determine unpacked shape for KV packed tensor
+std::vector<size_t> calculate_kv_unpacked_shape(const transformer_engine::Tensor *kv_tensor,
+                                                NVTE_QKV_Layout_Group layout_group,
+                                                NVTE_QKV_Format kv_format, size_t t_kv, size_t h_kv,
+                                                size_t d) {
+  std::vector<size_t> unpacked_kv_shape;
+  if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+    unpacked_kv_shape = {t_kv, h_kv, d};
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD ||
+             layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    unpacked_kv_shape = {kv_tensor->data.shape[0], kv_tensor->data.shape[1], h_kv, d};
+  }
+  return unpacked_kv_shape;
+}
+}  // namespace
+
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
   switch (qkv_layout) {
@@ -138,7 +206,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit) {
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   const int device_id = cuda::current_device();
@@ -166,7 +234,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         qkv_layout == NVTE_QKV_Layout::NVTE_T3HD && max_seqlen_q == max_seqlen_kv &&
         max_seqlen_q <= 512 && head_dim_qk == 64 && head_dim_v == 64 &&
         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-       // 9.2: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
+       // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
        (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
         max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
@@ -407,6 +475,28 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    " Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
+    if ((cudnn_runtime_version == 91400) && (max_seqlen_kv > 1024) && (window_size_left != -1) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)) {
+      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      std::cout << "Warning: Given combination of attention mask (non-causal) and "
+                   "max_seqlen_kv (> 1024) does not support fused attention for cuDNN 9.14.0. "
+                   " Please upgrade your cuDNN version if possible."
+                << std::endl;
+    }
+    if ((cudnn_runtime_version <= 91500) && is_training &&
+        (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
+        (max_seqlen_kv % 128 != 0) && cuda_graph &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
+        (attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK)) {
+      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      std::cout << "Warning: Given combination of attention mask (non-padding),"
+                   " max_seqlen_kv (not divisible by 128), and qkv_format (BSHD/SBHD) for"
+                   " backward fused attention with graph capture requires cuDNN 9.15.1+. "
+                   "Please upgrade your cuDNN version if possible."
+                << std::endl;
+    }
   } else {
     backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
@@ -414,16 +504,18 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 }
 
 // NVTE fused attention FWD with packed QKV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                                    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
                                    const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
                                    size_t max_seqlen, bool is_training, bool return_max_logit,
-                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-                                   int64_t window_size_right, NVTETensor workspace,
-                                   cudaStream_t stream) {
+                                   bool cuda_graph, float attn_scale, float dropout,
+                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                                   NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                                   int64_t window_size_left, int64_t window_size_right,
+                                   NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
 
@@ -460,34 +552,67 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
-      h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_logit);
+      h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_logit,
+      cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
-    fused_attn_max_512_fwd_qkvpacked(b, h, max_seqlen, d, is_training, attn_scale, dropout,
-                                     qkv_layout, bias_type, attn_mask_type, input_QKV, input_Bias,
-                                     output_O, Aux_CTX_Tensors, input_cu_seqlens, input_rng_state,
-                                     wkspace, stream, handle);
+    // Unpack QKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    fused_attn_max_512_fwd(b, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
+                           qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
+                           input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens,
+                           input_cu_seqlens, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn_arbitrary_seqlen_fwd_qkvpacked(
-        b, h, max_seqlen, d, t, is_training, return_max_logit, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right, input_QKV,
-        input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens,
-        input_cu_seqlens_padded, input_rng_state, wkspace, stream, handle);
+    // Unpack QKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    fused_attn_arbitrary_seqlen_fwd(
+        b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training,
+        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
+        window_size_left, window_size_right, &Q_view, &K_view, &V_view, input_Bias,
+        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens,
+        input_cu_seqlens_padded, input_cu_seqlens_padded, nullptr, nullptr, input_rng_state,
+        wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn_fp8_fwd_qkvpacked(b, h, max_seqlen, d, is_training, attn_scale, dropout, qkv_layout,
-                                 bias_type, attn_mask_type, input_QKV, input_output_S, output_O,
-                                 Aux_CTX_Tensors, input_cu_seqlens, input_rng_state, wkspace,
-                                 stream, handle);
+    // Unpack QKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    fused_attn_fp8_fwd(b, h, h, max_seqlen, max_seqlen, d, is_training, attn_scale, dropout,
+                       qkv_layout, bias_type, attn_mask_type, &Q_view, &K_view, &V_view,
+                       input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens,
+                       input_cu_seqlens, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -496,16 +621,16 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   }
 }
 // NVTE fused attention BWD with packed QKV
-void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
-                                   const NVTETensor S, NVTETensor dP,
-                                   const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
-                                   NVTETensor dBias, NVTETensor dSoftmaxOffset,
-                                   const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
-                                   size_t max_seqlen, float attn_scale, float dropout,
-                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                   NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   bool deterministic, NVTETensor workspace, cudaStream_t stream) {
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_bwd with separate Q, K, V tensors instead.
+void nvte_fused_attn_bwd_qkvpacked(
+    const NVTETensor QKV, const NVTETensor O, const NVTETensor dO, const NVTETensor S,
+    NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV, NVTETensor dBias,
+    NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
+    size_t max_seqlen, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool deterministic, bool cuda_graph,
+    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
 
@@ -544,14 +669,30 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h, h,
-      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false);
+      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false, cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    fused_attn_max_512_bwd_qkvpacked(
-        b, h, max_seqlen, d, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, input_QKV,
-        input_dO, output_S, output_dQKV, output_dBias, input_cu_seqlens, wkspace, stream, handle);
+
+    // Unpack QKV and dQKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
+
+    fused_attn_max_512_bwd(b, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
+                           bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_dO, output_S,
+                           &dQ_view, &dK_view, &dV_view, output_dBias, input_cu_seqlens,
+                           input_cu_seqlens, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
@@ -567,12 +708,27 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
-    fused_attn_arbitrary_seqlen_bwd_qkvpacked(
-        b, h, max_seqlen, d, t, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-        softmax_type, window_size_left, window_size_right, deterministic, input_QKV, input_O,
-        input_dO, input_Bias, input_SoftmaxOffset, output_S, output_dQKV, output_dBias,
-        output_dSoftmaxOffset, input_cu_seqlens, input_cu_seqlens_padded, input_rng_state, wkspace,
-        stream, handle);
+
+    // Unpack QKV and dQKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
+
+    fused_attn_arbitrary_seqlen_bwd(
+        b, h, h, max_seqlen, max_seqlen, d, d, t, t, attn_scale, dropout, qkv_layout, bias_type,
+        attn_mask_type, softmax_type, window_size_left, window_size_right, deterministic, &Q_view,
+        &K_view, &V_view, input_O, input_dO, input_Bias, input_SoftmaxOffset, output_S, &dQ_view,
+        &dK_view, &dV_view, output_dBias, output_dSoftmaxOffset, input_cu_seqlens, input_cu_seqlens,
+        input_cu_seqlens_padded, input_cu_seqlens_padded, input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention "
@@ -584,10 +740,26 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    fused_attn_fp8_bwd_qkvpacked(b, h, max_seqlen, d, attn_scale, dropout, qkv_layout, bias_type,
-                                 attn_mask_type, input_QKV, input_O, input_dO, input_M, input_ZInv,
-                                 input_S, input_output_dP, output_dQKV, input_cu_seqlens,
-                                 input_rng_state, wkspace, stream, handle);
+
+    // Unpack QKV and dQKV and call the non-packed function
+    const auto QKV_type = input_QKV->data.dtype;
+    size_t stride = calculate_qkv_stride(layout_group, QKV_type, h, d);
+    std::vector<size_t> unpacked_shape = calculate_qkv_unpacked_shape(input_QKV, h, d);
+
+    // Create tensor views for Q, K, V and dQ, dK, dV
+    Tensor Q_view = make_tensor_view(input_QKV, unpacked_shape);
+    Tensor K_view = make_tensor_view(input_QKV, unpacked_shape, stride);
+    Tensor V_view = make_tensor_view(input_QKV, unpacked_shape, 2 * stride);
+
+    Tensor dQ_view = make_tensor_view(output_dQKV, unpacked_shape);
+    Tensor dK_view = make_tensor_view(output_dQKV, unpacked_shape, stride);
+    Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
+
+    fused_attn_fp8_bwd(b, h, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
+                       bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_O, input_dO,
+                       input_M, input_ZInv, input_S, input_output_dP, &dQ_view, &dK_view, &dV_view,
+                       input_cu_seqlens, input_cu_seqlens, input_rng_state, wkspace, stream,
+                       handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -596,16 +768,18 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   }
 }
 // NVTE fused attention FWD with packed KV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, const NVTETensor SoftmaxOffset,
     NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
     const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
     const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
     const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
-    size_t max_seqlen_kv, bool is_training, bool return_max_logit, float attn_scale, float dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    NVTETensor workspace, cudaStream_t stream) {
+    size_t max_seqlen_kv, bool is_training, bool return_max_logit, bool cuda_graph,
+    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+    int64_t window_size_right, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -681,25 +855,44 @@ void nvte_fused_attn_fwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right,
-      return_max_logit);
+      return_max_logit, cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
-    fused_attn_max_512_fwd_kvpacked(
-        b, h_q, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, input_Q, input_KV, input_Bias, output_O, Aux_CTX_Tensors,
-        input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
+    // Unpack KV and call the non-packed function
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, input_Q->data.dtype, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout,
+                           qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
+                           input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
+                           input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8903)
-    fused_attn_arbitrary_seqlen_fwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, num_pages_k, num_pages_v,
+    // Unpack KV and call the non-packed function
+    const auto Q_type = input_Q->data.dtype;
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    fused_attn_arbitrary_seqlen_fwd(
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
         return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, input_Q, input_KV, input_Bias, input_SoftmaxOffset,
-        output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
+        window_size_left, window_size_right, input_Q, &K_view, &V_view, input_Bias,
+        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k,
         input_page_table_v, input_rng_state, wkspace, stream, handle);
 #else
@@ -708,10 +901,20 @@ void nvte_fused_attn_fwd_kvpacked(
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn_fp8_fwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, input_Q, input_KV, input_output_S, output_O, Aux_CTX_Tensors,
-        input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
+    // Unpack KV and call the non-packed function
+    const auto Q_type = input_Q->data.dtype;
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale,
+                       dropout, qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view,
+                       input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
+                       input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -720,6 +923,8 @@ void nvte_fused_attn_fwd_kvpacked(
   }
 }
 // NVTE fused attention BWD with packed KV
+// DEPRECATED: This API is deprecated.
+// Please use nvte_fused_attn_bwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
     const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,
@@ -728,7 +933,8 @@ void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q, size_t max_seqlen_kv,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic, NVTETensor workspace, cudaStream_t stream) {
+    int64_t window_size_right, bool deterministic, bool cuda_graph, NVTETensor workspace,
+    cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -776,17 +982,31 @@ void nvte_fused_attn_bwd_kvpacked(
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
-  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
-      h_kv, max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right, false);
+  NVTE_Fused_Attn_Backend fused_attention_backend =
+      nvte_get_fused_attn_backend(true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type,
+                                  softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+                                  d, window_size_left, window_size_right, false, cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    fused_attn_max_512_bwd_kvpacked(
-        b, h_q, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout, bias_type,
-        attn_mask_type, input_Q, input_KV, input_dO, output_S, output_dQ, output_dKV, output_dBias,
-        input_cu_seqlens_q, input_cu_seqlens_kv, wkspace, stream, handle);
+
+    // Unpack KV and dKV and call the non-packed function
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, input_Q->data.dtype, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
+
+    fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout,
+                           bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_dO, output_S,
+                           output_dQ, &dK_view, &dV_view, output_dBias, input_cu_seqlens_q,
+                           input_cu_seqlens_kv, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
@@ -802,13 +1022,29 @@ void nvte_fused_attn_bwd_kvpacked(
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
-    fused_attn_arbitrary_seqlen_bwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
+
+    // Unpack KV and dKV and call the non-packed function
+    const auto Q_type = input_Q->data.dtype;
+    NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    // Create tensor views for dK, dV
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
+
+    fused_attn_arbitrary_seqlen_bwd(
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right, deterministic,
-        input_Q, input_KV, input_O, input_dO, input_Bias, input_SoftmaxOffset, output_S, output_dQ,
-        output_dKV, output_dBias, output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
-        input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream,
-        handle);
+        input_Q, &K_view, &V_view, input_O, input_dO, input_Bias, input_SoftmaxOffset, output_S,
+        output_dQ, &dK_view, &dV_view, output_dBias, output_dSoftmaxOffset, input_cu_seqlens_q,
+        input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
+        wkspace, stream, handle);
 #else
     const char *err_msg =
         "cuDNN 8.9.3 is required for BF16/FP16 fused attention "
@@ -820,11 +1056,25 @@ void nvte_fused_attn_bwd_kvpacked(
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    fused_attn_fp8_bwd_kvpacked(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
-                                qkv_layout, bias_type, attn_mask_type, input_Q, input_KV, input_O,
-                                input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ,
-                                output_dKV, input_cu_seqlens_q, input_cu_seqlens_kv,
-                                input_rng_state, wkspace, stream, handle);
+
+    // Unpack KV and dKV and call the non-packed function
+    const auto Q_type = input_Q->data.dtype;
+    NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+    size_t stride = calculate_kv_stride(layout_group, Q_type, h_kv, d);
+    std::vector<size_t> unpacked_kv_shape =
+        calculate_kv_unpacked_shape(input_KV, layout_group, kv_format, t_kv, h_kv, d);
+
+    Tensor K_view = make_tensor_view(input_KV, unpacked_kv_shape);
+    Tensor V_view = make_tensor_view(input_KV, unpacked_kv_shape, stride);
+
+    Tensor dK_view = make_tensor_view(output_dKV, unpacked_kv_shape);
+    Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
+
+    fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
+                       qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_O,
+                       input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ, &dK_view,
+                       &dV_view, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace,
+                       stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -833,16 +1083,19 @@ void nvte_fused_attn_bwd_kvpacked(
   }
 }
 // NVTE fused attention FWD with separate Q, K and V
-void nvte_fused_attn_fwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
-    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
-    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -913,7 +1166,7 @@ void nvte_fused_attn_fwd(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit);
+      return_max_logit, cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -963,7 +1216,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right, bool deterministic,
-                         NVTETensor workspace, cudaStream_t stream) {
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -1008,7 +1261,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
-      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false);
+      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
+      cuda_graph);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)

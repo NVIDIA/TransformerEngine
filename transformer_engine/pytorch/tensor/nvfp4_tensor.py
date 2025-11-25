@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -28,9 +28,9 @@ from ._quantization_helpers import _IdentityFunc
 aten = torch.ops.aten
 
 
-def get_no_random_sign_vector() -> torch.Tensor:
+def get_no_random_sign_vector(device: int) -> torch.Tensor:
     """Non-random sign vector for Hadamard transform."""
-    return torch.tensor([1], dtype=torch.float32, device="cuda")
+    return torch.tensor([1], dtype=torch.float32, device=device)
 
 
 def get_sign_from_vector(vector: torch.Tensor) -> int:
@@ -45,7 +45,7 @@ def get_sign_from_vector(vector: torch.Tensor) -> int:
     return mask.item()
 
 
-def get_wgrad_sign_vector() -> torch.Tensor:
+def get_wgrad_sign_vector(device: int) -> torch.Tensor:
     """Hard-coded random signs for Hadamard transform.
 
     https://xkcd.com/221/
@@ -54,11 +54,11 @@ def get_wgrad_sign_vector() -> torch.Tensor:
     return torch.tensor(
         [1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1],
         dtype=torch.float32,
-        device="cuda",
+        device=device,
     )
 
 
-def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
+def get_hadamard_matrix(hadamard_dimension: int, device: int) -> torch.Tensor:
     """Construct a 16x16 Hadamard matrix."""
     assert hadamard_dimension == 16, "Only hadamard dimension 16 is supported."
     hadamard_scale = 1 / math.sqrt(hadamard_dimension)
@@ -83,30 +83,30 @@ def get_hadamard_matrix(hadamard_dimension: int) -> torch.Tensor:
                 [1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, -1, -1, 1],
             ],
             dtype=torch.float32,
-            device="cuda",
+            device=device,
         )
         * hadamard_scale
     )
 
 
 @functools.lru_cache(maxsize=None)
-def get_rht_matrix(with_random_sign_mask: bool) -> torch.Tensor:
+def get_rht_matrix(with_random_sign_mask: bool, device: int) -> torch.Tensor:
     """Construct matrix used in random Hadamard transform."""
     hadamard_dimension = 16
     if with_random_sign_mask:
-        signs = get_wgrad_sign_vector()
+        signs = get_wgrad_sign_vector(device=device)
     else:
-        signs = get_no_random_sign_vector()
-    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device="cuda")
-    rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension)
+        signs = get_no_random_sign_vector(device=device)
+    sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device=device)
+    rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension, device=device)
     return rht_matrix.to(dtype=torch.bfloat16)
 
 
 @functools.lru_cache(maxsize=None)
-def get_random_sign_mask_for_rht(with_random_sign_mask: bool) -> int:
+def get_random_sign_mask_for_rht(with_random_sign_mask: bool, device: int) -> int:
     """Sign mask for random Hadamard transform."""
     if with_random_sign_mask:
-        return get_sign_from_vector(get_wgrad_sign_vector())
+        return get_sign_from_vector(get_wgrad_sign_vector(device=device))
     return 0
 
 
@@ -152,8 +152,10 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
-        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(with_random_sign_mask)
-        self.rht_matrix = get_rht_matrix(with_random_sign_mask)
+        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
+            with_random_sign_mask, torch.cuda.current_device()
+        )
+        self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
 
     def update_quantized(
         self,
@@ -175,6 +177,26 @@ class NVFP4Quantizer(Quantizer):
         tex.quantize(src, self, dst, noop_flag)
 
         return dst
+
+    def copy(self) -> NVFP4Quantizer:
+        """Create shallow copy"""
+
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            with_rht=self.with_rht,
+            with_post_rht_amax=self.with_post_rht_amax,
+            with_2d_quantization=self.with_2d_quantization,
+            stochastic_rounding=self.stochastic_rounding,
+        )
+        quantizer.internal = self.internal
+        quantizer.rht_matrix = self.rht_matrix
+        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
+
+        return quantizer
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
@@ -265,6 +287,7 @@ class NVFP4Quantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        pin_memory: bool = False,
         requires_grad: bool = False,
     ) -> NVFP4Tensor:
 
@@ -288,11 +311,18 @@ class NVFP4Quantizer(Quantizer):
         scale_inv = None
         amax_rowwise = None
         if self.rowwise_usage:
-            data = torch.empty(self.convert_shape_for_fp4(shape), dtype=torch.uint8, device=device)
+            data = torch.empty(
+                self.convert_shape_for_fp4(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
             scale_shape = self.get_scale_shape(shape, columnwise=False)
-            scale_inv = torch.empty(scale_shape, dtype=torch.uint8, device=device)
+            scale_inv = torch.empty(
+                scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
             # Allocate per tensor scale inverse. FP32 format.
-            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device)
+            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -306,12 +336,15 @@ class NVFP4Quantizer(Quantizer):
                 self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape, dtype=torch.uint8, device=device
+                columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
-            amax_columnwise = torch.zeros(1, dtype=torch.float32, device=device)
+            amax_columnwise = torch.zeros(
+                1, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
 
         # Construct FP8 tensor
         return NVFP4Tensor(
@@ -498,6 +531,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return self
         raise ValueError("NVFP4Tensor does not support different memory formats!")
 
+    def get_usages(self) -> Dict[str, bool]:
+        return {
+            "rowwise": self._rowwise_data is not None,
+            "columnwise": self._columnwise_data is not None,
+        }
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -520,16 +559,20 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             )
 
             if tensor._rowwise_data is not None:
-                rowwise_data = data_init_func(tensor._rowwise_data)
-                rowwise_scale_inv = scale_inv_init_func(tensor._rowwise_scale_inv)
-                amax_rowwise = torch.zeros_like(tensor._amax_rowwise)
+                rowwise_data = data_init_func(tensor._rowwise_data, *args[1:], **kwargs)
+                rowwise_scale_inv = scale_inv_init_func(
+                    tensor._rowwise_scale_inv, *args[1:], **kwargs
+                )
+                amax_rowwise = torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
             else:
                 rowwise_data, rowwise_scale_inv, amax_rowwise = None, None, None
 
             if tensor._columnwise_data is not None:
-                columnwise_data = data_init_func(tensor._columnwise_data)
-                columnwise_scale_inv = scale_inv_init_func(tensor._columnwise_scale_inv)
-                amax_columnwise = torch.zeros_like(tensor._amax_columnwise)
+                columnwise_data = data_init_func(tensor._columnwise_data, *args[1:], **kwargs)
+                columnwise_scale_inv = scale_inv_init_func(
+                    tensor._columnwise_scale_inv, *args[1:], **kwargs
+                )
+                amax_columnwise = torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
             else:
                 columnwise_data, columnwise_scale_inv, amax_columnwise = (
                     None,

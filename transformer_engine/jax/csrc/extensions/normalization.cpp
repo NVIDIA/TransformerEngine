@@ -66,7 +66,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                           Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
                           Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
                           double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
-                          bool is_2x, bool output_amax_when_no_scaling) {
+                          JAXX_Quantize_Layout quantize_layout, bool output_amax_when_no_scaling) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
@@ -86,7 +86,6 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
 
   auto _norm_type = static_cast<NVTE_Norm_Type>(norm_type);
-  auto _is_2x = static_cast<bool>(is_2x);
 
   auto x_size = product(x_buf.dimensions());
   auto gamma_size = product(gamma_buf.dimensions());
@@ -134,7 +133,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
   }
 
-  if (_is_2x) {
+  if (is_quantize_2x2x(quantize_layout)) {
     output_tensor.set_columnwise_data(colwise_output_buf->untyped_data(),
                                       static_cast<DType>(out_dtype), input_shape);
     output_tensor.set_columnwise_scale_inv(
@@ -185,25 +184,23 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
 
-Error_Type NormForwardInitializeFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
-                                    Buffer_Type amax_buf, Buffer_Type gamma_buf,
-                                    Buffer_Type beta_buf, Result_Type output_buf,
-                                    Result_Type colwise_output_buf, Result_Type scale_inv_buf,
-                                    Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
-                                    Result_Type mu_buf, Result_Type rsigma_buf,
-                                    Result_Type wkspace_buf, int norm_type,
-                                    bool zero_centered_gamma, double epsilon, int64_t sm_margin,
-                                    JAXX_Scaling_Mode scaling_mode, bool is_2x,
-                                    bool output_amax_when_no_scaling) {
+Error_Type NormForwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf, Buffer_Type amax_buf,
+    Buffer_Type gamma_buf, Buffer_Type beta_buf, Result_Type output_buf,
+    Result_Type colwise_output_buf, Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+    Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+    Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma, double epsilon,
+    int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
+    bool output_amax_when_no_scaling) {
   return wrapInStreamCapture(std::function(NormForwardFFI), stream, x_buf, scale_buf, amax_buf,
                              gamma_buf, beta_buf, output_buf, colwise_output_buf, scale_inv_buf,
                              colwise_scale_inv_buf, updated_amax_buf, mu_buf, rsigma_buf,
                              wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin,
-                             scaling_mode, is_2x, output_amax_when_no_scaling);
+                             scaling_mode, quantize_layout, output_amax_when_no_scaling);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
@@ -227,7 +224,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializ
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<bool>("output_amax_when_no_scaling"));
 
 pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,

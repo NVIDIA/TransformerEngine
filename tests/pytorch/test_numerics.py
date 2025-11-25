@@ -44,7 +44,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
@@ -186,7 +185,7 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
         return dict(rtol=1e-3, atol=1e-5)
     if dtype == torch.bfloat16:
         return dict(rtol=1.6e-2, atol=1e-5)
-    raise ValueError(f"Unsuppored dtype ({dtype})")
+    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 def assert_allclose(
@@ -1364,7 +1363,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, recipe=recipe)
     te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, recipe=recipe)
 
-    # Shoule be bit-wise match
+    # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
@@ -1697,7 +1696,11 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, bias, fuse_wgrad_accumulation
+    dtype,
+    bs,
+    model,
+    bias,
+    fuse_wgrad_accumulation,
 ):
     config = model_configs[model]
 
@@ -1739,6 +1742,58 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
             ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", [2])
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("bias", all_boolean)
+def test_layernorm_mlp_accuracy_checkpoint(
+    dtype,
+    bs,
+    model,
+    bias,
+):
+    config = model_configs[model]
+
+    ln_mlp = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        checkpoint=True,
+    ).eval()
+
+    ln_mlp_ref = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        checkpoint=False,
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
+        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
+        if bias:
+            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
+
+    te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=False)
     te_outputs_ref = _test_granular_accuracy(
         ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
     )
@@ -2690,7 +2745,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         general_gemm(
             A[i],
             B[i],
-            get_workspace(),
             dtype,
             grad=grad,
             accumulate=accumulate,
@@ -2705,7 +2759,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         B,
         out,
         dtype,
-        get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
         grad=grad,
         accumulate=accumulate,
@@ -2760,7 +2813,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     quantized_out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         quantization_params=out_quantizer,
         bias=None,
@@ -2770,7 +2822,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         quantization_params=None,
         bias=None,
@@ -2846,7 +2897,6 @@ def test_fp8_grouped_gemm(shape, accumulate):
         general_gemm(
             A_fp8[i],
             B_fp8[i],
-            get_workspace(),
             dtype,
             out=out_ref[i],
             accumulate=accumulate,
@@ -2856,7 +2906,6 @@ def test_fp8_grouped_gemm(shape, accumulate):
         B_fp8,
         out,
         dtype,
-        get_multi_stream_cublas_workspace(),
         m_splits=m_splits,
         accumulate=accumulate,
     )

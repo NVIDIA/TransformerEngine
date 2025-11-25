@@ -135,7 +135,7 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 3ba6f82 && git submodule update --init && cd hopper/ && python setup.py install
+(2) cd flash-attention/hopper && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
@@ -231,6 +231,10 @@ class AttentionParams:
         The type of softmax operation. See DotProductAttention for details.
     return_max_logit: bool, default = `False`
         Whether to output max_logit.
+    cuda_graph: bool, default = `False`
+        Whether support for cuda graph capture is needed or not.
+    num_splits: int, default = 1
+        The number of kernels to split attention to.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -260,6 +264,8 @@ class AttentionParams:
     inference_params: Optional[InferenceParams] = None
     softmax_type: str = "vanilla"
     return_max_logit: bool = False
+    cuda_graph: bool = False
+    num_splits: int = 1
 
     def __eq__(self, other):
         """
@@ -334,6 +340,8 @@ def get_attention_backend(
     inference_params = attention_params.inference_params
     softmax_type = attention_params.softmax_type
     return_max_logit = attention_params.return_max_logit
+    cuda_graph = attention_params.cuda_graph
+    num_splits = attention_params.num_splits
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -477,9 +485,47 @@ def get_attention_backend(
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
-            elif cudnn_version < (9, 14, 0):
-                logger.debug("Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0")
-                use_fused_attention = False
+            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
+            # determinism for Blackwell
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug(
+                        "Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0"
+                    )
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug(
+                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
+                            " with cuDNN < 9.18.0"
+                        )
+                        use_fused_attention = False
+
+        if device_compute_capability == (12, 0):
+            if use_flash_attention:
+                logger.debug(
+                    "Disabling FlashAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            use_flash_attention = False
+            use_fused_attention = False
+
+    # Filter: num_splits
+    if num_splits != 1:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for num_splits")
+            use_flash_attention_2 = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention for num_splits")
+            use_fused_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for num_splits")
+            use_unfused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:
@@ -560,6 +606,20 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+        ):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
+                    head_dim_qk,
+                )
+            use_fused_attention = False
+
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
@@ -629,6 +689,13 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
+        if device_compute_capability == (12, 0):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as qkv_format = thd is"
+                    " not supported for compute capability = sm120"
+                )
+            use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
@@ -932,6 +999,7 @@ def get_attention_backend(
             window_size[0],
             window_size[1],
             return_max_logit,
+            cuda_graph,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
@@ -1514,8 +1582,9 @@ def _pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     if isinstance(tensor, Float8Tensor):
@@ -1570,8 +1639,9 @@ def _unpack_tensor(
     Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     if isinstance(tensor, Float8Tensor):
         unpacked.scatter_(0, indices, tensor._data)

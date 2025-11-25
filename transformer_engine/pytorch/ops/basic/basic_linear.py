@@ -25,7 +25,6 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     get_dummy_wgrad,
-    get_workspace,
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -585,7 +584,6 @@ class BasicLinear(BasicOperation):
         y, *_ = general_gemm(
             w,
             x,
-            get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
             alpha=alpha,
@@ -875,7 +873,6 @@ class BasicLinear(BasicOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
-                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 alpha=grad_input_alpha,
@@ -928,7 +925,6 @@ class BasicLinear(BasicOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
-                get_workspace(),
                 out_dtype=dw_dtype,
                 alpha=grad_weight_alpha,
                 beta=grad_weight_beta,

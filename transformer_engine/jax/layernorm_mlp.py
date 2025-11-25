@@ -28,7 +28,6 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     TensorUsage,
-    get_quantize_config,
 )
 
 
@@ -114,7 +113,7 @@ def layernorm_mlp(
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
 
-    if not get_quantize_config().is_fp8_enabled():
+    if quantizer_sets == (noop_quantizer_set, noop_quantizer_set):
         input_dtype = x.dtype
         kernel_1 = kernel_1.astype(input_dtype)
         kernel_2 = kernel_2.astype(input_dtype)
@@ -390,11 +389,11 @@ def _layernorm_mlp_fwd_rule(
         rsigma,
         gamma,
         beta,
-        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel_1.get_tensor(TensorUsage.RHS_TRANS),
+        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS).checkpoint(ffn1_quantizer_set.x),
+        casted_kernel_1.get_tensor(TensorUsage.RHS_TRANS).checkpoint(ffn1_quantizer_set.kernel),
         dot_1_output,
-        casted_act_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel_2.get_tensor(TensorUsage.RHS_TRANS),
+        casted_act_out.get_tensor(TensorUsage.LHS_TRANS).checkpoint(ffn2_quantizer_set.x),
+        casted_kernel_2.get_tensor(TensorUsage.RHS_TRANS).checkpoint(ffn2_quantizer_set.kernel),
         x_contracting_dims,
         k_contracting_dims,
         kernel_1.shape,

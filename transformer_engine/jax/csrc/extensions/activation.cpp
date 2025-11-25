@@ -18,7 +18,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Buffer_Type amax_buf, Result_Type output_buf, Result_Type colwise_output_buf,
                     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                     Result_Type updated_amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
-                    bool is_2x_int, ActivationConfig act_params, bool output_amax_when_no_scaling) {
+                    JAXX_Quantize_Layout quantize_layout, ActivationConfig act_params,
+                    bool output_amax_when_no_scaling) {
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
@@ -40,7 +41,6 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto n = input_dims.back();
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   auto act_len = input_dims[input_dims.size() - 2];
-  auto is_2x = static_cast<bool>(is_2x_int);
   auto flatten_axis = output_buf->dimensions().size() - 1;  // output does not have act axis
 
   auto input_shape = std::vector<size_t>{m, static_cast<size_t>(act_len * n)};
@@ -77,7 +77,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
     }
   }
 
-  if (is_2x) {
+  if (is_quantize_2x2x(quantize_layout)) {
     auto &tmp_shape = (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
                           ? output_trans_shape
                           : output_shape;
@@ -158,7 +158,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
                                   .Ret<Buffer_Type>()      // updated_amax
                                   .Attr<int64_t>("act_enum")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<ActivationConfig>("act_params")
                                   .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
@@ -167,11 +167,12 @@ Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer
                               Buffer_Type amax_buf, Result_Type output_buf,
                               Result_Type colwise_output_buf, Result_Type scale_inv_buf,
                               Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
-                              int64_t act_enum, JAXX_Scaling_Mode scaling_mode, bool is_2x_int,
-                              ActivationConfig act_params, bool output_amax_when_no_scaling) {
+                              int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
+                              JAXX_Quantize_Layout quantize_layout, ActivationConfig act_params,
+                              bool output_amax_when_no_scaling) {
   return wrapInStreamCapture(std::function(ActLuFFI), stream, input_buf, scale_buf, amax_buf,
                              output_buf, colwise_output_buf, scale_inv_buf, colwise_scale_inv_buf,
-                             updated_amax_buf, act_enum, scaling_mode, is_2x_int, act_params,
+                             updated_amax_buf, act_enum, scaling_mode, quantize_layout, act_params,
                              output_amax_when_no_scaling);
 }
 
@@ -188,13 +189,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuInitializeHandler, ActLuInitializeFFI,
                                   .Ret<Buffer_Type>()      // updated_amax
                                   .Attr<int64_t>("act_enum")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<ActivationConfig>("act_params")
                                   .Attr<bool>("output_amax_when_no_scaling"));
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
-                                                   JAXX_Scaling_Mode scaling_mode, bool is_2x) {
+                                                   JAXX_Scaling_Mode scaling_mode,
+                                                   JAXX_Quantize_Layout quantize_layout) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto dact_input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto output_shape = std::vector<size_t>{batch_size, hidden_size};
@@ -226,7 +228,7 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
                                         std::vector<size_t>{1});
   }
 
-  if (is_2x) {
+  if (is_quantize_2x2x(quantize_layout)) {
     auto &tmp_shape = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ? output_trans_shape
                                                                                 : output_shape;
     output_tensor.set_columnwise_data(reinterpret_cast<void *>(&temp), out_dtype, tmp_shape);
@@ -260,9 +262,9 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   Result_Type colwise_output_buf, Result_Type scale_inv_buf,
                                   Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
                                   Result_Type dbias_buf, Result_Type workspace_buf,
-                                  JAXX_Scaling_Mode scaling_mode, int64_t act_enum, bool is_2x,
-                                  bool is_dbias, ActivationConfig act_params,
-                                  bool output_amax_when_no_scaling) {
+                                  JAXX_Scaling_Mode scaling_mode, int64_t act_enum,
+                                  JAXX_Quantize_Layout quantize_layout, bool is_dbias,
+                                  ActivationConfig act_params, bool output_amax_when_no_scaling) {
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
@@ -340,7 +342,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
     }
   }
 
-  if (is_2x) {
+  if (is_quantize_2x2x(quantize_layout)) {
     auto &tmp_shape = (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
                           ? output_trans_shape
                           : output_shape;
@@ -370,7 +372,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   // fused_dgated_dbias is not available, so we use dact_lu + quantize_dbias in Python instead
   NVTE_CHECK(!(act_len == 2 && is_dbias), "Unsupported DGatedActedDBias Fusion!");
-  NVTE_CHECK(!(scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_2x && act_len == 2),
+  NVTE_CHECK(!(scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING &&
+               is_quantize_2x2x(quantize_layout) && act_len == 2),
              "TE/common does not support delayed scaling for 2x with gated activations.");
 
   if (is_dbias) {
@@ -465,7 +468,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler, DActLuDBiasQuantizeFFI
                                   .Ret<Buffer_Type>()      // wkspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("act_enum")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<bool>("is_dbias")
                                   .Attr<ActivationConfig>("act_params")
                                   .Attr<bool>("output_amax_when_no_scaling"),
@@ -476,13 +479,13 @@ Error_Type DActLuDBiasQuantizeInitializeFFI(
     Buffer_Type amax_buf, Result_Type output_buf, Result_Type colwise_output_buf,
     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
     Result_Type dbias_buf, Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
-    int64_t act_enum, bool is_2x, bool is_dbias, ActivationConfig act_params,
-    bool output_amax_when_no_scaling) {
+    int64_t act_enum, JAXX_Quantize_Layout quantize_layout, bool is_dbias,
+    ActivationConfig act_params, bool output_amax_when_no_scaling) {
   return wrapInStreamCapture(std::function(DActLuDBiasQuantizeFFI), stream, input_buf,
                              act_input_buf, scale_buf, amax_buf, output_buf, colwise_output_buf,
                              scale_inv_buf, colwise_scale_inv_buf, updated_amax_buf, dbias_buf,
-                             workspace_buf, scaling_mode, act_enum, is_2x, is_dbias, act_params,
-                             output_amax_when_no_scaling);
+                             workspace_buf, scaling_mode, act_enum, quantize_layout, is_dbias,
+                             act_params, output_amax_when_no_scaling);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler,
@@ -502,7 +505,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler,
                                   .Ret<Buffer_Type>()      // wkspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("act_enum")
-                                  .Attr<bool>("is_2x")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
                                   .Attr<bool>("is_dbias")
                                   .Attr<ActivationConfig>("act_params")
                                   .Attr<bool>("output_amax_when_no_scaling"));

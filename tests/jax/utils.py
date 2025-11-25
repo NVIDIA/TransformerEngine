@@ -21,6 +21,7 @@ from jax import random as jax_random
 import pytest
 
 from transformer_engine.jax.attention import (
+    AttnSoftmaxType,
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
@@ -162,6 +163,7 @@ class DotProductAttention(nn.Module):
     dropout_rate: float = 0.0
     dtype: DType = jnp.float32
     float32_logits: bool = False
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
     """Computes dot-product attention given query, key, and value.
 
     This is the core function for applying attention based on
@@ -211,6 +213,24 @@ class DotProductAttention(nn.Module):
         assert key.shape[-2] == value.shape[-2], "k, v num_heads must match."
         assert query.shape[-1] == key.shape[-1], "q, k head_dim must match."
 
+        # Infer number of attention heads from query shape
+        # query shape: [..., h, d] where h is num_attention_heads
+        num_attention_heads = query.shape[-2]
+
+        # Initialize softmax_offset for off-by-one or learnable softmax
+        softmax_offset = None
+        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            # For off-by-one softmax, use zeros with shape (1, h, 1, 1)
+            softmax_offset = jnp.zeros((1, num_attention_heads, 1, 1), dtype=input_dtype)
+        elif self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # For learnable softmax, create a learnable parameter with shape (1, h, 1, 1)
+            softmax_offset = self.param(
+                "softmax_offset",
+                nn.initializers.zeros,
+                (1, num_attention_heads, 1, 1),
+                jnp.float32,
+            )
+
         if self.scale_attn_logits:
             head_dim = query.shape[-1]
             depth_scaling = jnp.sqrt(head_dim).astype(input_dtype)
@@ -241,8 +261,22 @@ class DotProductAttention(nn.Module):
         if bias is not None:
             attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
+        # Add attention sink to the last column if not vanilla softmax
+        if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            # Add extra column with softmax_offset
+            # softmax_offset shape: (1, h, 1, 1), attn_weights shape: [b, h, q, k]
+            extra_col = jnp.broadcast_to(
+                softmax_offset,
+                (attn_weights.shape[0], attn_weights.shape[1], attn_weights.shape[2], 1),
+            )
+            attn_weights = jnp.concatenate([attn_weights, extra_col], axis=-1)
+
         # Normalize the attention weights across `kv_length` dimension.
         attn_weights = jax_nn.softmax(attn_weights).astype(input_dtype)
+
+        # Remove the extra column after softmax if not vanilla softmax
+        if self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+            attn_weights = attn_weights[..., :-1]
 
         # Apply attention dropout.
         if not deterministic and self.dropout_rate > 0.0:
@@ -364,9 +398,9 @@ class MlpBlock(nn.Module):
 
     transpose_batch_sequence: bool
     intermediate_dim: int = 2048
-    activations: Sequence[Union[str, Callable]] = ("relu",)
+    activations: Sequence[Union[str, Callable]] = ("gelu",)
     kernel_init: Initializer = None
-    intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_rate: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     use_bias: bool = False
     dtype: Any = jnp.float32
@@ -535,6 +569,7 @@ class MultiHeadAttention(nn.Module):
     rotary_pos_emb_group_method: str = "consecutive"
     fuse_qkv: bool = True
     use_bias: bool = False
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -801,6 +836,7 @@ class MultiHeadAttention(nn.Module):
             dropout_rate=self.dropout_rate,
             dtype=self.dtype,
             float32_logits=self.float32_logits,
+            softmax_type=self.softmax_type,
         )(query, key, value, bias=attention_bias, deterministic=deterministic)
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
@@ -1035,14 +1071,14 @@ class EncoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1058,6 +1094,7 @@ class EncoderLayer(nn.Module):
     self_attn_bias_type: Any = None
     self_attn_mask_type: str = "no_mask"
     window_size: Tuple[int, int] = (-1, -1)
+    softmax_type: str = "vanilla"
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1111,6 +1148,9 @@ class EncoderLayer(nn.Module):
         else:
             x = inputs
 
+        # Convert softmax_type string to AttnSoftmaxType enum
+        attn_softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
+
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         x = MultiHeadAttention(
             num_heads=self.num_attention_heads,
@@ -1126,6 +1166,7 @@ class EncoderLayer(nn.Module):
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
             use_bias=self.use_bias,
+            softmax_type=attn_softmax_type,
             name="attention",
         )(x, x, encoder_mask, encoder_bias, deterministic=deterministic)
         x = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=self.hidden_dropout_dims)(
@@ -1199,14 +1240,14 @@ class DecoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1222,6 +1263,7 @@ class DecoderLayer(nn.Module):
     self_attn_bias_type: Any = None
     self_attn_mask_type: str = "no_mask"
     window_size: Tuple[int, int] = (-1, -1)
+    softmax_type: str = "vanilla"
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1290,6 +1332,9 @@ class DecoderLayer(nn.Module):
         else:
             x = inputs
 
+        # Convert softmax_type string to AttnSoftmaxType enum
+        attn_softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
+
         # Self-attention block
         x = MultiHeadAttention(
             num_heads=self.num_attention_heads,
@@ -1305,6 +1350,7 @@ class DecoderLayer(nn.Module):
             rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
             fuse_qkv=self.fuse_qkv_params,
             use_bias=self.use_bias,
+            softmax_type=attn_softmax_type,
             name="self_attention",
         )(x, x, decoder_mask, decoder_bias, deterministic=deterministic, decode=decode)
         x = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=self.hidden_dropout_dims)(
@@ -1343,6 +1389,7 @@ class DecoderLayer(nn.Module):
             rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
             fuse_qkv=self.fuse_qkv_params,
             use_bias=self.use_bias,
+            softmax_type=attn_softmax_type,
             name="encoder_decoder_attention",
         )(y, encoded, encoder_decoder_mask, deterministic=deterministic)
         y = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=self.hidden_dropout_dims)(

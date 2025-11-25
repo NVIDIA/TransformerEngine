@@ -140,6 +140,7 @@ def fused_attn_fwd(
     rng_gen: torch.Generator = None,
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
+    cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -219,6 +220,8 @@ def fused_attn_fwd(
                 See softmax_type in DotProductAttention for details.
     return_max_logit: bool, default = False
                       whether to return the maximum attention score
+    cuda_graph: bool, default = False
+                whether or not cuda graph capture is enabled.
 
     Returns
     ----------
@@ -320,6 +323,7 @@ def fused_attn_fwd(
         rng_gen,
         rng_elts_per_thread,
         return_max_logit,
+        cuda_graph,
     )
 
     if return_max_logit:
@@ -367,6 +371,7 @@ def fused_attn_bwd(
     softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
     deterministic: bool = False,
+    cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -439,6 +444,8 @@ def fused_attn_bwd(
                 window and causal mask specifically.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
+    cuda_graph: bool, default = False
+                whether or not cuda graph capture is enabled.
 
     Returns
     ----------
@@ -509,6 +516,7 @@ def fused_attn_bwd(
         s_quantizer,
         dp_quantizer,
         dqkv_quantizer,
+        cuda_graph,
     )
 
     return output_tensors

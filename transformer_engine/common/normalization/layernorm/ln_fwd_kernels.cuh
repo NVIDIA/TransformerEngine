@@ -123,7 +123,14 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 
         if (requires_amax) {
           __builtin_assume(amax >= 0);
-          amax = fmaxf(amax, fabsf(temp_output));
+          if (params.fp8_out) {
+            // For fp8_out, keep amax on pre-scale compute_t
+            amax = fmaxf(amax, fabsf(temp_output));
+          } else {
+            // Otherwise compute amax on the value converted to output_t (e.g., bf16)
+            output_t out_t_val = output_t(temp_output);
+            amax = fmaxf(amax, fabsf(compute_t(out_t_val)));
+          }
         }
         if (params.fp8_out) {
           temp_output = temp_output * scale;
@@ -290,7 +297,14 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
           if (col + jt < params.cols) {
             compute_t z_ij = z.data.elt[jt];
             __builtin_assume(amax >= 0);
-            amax = fmaxf(amax, fabsf(z_ij));
+            if (params.fp8_out) {
+              // For fp8_out, keep amax on pre-scale compute_t
+              amax = fmaxf(amax, fabsf(z_ij));
+            } else {
+              // Otherwise compute amax on the value converted to output_t (e.g., bf16)
+              output_t out_t_val = output_t(z_ij);
+              amax = fmaxf(amax, fabsf(compute_t(out_t_val)));
+            }
             if (params.fp8_out) {
               z.data.elt[jt] = z_ij * scale;
             }

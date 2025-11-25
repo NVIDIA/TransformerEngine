@@ -114,8 +114,18 @@ void compute_ref_output(NormType norm_type,
         tmp = current * rsigma[i] * g;
       }
 
+      // Write output (scaled only for fp8 paths)
       output[i * H + j] = static_cast<OutputType>(tmp * scale);
-      current_max = fmaxf(current_max, fabsf(tmp));
+
+      // amax semantics:
+      // - fp8_out (scale != 1): amax on pre-scale compute value 'tmp'
+      // - non-fp8_out (scale == 1): amax on value converted to OutputType (e.g., bf16)
+      if (scale != 1.f) {
+        current_max = fmaxf(current_max, fabsf(tmp));
+      } else {
+        OutputType out_t_val = static_cast<OutputType>(tmp);
+        current_max = fmaxf(current_max, fabsf(static_cast<compute_t>(out_t_val)));
+      }
     }
   }
 

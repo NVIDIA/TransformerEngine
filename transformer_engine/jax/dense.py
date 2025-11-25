@@ -19,6 +19,7 @@ from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
 from .quantize import (
     ScaledTensorFactory,
+    ScaledTensor,
     ScalingMode,
     QuantizeLayout,
     QuantizerSet,
@@ -26,7 +27,6 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
-    get_quantize_config,
 )
 
 
@@ -94,7 +94,7 @@ def dense(
     if transpose_batch_sequence:
         warnings.warn("transpose_batch_sequence is not well tested, use with caution!")
 
-    if not get_quantize_config().is_fp8_enabled():
+    if quantizer_set == noop_quantizer_set:
         input_dtype = x.dtype
         kernel = kernel.astype(input_dtype)
 
@@ -227,8 +227,8 @@ def _dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
         use_bias,
@@ -529,8 +529,12 @@ def _grouped_dense_fwd_rule(
 
     ctx = (
         group_sizes,
-        ctx_x,
-        ctx_kernel,
+        ctx_x.checkpoint(quantizer_set.x) if isinstance(ctx_x, ScaledTensor) else ctx_x,
+        (
+            ctx_kernel.checkpoint(quantizer_set.kernel)
+            if isinstance(ctx_kernel, ScaledTensor)
+            else ctx_kernel
+        ),
         x.shape,
         kernel.shape,
         use_bias,

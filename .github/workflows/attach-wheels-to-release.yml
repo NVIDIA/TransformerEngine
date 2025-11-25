@@ -1,0 +1,198 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# This workflow will:
+# - Create a new Github release
+# - Build wheels for supported architectures
+# - Deploy the wheels to the Github release
+# - Release the static code to PyPi
+# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions#publishing-to-package-registries
+
+name: Attach wheels to release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: 'The runner to use for the build'
+        required: true
+        type: string
+        default: ubuntu-22.04
+      release-version:
+        description: 'Release version'
+        required: true
+        default: '0.1.0'
+      python-version:
+        description: 'Python version'
+        required: true
+        default: '3.12'
+      torch-version:
+        description: 'Torch version'
+        required: true
+        default: '2.8.0'
+      cuda-version:
+        description: 'CUDA version'
+        required: true
+        default: '12.9.1'
+      cudnn-version:
+        description: 'CUDNN version'
+        required: true
+        default: '9'
+      cxx11_abi:
+        description: 'C++11 ABI'
+        required: true
+        type: choice
+        default: 'TRUE'
+        options:
+          - 'TRUE'
+          - 'FALSE'
+      ngc-image:
+        description: 'NGC PyTorch image (will take precedence over the source build)'
+        required: false
+        type: string
+        default: ''
+jobs:
+  pre-flight:
+    runs-on: ubuntu-latest
+    outputs:
+      build-wheel-matrix: ${{ steps.matrix.outputs.matrix }}
+      release-assets-url: ${{ steps.release-assets-url.outputs.upload_url }}
+      ngc-images: ${{ steps.check_for_ngc_images.outputs.IMAGES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build release matrix
+        id: matrix
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == "release" ]]; then
+            MATRIX=$(echo '{
+              "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
+              "release-version": ["${{ github.event.release.tag_name }}"],
+              "python-version": ["3.12"], 
+              "torch-version": ["2.8.0"], 
+              "cuda-version": ["12.9.1"], 
+              "cudnn-version": ["9"], 
+              "cxx11_abi": ["TRUE"]
+            }' | jq -rc)
+          else
+            MATRIX=$(echo '{
+              "os": ["${{ inputs.runs-on }}"],
+              "release-version": ["${{ inputs.release-version }}"],
+              "python-version": ["${{ inputs.python-version }}"], 
+              "torch-version": ["${{ inputs.torch-version }}"], 
+              "cuda-version": ["${{ inputs.cuda-version }}"], 
+              "cudnn-version": ["${{ inputs.cudnn-version }}"], 
+              "cxx11_abi": ["${{ inputs.cxx11_abi }}"]
+            }' | jq -rc)
+          fi
+
+          echo "matrix=$MATRIX" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Get Release with tag
+        id: get_current_release
+        uses: joutvhu/get-release@v1
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        with:
+          tag_name: ${{ inputs.release-version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get release assets url
+        env:
+          EVENT: ${{ github.event_name }}
+        if: ${{ (success() || !failure()) && !cancelled()}}
+        id: release-assets-url
+        run: |
+          if [[ "$EVENT" == "release" ]]; then
+            echo "upload_url=${{ github.event.release.upload_url }}" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "upload_url=${{ steps.get_current_release.outputs.upload_url }}" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for NGC PyTorch images
+        id: check_for_ngc_images
+        if: ${{ (success() || !failure()) && !cancelled()}}
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == "release" ]]; then
+            bash ./.github/scripts/check_for_ngc_images.sh
+            echo "IMAGES=$(cat ngc_images.json | jq -cr)" | tee -a $GITHUB_OUTPUT
+          else
+            echo 'IMAGES=["${{ inputs.ngc-image }}"]' | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  build_wheels:
+    name: Build Wheel
+    runs-on: ${{ matrix.os }}
+    needs: pre-flight
+    if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.pre-flight.outputs.build-wheel-matrix) }}
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+
+      - name: 'Build PyTorch Wheel'
+        uses: ./.github/actions/build-pytorch-wheel
+        id: build-pytorch-wheel
+        with:
+          release-version: ${{ matrix.release-version }}
+          python-version: ${{ matrix.python-version }}
+          cuda-version: ${{ matrix.cuda-version }}
+          cudnn-version: ${{ matrix.cudnn-version }}
+          torch-version: ${{ matrix.torch-version }}
+          cxx11_abi: ${{ matrix.cxx11_abi }}
+          aarch: ${{ matrix.os == 'ubuntu-22.04' && 'x86_64' || 'sbsa' }}
+        env:
+          NVTE_FRAMEWORK: pytorch
+          MAX_JOBS: 1
+
+      - name: Upload Release Asset
+        id: upload_release_asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
+          asset_path: ./transformer_engine/pytorch/dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+          asset_name: ${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+          asset_content_type: application/*
+
+  build_wheels_for_ngc:
+    name: Build Wheels for NGC PyTorch images
+    runs-on: ${{ matrix.os }}
+    needs: pre-flight
+    if: ${{ github.event_name == 'release' || inputs.ngc-image != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+        container-image: ${{ fromJson(needs.pre-flight.outputs.ngc-images) }}
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+
+      - name: 'Build PyTorch Wheel'
+        uses: ./.github/actions/build-pytorch-wheel
+        id: build-pytorch-wheel
+        with:
+          base-image: ${{ matrix.container-image }}
+
+      - name: Upload Release Asset
+        id: upload_release_asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
+          asset_path: ./transformer_engine/pytorch/dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+          asset_name: ${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+          asset_content_type: application/*

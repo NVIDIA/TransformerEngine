@@ -101,3 +101,4 @@ breathe_default_project = "TransformerEngine"
 
 autoapi_generate_api_docs = False
 autoapi_dirs = [root_path / "transformer_engine"]
+autoapi_ignore = ["*/_[!_]*"]

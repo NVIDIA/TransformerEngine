@@ -259,6 +259,7 @@ These environment variables can be set before installation to customize the buil
 * **NVTE_FRAMEWORK**: Comma-separated list of frameworks to build for (e.g., ``pytorch,jax``)
 * **MAX_JOBS**: Limit number of parallel build jobs (default varies by system)
 * **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
+* **NVTE_CUDA_ARCHS**: Semicolon-separated list of CUDA compute architectures to compile for (e.g., ``80;90`` for A100 and H100). If not set, automatically determined based on CUDA version. Setting this can significantly reduce build time and binary size.
 
 Compiling with FlashAttention
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

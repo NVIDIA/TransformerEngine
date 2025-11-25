@@ -57,6 +57,22 @@ class Float8BlockQuantizer(Quantizer):
         self.block_scaling_dim = block_scaling_dim
         self.all_gather_usage = all_gather_usage
 
+    def copy(self) -> Float8BlockQuantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            block_scaling_dim=self.block_scaling_dim,
+            all_gather_usage=self.all_gather_usage,
+            amax_epsilon=self.amax_epsilon,
+            force_pow_2_scales=self.force_pow_2_scales,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -214,6 +230,7 @@ class Float8BlockQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -229,12 +246,13 @@ class Float8BlockQuantizer(Quantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Allocate FP8 data transpose if needed
@@ -242,13 +260,17 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
                 columnwise_scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
