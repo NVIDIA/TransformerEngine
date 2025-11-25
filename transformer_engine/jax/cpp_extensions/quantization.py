@@ -552,7 +552,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         )
 
         arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
-        if (len(sr_rng_state_spec) > 1):
+        if len(sr_rng_state_spec) > 1:
             # sr_rng_state shape [n_devices, state_per_device]
             sr_rng_state_spec = (*tuple(x for x in x_spec if x is not None), None)
             arg_shardings[3] = NamedSharding(
@@ -659,8 +659,11 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         amax = (BATCHING + prefix + "_amax",)
         scale = (BATCHING + prefix + "_scale",)
         sr_rng_state = (BATCHING + prefix + "_sr_rng_state",)
-        if (value_types[3].shape != [0]):
-            sr_rng_state = (BATCHING + prefix + "_sr_rng_state_devices", prefix + "sr_rng_state_data")
+        if value_types[3].shape != [0]:
+            sr_rng_state = (
+                BATCHING + prefix + "_sr_rng_state_devices",
+                prefix + "sr_rng_state_data",
+            )
 
         post_rht_amax = (BATCHING + prefix + "_post_rht_amax",)
         rht_matrix = (BATCHING + prefix + "_rht_matrix_1", BATCHING + prefix + "_rht_matrix_2")
