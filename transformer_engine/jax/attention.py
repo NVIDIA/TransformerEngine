@@ -1107,9 +1107,9 @@ def _fused_attn_bwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_height,
     ctx,
     dz,
-    stripe_height
 ):
     del context_checkpoint_name
     (

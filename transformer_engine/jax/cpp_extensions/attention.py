@@ -1636,7 +1636,7 @@ class _FusedAttnCPWithAllGatherHelper:
             # Can't use len() on traced values - use jnp.max instead
             # max_new_segments_per_seq = jnp.max(jnp.where(actual_valid, new_segment_ids, 0))
             # print(f"{max_new_segments_per_seq=}")
-        #max_new_segments_per_seq = 0 #placeholder to be removed later on
+        max_new_segments_per_seq = 0 #placeholder to be removed later on
 
             # Use bincount with a safe length
             # Add 1 to handle 0-indexing, and ensure it's at least max_segments_per_seq
@@ -2455,9 +2455,9 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                 q_seqlen,
                 kv_seqlen,
                 _q_segment_ids,
-                _kv_segment_ids,
+                kv_segment_ids_ag,
                 _q_segment_pos,
-                _kv_segment_pos,
+                kv_segment_pos_ag,
             ):
                 # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
                 # Do not forget to unset the segment_ids and segment_pos so that the seqlens_from_segment_ids_pos() function
