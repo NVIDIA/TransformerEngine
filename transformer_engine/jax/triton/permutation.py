@@ -51,10 +51,10 @@ def make_row_id_map(
         The [num_experts, num_experts + n_routed) items are the indices of the experts corresponding
         to the first n_routed row indices above.
     """
-    row_id_map = jnp.full((num_tokens, num_experts * 2 + 1), -1, dtype=jnp.int32)
+    row_id_map_shape = (num_tokens, num_experts * 2 + 1)
     block_size = 1024
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
-    workspace_tensor = jnp.zeros(grid, dtype=jnp.int32)
+    workspace_tensor_shape = grid
 
     # supposing num_tokens == 5, num_experts == 3, block_size == 3
     # and we have a routing_map like this:
@@ -92,8 +92,8 @@ def make_row_id_map(
         row_id_stride_expert,
         kernel=_row_id_map_pass_1_kernel,
         out_shape=[
-            ShapeDtypeStruct(row_id_map.shape, row_id_map.dtype),
-            ShapeDtypeStruct(workspace_tensor.shape, workspace_tensor.dtype),
+            ShapeDtypeStruct(row_id_map_shape, jnp.int32),
+            ShapeDtypeStruct(workspace_tensor_shape, jnp.int32),
         ],
         grid=grid,
         BLOCK_SIZE=block_size,
@@ -108,8 +108,8 @@ def make_row_id_map(
         row_id_stride_expert,
         kernel=_row_id_map_pass_2_kernel,
         out_shape=[
-            ShapeDtypeStruct(row_id_map.shape, row_id_map.dtype),
-            ShapeDtypeStruct(workspace_tensor.shape, workspace_tensor.dtype),
+            ShapeDtypeStruct(row_id_map_shape, jnp.int32),
+            ShapeDtypeStruct(workspace_tensor_shape, jnp.int32),
         ],
         input_output_aliases={0: 0, 1: 1},
         grid=grid,
@@ -131,12 +131,12 @@ def make_row_id_map(
         row_id_stride_token,
         row_id_stride_expert,
         kernel=_row_id_map_pass_3_kernel,
-        out_shape=[ShapeDtypeStruct(row_id_map.shape, row_id_map.dtype)],
+        out_shape=ShapeDtypeStruct(row_id_map_shape, jnp.int32),
         input_output_aliases={0: 0},
         num_experts=num_experts,
         grid=grid,
         LOAD_SIZE=load_size,
-    )[0]
+    )
 
     return row_id_map
 
@@ -177,9 +177,12 @@ def permute_with_mask_map(
     permuted_probs : Optional[jnp.ndarray]
         Permuted probabilities if probs was provided, None otherwise.
     """
+    # one block per token, multiple blocks for hidden dimension
+    def grid_fn(meta):
+        return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
+    with_probs = probs is not None
     # Compute strides manually (JAX arrays don't have .strides attribute)
-
     # [num_tokens, hidden_size]
     inp_stride_token = hidden_size
     inp_stride_hidden = 1
@@ -190,7 +193,10 @@ def permute_with_mask_map(
     row_id_stride_token = num_experts * 2 + 1
     row_id_stride_expert = 1
 
-    if probs is not None:
+    # [num_out_tokens]
+    permuted_probs_stride_token = 1
+
+    if with_probs:
         if probs.ndim > 1:
             # [num_tokens, num_experts]
             probs_stride_token = num_experts
@@ -199,93 +205,56 @@ def permute_with_mask_map(
             # [num_tokens]
             probs_stride_token = 1
             probs_stride_expert = 1
+        out_shape = [
+            ShapeDtypeStruct((num_out_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((num_out_tokens,), probs.dtype),
+        ]
     else:
         probs_stride_token = 0
         probs_stride_expert = 0
+        probs = jnp.zeros((0,), dtype=inp.dtype)
+        out_shape = [
+            ShapeDtypeStruct((num_out_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((0,), inp.dtype),
+        ]
 
-    # [num_out_tokens]
-    permuted_probs_stride_token = 1
+    dummy_scale = jnp.zeros((num_tokens, hidden_size), dtype=inp.dtype)
+    dummy_permuted_scale = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
 
-    # one block per token, multiple blocks for hidden dimension
-    def grid_fn(meta):
-        return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+    outputs = jt.triton_call(
+        inp,
+        row_id_map,
+        probs,
+        dummy_scale, # scale
+        dummy_permuted_scale, # permuted_scale
+        0,
+        row_id_stride_token,
+        row_id_stride_expert,
+        inp_stride_token,
+        inp_stride_hidden,
+        output_stride_token,
+        output_stride_hidden,
+        probs_stride_token,
+        probs_stride_expert,
+        hidden_size,
+        1,
+        permuted_probs_stride_token,
+        hidden_size,
+        1,
+        kernel=_permute_kernel,
+        out_shape=out_shape,
+        grid=grid_fn,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        PERMUTE_PROBS=with_probs,
+        PERMUTE_SCALE=False,
+        # BLOCK_SIZE is keyword constexpr from autotune
+    )
 
-    if probs is not None:
-        # jax-triton doesn't handle None pointers correctly, create dummy tensors
-        dummy_scale = jnp.zeros((num_tokens, hidden_size), dtype=inp.dtype)
-        dummy_permuted_scale = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
-
-        output, permuted_probs = jt.triton_call(
-            inp,
-            row_id_map,
-            probs,
-            dummy_scale,
-            dummy_permuted_scale,
-            0,
-            row_id_stride_token,
-            row_id_stride_expert,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            probs_stride_token,
-            probs_stride_expert,
-            hidden_size,
-            1,
-            permuted_probs_stride_token,
-            hidden_size,
-            1,
-            kernel=_permute_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_out_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_out_tokens,), probs.dtype),
-            ],
-            grid=grid_fn,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            PERMUTE_PROBS=True,
-            PERMUTE_SCALE=False,
-            # BLOCK_SIZE is keyword constexpr from autotune
-        )
+    output = outputs[0]
+    if with_probs:
+        permuted_probs = outputs[1]
     else:
-        # jax-triton doesn't handle None pointers correctly, create dummy tensors
-        dummy_probs = jnp.zeros((num_tokens, num_experts), dtype=inp.dtype)
-        dummy_scale = jnp.zeros((num_tokens, hidden_size), dtype=inp.dtype)
-        dummy_permuted_scale = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
-
-        result = jt.triton_call(
-            inp,
-            row_id_map,
-            dummy_probs,
-            dummy_scale,
-            dummy_permuted_scale,
-            0,
-            row_id_stride_token,
-            row_id_stride_expert,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            probs_stride_token,
-            probs_stride_expert,
-            hidden_size,
-            1,
-            permuted_probs_stride_token,
-            hidden_size,
-            1,
-            kernel=_permute_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_out_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_out_tokens,), inp.dtype),
-            ],
-            grid=grid_fn,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            PERMUTE_PROBS=False,
-            PERMUTE_SCALE=False,
-            # BLOCK_SIZE is keyword constexpr from autotune
-        )
-        output = result[0]
         permuted_probs = None
 
     return output, permuted_probs
@@ -328,6 +297,9 @@ def unpermute_with_mask_map(
     unpermuted_probs : Optional[jnp.ndarray]
         Unpermuted probabilities if permuted_probs was provided, None otherwise.
     """
+    with_merging_probs = merging_probs is not None
+    with_probs = permuted_probs is not None
+
     # Compute strides manually (JAX arrays don't have .strides attribute)
     # [num_out_tokens, hidden_size],
     inp_stride_token = hidden_size
@@ -339,7 +311,7 @@ def unpermute_with_mask_map(
     row_id_stride_token = num_experts * 2 + 1
     row_id_stride_expert = 1
     # [num_tokens, num_experts] if present:
-    if merging_probs is not None:
+    if with_merging_probs:
         merging_probs_stride_token = num_experts
         merging_probs_stride_expert = 1
     else:
@@ -355,81 +327,50 @@ def unpermute_with_mask_map(
     def grid_fn(meta):
         return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-    if permuted_probs is not None:
-        merging_probs_arg = (
-            merging_probs
-            if merging_probs is not None
-            else jnp.zeros((num_tokens, num_experts), dtype=inp.dtype)
-        )
+    merging_probs = merging_probs if with_merging_probs else jnp.zeros((0,), dtype=inp.dtype)
+    permuted_probs = permuted_probs if with_probs else jnp.zeros((0,), dtype=inp.dtype)
 
-        output, unpermuted_probs = jt.triton_call(
-            inp,
-            row_id_map,
-            merging_probs_arg,
-            permuted_probs,
-            row_id_stride_token,
-            row_id_stride_expert,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            merging_probs_stride_token,
-            merging_probs_stride_expert,
-            permuted_probs_stride_token,
-            unpermuted_probs_stride_token,
-            unpermuted_probs_stride_expert,
-            kernel=_unpermute_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_tokens, num_experts), permuted_probs.dtype),
-            ],
-            grid=grid_fn,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
-            WITH_MERGING_PROBS=merging_probs is not None,
-            PERMUTE_PROBS=True,
-            # BLOCK_SIZE is keyword constexpr from autotune
-        )
+    if with_probs:
+        out_shape = [
+            ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((num_tokens, num_experts), permuted_probs.dtype),
+        ]
     else:
-        # jax-triton doesn't handle None pointers correctly, create dummy tensors if needed
-        dummy_permuted_probs = jnp.zeros((num_tokens,), dtype=inp.dtype)
-        merging_probs_arg = (
-            merging_probs
-            if merging_probs is not None
-            else jnp.zeros((num_tokens, num_experts), dtype=inp.dtype)
-        )
+        out_shape = [
+            ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((0,), inp.dtype),
+        ]
 
-        result = jt.triton_call(
-            inp,
-            row_id_map,
-            merging_probs_arg,
-            dummy_permuted_probs,
-            row_id_stride_token,
-            row_id_stride_expert,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            merging_probs_stride_token,
-            merging_probs_stride_expert,
-            1,
-            0,
-            0,
-            kernel=_unpermute_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_tokens, num_experts), inp.dtype),
-            ],
-            grid=grid_fn,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
-            WITH_MERGING_PROBS=merging_probs is not None,
-            PERMUTE_PROBS=False,
-            # BLOCK_SIZE is keyword constexpr from autotune
-        )
-        output = result[0]
+    outputs = jt.triton_call(
+        inp,
+        row_id_map,
+        merging_probs,
+        permuted_probs,
+        row_id_stride_token,
+        row_id_stride_expert,
+        inp_stride_token,
+        inp_stride_hidden,
+        output_stride_token,
+        output_stride_hidden,
+        merging_probs_stride_token,
+        merging_probs_stride_expert,
+        1,
+        0,
+        0,
+        kernel=_unpermute_kernel,
+        out_shape=out_shape,
+        grid=grid_fn,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
+        WITH_MERGING_PROBS=with_merging_probs,
+        PERMUTE_PROBS=with_probs,
+        # BLOCK_SIZE is keyword constexpr from autotune
+    )
+    output = outputs[0]
+    if with_probs:
+        unpermuted_probs = outputs[1]
+    else:
         unpermuted_probs = None
 
     return output, unpermuted_probs
@@ -521,54 +462,41 @@ def sort_chunks_by_map(
     def grid_fn(meta):
         return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-    if probs is not None:
-        output, permuted_probs = jt.triton_call(
-            inp,
-            row_id_map,
-            probs,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            probs_stride_token,
-            permuted_probs_stride_token,
-            kernel=_sort_chunks_by_map_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_tokens,), probs.dtype),
-            ],
-            grid=grid_fn,
-            hidden_size=hidden_size,
-            PERMUTE_PROBS=True,
-            # BLOCK_SIZE is provided by autotune
-            FORWARD=is_forward,
-        )
+    with_probs = probs is not None
+    if with_probs:
+        out_shape = [
+            ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((num_tokens,), probs.dtype),
+        ]
     else:
+        out_shape = [
+            ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
+            ShapeDtypeStruct((0,), inp.dtype),
+        ]
+        probs = jnp.zeros((0,), dtype=inp.dtype)
 
-        dummy_probs = jnp.zeros((num_tokens,), dtype=inp.dtype)
-
-        result = jt.triton_call(
-            inp,
-            row_id_map,
-            dummy_probs,
-            inp_stride_token,
-            inp_stride_hidden,
-            output_stride_token,
-            output_stride_hidden,
-            probs_stride_token,
-            permuted_probs_stride_token,
-            kernel=_sort_chunks_by_map_kernel,
-            out_shape=[
-                ShapeDtypeStruct((num_tokens, hidden_size), inp.dtype),
-                ShapeDtypeStruct((num_tokens,), inp.dtype),
-            ],
-            grid=grid_fn,
-            hidden_size=hidden_size,
-            PERMUTE_PROBS=False,
-            FORWARD=is_forward,
-            # BLOCK_SIZE is added by autotune as keyword constexpr
-        )
-        output = result[0]
+    outputs = jt.triton_call(
+        inp,
+        row_id_map,
+        probs,
+        inp_stride_token,
+        inp_stride_hidden,
+        output_stride_token,
+        output_stride_hidden,
+        probs_stride_token,
+        permuted_probs_stride_token,
+        kernel=_sort_chunks_by_map_kernel,
+        out_shape=out_shape,
+        grid=grid_fn,
+        hidden_size=hidden_size,
+        PERMUTE_PROBS=with_probs,
+        # BLOCK_SIZE is provided by autotune
+        FORWARD=is_forward,
+    )
+    output = outputs[0]
+    if with_probs:
+        permuted_probs = outputs[1]
+    else:
         permuted_probs = None
 
     return output, permuted_probs
