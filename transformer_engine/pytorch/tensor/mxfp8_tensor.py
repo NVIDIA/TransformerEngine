@@ -440,7 +440,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                         current_shape = split_scale_inv_out.shape
                         pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
                         if pad_dim0 > 0:
-                            scale_inv_out[idx] = torch.nn.functional.pad(split_scale_inv_out, (0, 0, 0, pad_dim0))
+                            scale_inv_out[idx] = torch.nn.functional.pad(
+                                split_scale_inv_out, (0, 0, 0, pad_dim0)
+                            )
                 out_data.append(scale_inv_out)
             return [
                 MXFP8Tensor(

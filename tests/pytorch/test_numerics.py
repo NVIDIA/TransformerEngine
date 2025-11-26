@@ -2977,6 +2977,7 @@ def test_noncontiguous():
 
     assert_allclose(out, outT, 1e-7)
 
+
 @pytest.mark.parametrize(
     "quantization_type",
     [
@@ -2987,8 +2988,8 @@ def test_noncontiguous():
 @pytest.mark.parametrize(
     "shape,chunks,dim",
     [
-        ((64, 128), 2, 0),   # Split along first dimension, needs padding for mxfp8
-        ((64, 128), 2, 1),   # Split along second dimension, goes down dequantization path for mxfp8
+        ((64, 128), 2, 0),  # Split along first dimension, needs padding for mxfp8
+        ((64, 128), 2, 1),  # Split along second dimension, goes down dequantization path for mxfp8
     ],
 )
 def test_fp8_split_functionality(quantization_type, shape, chunks, dim):
@@ -2997,7 +2998,7 @@ def test_fp8_split_functionality(quantization_type, shape, chunks, dim):
         pytest.skip(reason_for_no_fp8)
     if quantization_type == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    
+
     device = "cuda"
     dtype = torch.bfloat16
 
@@ -3005,7 +3006,7 @@ def test_fp8_split_functionality(quantization_type, shape, chunks, dim):
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     ref_tensor = torch.randn(shape, device=device, dtype=dtype)
-    
+
     # Quantize the tensor
     if quantization_type == "fp8":
         quantizer = Float8Quantizer(
@@ -3033,12 +3034,17 @@ def test_fp8_split_functionality(quantization_type, shape, chunks, dim):
     # Reference: chunk the dequantized tensor directly
     ref_dequantized = quantized_tensor.dequantize()
     ref_chunked = torch.chunk(ref_dequantized, chunks, dim=dim)
-    
+
     # Compare results
-    assert len(chunked_dequantized) == len(ref_chunked), \
-        f"Number of chunks mismatch: {len(chunked_dequantized)} vs {len(ref_chunked)}"
-    
+    assert len(chunked_dequantized) == len(
+        ref_chunked
+    ), f"Number of chunks mismatch: {len(chunked_dequantized)} vs {len(ref_chunked)}"
+
     for i, (chunk_deq, ref_chunk) in enumerate(zip(chunked_dequantized, ref_chunked)):
-        assert chunk_deq.shape == ref_chunk.shape, \
-            f"Chunk {i} shape mismatch: {chunk_deq.shape} vs {ref_chunk.shape}"
-        torch.testing.assert_close(chunk_deq, ref_chunk,)
+        assert (
+            chunk_deq.shape == ref_chunk.shape
+        ), f"Chunk {i} shape mismatch: {chunk_deq.shape} vs {ref_chunk.shape}"
+        torch.testing.assert_close(
+            chunk_deq,
+            ref_chunk,
+        )
