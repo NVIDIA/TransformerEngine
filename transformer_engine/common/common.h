@@ -286,7 +286,7 @@ struct GroupedTensor {
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
 
   Shape Representation:
-  - logical_shape: 2D shape representing the conceptual layout (REQUIRED)
+  - logical_shape: 2D shape representing the conceptual layouy, i.e. the shape when member tensors are flattened to 2D and stacked together (REQUIRED)
     + When all_same_shape(): [num_tensors * M, N] where each tensor is (M, N)
     + When varying_first_dim(): [~sum_of_first_dims, N] where N is common
     + When varying_last_dim(): [M, ~sum_of_last_dims] where M is common
