@@ -40,7 +40,7 @@ class LinearLowbitContext:
 
         return (
             f"LinearLowbitContext(\n"
-            f"  q_forward_input={fn_name(self.q_forward_input)},\n"
+            f"  use_metis={self.use_metis},\n"
             f"  q_forward_weight={fn_name(self.q_forward_weight)},\n"
             f"  q_backward_input={fn_name(self.q_backward_input)},\n"
             f"  q_backward_weight={fn_name(self.q_backward_weight)},\n"
@@ -118,7 +118,7 @@ def load_svd_history():
 @contextmanager
 def no_use_metis():
     old_use_metis_status = LinearLowbitContext.use_metis
-    LinearLowbitContext.use_metis = True
+    LinearLowbitContext.use_metis = False
     # setattr(LinearLowbitContext, "gradacc_broadcast", True)
     try:
         yield

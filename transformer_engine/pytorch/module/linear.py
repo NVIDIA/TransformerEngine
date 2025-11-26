@@ -94,6 +94,7 @@ class _Linear(torch.autograd.Function):
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
     ) -> torch.Tensor:
+        # print("foward LinearLowbitContext=", LinearLowbitContext())
         # pylint: disable=missing-function-docstring
 
         (
@@ -338,6 +339,7 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        # print(f"forward weightmat dtype= {type(weightmat)}, inputmat_total dtype= {type(inputmat_total)}")
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -514,6 +516,7 @@ class _Linear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # print("backward LinearLowbitContext=", ctx.metis_context)
         # pylint: disable=missing-function-docstring
 
         # NVTX label for profiling
@@ -738,7 +741,7 @@ class _Linear(torch.autograd.Function):
 
                 # dgrad GEMM
                 # Note: dx = dy * w
-
+                # print(f"backward weight_fp8 dtype= {type(weight_fp8)}, grad_output dtype= {type(grad_output)}")
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_fp8,
