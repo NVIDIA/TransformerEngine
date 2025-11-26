@@ -137,8 +137,10 @@ class BasicLinear(BasicOperation):
             out_features=out_features,
         )
 
-        # Whether weight tensor is natively quantized
+        # Initialize recipe state if needed for natively quantized weight
         self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
+        if self._with_quantized_weight:
+            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
 
         # Initialize parameters if needed
         weight = torch.empty(
