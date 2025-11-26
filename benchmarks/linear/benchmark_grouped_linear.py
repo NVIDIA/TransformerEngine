@@ -173,7 +173,9 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None):
+def run_benchmark_linear(
+    mkns, recipe_name, use_bias, num_gemms=4, m_splits_provided=None, fwd_only=False
+):
     data = []
     assert not use_bias, "Bias is not supported for GroupedLinear benchmark"
 
@@ -182,14 +184,14 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None
         device = "cuda"
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
         ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
-        assert m % num_gemms == 0
-        m_splits = [m // num_gemms] * num_gemms if m_splits is None else m_splits
+        m_splits = [m // num_gemms] * num_gemms if m_splits_provided is None else m_splits_provided
         # Bias is not supported for GroupedLinear benchmark
         bias = None
 
         # Run the benchmark
         print(f"fwd_m={m}, fwd_k={k}, fwd_n={n}")
         print(f"m_splits: {m_splits}")
+        print(f"fwd_only: {fwd_only}")
 
         grouped_fwd_bwd_timing_ms = benchmark_linear(
             x,
@@ -197,7 +199,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None
             m_splits,
             bias,
             recipe_name,
-            mode="fwd_bwd",
+            mode="fwd_only" if fwd_only else "fwd_bwd",
             num_gemms=num_gemms,
         )
 
@@ -213,6 +215,8 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None
             ]
         )
 
+    timing_notation = "grouped_fwd_time_ms" if fwd_only else "grouped_fwd_bwd_time_ms"
+
     df = pd.DataFrame(
         data=data,
         columns=[
@@ -221,7 +225,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None
             "n",
             "recipe",
             "num_gemms",
-            "grouped_fwd_bwd_time_ms",
+            timing_notation,
         ],
     )
 
@@ -266,6 +270,12 @@ if __name__ == "__main__":
         default=2048,
         help="Output dimension to use, default is 2048",
     )
+    parser.add_argument(
+        "--fwd-only",
+        action="store_true",
+        default=False,
+        help="Run forward pass only, default is both forward and backward passes",
+    )
     args = parser.parse_args()
 
     jagged_input_splits = None
@@ -297,7 +307,7 @@ if __name__ == "__main__":
     if jagged_input_splits is not None:
         num_gemms_list = [len(jagged_input_splits)]
 
-    token_dim_list = [65536]
+    token_dim_list = [16384, 32768, 65536, 98304]
     hidden_dim_list = [7168]
     output_dim_list = [2048]
 
@@ -371,7 +381,8 @@ if __name__ == "__main__":
                 recipe_name,
                 use_bias,
                 num_gemms=num_gemms,
-                m_splits=jagged_input_splits,
+                m_splits_provided=jagged_input_splits,
+                fwd_only=args.fwd_only,
             )
             df_linears = pd.concat([df_linears, df])
 
