@@ -377,13 +377,13 @@ def fuse_userbuffers_forward_linear(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Forward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated forward pass operations
 
     """

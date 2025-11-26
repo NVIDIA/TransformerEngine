@@ -508,14 +508,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                  size of each input sample.
     out_features : int
                   size of each output sample.
-    bias : bool, default = `True`
-          if set to `False`, the layer will not learn an additive bias.
-    init_method : Callable, default = `None`
-                 used for initializing weights in the following way: `init_method(weight)`.
-                 When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    get_rng_state_tracker : Callable, default = `None`
+    bias : bool, default = True
+          if set to ``False``, the layer will not learn an additive bias.
+    init_method : Callable, default = None
+                 used for initializing weights in the following way: ``init_method(weight)``.
+                 When set to ``None``, defaults to ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    get_rng_state_tracker : Callable, default = None
                  used to get the random number generator state tracker for initializing weights.
-    rng_tracker_name : str, default = `None`
+    rng_tracker_name : str, default = None
                  the param passed to get_rng_state_tracker to get the specific rng tracker.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
@@ -524,34 +524,36 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     Optimization parameters
     -----------------------
-    fuse_wgrad_accumulation : bool, default = 'False'
-                             if set to `True`, enables fusing of creation and accumulation of
+    fuse_wgrad_accumulation : bool, default = False
+                             if set to ``True``, enables fusing of creation and accumulation of
                              the weight gradient. When enabled, it is assumed that the weights
-                             have an additional `main_grad` attribute (used instead of the
-                             regular `grad`) which is a pre-allocated buffer of the correct
+                             have an additional ``main_grad`` attribute (used instead of the
+                             regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in. This argument along with
                              weight tensor having attribute 'overwrite_main_grad' set to True
-                             will overwrite `main_grad` instead of accumulating.
-    return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias itself, but
+                             will overwrite ``main_grad`` instead of accumulating.
+    return_bias : bool, default = False
+                 when set to ``True``, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+    params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    delay_wgrad_compute : bool, default = `False`
+    delay_wgrad_compute : bool, default = False
                          Whether to delay weight gradient computation
-    save_original_input : bool, default = `False`
-                       If set to `True`, always saves the original input tensor rather than the
+    save_original_input : bool, default = False
+                       If set to ``True``, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.
 
-    Note: GroupedLinear doesn't really handle the TP communications inside. The `tp_size` and
-          `parallel_mode` are used to determine the shapes of weights and biases.
-          The TP communication should be handled in the dispatch and combine stages of MoE models.
+    Notes
+    -----
+    GroupedLinear doesn't really handle the TP communications inside. The ``tp_size`` and
+    ``parallel_mode`` are used to determine the shapes of weights and biases.
+    The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
     def __init__(

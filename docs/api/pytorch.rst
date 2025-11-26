@@ -3,7 +3,7 @@
 
     See LICENSE for license information.
 
-pyTorch
+PyTorch
 =======
 
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, bias=True, **kwargs)
@@ -37,15 +37,22 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
-.. autoapifunction:: transformer_engine.pytorch.fp8_autocast
-
-.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.autocast
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
+
+
+.. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
+
+.. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
+
+.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
+
+Recipe availability
+-------------------
 
 .. autoapifunction:: transformer_engine.pytorch.is_fp8_available
 
@@ -63,9 +70,8 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.get_default_recipe
 
-.. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
-
-.. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
+Mixture of Experts (MoE) functions
+----------------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
@@ -75,9 +81,11 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
 
-.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
-
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
+
+
+Communication-computation overlap
+---------------------------------
 
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
@@ -85,6 +93,7 @@ pyTorch
 
 .. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
   :members: FP8, NONE
+
 
 Quantized tensors
 -----------------
@@ -133,3 +142,10 @@ Tensor saving and restoring functions
 .. autoapifunction:: transformer_engine.pytorch.prepare_for_saving
 
 .. autoapifunction:: transformer_engine.pytorch.restore_from_saved
+
+Deprecated functions
+--------------------
+
+.. autoapifunction:: transformer_engine.pytorch.fp8_autocast
+
+.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
