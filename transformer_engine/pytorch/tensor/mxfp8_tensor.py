@@ -434,7 +434,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     if scale_inv is not None
                     else None
                 )
-                scale_inv_out = list(scale_inv_out)
+                scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
                 # Pad scale_inv_out to be a multiple of pad_multiple
                 if scale_inv_out is not None:
                     for idx, split_scale_inv_out in enumerate(scale_inv_out):
