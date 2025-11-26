@@ -205,11 +205,13 @@ class CPStrategy(Enum):
     DEFAULT: Default strategy will choose automatically if context parallel axis is sharded.
     ALL_GATHER: All-gather/reduce scatter implementation.
     RING: Ring attention implementation (https://arxiv.org/abs/2310.01889).
+    ALL_TO_ALL: All-to-all implementation.
     """
 
     DEFAULT = 0
     ALL_GATHER = 1
     RING = 2
+    ALL_TO_ALL = 3
 
 
 class ReorderStrategy(Enum):
@@ -1199,6 +1201,8 @@ def fused_attn(
             time and memory consumption is proportional to `max_segments_per_seq`.
         window_size (Optional[Tuple[int, int]]):
             Sliding window size.
+        context_parallel_strategy (CPStrategy):
+            The strategy of context parallel. Options: DEFAULT, ALL_GATHER, RING, ALL_TO_ALL.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
