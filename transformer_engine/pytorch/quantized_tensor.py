@@ -27,7 +27,7 @@ _quantized_tensor_cpu_supported_ops = (
 
 
 class QuantizedTensorStorage:
-    r"""Base class for all *TensorStorage classes.
+    r"""Base class for all TensorStorage classes.
 
     This class (and its subclasses) are optimization for when
     the full QuantizedTensor is not needed (when it is fully
@@ -128,7 +128,7 @@ def prepare_for_saving(
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal *TensorStorage types too."""
+    the internal TensorStorage types too."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:

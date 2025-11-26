@@ -492,17 +492,19 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-               Factory callable that returns a quantizer instance for a
-               given semantic tensor role.
-               The callable is typically invoked as:
-                   qfactory(
-                       role: str,
-                   )
+        Factory callable that returns a quantizer instance for a
+        given semantic tensor role.
+        The callable is typically invoked as::
 
-               Where `role` is one of the following strings for e.g. te.Linear
-               (stable public contract):
-               - forward:  "linear_input", "linear_weight", "linear_output"
-               - backward: "linear_grad_output", "linear_grad_input"
+            qfactory(
+                role: str,
+            )
+
+        Where `role` is one of the following strings for e.g. te.Linear
+        (stable public contract):
+
+        - forward:  "linear_input", "linear_weight", "linear_output"
+        - backward: "linear_grad_output", "linear_grad_input"
     """
 
     qfactory: Callable[..., Any]
