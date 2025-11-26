@@ -282,7 +282,7 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   // - last_dims: empty if all tensors have same last dimension
   // - tensor_offsets: empty if all tensors have same shape (offsets are predictable)
   auto check_shape_array = [&](const SimpleTensor &arr, const char *arr_name) {
-    if (arr.dptr != nullptr) {
+    if (arr.has_data()) {
       NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
       NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
                  " must have dtype Int64");
