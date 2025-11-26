@@ -237,35 +237,35 @@ class AttentionParams:
         The number of kernels to split attention to.
     """
 
-    qkv_type : Union[torch.Tensor, Float8Tensor] = torch.Tensor
-    qkv_dtype : torch.dtype = torch.bfloat16
-    qkv_layout : str = "sbh3d"
-    batch_size : int = 1
-    num_heads : int = 16
-    num_gqa_groups : int = 16
-    max_seqlen_q : int = 128
-    max_seqlen_kv : int = 128
-    head_dim_qk : int = 64
-    head_dim_v : int = 64
-    attn_mask_type : str = "no_mask"
-    window_size : Union[Tuple[int, int], None] = None
-    alibi_slopes_shape : Union[torch.Size, List, None] = None
-    core_attention_bias_type : str = "no_bias"
-    core_attention_bias_shape : str = "1hss"
-    core_attention_bias_requires_grad : bool = True
-    pad_between_seqs : bool = False
-    attention_dropout : float = 0.0
-    context_parallel : bool = False
-    cp_comm_type : str = "p2p"
-    deterministic : bool = False
-    is_training : bool = True
-    fp8 : bool = False
-    fp8_meta : Union[Dict[str, Any], None] = None
-    inference_params : Optional[InferenceParams] = None
-    softmax_type : str = "vanilla"
-    return_max_logit : bool = False
-    cuda_graph : bool = False
-    num_splits : int = 1
+    qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
+    qkv_dtype: torch.dtype = torch.bfloat16
+    qkv_layout: str = "sbh3d"
+    batch_size: int = 1
+    num_heads: int = 16
+    num_gqa_groups: int = 16
+    max_seqlen_q: int = 128
+    max_seqlen_kv: int = 128
+    head_dim_qk: int = 64
+    head_dim_v: int = 64
+    attn_mask_type: str = "no_mask"
+    window_size: Union[Tuple[int, int], None] = None
+    alibi_slopes_shape: Union[torch.Size, List, None] = None
+    core_attention_bias_type: str = "no_bias"
+    core_attention_bias_shape: str = "1hss"
+    core_attention_bias_requires_grad: bool = True
+    pad_between_seqs: bool = False
+    attention_dropout: float = 0.0
+    context_parallel: bool = False
+    cp_comm_type: str = "p2p"
+    deterministic: bool = False
+    is_training: bool = True
+    fp8: bool = False
+    fp8_meta: Union[Dict[str, Any], None] = None
+    inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
+    return_max_logit: bool = False
+    cuda_graph: bool = False
+    num_splits: int = 1
 
     def __eq__(self, other):
         """
