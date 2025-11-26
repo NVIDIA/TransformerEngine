@@ -382,26 +382,26 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    rowwise_data: torch.Tensor
+    rowwise_data : torch.Tensor
         Raw FP4 data in a uint8 tensor (rowwise layout).
-    rowwise_scale_inv: torch.Tensor
+    rowwise_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when
         casting to FP4, i.e. the scaling factor that must
         be applied when casting from FP4 to higher
         precision (rowwise).
-    columnwise_data: torch.Tensor, optional
+    columnwise_data : torch.Tensor, optional
         Raw FP4 data in a uint8 tensor (columnwise layout).
-    columnwise_scale_inv: torch.Tensor, optional
+    columnwise_scale_inv : torch.Tensor, optional
         Reciprocal of the scaling factor for columnwise FP4 data.
-    amax_rowwise: torch.Tensor, optional
+    amax_rowwise : torch.Tensor, optional
         Rowwise amax tracking tensor.
-    amax_columnwise: torch.Tensor, optional
+    amax_columnwise : torch.Tensor, optional
         Columnwise amax tracking tensor.
-    fp4_dtype: TE_DType
+    fp4_dtype : TE_DType
         The FP4 data type used for quantization.
-    quantizer: Quantizer
+    quantizer : Quantizer
         The quantizer instance used for this tensor.
-    dtype: torch.dtype, default = torch.float32
+    dtype : torch.dtype, default = torch.float32
         Nominal tensor datatype, used in dequantize.
     """
 

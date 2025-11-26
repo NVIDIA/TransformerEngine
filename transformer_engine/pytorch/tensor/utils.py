@@ -74,7 +74,7 @@ def cast_master_weights_to_fp8(
     fsdp_shard_model_weights : list of FSDP shard model weights. If None, it means that the model weights are
                              not sharded. Otherwise, it means that the model weights are sharded and we get
                              target model weights data storage using the FSDP shard model weights.
-    manual_post_all_gather_processing: bool, default = `False`.
+    manual_post_all_gather_processing : bool, default = `False`.
                      If False, post processing will be automatically triggered during next forward.
                      If True, the timing of calling post_all_gather_processing is left to the user.
                      Note that users must call `post_all_gather_processing` if it's set to True,
