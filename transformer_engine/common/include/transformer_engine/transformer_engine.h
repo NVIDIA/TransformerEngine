@@ -418,6 +418,7 @@ enum NVTEGroupedTensorParam {
   kNVTENumGroupedTensorParams
 };
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Create a new TE grouped tensor.
  *
  * Create a new TE grouped tensor. Before use its parameters need to be set.
@@ -433,6 +434,7 @@ enum NVTEGroupedTensorParam {
 NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
                                              NVTEShape logical_shape);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Destroy a TE grouped tensor.
  *
  * Since the TE grouped tensor does not own memory, the underlying
@@ -442,6 +444,7 @@ NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_
  */
 void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Set a parameter of the grouped tensor.
  *
  *  \param[in/out] tensor Grouped tensor.
@@ -451,6 +454,7 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
                                    const NVTEBasicTensor *param);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get a value of the parameter of the grouped tensor.
  *
  *  \param[in] tensor Grouped tensor.
@@ -461,6 +465,7 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
 NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
                                               NVTEGroupedTensorParam param_name);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get the number of tensors in a grouped tensor.
  *
  *  \param[in] tensor Grouped tensor.
@@ -469,6 +474,7 @@ NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
  */
 size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get a grouped tensor's data type.
  *
  *  \param[in] tensor Grouped tensor.
@@ -477,6 +483,7 @@ size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor);
  */
 NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get a scaling mode of the grouped tensor.
  *
  *  \param[in] tensor Grouped tensor.
@@ -485,6 +492,7 @@ NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
  */
 NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get the logical shape of a grouped tensor.
  *
  *  \param[in] tensor Grouped tensor.
