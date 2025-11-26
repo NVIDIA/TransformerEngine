@@ -85,3 +85,50 @@ pyTorch
 
 .. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
   :members: FP8, NONE
+
+.. autoapiclass:: transformer_engine.pytorch.QuantizedTensorStorage
+   :members: update_usage, get_usages, prepare_for_saving, restore_from_saved, quantize_, update_quantizer
+
+.. autoapiclass:: transformer_engine.pytorch.QuantizedTensor(shape, dtype, *, requires_grad=False, device=None)
+   :members: dequantize, quantize_, detach, clear, float, bfloat16, half, cpu, expand_as, contiguous, make_like, to_dtype
+
+.. autoapiclass:: transformer_engine.pytorch.Quantizer(rowwise, columnwise)
+   :members: update_quantized, quantize, quantize_impl, multi_quantize, make_empty, calibrate, set_usage, is_quantizable, get_usages
+
+.. autoapiclass:: transformer_engine.pytorch.Float8Quantizer(scale, amax, fp8_dtype, *, rowwise=True, columnwise=True)
+
+.. autoapiclass:: transformer_engine.pytorch.Float8CurrentScalingQuantizer(fp8_dtype, device, *, rowwise=True, columnwise=True, **kwargs)
+
+.. autoapiclass:: transformer_engine.pytorch.MXFP8Quantizer(fp8_dtype, *, rowwise=True, columnwise=True)
+
+.. autoapiclass:: transformer_engine.pytorch.Float8BlockQuantizer(fp8_dtype, *, rowwise, columnwise, **kwargs)
+
+.. autoapiclass:: transformer_engine.pytorch.NVFP4Quantizer(fp4_dtype, *, rowwise=True, columnwise=True, **kwargs)
+
+.. autoapiclass:: transformer_engine.pytorch.Float8TensorStorage(data, fp8_scale_inv, fp8_dtype, data_transpose=None, quantizer=None)
+   :members: clear, get_metadata, prepare_for_saving, restore_from_saved, get_data_tensors, dequantize, size, view, update_usage, get_usages
+
+.. autoapiclass:: transformer_engine.pytorch.MXFP8TensorStorage(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, fp8_dtype, quantizer)
+   :members: clear, get_metadata, prepare_for_saving, restore_from_saved, get_data_tensors, dequantize, size, view, update_usage, get_usages
+
+.. autoapiclass:: transformer_engine.pytorch.Float8BlockwiseQTensorStorage(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, fp8_dtype, quantizer, is_2D_scaled, data_format)
+   :members: clear, get_metadata, prepare_for_saving, restore_from_saved, get_data_tensors, dequantize, size, update_usage, get_usages
+
+.. autoapiclass:: transformer_engine.pytorch.NVFP4TensorStorage(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, amax_rowwise, amax_columnwise, fp4_dtype, quantizer)
+   :members: clear, get_metadata, prepare_for_saving, restore_from_saved, get_data_tensors, dequantize, size, view, update_usage
+
+.. autoapiclass:: transformer_engine.pytorch.Float8Tensor(shape, dtype, data, fp8_scale_inv, fp8_dtype, requires_grad=False, data_transpose=None, quantizer=None)
+   :members: dequantize, quantize_, detach, clone, view, reshape, contiguous, remove_caches, make_like
+
+.. autoapiclass:: transformer_engine.pytorch.MXFP8Tensor(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, fp8_dtype, quantizer)
+   :members: dequantize, quantize_, detach, clone, view, reshape, contiguous
+
+.. autoapiclass:: transformer_engine.pytorch.Float8BlockwiseQTensor(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, fp8_dtype, quantizer, is_2D_scaled, data_format)
+   :members: quantize_, dequantize, detach, clone, view, reshape, untyped_storage, contiguous
+
+.. autoapiclass:: transformer_engine.pytorch.NVFP4Tensor(rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, amax_rowwise, amax_columnwise, fp4_dtype, quantizer)
+   :members: dequantize, quantize_, detach, clone, view, reshape, contiguous, get_usages
+
+.. autoapifunction:: transformer_engine.pytorch.prepare_for_saving
+
+.. autoapifunction:: transformer_engine.pytorch.restore_from_saved
