@@ -560,7 +560,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             memory_format=memory_format
         ):
             return self
-        return Float8Tensor.make_like(tensor=self, data=self._data.contiguous())
+        return Float8Tensor.make_like(tensor=self, data=self._data.contiguous(),
+        data_transpose=self._transpose.contiguous() if self._transpose is not None else None,
+        )
 
         # raise ValueError("Float8Tensor does not support different memory formats!")
 

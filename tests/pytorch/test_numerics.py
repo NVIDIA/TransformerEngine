@@ -3006,6 +3006,7 @@ def test_fp8_split_functionality(quantization_type, shape, chunks, dim):
 
     # Apply torch.chunk on quantized tensor
     quantized_tensor_dispatch_out = torch.chunk(quantized_tensor, chunks, dim=dim)
+    # need to make tensor contigous for dim=1 splitting.
     outs = [out.contiguous() for out in quantized_tensor_dispatch_out]
     if dim == 0 or quantization_type == "fp8":
         # Dequantize the chunked results
