@@ -1305,8 +1305,7 @@ class _FusedAttnCPWithAllGatherHelper:
                 f"{header} only supports masking types: "
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
-        # TODO: For now do not all  CP + AG + THD + Striped with NO_MASK
-        # TODO: For now do not allow CP + AG + THD + Striped with NO_MASK
+        # Do not allow CP + AG + THD + Striped with NO_MASK
         if self.config.attn_mask_type is AttnMaskType.NO_MASK and self.config.qkv_layout.is_thd():
             raise ValueError(f"{header} only supports CAUSAL_MASK for THD types")
 
@@ -1339,6 +1338,7 @@ class _FusedAttnCPWithAllGatherHelper:
         return self.config.attn_mask_type
 
     def get_adjusted_max_segments_per_seq(self, max_seqlen, cp_size):
+        """Converts the max segments per seq for context parallelism AG + THD."""
         # Estimating adjusted max segments per seq
         return (
             max_seqlen // (self.config.stripe_size * cp_size)
@@ -1504,8 +1504,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         return dk, dv  # fall through
 
-    # Extract the q seqlens for striped primitive (post AG) from the sharded q seg ids and seg pos
-    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # Below are the sharded post AG q seg ids and pos for a given rank:
     # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
     # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
     # max_segments_per_seq = 7
@@ -1515,6 +1514,7 @@ class _FusedAttnCPWithAllGatherHelper:
     # seqlens_pre = [[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0]]
     # seqlens_all_pad_neg = [[ 4,  4,  4, -1, -1, -1, -1]]
     def q_seqlens_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
+        """Extract the q seqlens for striped primitive (post AG) from the sharded q seg ids and seg pos"""
         # Create mask for non-zero seg ids and get the non-zero indices associated with the same
         non_zero_mask = q_segment_ids != 0
         max_size = q_segment_ids.shape[-1]
@@ -1543,8 +1543,7 @@ class _FusedAttnCPWithAllGatherHelper:
             [
                 first_is_segment,  # First valid element starts a segment
                 (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1]) |
-                # ((valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1) & actual_valid[..., 1:])
-                (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1),
+                (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1)
             ],
             axis=-1,
         )
@@ -1558,8 +1557,7 @@ class _FusedAttnCPWithAllGatherHelper:
         seqlens_all_pad_neg = jnp.where(seqlens_all == 0, -1, seqlens_all)
         return seqlens_all_pad_neg
 
-    # Extract the q seqoffets for striped primitive (post AG) from the sharded q seg ids and seg pos
-    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # Below are the sharded post AG q seg ids and pos for a given rank:
     # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
     # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
     # max_segments_per_seq = 7
@@ -1568,6 +1566,7 @@ class _FusedAttnCPWithAllGatherHelper:
     # segment_changes_masked = [[ True, False, False, False, False, False, False, False,  True, False, False, False,  True, False, False, False]]
     # seq_offsets =  [[ 0,  8, 12, -1, -1, -1, -1, -1]]
     def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
+        """Extract the q seqoffets for striped primitive (post AG) from the sharded q seg ids and seg pos"""
         segment_changes = jnp.concatenate(
             [
                 jnp.full(
@@ -1580,14 +1579,12 @@ class _FusedAttnCPWithAllGatherHelper:
         # Remove any padded region segment changes
         segment_changes_masked = jnp.where(q_segment_ids != 0, segment_changes, False)
         # Get the indices for segment changes (these are the offsets)
-        max_size = q_segment_pos.shape[-1]
         seq_offsets = jax.vmap(
             lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq, fill_value=-1)[0]
         )(segment_changes_masked)
         return seq_offsets
 
-    # Extract the kv seqlens for striped primitive (post AG) from the sharded kv seg ids and seg pos
-    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # Below are the sharded post AG q seg ids and pos for a given rank:
     # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
     # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
     # max_segments_per_seq = 7
@@ -1597,6 +1594,7 @@ class _FusedAttnCPWithAllGatherHelper:
     # segment_changes = [[False, False, False,  True, False, False, False,  True, False, False, False,  True,  True,  True,  True, False]]
     # selected_values = [[ 4, 15, 31, -1, -1, -1, -1, -1]]
     def kv_seqlens_for_striped_for_rank(self, kv_segment_ids, kv_segment_pos, max_segments_per_seq):
+        """Extract the kv seqlens for striped primitive (post AG) from the sharded kv seg ids and seg pos"""
         # Create mask for non-zero seg ids and get the non-zero indices associated with the same
         non_zero_mask = kv_segment_ids != 0
         max_size = kv_segment_ids.shape[-1]
@@ -1614,7 +1612,6 @@ class _FusedAttnCPWithAllGatherHelper:
             non_zero_indices >= 0, jnp.take_along_axis(kv_segment_pos, clipped_indices, axis=-1), 0
         )
         actual_valid = valid_segment_ids != 0
-        first_is_segment = actual_valid[..., 0:1]
 
         # Detect segment breaks (only for non-zero segments)
         segment_changes = jnp.concatenate(
@@ -1643,9 +1640,7 @@ class _FusedAttnCPWithAllGatherHelper:
         )
         return selected_values
 
-    # Extract the kv seqoffsets for striped primitive (post AG) from the sharded kv seg ids and seg pos,
-    # AG kv seg ids and seg pos.
-    # For e.g. below are the sharded post AG q seg ids and pos for a given rank:
+    # Below are the sharded post AG q seg ids and pos for a given rank:
     # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
     # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
     # kv_segment_ids_ag = [[1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1679,6 +1674,8 @@ class _FusedAttnCPWithAllGatherHelper:
         kv_segment_ids_ag,
         max_segments_per_seq,
     ):
+        """Extract the kv seqoffsets for striped primitive (post AG) from the sharded kv seg ids and seg pos,
+        AG kv seg ids and seg pos."""
         # Calculate the segment pos change mask
         segment_changes_first_true = jnp.concatenate(
             [
@@ -2082,7 +2079,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             # Each rank sees the sharded view for 5 tensors -> q, _q_segment_ids, _q_segment_pos,
             # _kv_segment_ids, _kv_segment_pos -> Note these have also been reordered before passing in.
             def _cross_attn(
-                idx, q, k, v, bias, softmax_offset, kv_segment_ids_ag, kv_segment_pos_ag, seed
+                q, k, v, bias, softmax_offset, kv_segment_ids_ag, kv_segment_pos_ag, seed
             ):
                 # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
                 # Unset the segment_ids and segment_pos by passing placeholders so that the seqlens_from_segment_ids_pos()
@@ -2143,7 +2140,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             functions = [
                 partial(
                     _cross_attn,
-                    idx,
                     q,
                     k_ag,
                     v_ag,
@@ -2226,7 +2222,6 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
 
             # See comment in FusedAttnCPFwdPrimitive.partition for why we define this function.
             def _cross_attn_bwd(
-                idx,
                 q,
                 k,
                 v,
@@ -2306,7 +2301,6 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
             functions = [
                 partial(
                     _cross_attn_bwd,
-                    idx,
                     q,
                     k_ag,
                     v_ag,
