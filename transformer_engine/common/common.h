@@ -156,7 +156,7 @@ struct Tensor {
   }
 
   // TODO(Tim): Change this to use data.has_data()
-  bool has_data() const noexcept { return data.dptr != nullptr;}
+  bool has_data() const noexcept { return data.dptr != nullptr; }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept { return columnwise_data.has_data(); }
@@ -284,7 +284,7 @@ struct Tensor {
 struct GroupedTensor {
  public:
   /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-  /* 
+  /*
   Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
 
   Shape Representation:
