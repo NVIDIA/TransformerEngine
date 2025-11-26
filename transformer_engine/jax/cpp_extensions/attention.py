@@ -1542,8 +1542,8 @@ class _FusedAttnCPWithAllGatherHelper:
         segment_changes = jnp.concatenate(
             [
                 first_is_segment,  # First valid element starts a segment
-                (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1]) |
-                (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1)
+                (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1])
+                | (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1),
             ],
             axis=-1,
         )
