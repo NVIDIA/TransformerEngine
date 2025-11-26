@@ -48,7 +48,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--recipe",
         type=str,
-        default="current_scaling",
+        default="mx_fp8_block_scaling",
         help="Quantizer type.",
         choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
     )
@@ -72,7 +72,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
+        default="meta",
         help="Device to run the model on.",
         choices=["cuda", "meta"],
     )
@@ -322,8 +322,8 @@ def _train(args):
         f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB"
     )
 
-    # optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    optimizer = te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
     for iteration in range(args.iter):
         # Zero the parameter gradients
         optimizer.zero_grad()
