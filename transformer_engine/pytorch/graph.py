@@ -1016,38 +1016,38 @@ def make_graphed_callables(
                  Positional arguments to callable(s).
     num_warmup_iters: int, default = 3
                       Number of warmup iterations.
-    allow_unused_input: bool, default = `False`
+    allow_unused_input: bool, default = False
                         Whether to handle case where callable inputs
                         and outputs are disconnected in compute graph.
     sample_kwargs: (tuple of) dict, optional
                    Keyword arguments to callable(s)
-    pool: (tuple of) int, default = `None`, optional
+    pool: (tuple of) int, default = None, optional
           An instance returned from function `torch.cuda.graph_pool_handle` that hints
           this graph may share memory with the indicated pool.
-    retain_graph_in_backward: bool, default = `False`
+    retain_graph_in_backward: bool, default = False
                               Whether to set retain_graph=True in backward graph capture.
-    _reuse_graph_input_output_buffers: bool, default = `False`
+    _reuse_graph_input_output_buffers: bool, default = False
         Reduce memory usage by reusing input/output data buffers between
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
 
-    Quantization related parameters
-    ----------------------
-    enabled: (tuple of) bool, default = `False`
+    Quantization parameters
+    -----------------------
+    enabled: (tuple of) bool, default = False
              whether or not to enable low precision quantization (FP8/FP4).
              If tuple, the length must match the number of modules.
-    calibrating: bool, default = `False`
+    calibrating: bool, default = False
                  calibration mode allows collecting statistics such as amax and scale
                  data of quantized tensors even when executing without quantization enabled.
                  This is useful for saving an inference ready checkpoint while training
                  using a higher precision.
-    recipe: recipe.Recipe, default = `None`
+    recipe: recipe.Recipe, default = None
             recipe used for low precision quantization.
-    amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
+    amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = None
                           distributed group over which amaxes for the quantized tensors
                           are reduced at the end of each training step.
-    cache_quantized_params: bool, default = `False`
+    cache_quantized_params: bool, default = False
                             Whether or not to cache quantized weights across microbatches. if set to `True`,
                             the `is_first_microbatch` boolean argument must be passed into the forward
                             method for TransformerEngine modules. When storing primary weights in low precision

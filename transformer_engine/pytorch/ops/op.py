@@ -684,7 +684,7 @@ class FusedOperation(FusibleOperation):
 
     Parameters
     ----------
-    basic_ops: iterable of FusibleOperation
+    basic_ops : iterable of FusibleOperation
         Basic ops that are interchangeable with this op
 
     """
