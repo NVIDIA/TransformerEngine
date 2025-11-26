@@ -612,35 +612,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         if func == aten.view.default:
             tensor = args[0]
-            data = tensor._data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
-            out_transpose = None if tensor._transpose_invalid else tensor._transpose
-            if out_transpose is not None:
-                out_transpose_shape = out_transpose.size()
-                if (
-                    out_transpose_shape[0] != out_shape[-1]
-                    or out_transpose_shape[1:] != out_shape[:-1]
-                ):
-                    out_transpose = None
-                else:
-                    view_shape_for_transpose = [out_shape[-1]] + list(out_shape[:-1])
-                    out_transpose = out_transpose.view(*view_shape_for_transpose)
-            return Float8Tensor(
-                shape=out_shape,
-                dtype=tensor.dtype,
-                requires_grad=False,
-                data=out_data,
-                fp8_scale_inv=tensor._scale_inv,
-                fp8_dtype=tensor._fp8_dtype,
-                data_transpose=out_transpose,
-                quantizer=tensor._quantizer,
-            )
+            return _ViewFunc.apply(tensor, args[1:])
 
         if func in [aten.slice.Tensor, aten.select.int]:
             tensor = args[0]
