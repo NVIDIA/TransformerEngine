@@ -267,7 +267,7 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
 
     # PyPI packages provided by nvidia libs exist
     # in 4 possible locations inside `nvidia`.
-	# Check by order of priority.
+    # Check by order of priority.
     path_found = False
     if os.path.isdir(os.path.join(nvidia_dir, "cu13", lib_name)):
         so_paths = glob.glob(os.path.join(nvidia_dir, "cu13", lib_name, f"lib/lib*{ext}.*[0-9]"))
@@ -280,7 +280,7 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
     if not path_found and os.path.isdir(os.path.join(nvidia_dir, lib_name)):
         so_paths = glob.glob(os.path.join(nvidia_dir, lib_name, f"lib/lib*{ext}.*[0-9]"))
         path_found = len(so_paths) > 0
-    
+
     if not path_found:
         so_paths = glob.glob(os.path.join(nvidia_dir, f"cuda_{lib_name}", f"lib/lib*{ext}.*[0-9]"))
         path_found = len(so_paths) > 0
