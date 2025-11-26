@@ -1702,7 +1702,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    name: str, default = None
+    name : str, default = None
         name of the module, currently used for debugging purposes.
 
     Parallelism parameters
@@ -1740,11 +1740,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    seq_length: int
+    seq_length : int
                sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
                functions are warmed up before training to ensure same kernels are used for forward
                propogation and activation recompute phase.
-    micro_batch_size: int
+    micro_batch_size : int
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
@@ -1757,7 +1757,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
-    checkpoint: bool, default = False
+    checkpoint : bool, default = False
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward

@@ -97,9 +97,9 @@ class TransformerLayer(torch.nn.Module):
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
                        for numerical stability.
-    hidden_dropout: float, default = 0.1
+    hidden_dropout : float, default = 0.1
                    dropout probability for the dropout op after FC2 layer.
-    attention_dropout: float, default = 0.1
+    attention_dropout : float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
     init_method : Callable, default = None
                  used for initializing weights of QKV and FC1 weights in the following way:
@@ -113,26 +113,26 @@ class TransformerLayer(torch.nn.Module):
                                               if set to ``True``, residual connections are taken
                                               from the output of layer norm (default is taken
                                               from input of layer norm)
-    layer_number: int, default = None
+    layer_number : int, default = None
                  layer number of the current :class:`TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    output_layernorm: bool, default = False
+    output_layernorm : bool, default = False
                      if set to ``True``, layer normalization is applied on the output side,
                      after the final dropout-add. default behavior is to apply layer
                      normalization on the input side, before the QKV transformation.
-    parallel_attention_mlp: bool, default = False
+    parallel_attention_mlp : bool, default = False
                            if set to ``True``, self-attention and feedforward network are computed
                            based on the same input (in parallel) instead of sequentially.
                            Both blocks have an independent normalization.
                            This architecture is used in `Falcon` models.
-    layer_type: {'encoder', 'decoder'}, default = "encoder"
+    layer_type : {'encoder', 'decoder'}, default = "encoder"
                if set to ``"decoder"``, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
                ``"encoder"`` option.
-    kv_channels: int, default = None
+    kv_channels : int, default = None
                 number of query-key-value channels per attention head. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if ``None``.
-    self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+    self_attn_mask_type : {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
                         'padding_causal_bottom_right', 'arbitrary'},
                         default = "causal"
                         type of attention mask passed into softmax operation for encoder.
@@ -140,7 +140,7 @@ class TransformerLayer(torch.nn.Module):
                         The :meth:`forward` arg is useful for dynamically changing mask types, e.g.
                         a different mask for training and inference. The :meth:`__init__` arg is useful
                         for cases involving compilation/tracing, e.g. ONNX export.
-    window_size: Optional[Tuple[int, int]], default = None
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention in encoder, where query at position i
                 attends to keys in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k
                 - seqlen_q + window_size[1]]`` inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean
@@ -149,10 +149,10 @@ class TransformerLayer(torch.nn.Module):
                 distinguishes them based on :attr:`self_attn_mask_type` or :attr:`enc_dec_attn_mask_type`.
                 Similar to :attr:`self_attn_mask_type`, :attr:`window_size` can be overridden by
                 :attr:`window_size` in :meth:`forward` as well.
-    enc_dec_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
+    enc_dec_attn_mask_type : {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                            default = "no_mask"
                            type of attention mask passed into softmax operation for decoder.
-    enc_dec_window_size: Optional[Tuple[int, int]], default = None
+    enc_dec_window_size : Optional[Tuple[int, int]], default = None
                         sliding window size for local attention in decoder.
     zero_centered_gamma : bool, default = False
                          if set to ``True``, gamma parameter in LayerNorm is initialized to 0 and
@@ -186,7 +186,7 @@ class TransformerLayer(torch.nn.Module):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    attn_input_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+    attn_input_format : {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
             This controls whether the dimensions of the
             intermediate hidden states is 'sequence first' (``'sbhd'``), 'batch first' (``'bshd'``),
             or 'token first' (``'thd'``). ``s`` stands for the sequence length, ``b`` batch size,
@@ -194,9 +194,9 @@ class TransformerLayer(torch.nn.Module):
             Note that these formats are very closely
             related to the :attr:`qkv_format` parameter in the :class:`MultiHeadAttention`
             and :class:`DotProductAttention` modules.
-    name: str, default = None
+    name : str, default = None
         name of the module, currently used for debugging purposes.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
                  Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
@@ -252,23 +252,23 @@ class TransformerLayer(torch.nn.Module):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    seq_length: int
+    seq_length : int
                sequence length of input samples. Needed for JIT Warmup, a technique where jit
                fused functions are warmed up before training to ensure same kernels are used for
                forward propogation and activation recompute phase.
-    micro_batch_size: int
+    micro_batch_size : int
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    drop_path_rate: float, default = 0.0
+    drop_path_rate : float, default = 0.0
                    when > 0.0, applies stochastic depth per sample in
                    the main path of the residual block.
-    fuse_qkv_params: bool, default = False
+    fuse_qkv_params : bool, default = False
                     if set to ``True``, :class:`TransformerLayer` module exposes a single fused
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     :attr:`fuse_wgrad_accumulation`.
-    qk_norm_type: Optional[str], default = None
+    qk_norm_type : Optional[str], default = None
                     type of normalization to apply to query and key tensors.
                     Options: ``None``, ``'L2Normalization'``, ``'RMSNorm'``, ``'LayerNorm'``. When ``None``, no normalization is applied.
                     When ``'L2Normalization'``, L2 normalization is applied to query and key tensors.
@@ -277,10 +277,10 @@ class TransformerLayer(torch.nn.Module):
                     Normalization is applied after RoPE (if applicable) but before attention computation
                     when ``qk_norm_before_rope`` is ``False``. This follows the e.g. Llama4 approach for
                     QK normalization to improve training stability and model performance.
-    qk_norm_eps: float, default = 1e-6
+    qk_norm_eps : float, default = 1e-6
                     epsilon value for normalization of query and key tensors.
                     Only used when ``qk_norm_type`` is not ``None``.
-    qk_norm_before_rope: bool, default = False
+    qk_norm_before_rope : bool, default = False
                     if set to ``True``, query and key normalization is applied before rotary position
                     embedding. When ``False`` (default), normalization is applied after RoPE.
                     This parameter allows supporting different architectural variants that apply

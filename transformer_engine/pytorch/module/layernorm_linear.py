@@ -1082,7 +1082,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    name: str, default = None
+    name : str, default = None
         name of the module, currently used for debugging purposes.
 
     Parallelism parameters

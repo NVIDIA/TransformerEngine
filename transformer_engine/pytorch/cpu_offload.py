@@ -657,29 +657,29 @@ def get_cpu_offload_context(
 
     Parameters
     ----------
-    enabled: bool, default = False
+    enabled : bool, default = False
              When set to True, CPU Offloading functionality is enabled.
-    num_layers: int, default = 1
+    num_layers : int, default = 1
             Determines the number of layers
             you want to offload activations/weights for.
-    model_layers: int, default = 1
+    model_layers : int, default = 1
             Number of layers in the model that will be used under this context.
-    offload_activations: bool, default = True
+    offload_activations : bool, default = True
             Deprecated.
-    offload_weights: bool, default = True
+    offload_weights : bool, default = True
             Deprecated.
-    double_buffering: bool, default = False
+    double_buffering : bool, default = False
             Deprecated.
-    retain_pinned_cpu_buffers: bool, default = False
+    retain_pinned_cpu_buffers : bool, default = False
             If True, the pinned CPU buffers are retained after offloading
             and reused for the next iteration. It is useful for cuda graphs capture.
-    manual_synchronization: bool, default = False
+    manual_synchronization : bool, default = False
             If True, the synchronization is done manually by the user.
             Additional argument manual_controller is returned. See more in manual control section.
-    offload_stream: torch.cuda.Stream, default = None
-        If provided, the offload stream is used for offloading and reloading.
-        Otherwise, a new stream is allocated internally. It can be other than None
-        only if manual_synchronization is True.
+    offload_stream : torch.cuda.Stream, default = None
+            If provided, the offload stream is used for offloading and reloading.
+            Otherwise, a new stream is allocated internally. It can be other than None
+            only if manual_synchronization is True.
 
     Notes
     -----

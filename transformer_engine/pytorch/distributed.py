@@ -642,14 +642,14 @@ def checkpoint(
 
     Parameters
     ----------
-    function: Callable
+    function : Callable
             pytorch module used to run the forward and backward passes using
             the specified :attr:`args` and :attr:`kwargs`.
-    distribute_saved_activations: bool, default = False
+    distribute_saved_activations : bool, default = False
             if set to ``True`` and ``use_reentrant=True``, first tensor argument is distributed
             across the specified tensor parallel group (``tp_group``) before saving it for the
             backward pass. This has no effect when ``use_reentrant=False``.
-    get_rng_state_tracker: Callable, default = None
+    get_rng_state_tracker : Callable, default = None
             python callable which returns an instance of :class:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup, default = None
             tensor parallel process group. Used only when ``distribute_saved_activations=True``
@@ -2009,7 +2009,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
 
     Parameters
     ----------
-    fsdp_root: torch.nn.Module
+    fsdp_root : torch.nn.Module
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
     assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."

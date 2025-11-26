@@ -121,7 +121,7 @@ def initialize_ub(
               falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when ``use_fp8 = False``
-    ub_cfgs: dict = None
+    ub_cfgs : dict = None
              Configuration dictionary with the structure::
 
                  {

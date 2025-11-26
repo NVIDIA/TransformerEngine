@@ -59,10 +59,10 @@ class MultiheadAttention(torch.nn.Module):
                  size of each input sample.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    kv_channels: int, default = None
+    kv_channels : int, default = None
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if ``None``.
-    attention_dropout: float, default = 0.1
+    attention_dropout : float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
@@ -75,10 +75,10 @@ class MultiheadAttention(torch.nn.Module):
                               used for initializing weights of PROJ and FC2 in the following way:
                               ``output_layer_init_method(weight)``. When set to ``None``, defaults to
                               ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
-    layer_number: int, default = None
+    layer_number : int, default = None
                  layer number of the current ``TransformerLayer`` when multiple such modules are
                  concatenated to form a transformer block.
-    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+    attn_mask_type : {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
                    'padding_causal_bottom_right','arbitrary'},
                    default = "causal"
                    type of attention mask passed into softmax operation. Overridden by
@@ -86,7 +86,7 @@ class MultiheadAttention(torch.nn.Module):
                    arg is useful for dynamically changing mask types, e.g. a different
                    mask for training and inference. The :meth:`__init__` arg is useful for cases
                    involving compilation/tracing, e.g. ONNX export.
-    window_size: Optional[Tuple[int, int]], default = None
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention, where query at position i attends to keys
                 in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]]`` inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean no sliding
                 window and causal mask specifically. Both ``"causal"`` and ``"causal_bottom_right"`` masks
@@ -106,9 +106,9 @@ class MultiheadAttention(torch.nn.Module):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = False
+    input_layernorm : bool, default = False
                      if set to ``True``, layer normalization to the input is applied.
-    attention_type: { 'self', 'cross' }, default = 'self'
+    attention_type : { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
@@ -133,7 +133,7 @@ class MultiheadAttention(torch.nn.Module):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    qkv_format: str, default = "sbhd"
+    qkv_format : str, default = "sbhd"
             dimension format for ``query_layer``, ``key_layer`` and ``value_layer``,
             {``"sbhd"``, ``"bshd"``}. ``s`` stands for the sequence length, ``b`` batch size,
             ``h`` the number of heads and ``d`` head size. ``"sbhd"`` and ``"bshd"`` formats
@@ -141,9 +141,9 @@ class MultiheadAttention(torch.nn.Module):
             equal length. Please note that these formats do not reflect how
             tensors ``query_layer``, ``key_layer``, ``value_layer`` are laid out in memory.
             For that, please use ``get_qkv_layout`` to gain the layout information.
-    name: str, default = None
+    name : str, default = None
         name of the module, currently used for debugging purposes.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
                  Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
@@ -204,12 +204,12 @@ class MultiheadAttention(torch.nn.Module):
                  instead return the bias value during the :meth:`forward` method together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    fuse_qkv_params: bool, default = 'False'
+    fuse_qkv_params : bool, default = 'False'
                     if set to ``True``, ``TransformerLayer`` module exposes a single fused
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     ``fuse_wgrad_accumulation``.
-    qk_norm_type: Optional[str], default = None
+    qk_norm_type : Optional[str], default = None
                     type of normalization to apply to query and key tensors.
                     Options: ``None``, ``'L2Normalization'``, ``'RMSNorm'``, ``'LayerNorm'``. When ``None``, no normalization is applied.
                     When ``'L2Normalization'``, L2 normalization is applied to query and key tensors.
@@ -218,19 +218,19 @@ class MultiheadAttention(torch.nn.Module):
                     Normalization is applied after RoPE (if applicable) but before attention computation
                     when ``qk_norm_before_rope`` is ``False``. This follows the e.g. Llama4 approach
                     for QK normalization to improve training stability and model performance.
-    qk_norm_eps: float, default = 1e-6
+    qk_norm_eps : float, default = 1e-6
                     epsilon value for normalization of query and key tensors.
                     Only used when ``qk_norm_type`` is not ``None``.
-    qk_norm_before_rope: bool, default = False
+    qk_norm_before_rope : bool, default = False
                     if set to ``True``, query and key normalization is applied before rotary position
                     embedding. When ``False`` (default), normalization is applied after RoPE.
                     This parameter allows supporting different architectural variants that apply
                     QK normalization at different points.
-    seq_length: Optional[int], default = None
+    seq_length : Optional[int], default = None
                     sequence length of input samples. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are used for
                     forward propagation and activation recompute phase.
-    micro_batch_size: Optional[int], default = None
+    micro_batch_size : Optional[int], default = None
                     batch size per training step. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are
                     used for forward propagation and activation recompute phase.

@@ -98,29 +98,29 @@ class InferenceParams:
 
     Parameters
     ----------
-    max_batch_size: int
+    max_batch_size : int
         Maximum batch size in inference
-    max_sequence_length: int
+    max_sequence_length : int
         Maximum sequence length in inference
-    num_heads_kv: int
+    num_heads_kv : int
         Number of attention heads in keys and values
-    head_dim_k: int
+    head_dim_k : int
         Head size for keys
-    dtype: torch.dtype
+    dtype : torch.dtype
         Data type of the KV cache
-    head_dim_v: int, default = None
+    head_dim_v : int, default = None
         Head size for values. If None, initialized as head_dim_k.
-    is_paged: bool, default = False
+    is_paged : bool, default = False
         Whether the KV cache is paged (True) or non-paged (False)
-    total_num_pages: int, default = None
+    total_num_pages : int, default = None
         Total number of pages in the KV cache. Required for is_paged = True.
-    page_size: int, default = None
+    page_size : int, default = None
         Page size of the KV cache. Required for is_paged = True.
-    max_ctx_len: int, default = None
+    max_ctx_len : int, default = None
         Maximum context length in inference. 1 <= max_ctx_len <= max_sequence_length.
-    qkv_format: str, default = "bshd"
+    qkv_format : str, default = "bshd"
         Format of the incoming query/key/value tensors in current iteration
-    custom_cache_manager: KVCacheManager, default = None
+    custom_cache_manager : KVCacheManager, default = None
         Custom cache manager, with KVCacheManager as the base class.
     """
 

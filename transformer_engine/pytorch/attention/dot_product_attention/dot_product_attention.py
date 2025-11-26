@@ -190,9 +190,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     GQA-1 is equivalent to Multi-Query Attention
                     (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
                     is equivalent to MHA, i.e. ``num_gqa_groups = num_attention_heads``.
-    attention_dropout: float, default = 0.0
+    attention_dropout : float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: str, default = "causal"
+    attn_mask_type : str, default = "causal"
                    type of attention mask passed into softmax operation, options are ``"no_mask"``,
                    ``"padding"``, ``"causal"``, ``"padding,causal"``, ``"causal,padding"``,
                    ``"padding_causal"``, ``"causal_bottom_right"``, ``"padding_causal_bottom_right"``, and
@@ -220,7 +220,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                    4. For ``"arbitrary"``, users need to provide a mask that is broadcastable to
                       the shape of softmax input ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``.
 
-    window_size: Optional[Tuple[int, int]], default = None
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention, where query at position i attends to keys
                 in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean no sliding
@@ -228,12 +228,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in ``forward`` as well.
-    attention_type: str, default = "self"
+    attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
-    layer_number: int, default = None
+    layer_number : int, default = None
                  layer number of the current ``DotProductAttention`` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
-    qkv_format: str, default = "sbhd"
+    qkv_format : str, default = "sbhd"
                dimension format for ``query_layer``, ``key_layer`` and ``value_layer``,
                {``"sbhd"``, ``"bshd"``, ``"thd"``}. ``s`` stands for the sequence length, ``b`` batch size,
                ``h`` the number of heads, ``d`` head size, and ``t`` the total number of tokens
@@ -243,10 +243,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                have different lengths. Please note that these formats do not reflect how
                tensors ``query_layer``, ``key_layer``, ``value_layer`` are laid out in memory.
                For that, please use ``get_qkv_layout`` to gain the layout information.
-    softmax_scale: Optional[float], default = None
+    softmax_scale : Optional[float], default = None
                 softmax scale for the attention scores. If ``None``, defaults to
                 ``1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])``.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
                  Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
@@ -273,7 +273,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                  ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
                  (``'zero sink'`` and ``'learnable sink'``).
 
-    return_max_logit: Optional[bool], default = False
+    return_max_logit : Optional[bool], default = False
                      If true, returns the maximum attention score that can be used in a Muon optimizer to
                      rescale the Q and K projection weights (see `Muon is Scalable for LLM Training
                      <https://arxiv.org/pdf/2502.16982>`_).
