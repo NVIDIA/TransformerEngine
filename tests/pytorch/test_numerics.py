@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    get_align_size_for_quantization,
+)
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -1267,6 +1270,9 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     te_linear_ref = Linear(
@@ -1563,6 +1569,9 @@ def test_layernorm_linear_accuracy(
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
     dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1702,6 +1711,9 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     bias,
     fuse_wgrad_accumulation,
 ):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
     config = model_configs[model]
 
     ln_mlp = LayerNormMLP(
@@ -1829,9 +1841,7 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            split_size = 16
-            if recipe.mxfp8() or recipe.nvfp4():
-                split_size = 32
+            split_size = get_align_size_for_quantization(recipe)
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
@@ -1898,6 +1908,8 @@ def test_grouped_linear_accuracy(
     fp8 = recipe is not None
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2040,6 +2052,8 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2137,9 +2151,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
-        align_size = 16
-        if recipe.mxfp8() or recipe.nvfp4():
-            align_size = 32
+        align_size = get_align_size_for_quantization(recipe)
         padded_tokens_per_expert = [
             (num_tokens + align_size - 1) // align_size * align_size
             for num_tokens in tokens_per_expert
@@ -2758,6 +2770,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         A,
         B,
         out,
+        [None] * z,
         dtype,
         m_splits=m_splits,
         grad=grad,
@@ -2905,6 +2918,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         A_fp8,
         B_fp8,
         out,
+        [None] * z,
         dtype,
         m_splits=m_splits,
         accumulate=accumulate,
