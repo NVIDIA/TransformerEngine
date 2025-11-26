@@ -1582,7 +1582,7 @@ class _FusedAttnCPWithAllGatherHelper:
         # Get the indices for segment changes (these are the offsets)
         max_size = q_segment_pos.shape[-1]
         seq_offsets = jax.vmap(
-            lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+            lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq, fill_value=-1)[0]
         )(segment_changes_masked)
         return seq_offsets
 
@@ -1695,7 +1695,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         # Get segment change indices for rank
         segment_changes_indices = jax.vmap(
-            lambda sc_row: jnp.where(sc_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+            lambda sc_row: jnp.where(sc_row, size=max_segments_per_seq, fill_value=-1)[0]
         )(segment_changes_first_true_masked)
         # Get segment ids associated with the segment_changes_indices for rank
         segment_ids = jax.vmap(
@@ -1719,7 +1719,7 @@ class _FusedAttnCPWithAllGatherHelper:
         )
         # Get segment change indices for AG
         segment_changes_ag_indices = jax.vmap(
-            lambda scag_row: jnp.where(scag_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
+            lambda scag_row: jnp.where(scag_row, size=max_segments_per_seq, fill_value=-1)[0]
         )(segment_changes_ag_first_true_masked)
 
         # Use the segment ids picked per rank to get the offsets from the AG indices
