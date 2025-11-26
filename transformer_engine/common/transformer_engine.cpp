@@ -563,7 +563,7 @@ class GroupedTensorAllocator {
     // 1-based indexing to enable 0-initialization of NVTEGroupedTensor
     // to be invalid tensor
     static_assert(nullptr == 0);
-    if (index != 0 && index <= size) {
+    if (index != 0 && index <= memory.size()) {
       return &(memory[index - 1]);
     }
     return nullptr;
