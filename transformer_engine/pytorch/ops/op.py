@@ -188,9 +188,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
-        with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_fp8_parameters else None
-        self.reset_recipe_state(recipe=recipe)
 
     @property
     def is_fused_op(self) -> bool:
