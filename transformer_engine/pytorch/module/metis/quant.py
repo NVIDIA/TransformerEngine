@@ -39,7 +39,6 @@ class MetisSvdFunction():
 
     @staticmethod
     @torch.no_grad()
-    @torch.compile
     def svd_quant_gemm(x,y,output_dtype,output_quantizer = None,layout="TN",nvtx_label=""):
         
         nvtx_range_push(f"transformer_engine.MetisSvdFunction.svd_quant_gemm_{nvtx_label}.gemm")
@@ -81,6 +80,8 @@ class MetisSvdFunction():
 
         # for backward, input_ has already shaped into 2d tensor.
         # input_ shape [b,s,h]
+        if not input_quantizer.columnwise_usage:
+            input_quantizer.set_usage(rowwise=True, columnwise=True)
 
         input_shape = input_.shape
         if broadcast_dim >= 0:
@@ -104,6 +105,7 @@ class MetisSvdFunction():
             sg = sg.to(input_.dtype)
             sg = torch.diag(sg)
             vg = vg.T.to(input_.dtype)
+            # print(f"cinput.shape={cinput.shape},input_.shape={input_.shape},sg.size={sg.size()}, ug.size={ug.size()}, vg.size={vg.size()}")
             ker = (ug @ sg @ vg) #[s,h] or [b*s,h]
             if broadcast_dim >= 0:
                 ker = ker.unsqueeze(broadcast_dim) #[1,s,h]
@@ -112,6 +114,7 @@ class MetisSvdFunction():
             ug = input_quantizer(ug)
             vg = input_quantizer(vg)
             sg = input_quantizer(sg)
+            
             gemm_out = MetisSvdFunction.svd_quant_gemm(sg, ug, input_.dtype, input_quantizer, layout="NN", nvtx_label="U@S")
             de_svd_gemm_out = MetisSvdFunction.svd_quant_gemm(vg,gemm_out, input_.dtype, None, layout="NN", nvtx_label="U@S@V")
             #[s,h] or [b*s,h]
