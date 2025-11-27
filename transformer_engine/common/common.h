@@ -102,9 +102,7 @@ struct SimpleTensor {
     return acc;
   }
 
-  bool has_data() const {
-    return dptr != nullptr && numel() > 0;
-  }
+  bool has_data() const { return dptr != nullptr && numel() > 0; }
 
   void clear() {
     dptr = nullptr;
@@ -159,13 +157,9 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const {
-    return data.has_data();
-  }
+  bool has_data() const { return data.has_data(); }
 
-  bool has_columnwise_data() const {
-    return columnwise_data.has_data();
-  }
+  bool has_columnwise_data() const { return columnwise_data.has_data(); }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
