@@ -530,6 +530,11 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
+
+    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
+    # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
+    # It does not need to involve SW for this mask's creation
+
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
     if (attn_mask_type.is_causal() and window_size is None) or (
         window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
@@ -590,21 +595,6 @@ def _segment_ids_pos_to_seqlens_offsets(
             jnp.greater_equal,
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
-
-    # TODO(KshitijLakhani): Evaluate if swa_mask is needed to procure seqlen and offsets
-    swa_mask = (
-        make_swa_mask(
-            segment_pos_q,
-            segment_pos_kv,
-            window_size,
-            dtype=jnp.bool,
-            segment_ids_q=segment_ids_q,
-            segment_ids_kv=segment_ids_kv,
-        )
-        if attn_mask_type.is_bottom_right()
-        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
-    )
-    attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
