@@ -221,7 +221,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
             fake_dtype = inp.dtype
             # blockwise scaling
             if blockwise_recipe:
-                fp8_scale = inp._rowwise_scale_inv.T.contiguous()
+                data_format = inp._data_format
+                if data_format == tex.Float8BlockScaleTensorFormat.GEMM_READY:
+                    fp8_scale = inp._rowwise_scale_inv.T.contiguous()
+                else:
+                    fp8_scale = inp._rowwise_scale_inv
                 scale_hidden_dim = fp8_scale.shape[1]
                 assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
                 inp = inp._rowwise_data
@@ -414,7 +418,11 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     unpermuted_act_grad = unpermuted_act_grad._data
                 # blockwise scaling
                 elif blockwise_recipe:
-                    fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
+                    data_format = unpermuted_act_grad._data_format
+                    if data_format == tex.Float8BlockScaleTensorFormat.GEMM_READY:
+                        fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
+                    else:
+                        fp8_scale = unpermuted_act_grad._rowwise_scale_inv
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
                     assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
