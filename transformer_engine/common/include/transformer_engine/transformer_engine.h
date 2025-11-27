@@ -149,6 +149,12 @@ void *nvte_tensor_columnwise_data(const NVTETensor tensor);
  */
 NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
 
+/*! \brief Construct a shape with a single zero.
+ *
+ *  \return A shape with a single zero. The shape will own its own copy of the data.
+ */
+NVTEShape nvte_make_zero_shape();
+
 /*! \brief Get a tensor's data shape.
  *
  *  \param[in] tensor Tensor.
@@ -633,8 +639,7 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      const size_t zero = 0;
-      return nvte_make_shape(&zero, 1);
+      return nvte_make_zero_shape();
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -645,8 +650,7 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      const size_t zero = 0;
-      return nvte_make_shape(&zero, 1);
+      return nvte_make_zero_shape();
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
@@ -770,8 +774,7 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      const size_t zero = 0;
-      return nvte_make_shape(&zero, 1);
+      return nvte_make_zero_shape();
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }

@@ -354,10 +354,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   }
 
   // Check if scaling factors are non-trivial
-  const bool has_rowwise_scale_inv =
-      (input->scale_inv.dptr != nullptr && input->scale_inv.numel() != 0);
-  const bool has_columnwise_scale_inv =
-      (input->columnwise_scale_inv.dptr != nullptr && input->columnwise_scale_inv.numel() != 0);
+  const bool has_rowwise_scale_inv = input->scale_inv.has_data();
+  const bool has_columnwise_scale_inv = input->columnwise_scale_inv.has_data();
   NVTE_CHECK(!has_rowwise_scale_inv || !has_columnwise_scale_inv,
              "Input tensor has both row-wise and column-wise scaling factors");
   if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
@@ -662,15 +660,15 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
     CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]");
     CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]");
-    all_has_data =
-        (all_has_data && input[i]->scale_inv.dptr != nullptr && input[i]->scale_inv.numel() != 0);
+    all_has_data = all_has_data && input[i]->scale_inv.has_data();
     all_has_columnwise_data =
-        (all_has_columnwise_data && input[i]->columnwise_scale_inv.dptr != nullptr &&
-         input[i]->columnwise_scale_inv.numel() != 0);
+        (all_has_columnwise_data && input[i]->columnwise_scale_inv.has_data());
     all_nvfp4 = all_nvfp4 && is_nvfp4_scaling(scaling_mode);
   }
   NVTE_CHECK(all_has_data || all_has_columnwise_data,
              "All tensors should have data or columnwise data.");
+  NVTE_CHECK(!all_has_data || !all_has_columnwise_data,
+             "All tensors have both data and columnwise data.");
 
   const bool rowwise_swizzle = all_has_data || all_nvfp4;
   const bool columnwise_swizzle = all_has_columnwise_data && !all_nvfp4;

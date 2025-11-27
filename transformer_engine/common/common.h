@@ -102,6 +102,10 @@ struct SimpleTensor {
     return acc;
   }
 
+  bool has_data() const {
+    return dptr != nullptr && numel() > 0;
+  }
+
   void clear() {
     dptr = nullptr;
     shape.resize(1);
@@ -155,10 +159,12 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept { return data.dptr != nullptr && data.numel() != 0; }
+  bool has_data() const {
+    return data.has_data();
+  }
 
-  bool has_columnwise_data() const noexcept {
-    return columnwise_data.dptr != nullptr && columnwise_data.numel() != 0;
+  bool has_columnwise_data() const {
+    return columnwise_data.has_data();
   }
 
   DType dtype() const {
@@ -179,11 +185,7 @@ struct Tensor {
     // differently, but for simplicity we assume they all use row-wise
     // and column-wise data similarly.
     bool use_columnwise_shape = false;
-    if (data.dptr != nullptr) {
-      use_columnwise_shape = false;
-    } else if (columnwise_data.dptr != nullptr) {
-      use_columnwise_shape = true;
-    } else if (!is_shape_trivial(data.shape)) {
+    if (!is_shape_trivial(data.shape)) {
       use_columnwise_shape = false;
     } else if (!is_shape_trivial(columnwise_data.shape)) {
       use_columnwise_shape = true;
@@ -201,26 +203,18 @@ struct Tensor {
     auto is_shape_trivial = [](const std::vector<size_t> &shape) -> bool {
       return shape.size() == 1 && shape.front() == 0;
     };
+    const auto is_data_shape_trivial = is_shape_trivial(data.shape);
+    const auto is_columnwise_data_shape_trivial = is_shape_trivial(columnwise_data.shape);
 
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
+      case NVTE_BLOCK_SCALING_1D:
+      case NVTE_BLOCK_SCALING_2D:
       case NVTE_NVFP4_1D_SCALING: {
-        // Choose data buffer based on whether it is initialized
-        bool use_columnwise_shape = false;
-        if (data.dptr != nullptr) {
-          use_columnwise_shape = false;
-        } else if (columnwise_data.dptr != nullptr) {
-          use_columnwise_shape = true;
-        } else if (!is_shape_trivial(data.shape)) {
-          use_columnwise_shape = false;
-        } else if (!is_shape_trivial(columnwise_data.shape)) {
-          use_columnwise_shape = true;
-        }
-
-        // Infer shape based on data
-        if (use_columnwise_shape) {
-          // Column-wise data is transposed
+        // Row-wise data shape matches tensor logical shape,
+        // column-wise data shape is transpose of logical shape
+        if (is_data_shape_trivial && !is_columnwise_data_shape_trivial) {
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
             ret.reserve(columnwise_data.shape.size());
@@ -234,50 +228,10 @@ struct Tensor {
         return data.shape;
       }
       case NVTE_MXFP8_1D_SCALING: {
-        // Choose data buffer based on whether it is initialized
-        bool use_columnwise_shape = false;
-        if (data.dptr != nullptr) {
-          use_columnwise_shape = false;
-        } else if (columnwise_data.dptr != nullptr) {
-          use_columnwise_shape = true;
-        } else if (!is_shape_trivial(data.shape)) {
-          use_columnwise_shape = false;
-        } else if (!is_shape_trivial(columnwise_data.shape)) {
-          use_columnwise_shape = true;
-        }
-
-        // Infer shape based on data
-        if (use_columnwise_shape) {
+        // Row-wise and column-wise data shapes both match tensor
+        // logical shape
+        if (is_data_shape_trivial && !is_columnwise_data_shape_trivial) {
           return columnwise_data.shape;
-        }
-        return data.shape;
-      }
-      case NVTE_BLOCK_SCALING_1D:
-      case NVTE_BLOCK_SCALING_2D: {
-        // Choose data buffer based on whether it is initialized
-        bool use_columnwise_shape = false;
-        if (data.dptr != nullptr) {
-          use_columnwise_shape = false;
-        } else if (columnwise_data.dptr != nullptr) {
-          use_columnwise_shape = true;
-        } else if (!is_shape_trivial(data.shape)) {
-          use_columnwise_shape = false;
-        } else if (!is_shape_trivial(columnwise_data.shape)) {
-          use_columnwise_shape = true;
-        }
-
-        // Infer shape based on data
-        if (use_columnwise_shape) {
-          // Column-wise data is transposed
-          std::vector<size_t> ret;
-          if (!columnwise_data.shape.empty()) {
-            ret.reserve(columnwise_data.shape.size());
-            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
-              ret.push_back(columnwise_data.shape[i]);
-            }
-            ret.push_back(columnwise_data.shape.front());
-          }
-          return ret;
         }
         return data.shape;
       }

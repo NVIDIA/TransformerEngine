@@ -437,6 +437,13 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
   return ret;
 }
 
+NVTEShape nvte_make_zero_shape() {
+  NVTEShape ret;
+  ret.ndim = 1;
+  ret.data[0] = 0;
+  return ret;
+}
+
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
@@ -539,8 +546,7 @@ void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor) {
 NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    const size_t zero = 0;
-    return nvte_make_shape(&zero, 1);
+    return nvte_make_zero_shape();
   }
   return nvte_make_shape(t->scale_inv.shape.data(), t->scale_inv.shape.size());
 }
@@ -579,8 +585,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    const size_t zero = 0;
-    return {nullptr, kNVTEFloat32, nvte_make_shape(&zero, 1)};
+    return {nullptr, kNVTEFloat32, nvte_make_zero_shape()};
   }
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   switch (param_name) {
