@@ -137,7 +137,8 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
   NVTE_CHECK(cols % 32 == 0, "cols must be divisible by 32");
 
   NVTE_CHECK(input.data.shape.size() == 1, "input must be a 1D tensor");
-  NVTE_CHECK(start_offset + input.data.shape[0] <= static_cast<size_t>(rows) * cols, "Invalid start_offset");
+  NVTE_CHECK(start_offset + input.data.shape[0] <= static_cast<size_t>(rows) * cols,
+             "Invalid start_offset");
 
   NVTE_CHECK(amax_rowwise.data.shape.size() == 2, "amax_rowwise must be a 2D tensor");
   NVTE_CHECK(amax_rowwise.data.shape[0] % rowwise_row_padding == 0,
@@ -177,7 +178,8 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
   NVTE_CHECK(cols % 32 == 0, "cols must be divisible by 32");
 
   NVTE_CHECK(input.data.shape.size() == 1, "input must be a 1D tensor");
-  NVTE_CHECK(start_offset + input.data.shape[0] <= static_cast<size_t>(rows) * cols, "Invalid start_offset");
+  NVTE_CHECK(start_offset + input.data.shape[0] <= static_cast<size_t>(rows) * cols,
+             "Invalid start_offset");
 
   NVTE_CHECK(output_rowwise.data.shape.size() == 1, "output_rowwise must be a 1D tensor");
   NVTE_CHECK(output_colwise.data.shape.size() == 1, "output_colwise must be a 1D tensor");
