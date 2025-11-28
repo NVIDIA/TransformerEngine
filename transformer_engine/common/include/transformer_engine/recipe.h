@@ -208,7 +208,7 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
  *  input contains a continuous segment starting from start_offset.
  *
  *  Logical view - Original Tensor (64x64) with 1x32 and 32x1 blocks:
- *  
+ *
  *  Rowwise blocks (1x32): Each row has 2 blocks
  *       ┌──────────────┬──────────────┐
  *  row0 │  Block_r0_0  │  Block_r0_1  │  (cols 0-31, 32-63)
@@ -243,7 +243,7 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
  *  ├────────┼────────┤
  *  │    0   │    0   │  row1 (not covered)
  *  ├────────┼────────┤
- *  │   ...  │   ...  │  
+ *  │   ...  │   ...  │
  *  ├────────┼────────┤
  *  │    0   │    0   │  row63 (not covered)
  *  └────────┴────────┘
