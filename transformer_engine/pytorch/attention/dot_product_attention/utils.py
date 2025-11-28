@@ -1128,8 +1128,9 @@ def get_attention_backend(
             use_flash_attention_2 = False
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
         if head_dim_qk >= 256:
-            logger.debug("Disabling FlashAttention 3 for deterministic execution with "
-                         "head_dim_qk >= 256.")
+            logger.debug(
+                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
+            )
             use_flash_attention_3 = False
     if use_fused_attention and deterministic:
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:

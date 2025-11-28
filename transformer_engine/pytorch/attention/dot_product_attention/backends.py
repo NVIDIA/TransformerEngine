@@ -169,6 +169,7 @@ else:
     from flash_attn.cute.interface import flash_attn_varlen_func as flash_attn_varlen_func_v4
     from flash_attn.cute.interface import _flash_attn_fwd as _flash_attn_fwd_v4
     from flash_attn.cute.interface import _flash_attn_bwd as _flash_attn_bwd_v4
+
     # flash_attn_with_kvcache_v4 = None  # FA4 does not support kvcache yet
     fa_utils.set_flash_attention_4_params()
 
