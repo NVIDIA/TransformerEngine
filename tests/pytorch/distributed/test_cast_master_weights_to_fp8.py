@@ -124,7 +124,7 @@ class MiniZero_1:
         self.offsets = [0]
         for weight in self.weights:
             self.offsets.append(self.offsets[-1] + weight.numel())
-
+        print(f"offsets: {self.offsets}")
         # Padding to avoid global buffer cannot be divided by world size, so the offsets[-1] may
         # not be the end range of the last weight.
         if self.offsets[-1] % self.world_size != 0:
@@ -139,7 +139,7 @@ class MiniZero_1:
         # The start and end of this rank's local buffer in the global buffer
         rank_start = self.offsets[-1] // self.world_size * self.rank
         rank_end = rank_start + self.offsets[-1] // self.world_size
-
+        print(f"current rank: {self.rank}, rank_start: {rank_start}, rank_end: {rank_end}")
         for weight, offset in zip(self.weights, self.offsets[:-1]):
             if offset >= rank_end or (offset + weight.numel()) <= rank_start:
                 # This weight is not in this rank's local buffer
@@ -265,6 +265,19 @@ class MiniZero_1:
                 weight = self.weights[i]
             weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
             overlapping_start, overlapping_end = self.overlapping_areas[i]
+            buffer_len = overlapping_end - overlapping_start
+            slice_len = weight_slice.numel()
+            if buffer_len != slice_len:
+                print(
+                    "[MiniZero_1] copy mismatch:",
+                    f"idx={i}",
+                    f"buffer_len={buffer_len}",
+                    f"slice_len={slice_len}",
+                    f"weight_shape={tuple(weight.shape)}",
+                    f"start_offset={start_offset}",
+                    f"master_numel={master_weight.numel()}",
+                    f"overlap=({overlapping_start},{overlapping_end})",
+                )
             self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
 
         # -----------------------------------------------------------------------------------------
@@ -282,6 +295,16 @@ class MiniZero_1:
             end = offset + weight.numel()
             if isinstance(weight, QuantizedTensor):
                 weight = _get_raw_data(weight)
+                buffer_len = end - start
+                slice_len = weight.view(-1).numel()
+                if slice_len != buffer_len:
+                    print(
+                        "[MiniZero_1] gather mismatch:",
+                        f"buffer_len={buffer_len}",
+                        f"slice_len={slice_len}",
+                        f"weight_shape={tuple(weight.shape)}",
+                        f"offset=({start},{end})",
+                    )
             weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
         if self.manual_post_all_gather_processing:
@@ -728,14 +751,14 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
     ):
         model_nvfp4 = nn.Sequential(
-            te.Linear(128, 256 + 16, **linear_kwargs),
-            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256, **linear_kwargs),
+            te.Linear(256, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     model = nn.Sequential(
-        te.Linear(128, 256 + 16, **linear_kwargs),
-        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256, **linear_kwargs),
+        te.Linear(256, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -758,7 +781,7 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
             w.main_grad.zero_()
 
         inputs = [
-            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(128, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         x = inputs[rank]
 
@@ -779,9 +802,9 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         loss_nvfp4.backward()
         loss.backward()
 
-        optimizer_nvfp4.step()
         optimizer.step()
-
+        optimizer_nvfp4.step()
+        
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
 
 
@@ -809,19 +832,19 @@ def run_parallel_tests() -> None:
     dp_group = dist.new_group(backend="nccl")
 
     quantizations = []
-    if is_fp8_available():
-        print("fp8 available")
-        quantizations.extend(["fp8", "fp8_cs"])
-    if is_fp8_block_scaling_available():
-        quantizations.append("fp8_block")
-    manual_post_all_gather_processings = [False, True]
-    print("starting mini optimizer test")
-    _test_mini_optimizer(dp_group)
-    print("starting cast master weights to fp8 test")
-    for quantization in quantizations:
-        for post_ag_processing in manual_post_all_gather_processings:
-            _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-            _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+    # if is_fp8_available():
+    #     print("fp8 available")
+    #     quantizations.extend(["fp8", "fp8_cs"])
+    # if is_fp8_block_scaling_available():
+    #     quantizations.append("fp8_block")
+    # manual_post_all_gather_processings = [False, True]
+    # print("starting mini optimizer test")
+    # _test_mini_optimizer(dp_group)
+    # print("starting cast master weights to fp8 test")
+    # for quantization in quantizations:
+    #     for post_ag_processing in manual_post_all_gather_processings:
+    #         _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+    #         _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
     print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:

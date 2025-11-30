@@ -1264,11 +1264,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
-                columnwise_usage = torch.is_grad_enabled()
-                if isinstance(quantizer, NVFP4Quantizer) and quantizer.with_2d_quantization:
-                    # NVFP4 2D stores only rowwise data/scale
-                    columnwise_usage = False
-                quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
                     device_mesh = dtensor_param.device_mesh
