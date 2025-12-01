@@ -80,13 +80,6 @@ def setup_jax_extension(
     else:
         cxx_flags.append("-g0")
 
-    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
-        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
-        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
-            f"nvidia-cublasmp-cu{cuda_version()[0]}"
-        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
-        include_dirs.append(Path(cublasmp_dir) / "include")
-
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
