@@ -25,7 +25,6 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     get_dummy_wgrad,
-    get_workspace,
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -54,27 +53,27 @@ class BasicLinear(BasicOperation):
 
     Parameters
     ----------
-    in_features: int
+    in_features : int
         Inner dimension of input tensor
-    out_features: int
+    out_features : int
         Inner dimension of output tensor
-    device: torch.device, default = default CUDA device
+    device : torch.device, default = default CUDA device
         Tensor device
-    dtype: torch.dtype, default = default dtype
+    dtype : torch.dtype, default = default dtype
         Tensor datatype
-    tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+    tensor_parallel_mode : {`None`, "column", "row"}, default = `None`
         Mode for tensor parallelism
-    tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+    tensor_parallel_group : torch.distributed.ProcessGroup, default = world group
         Process group for tensor parallelism
-    sequence_parallel: bool, default = `False`
+    sequence_parallel : bool, default = `False`
         Whether to apply sequence parallelism together with tensor
         parallelism, i.e. distributing input or output tensors along
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
-    rng_state_tracker_function: callable
+    rng_state_tracker_function : callable
         Function that returns `CudaRNGStatesTracker`, which is used
         for model-parallel weight initialization
-    accumulate_into_main_grad: bool, default = `False`
+    accumulate_into_main_grad : bool, default = `False`
         Whether to directly accumulate weight gradients into the
         weight's `main_grad` attribute instead of relying on PyTorch
         autograd. The weight's `main_grad` must be set externally and
@@ -138,8 +137,10 @@ class BasicLinear(BasicOperation):
             out_features=out_features,
         )
 
-        # Whether weight tensor is natively quantized
+        # Initialize recipe state if needed for natively quantized weight
         self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
+        if self._with_quantized_weight:
+            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
 
         # Initialize parameters if needed
         weight = torch.empty(
@@ -585,7 +586,6 @@ class BasicLinear(BasicOperation):
         y, *_ = general_gemm(
             w,
             x,
-            get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
             alpha=alpha,
@@ -875,7 +875,6 @@ class BasicLinear(BasicOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
-                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 alpha=grad_input_alpha,
@@ -928,7 +927,6 @@ class BasicLinear(BasicOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
-                get_workspace(),
                 out_dtype=dw_dtype,
                 alpha=grad_weight_alpha,
                 beta=grad_weight_beta,

@@ -66,6 +66,20 @@ class Float8Quantizer(Quantizer):
         self.amax = amax
         self.dtype = fp8_dtype
 
+    def copy(self) -> Float8Quantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8Quantizer(
+            scale=self.scale,
+            amax=self.amax,
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -101,6 +115,7 @@ class Float8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8Tensor:
 
         # Canonicalize tensor attributes
@@ -108,16 +123,19 @@ class Float8Quantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1])
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -125,7 +143,7 @@ class Float8Quantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -241,16 +259,42 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
+        scale: Optional[torch.Tensor] = None,
+        amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.empty(1, dtype=torch.float32, device=device)
-        self.amax = torch.empty(1, dtype=torch.float32, device=device)
+        if scale is None:
+            scale = torch.empty(1, dtype=torch.float32, device=device)
+        if amax is None:
+            amax = torch.empty(1, dtype=torch.float32, device=device)
+        self.scale = scale
+        self.amax = amax
         self.dtype = fp8_dtype
         self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+
+    def copy(self) -> Float8CurrentScalingQuantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=self.dtype,
+            device=0,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            use_existing_amax=self.use_existing_amax,
+            force_pow_2_scales=self.force_pow_2_scales,
+            amax_epsilon=self.amax_epsilon,
+            scale=self.scale,
+            amax=self.amax,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
 
     def update_quantized(
         self,
@@ -287,6 +331,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8Tensor:
 
         # Canonicalize tensor attributes
@@ -294,23 +339,26 @@ class Float8CurrentScalingQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1])
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
         # Construct FP8 tensor
         return Float8Tensor(
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -405,23 +453,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    shape: int or iterable of int
+    shape : int or iterable of int
         Tensor dimensions.
-    dtype: torch.dtype
+    dtype : torch.dtype
         Nominal tensor datatype.
-    requires_grad: bool, optional = False
+    requires_grad : bool, optional = False
         Whether to compute gradients for this tensor.
-    data: torch.Tensor
+    data : torch.Tensor
         Raw FP8 data in a uint8 tensor
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype: transformer_engine_torch.DType
+    fp8_dtype : transformer_engine_torch.DType
         FP8 format.
-    data_transpose: torch.Tensor, optional
+    data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
-    quantizer: Float8Quantizer, Float8CurrentScalingQuantizer, optional
+    quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
         Builder class for FP8 tensors
 
     """
@@ -665,9 +713,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, t_shape] + list(args[2:]),
                     kwargs,
                 )
-            # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
-            quantizer = tensor._quantizer.copy()
+            quantizer = tensor._quantizer  # Deep-copied in constructor
             out_tensor = Float8Tensor(
                 data=func_out,
                 shape=func_out.shape,
@@ -715,14 +762,22 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return cls.detach(args[0])
         if func == torch.ops.aten.clone.default:
             return cls.clone(args[0])
+
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
-                dst._data.copy_(src._data.detach())
-                dst._scale_inv.copy_(src._scale_inv.view(dst._scale_inv.size()))
-                if src._transpose is not None or dst._transpose is not None:
-                    dst._create_transpose()
+                if dst._data is not None:
+                    dst._data.copy_(src._data.detach(), *args[2:], **kwargs)
+                if dst._scale_inv is not None:
+                    dst._scale_inv.copy_(
+                        src._scale_inv.view(dst._scale_inv.size()), *args[2:], **kwargs
+                    )
+                if dst._transpose is not None and not dst._transpose_invalid:
+                    if not src._transpose_invalid:
+                        dst._transpose.copy_(src._transpose, *args[2:], **kwargs)
+                    else:
+                        dst._create_transpose()
                 return dst
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
@@ -764,7 +819,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             self._quantizer.amax_reduction_group = mesh.get_group()
             self._quantizer.with_amax_reduction = True
-        quantizer = self._quantizer.copy()  # quantizer to be used for allgathered weights
+
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
@@ -777,9 +832,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # In case of hopper/L40, only one of data/transpose is needed
             # based on forward or backward pass. So setting the quantizer usages appropriately.
-            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
+            rowwise_usage = not is_backward_pass
+            columnwise_usage = is_backward_pass
+        else:
+            rowwise_usage = True
+            columnwise_usage = self._quantizer.columnwise_usage
         sharded_tensors = (self._data,)
-        metadata = (self._scale_inv, self._fp8_dtype, quantizer)
+        metadata = (self._scale_inv, rowwise_usage, columnwise_usage, self._fp8_dtype)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -805,7 +864,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
 
         (data,) = all_gather_outputs
-        (fp8_scale_inv, fp8_dtype, quantizer) = metadata
+        (fp8_scale_inv, rowwise_usage, columnwise_usage, fp8_dtype) = metadata
         orig_shape = data.size()
         # Quantizer has only columnwise usage set for backward pass
         # In Blackwell+ architectures, transpose is not needed at all,
@@ -814,20 +873,27 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if out is not None:
             out._data = data
         else:
+            # We ll be here when post all gather is called the first time.
+            # Float8Tensor constructor makes a copy of the quantizer to
+            # save as its own quantizer. For the consequent iterations,
+            # the same quantizer is used. Copy is needed in the first iteration,
+            # since we need different quantizers for sharded and allgathered tensors.
+            # and self._quantizer belongs to the sharded parameter.
             fp8_args = {
                 "shape": orig_shape,
                 "dtype": param_dtype,
                 "fp8_scale_inv": fp8_scale_inv,
                 "fp8_dtype": fp8_dtype,
-                "quantizer": quantizer,
+                "quantizer": self._quantizer,
                 "requires_grad": False,
                 "data": data,
             }
             out = Float8Tensor(**fp8_args)
 
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage,
+            rowwise_usage=rowwise_usage,
+            columnwise_usage=columnwise_usage,
         )
         return out, all_gather_outputs
 

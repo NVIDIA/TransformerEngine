@@ -90,15 +90,15 @@ def fuse_backward_activation_bias(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Backward pass operations and the indices of the corresponding
         basic operations.
-    recipe: Recipe, optional
+    recipe : Recipe, optional
         Used quantization recipe
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated backward pass operations
 
     """

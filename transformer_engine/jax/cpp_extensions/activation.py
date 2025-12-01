@@ -27,14 +27,14 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_dbias, _quantize_dbias_impl, AmaxScope
+from .quantization import _jax_dbias, quantize, quantize_dbias, _quantize_dbias_impl, AmaxScope
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
+    QuantizeLayout,
 )
 
 
@@ -1268,7 +1268,19 @@ def act_lu(
     )
     act_params = act_params if act_params is not None else ActivationParams()
     if not ActLuPrimitive.enabled():
-        return _jax_act_lu(x, activation_type, quantizer, act_params)
+        act_out = _jax_act_lu(x, activation_type, act_params=act_params)
+        assert (
+            act_out.data.dtype == x.dtype
+        ), f"JAX activation output dtype {act_out.data.dtype} must match input dtype {x.dtype}"
+        if quantizer is None:
+            return act_out
+
+        return quantize(
+            act_out,
+            quantizer=quantizer,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
 
     # TE/common does not support colwise-only quantization yet
     if quantizer is not None and quantizer.q_layout.is_colwise_only:
@@ -1330,11 +1342,12 @@ def act_lu(
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
         )
-        out, _ = _quantize_dbias_impl(
+        assert (
+            out.data.dtype == x.dtype
+        ), f"Activation output dtype {out.data.dtype} must match input dtype {x.dtype}"
+        out = quantize(
             out,
-            is_dbias=False,
             quantizer=quantizer,
-            dq_dtype=x.dtype,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
@@ -1419,7 +1432,23 @@ def quantize_dact_dbias(
     if not PrimitiveClass.enabled() or (
         quantizer is not None and quantizer.q_layout.is_colwise_only
     ):
-        return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer, act_params)
+        if quantizer is None:
+            return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, act_params=act_params)
+        dact_out, _ = _jax_quantize_dact_dbias(
+            dz, x, activation_type, is_dbias=False, act_params=act_params
+        )
+        assert (
+            dact_out.data.dtype == x.dtype
+        ), f"JAX dact output dtype {dact_out.data.dtype} must match input dtype {x.dtype}"
+        return quantize_dbias(
+            dact_out,
+            quantizer,
+            is_dbias=is_dbias,
+            flatten_axis=-2,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
+
     if quantizer is None:
         output, _, _, _, updated_amax, _ = PrimitiveClass.outer_primitive.bind(
             dz,
@@ -1465,7 +1494,7 @@ def quantize_dact_dbias(
             output_amax_when_no_scaling=output_amax_when_no_scaling,
         )
         return _quantize_dbias_impl(
-            out.data,
+            out,
             quantizer,
             is_dbias=True,
             dq_dtype=x.dtype,

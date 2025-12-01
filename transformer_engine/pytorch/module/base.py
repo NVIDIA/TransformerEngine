@@ -20,7 +20,6 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
 from ..quantization import (
@@ -39,13 +38,18 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
+from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
+from ..utils import (
+    is_non_tn_fp8_gemm_supported,
+    torch_get_autocast_gpu_dtype,
+    get_nvtx_range_context,
+)
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -57,11 +61,8 @@ __all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
-_multi_stream_cublas_workspace = []
 _dummy_wgrads = {}
-_cublas_workspace = None
 _ub_communicators = None
-_NUM_MAX_UB_STREAMS = 3
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
@@ -73,35 +74,6 @@ class UserBufferQuantizationMode(Enum):
 
     NONE = "none"
     FP8 = "fp8"
-
-
-def get_cublas_workspace_size_bytes() -> None:
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
-        return 32 * 1024 * 1024 + 1024
-    return 4_194_304
-
-
-def get_workspace() -> torch.Tensor:
-    """Returns workspace for cublas."""
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        )
-    return _cublas_workspace
-
-
-def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
-    """Returns workspace for multi-stream cublas."""
-    global _multi_stream_cublas_workspace
-    if not _multi_stream_cublas_workspace:
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
-            )
-    return _multi_stream_cublas_workspace
 
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -131,55 +103,55 @@ def initialize_ub(
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
-    GEMM compute in te.Linear, te.LayerNormLinear and te.LayerNormMLP modules.
+    GEMM compute in ``te.Linear``, ``te.LayerNormLinear`` and ``te.LayerNormMLP`` modules.
 
     Parameters
     ----------
     shape : list
             shape of the communication buffer, typically set to be the same as the global shape of
-            the input tensor to a te.TransformerLayer forward pass, with the sequence and batch
-            dimensions collapsed together -- i.e.: `(sequence_length * batch_size, hidden_size)`
+            the input tensor to a ``te.TransformerLayer`` forward pass, with the sequence and batch
+            dimensions collapsed together -- i.e.: ``(sequence_length * batch_size, hidden_size)``
     tp_size : int
               number of GPUs in the tensor-parallel process group
     use_fp8 : bool = False
               allocate the communication buffer for FP8 GEMM inputs/outputs.
-              DEPRECATED: Please use `quantization_modes` instead.
+              DEPRECATED: Please use ``quantization_modes`` instead.
     quantization_modes : List[UserBufferQuantizationMode] = None
               if a list of UserBufferQuantizationMode is provided, a UB communicator is created for each quantization setting in the list.
-              falls back to the legacy `use_fp8` parameter if `None` is provided.
+              falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
-            non-FP8 data type of the communication buffer when `use_fp8 = False`
-    ub_cfgs: dict = None
-             Configuration dictionary with the structure
-             ```
-             {
-                <gemm_name> : {
-                    "method": <"ring_exchange" or "pipeline">,
-                    "is_reduce_scatter": bool,
-                    "num_sm": int,
-                    "cga_size": int,
-                    "set_sm_margin": bool,
-                    "num_splits": int,
-                    "aggregate": bool,
-                    "atomic_gemm": bool,
-                    "use_ce": bool,
-                    "fp8_buf": bool,
-                }
-             }
-             ```
-             for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
+            non-FP8 data type of the communication buffer when ``use_fp8 = False``
+    ub_cfgs : dict = None
+             Configuration dictionary with the structure::
+
+                 {
+                    <gemm_name> : {
+                        "method": <"ring_exchange" or "pipeline">,
+                        "is_reduce_scatter": bool,
+                        "num_sm": int,
+                        "cga_size": int,
+                        "set_sm_margin": bool,
+                        "num_splits": int,
+                        "aggregate": bool,
+                        "atomic_gemm": bool,
+                        "use_ce": bool,
+                        "fp8_buf": bool,
+                    }
+                 }
+
+             for ``te.TransformerLayer`` GEMM layers in ``["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
-             "fc2_fprop", "fc2_wgrad"]`.
-             a list may be provided to specify different overlap configurations for different the quantization settings in `quantization_modes`
+             "fc2_fprop", "fc2_wgrad"]``.
+             a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
     bootstrap_backend : str = None
-                        `torch.distributed` communication backend for the all-gather, broadcast and
+                        ``torch.distributed`` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
                         valid for every cluster configuration and distributed launch method even if
                         they are available in PyTorch. When left unset, the initialization prefers
                         to use the MPI backend, falling back first on Gloo and then NCCL if MPI is
-                        not available. Setting `NVTE_UB_WITH_MPI=1` when building TE overrides this
+                        not available. Setting ``NVTE_UB_WITH_MPI=1`` when building TE overrides this
                         option and always initializes Userbuffers with direct MPI calls in C++,
-                        which also requires `MPI_HOME=/path/to/mpi/root` to be set at compile time.
+                        which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
     """
     if not tex.device_supports_multicast():
         assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
@@ -275,16 +247,6 @@ def initialize_ub(
                 end="",
                 flush=True,
             )
-
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
-        # This ensures we don't do `.repeat()` on an already expanded workspace
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -988,7 +950,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         Parameters
         ----------
-        tp_group : ProcessGroup, default = `None`
+        tp_group : ProcessGroup, default = None
                   tensor parallel process group.
         """
         self.tp_group = tp_group
@@ -1078,8 +1040,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         self.allow_different_data_and_param_types = allow_different_data_and_param_types
         self.forwarded_at_least_once = True
+
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
+            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -1091,25 +1055,27 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].delayed():
-                assert self.fp8_meta["recipe"].reduce_amax, (
-                    "Amax reduction across tensor parallel group is "
-                    "necessary when using sequence parallelism with FP8."
-                )
+            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            if delayed_scaling_recipe:
+                if self.sequence_parallel:
+                    assert self.fp8_meta["recipe"].reduce_amax, (
+                        "Amax reduction across tensor parallel group is "
+                        "necessary when using sequence parallelism with FP8."
+                    )
 
-            if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
-                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
+                if not FP8GlobalStateManager.fp8_graph_capturing():
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
-            # Activation recomputation is used and this is the first forward phase.
-            if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
-                FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                # Activation recomputation is used and this is the first forward phase.
+                if self.training and is_fp8_activation_recompute_enabled():
+                    FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
-        with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
+        with get_nvtx_range_context(self.__class__.__name__ + " forward"):
             if not allow_non_contiguous and not inp.is_contiguous():
                 inp = inp.contiguous()
             yield inp
 
-        if self.fp8 and in_fp8_activation_recompute_phase():
+        if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
@@ -1198,18 +1164,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
-            if (
-                isinstance(
-                    grad_output_.get_tensor(True),
-                    (
-                        QuantizedTensor,
-                        Float8TensorStorage,
-                        MXFP8TensorStorage,
-                        Float8BlockwiseQTensorStorage,
-                    ),
-                )
-                and ctx.use_bias
-            ):
+            if ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias = None
@@ -1389,7 +1344,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             workspace is being constructed or updated.
         cache_name: str, optional
             Key for caching.
-        update_workspace: bool, default = `True`
+        update_workspace: bool, default = True
             Update workspace with values from `tensor`.
         skip_update_flag: torch.Tensor, optional
             GPU flag to skip updating the workspace. Take precedence
@@ -1531,7 +1486,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if not self.need_backward_dw():
             return
-        with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
+        with get_nvtx_range_context(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
@@ -1572,6 +1527,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # If this is the same iteration as previous invocation of the module,
             # we use the debug value from the first invocation in the iteration.
             debug = self.debug_enabled_in_this_iteration
+
+        self.debug_last_iteration = TEDebugState.get_iteration()
+
+        if self.wgrad_store is not None:
+            if debug and self.wgrad_store.delay_wgrad_compute():
+                raise RuntimeError("Delayed wgrad compute is not supported in debug mode.")
 
         return debug
 
@@ -1627,6 +1588,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in quantized_model_init()).
         """
         if not self.fp8 and not self.fp8_calibration:
+            return
+        if not self.primary_weights_in_fp8:
             return
         if not hasattr(self, "weight_names") or not self.weight_names:
             return

@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Transformer Engine documentation
-==============================================
+=================================
 
 .. ifconfig:: "dev" in release
 
@@ -29,7 +29,7 @@ Transformer Engine documentation
    :caption: Getting Started
 
    installation
-   examples/quickstart.ipynb
+   getting_started
    faq
 
 .. toctree::
