@@ -188,7 +188,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
-    
+
     def test_te_bf16_all_gather_with_dp_cublasmp(self):
         """Test Collective GEMM with AllGather"""
         os.environ["NVTE_WITH_CUBLASMP"] = "1"

@@ -158,7 +158,7 @@ class CommunicatorHandler {
 };
 
 struct CollectiveGemmPlan {
-  NVTECommGemmCtx* cublasmp_context;
+  NVTECommGemmCtx *cublasmp_context;
   std::unique_ptr<CommOverlapCore> userbuffers_context;
 
   CollectiveGemmPlan(void *ctx);
@@ -178,7 +178,8 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CollectiveGemmPlan *get_plan(std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op);
+  CollectiveGemmPlan *get_plan(std::vector<size_t> buffer_shape, DType dtype,
+                               JAXX_Collective_Op collective_op);
 
  private:
   CollectiveGemmPlanRegistry() {}
@@ -186,7 +187,6 @@ class CollectiveGemmPlanRegistry {
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
   std::unordered_map<int64_t, std::unique_ptr<CollectiveGemmPlan>> plan_map;
-
 };
 
 // Function declarations
