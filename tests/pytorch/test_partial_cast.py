@@ -75,12 +75,11 @@ def run_one_case(n, h, w, start_offset):
     torch.testing.assert_close(amax_colwise, amax_colwise_ref, atol=0, rtol=0)
 
     # Calculate scales and scale_invs
-    dummy_overflow_buf = torch.empty(1, dtype=torch.int32, device=inp.device)
     scale_inv_rowwise = torch.empty_like(amax_rowwise).to(torch.uint8)
     scale_inv_colwise = torch.empty_like(amax_colwise).to(torch.uint8)
     multi_tensor_applier(
         multi_tensor_compute_scale_inv_e8m0,
-        dummy_overflow_buf,
+        None,
         [
             [amax_rowwise, amax_colwise],
             [scale_inv_rowwise, scale_inv_colwise],

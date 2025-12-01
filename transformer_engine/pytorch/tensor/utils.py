@@ -495,9 +495,6 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
             master_weight_dtype = master_weight.dtype
             break
 
-    # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
-    dummy_overflow_buf = torch.empty(1, dtype=torch.int, device=device)
-
     # Get the total number of amax elements in all the model weights.
     cu_rowwise_amax_sizes = [0]
     cu_colwise_amax_sizes = [0]
@@ -560,7 +557,7 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
     # ---------------------------------------------------------------------------------------------
     multi_tensor_applier(
         multi_tensor_compute_scale_inv_e8m0,
-        dummy_overflow_buf,
+        None,  # dummy_overflow_buf
         [
             amaxes_rowwise + amaxes_colwise,
             scale_invs_rowwise + scale_invs_colwise,

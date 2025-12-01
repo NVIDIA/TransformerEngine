@@ -460,7 +460,7 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     float max_fp8, bool force_pow_2_scales, float epsilon);
 
-void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, at::Tensor noop_flag,
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
                                               std::vector<std::vector<at::Tensor>> tensor_lists);
 
 /***************************************************************************************************

@@ -268,16 +268,14 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
 /*!  \brief Compute E8M0 scale_inv for a list of tensors.
  *
  * \warning   This API is **experimental** and subject to change.
- * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
- *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      stream                  CUDA stream used for this operation.
  */
-void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor noop_flag,
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
                                                    NVTETensor **tensor_lists,
                                                    const size_t num_tensor_lists,
                                                    const size_t num_tensors_per_list,

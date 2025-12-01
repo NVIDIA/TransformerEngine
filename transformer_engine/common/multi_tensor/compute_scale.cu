@@ -57,12 +57,8 @@ struct ComputeScaleAndScaleInvFunctor {
 };
 
 struct ComputeScaleInvE8M0Functor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int chunk_size, volatile int *unused,
                                              TensorListMetadata<2> &tl) {
-    // I'd like this kernel to propagate infs/nans.
-    // if(*noop_gmem == 1)
-    //   return;
-
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
     int n = tl.sizes[tensor_loc];
@@ -92,14 +88,15 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, Tensor noop_f
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, Tensor noop_flag,
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
                                               std::vector<std::vector<Tensor *>> tensor_lists,
                                               cudaStream_t stream) {
   NVTE_CHECK(tensor_lists[0][0]->data.dtype == DType::kBFloat16, "amax should be bf16");
   auto scale_inv_dtype = tensor_lists[1][0]->data.dtype;
   NVTE_CHECK(scale_inv_dtype == DType::kByte || scale_inv_dtype == DType::kFloat8E8M0,
              "scale_inv should be e8m0/uint8");
-  multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+  Tensor dummy;
+  multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, dummy, tensor_lists,
                         ComputeScaleInvE8M0Functor(), stream);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -122,7 +119,7 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
       force_pow_2_scales, epsilon, stream);
 }
 
-void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor noop_flag,
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
                                                    NVTETensor **tensor_lists,
                                                    const size_t num_tensor_lists,
                                                    const size_t num_tensors_per_list,
@@ -131,6 +128,6 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor no
   using namespace transformer_engine;
 
   multi_tensor_compute_scale::multi_tensor_compute_scale_inv_e8m0_cuda(
-      chunk_size, *convertNVTETensorCheck(noop_flag),
+      chunk_size,
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), stream);
 }
