@@ -1306,8 +1306,8 @@ class _FusedAttnCPWithAllGatherHelper:
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
         # Do not allow CP + AG + THD + Striped with NO_MASK
-        if self.config.attn_mask_type is AttnMaskType.NO_MASK and self.config.qkv_layout.is_thd():
-            raise ValueError(f"{header} only supports CAUSAL_MASK for THD types")
+        if self.config.attn_mask_type is not AttnMaskType.PADDING_CAUSAL_MASK and self.config.qkv_layout.is_thd():
+            raise ValueError(f"{header} only supports PADDING_CAUSAL_MASK for THD types")
 
         if self.config.max_segments_per_seq != 1 and (not self.config.qkv_layout.is_thd):
             raise ValueError(
