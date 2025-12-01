@@ -456,11 +456,11 @@ class TestDistributedContextParallelSelfAttn:
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
-    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
     def test_context_parallel_allgather_attn_shardy(
         self,
@@ -473,6 +473,8 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
     ):
+        if qkv_layout.is_thd():
+            pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
         kv_groups = 8
         self.impl_test_context_parallel_attn(
             device_count,
@@ -498,7 +500,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        [DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[-1]],
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -535,8 +537,8 @@ class TestDistributedContextParallelSelfAttn:
         stripe_size,
         num_segments_per_seq,
     ):
-        if window_size != (-1, -1) and not qkv_layout.is_thd():
-            pytest.skip("Sliding window attention is only supported for THD layout")
+        if not qkv_layout.is_thd():
+            pytest.skip("Only THD layout is supported for CP + AG + Striped attention")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -564,7 +566,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -583,6 +585,8 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
+        if qkv_layout.is_thd():
+            pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -607,7 +611,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
     @pytest.mark.parametrize(
         "load_balanced",
@@ -671,7 +675,7 @@ class TestDistributedContextParallelSelfAttn:
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS[:-1],
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
     def test_context_parallel_ring_attn_shardy(
         self,
