@@ -56,6 +56,10 @@ def get_triton_dtype(aval):
         jnp.dtype("int32"): "i32",
         jnp.dtype("int16"): "i16",
         jnp.dtype("int8"): "i8",
+        jnp.dtype("uint64"): "u64",
+        jnp.dtype("uint32"): "u32",
+        jnp.dtype("uint16"): "u16",
+        jnp.dtype("uint8"): "u8",
         jnp.dtype("bool"): "i1",
     }
 
