@@ -30,9 +30,7 @@ class TestTritonBinding:
     @staticmethod
     @triton.autotune(
         configs=[
-            triton.Config(
-                {"BLOCK_SIZE": 256}
-            ),  # Uses defaults: num_warps=4, num_stages=3
+            triton.Config({"BLOCK_SIZE": 256}),  # Uses defaults: num_warps=4, num_stages=3
             triton.Config({"BLOCK_SIZE": 512}, num_warps=8),  # Custom num_warps
         ],
         key=["n_elements"],  # Autotune based on input size
@@ -101,9 +99,7 @@ class TestTritonBinding:
     @staticmethod
     def _triton_amax(x: jnp.ndarray, block_size: int = 1024) -> jnp.ndarray:
         """Compute amax using Triton kernel."""
-        return TestTritonBinding.AmaxTritonPrimitive.outer_primitive.bind(
-            x, block_size=block_size
-        )
+        return TestTritonBinding.AmaxTritonPrimitive.outer_primitive.bind(x, block_size=block_size)
 
     @pytest_parametrize_wrapper("shape", [(1024, 1024)])
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
