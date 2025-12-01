@@ -275,8 +275,7 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      stream                  CUDA stream used for this operation.
  */
-void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
-                                                   NVTETensor **tensor_lists,
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **tensor_lists,
                                                    const size_t num_tensor_lists,
                                                    const size_t num_tensors_per_list,
                                                    cudaStream_t stream);

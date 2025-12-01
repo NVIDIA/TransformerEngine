@@ -26,9 +26,8 @@ void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
 
-  nvte_multi_tensor_compute_scale_inv_e8m0_cuda(chunk_size,
-                                                tensor_lists_ptr.data(), num_lists, num_tensors,
-                                                at::cuda::getCurrentCUDAStream());
+  nvte_multi_tensor_compute_scale_inv_e8m0_cuda(chunk_size, tensor_lists_ptr.data(), num_lists,
+                                                num_tensors, at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

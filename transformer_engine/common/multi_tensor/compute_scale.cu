@@ -96,8 +96,8 @@ void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
   NVTE_CHECK(scale_inv_dtype == DType::kByte || scale_inv_dtype == DType::kFloat8E8M0,
              "scale_inv should be e8m0/uint8");
   Tensor dummy;
-  multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, dummy, tensor_lists,
-                        ComputeScaleInvE8M0Functor(), stream);
+  multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, dummy, tensor_lists, ComputeScaleInvE8M0Functor(),
+                        stream);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -119,8 +119,7 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
       force_pow_2_scales, epsilon, stream);
 }
 
-void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
-                                                   NVTETensor **tensor_lists,
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **tensor_lists,
                                                    const size_t num_tensor_lists,
                                                    const size_t num_tensors_per_list,
                                                    cudaStream_t stream) {
@@ -128,6 +127,6 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
   using namespace transformer_engine;
 
   multi_tensor_compute_scale::multi_tensor_compute_scale_inv_e8m0_cuda(
-      chunk_size,
-      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), stream);
+      chunk_size, convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
+      stream);
 }
