@@ -650,6 +650,8 @@ class TestDistributedContextParallelSelfAttn:
                 "When context parallelism and sliding window attention are used, "
                 "scanloop is not supported"
             )
+        # Set the stripe size to 1 (ring attention only support stripe_size=1)
+        stripe_size = 1 if qkv_layout.is_thd() else 0 
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -665,6 +667,7 @@ class TestDistributedContextParallelSelfAttn:
             use_shardy=False,
             use_scan_ring=use_scan,
             window_size=window_size,
+            stripe_size=stripe_size,
         )
 
     @pytest_parametrize_wrapper(
@@ -689,6 +692,8 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
     ):
         kv_groups = 8
+        # Set the stripe size to 1 (ring attention only support stripe_size=1)
+        stripe_size = 1 if qkv_layout.is_thd() else 0
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -703,6 +708,7 @@ class TestDistributedContextParallelSelfAttn:
             cp_strategy=CPStrategy.RING,
             use_shardy=False,
             use_scan_ring=True,
+            stripe_size=stripe_size,
         )
 
 
