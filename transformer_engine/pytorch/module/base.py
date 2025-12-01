@@ -50,6 +50,7 @@ from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_nvtx_range_context,
+    _nvtx_enabled,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
@@ -641,12 +642,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         "fp8_parameters",
     }
 
+    def fast_set_attr(self, name: str, value: Any) -> None:
+        self.__dict__[name] = value
+
     def __setattr__(self, name: str, value: Any) -> None:
         if name in TransformerEngineBaseModule._fast_setattr_names:
             # torch.nn.Module has a custom __setattr__ that handles
             # modules, parameters, and buffers. This is unnecessary
             # overhead when setting plain attrs.
-            self.__dict__[name] = value
+            self.fast_set_attr(name, value)
         else:
             # Default case
             super().__setattr__(name, value)
@@ -927,7 +931,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch_get_autocast_gpu_dtype()
+            self.fast_set_attr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
 
         # All checks after this have already been performed once, thus skip
@@ -942,7 +946,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         "Data types for parameters must match when outside of autocasted region. "
                         f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                     )
-        self.activation_dtype = dtype
+        self.fast_set_attr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
@@ -971,48 +975,51 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        _original_recipe = self.fp8_meta.get("recipe", None)
+        meta = self.fp8_meta
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
-        fp8_enabled = self.fp8 or self.fp8_calibration
-        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_set_attr("fp8_parameters", fp8_parameters)
+        self.fast_set_attr("fp8", fp8)
+        self.fast_set_attr("fp8_calibration", fp8_calibration)
+        fp8_enabled = fp8 or fp8_calibration
+        meta["fp8_checkpoint"] = fp8_enabled
 
-        if self.fp8_parameters or fp8_enabled:
-            if (
-                self.fp8_initialized
-                and FP8GlobalStateManager.get_fp8_recipe() == self.fp8_meta["recipe"]
-            ):
+        _original_recipe = None
+
+        if fp8_parameters or fp8_enabled:
+            _original_recipe = meta.get("recipe", None)
+            if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_set_attr("fp8_initialized", False)
             return
 
-        if self.fp8_parameters and not self.fp8_initialized:
-            self.fp8_meta["num_gemms"] = num_gemms
-            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+        if fp8_parameters and not self.fp8_initialized:
+            meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors(meta["recipe"])
 
         if fp8_enabled:
             # Set FP8 and other FP8 metadata
-            self.fp8_meta["num_gemms"] = num_gemms
-            self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+            meta["num_gemms"] = num_gemms
+            meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
-            if hasattr(self.fp8_meta["recipe"], "fp8_format"):
-                self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-                self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+            if hasattr(meta["recipe"], "fp8_format"):
+                meta["fp8_max_fwd"] = meta["recipe"].fp8_format.value.max_fwd
+                meta["fp8_max_bwd"] = meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+            self.init_fp8_meta_tensors(meta["recipe"])
             self.fp8_initialized = True
 
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
-        _current_recipe = self.fp8_meta["recipe"]
+        _current_recipe = meta["recipe"]
         if _original_recipe is not None and not (
             issubclass(_current_recipe.__class__, _original_recipe.__class__)
             or issubclass(_original_recipe.__class__, _current_recipe.__class__)
@@ -1025,22 +1032,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
-    @contextmanager
     def prepare_forward(
         self,
         inp: torch.Tensor,
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
         allow_different_data_and_param_types: bool = False,
-    ) -> Generator[torch.Tensor, None, None]:
-        """Checks and prep for FWD.
-        The context manager is needed because there isn't a way for a module to know
-        if it's the last FP8 module in the forward autocast. It is useful
-        to setup the forward aggregated amax reduction for every module
-        just in case. The autocast exit will pick up the most recent one.
-        """
-        self.allow_different_data_and_param_types = allow_different_data_and_param_types
-        self.forwarded_at_least_once = True
+    ) -> torch.Tensor:
+        """Checks and prepare for FWD execution."""
+        self.fast_set_attr(
+            "allow_different_data_and_param_types", allow_different_data_and_param_types
+        )
+        self.fast_set_attr("forwarded_at_least_once", True)
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
@@ -1071,13 +1074,32 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.training and is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
-        with get_nvtx_range_context(self.__class__.__name__ + " forward"):
-            if not allow_non_contiguous and not inp.is_contiguous():
-                inp = inp.contiguous()
-            yield inp
+        # with get_nvtx_range_context(self.__class__.__name__ + " forward"):
+        if _nvtx_enabled():
+            torch.cuda.nvtx.range_push(self.__class__.__name__ + " forward")
+        if not allow_non_contiguous and not inp.is_contiguous():
+            inp = inp.contiguous()
+        return inp
 
+    def end_forward(self):
+        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
+        if _nvtx_enabled():
+            torch.cuda.nvtx.range_pop()
+
+    @contextmanager
+    def prepare_forward_ctx(
+        self,
+        inp: torch.Tensor,
+        num_gemms: int = 1,
+        allow_non_contiguous: bool = False,
+        allow_different_data_and_param_types: bool = False,
+    ) -> Generator[torch.Tensor, None, None]:
+        yield self.prepare_forward(
+            inp, num_gemms, allow_non_contiguous, allow_different_data_and_param_types
+        )
+        self.end_forward()
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled

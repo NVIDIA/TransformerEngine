@@ -2052,115 +2052,117 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        inp = self.prepare_forward(inp, num_gemms=2)
 
-            quantizers = (
-                self._get_quantizers(fp8_output, is_grad_enabled)
-                if not debug
-                else self._get_debug_quantizers(fp8_output, is_grad_enabled)
-            )
-            if debug:
-                if self.no_debug_features_active(quantizers):
-                    debug = False
-                    quantizers = self._get_quantizers(fp8_output, is_grad_enabled)
+        quantizers = (
+            self._get_quantizers(fp8_output, is_grad_enabled)
+            if not debug
+            else self._get_debug_quantizers(fp8_output, is_grad_enabled)
+        )
+        if debug:
+            if self.no_debug_features_active(quantizers):
+                debug = False
+                quantizers = self._get_quantizers(fp8_output, is_grad_enabled)
 
-            # Get quantizers
-            (
-                fc1_input_quantizer,
-                fc1_weight_quantizer,
-                fc1_output_quantizer,
-                fc1_grad_input_quantizer,
-                fc1_grad_weight_quantizer,
-                fc1_grad_output_quantizer,
-                fc2_input_quantizer,
-                fc2_weight_quantizer,
-                fc2_output_quantizer,
-                fc2_grad_input_quantizer,
-                fc2_grad_weight_quantizer,
-                fc2_grad_output_quantizer,
-            ) = quantizers
+        # Get quantizers
+        (
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc1_output_quantizer,
+            fc1_grad_input_quantizer,
+            fc1_grad_weight_quantizer,
+            fc1_grad_output_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            fc2_output_quantizer,
+            fc2_grad_input_quantizer,
+            fc2_grad_weight_quantizer,
+            fc2_grad_output_quantizer,
+        ) = quantizers
 
-            # Get weight tensors
-            fc1_weight, fc2_weight = self._get_weight_tensors()
-            fc1_bias = self.fc1_bias if self.use_bias else None
-            fc2_bias = self.fc2_bias if self.use_bias else None
-            if not self.fp8:
-                if isinstance(fc1_weight, Float8Tensor):
-                    fc1_weight = fc1_weight.dequantize()
-                if isinstance(fc2_weight, Float8Tensor):
-                    fc2_weight = fc2_weight.dequantize()
+        # Get weight tensors
+        fc1_weight, fc2_weight = self._get_weight_tensors()
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        fc2_bias = self.fc2_bias if self.use_bias else None
+        if not self.fp8:
+            if isinstance(fc1_weight, Float8Tensor):
+                fc1_weight = fc1_weight.dequantize()
+            if isinstance(fc2_weight, Float8Tensor):
+                fc2_weight = fc2_weight.dequantize()
 
-            # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
-            if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
-                self.bias_gelu_nvfusion = False
+        # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
+        if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
+            self.bias_gelu_nvfusion = False
 
-            if is_grad_enabled:
-                fwd_fn = _LayerNormMLP.apply
-                autograd_ctx = []
-            else:
-                fwd_fn = _LayerNormMLP.forward
-                autograd_ctx = [None]
+        if is_grad_enabled:
+            fwd_fn = _LayerNormMLP.apply
+            autograd_ctx = []
+        else:
+            fwd_fn = _LayerNormMLP.forward
+            autograd_ctx = [None]
 
-            non_tensor_args = (
-                self.eps,
-                is_first_microbatch,
-                self.fp8,
-                self.fp8_calibration,
-                self.wgrad_store,
-                self.fuse_wgrad_accumulation,
-                fc1_input_quantizer,
-                fc1_weight_quantizer,
-                fc1_output_quantizer,
-                fc1_grad_input_quantizer,
-                fc1_grad_weight_quantizer,
-                fc1_grad_output_quantizer,
-                fc2_input_quantizer,
-                fc2_weight_quantizer,
-                fc2_output_quantizer,
-                fc2_grad_input_quantizer,
-                fc2_grad_weight_quantizer,
-                fc2_grad_output_quantizer,
-                is_cpu_offload_enabled(),
-                self.tp_group,
-                self.tp_size,
-                self.sequence_parallel,
-                self.tp_size > 1,
-                self.activation_dtype,
-                self.return_layernorm_output,
-                self.return_layernorm_output_gathered,
-                self.bias_gelu_nvfusion and not self.fp8 and not debug,
-                self.set_parallel_mode,
-                is_grad_enabled,
-                self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
-                self.bwd_ln_sm_margin,
-                self.zero_centered_gamma,
-                self.activation,
-                self.activation_params,
-                self.normalization,
-                self.ub_overlap_ag,
-                self.ub_overlap_rs,
-                self.ub_overlap_rs_dgrad,
-                self.ub_bulk_dgrad,
-                self.ub_bulk_wgrad,
-                self.gemm_gelu_fusion and not debug,
-                self.fsdp_group,
-                self,
-                skip_fp8_weight_update,
-                self.symmetric_ar_type,
-                self.checkpoint,
-                debug,
-            )
-            out = fwd_fn(
-                *autograd_ctx,
-                inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
-                fc1_weight,
-                fc1_bias,
-                fc2_weight,
-                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
-                non_tensor_args,
-            )
+        non_tensor_args = (
+            self.eps,
+            is_first_microbatch,
+            self.fp8,
+            self.fp8_calibration,
+            self.wgrad_store,
+            self.fuse_wgrad_accumulation,
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc1_output_quantizer,
+            fc1_grad_input_quantizer,
+            fc1_grad_weight_quantizer,
+            fc1_grad_output_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            fc2_output_quantizer,
+            fc2_grad_input_quantizer,
+            fc2_grad_weight_quantizer,
+            fc2_grad_output_quantizer,
+            is_cpu_offload_enabled(),
+            self.tp_group,
+            self.tp_size,
+            self.sequence_parallel,
+            self.tp_size > 1,
+            self.activation_dtype,
+            self.return_layernorm_output,
+            self.return_layernorm_output_gathered,
+            self.bias_gelu_nvfusion and not self.fp8 and not debug,
+            self.set_parallel_mode,
+            is_grad_enabled,
+            self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
+            self.bwd_ln_sm_margin,
+            self.zero_centered_gamma,
+            self.activation,
+            self.activation_params,
+            self.normalization,
+            self.ub_overlap_ag,
+            self.ub_overlap_rs,
+            self.ub_overlap_rs_dgrad,
+            self.ub_bulk_dgrad,
+            self.ub_bulk_wgrad,
+            self.gemm_gelu_fusion and not debug,
+            self.fsdp_group,
+            self,
+            skip_fp8_weight_update,
+            self.symmetric_ar_type,
+            self.checkpoint,
+            debug,
+        )
+        out = fwd_fn(
+            *autograd_ctx,
+            inp,
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            fc1_weight,
+            fc1_bias,
+            fc2_weight,
+            fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
+            non_tensor_args,
+        )
+
+        self.end_forward()
 
         if self.return_layernorm_output:
             out, ln_out = out
