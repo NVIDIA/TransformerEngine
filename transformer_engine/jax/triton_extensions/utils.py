@@ -176,7 +176,9 @@ def triton_call_lowering(
         *array_args: Input arrays (from ctx)
         grid: Grid dimensions (int or tuple)
         input_output_aliases: Mapping of input to output aliases
-        constexprs: Compile-time constants for the kernel
+        constexprs: Compile-time constants for the kernel. This includes both
+                    tl.constexpr arguments AND scalar runtime arguments (like
+                    num_tokens, strides) that are known at JAX trace time.
 
     Returns:
         MLIR lowering result
@@ -188,9 +190,11 @@ def triton_call_lowering(
             n = ctx.avals_in[0].size
             return triton_call_lowering(
                 ctx, my_kernel, x,
-                grid=(triton.cdiv(n, block_size),),
-                n_elements=n,
-                BLOCK_SIZE=block_size
+                grid=(triton.cdiv(n_elements, block_size),),
+                constexprs={
+                    "n_elements": n_elements,  # scalar arg (not tl.constexpr in kernel)
+                    "BLOCK_SIZE": block_size,  # tl.constexpr arg
+                },
             )
     """
     # Get compute capability using gpu_triton
@@ -203,9 +207,22 @@ def triton_call_lowering(
     else:
         arg_names = kernel_fn.arg_names
 
-    # Build signature for inputs + outputs
+    # Build signature for tensor arguments only (inputs + outputs)
+    # Scalar arguments should be passed via constexprs and will be
+    # specialized into the kernel at compile time
     all_avals = list(ctx.avals_in) + list(ctx.avals_out)
-    signature = {arg_names[i]: get_triton_dtype(aval) for i, aval in enumerate(all_avals)}
+    signature = {}
+    constexpr_names = set(constexprs.keys()) if constexprs else set()
+
+    tensor_arg_idx = 0
+    for arg_name in arg_names:
+        if arg_name in constexpr_names:
+            # Skip constexpr/scalar args - they're specialized at compile time
+            continue
+        elif tensor_arg_idx < len(all_avals):
+            # Tensor arg - add to signature
+            signature[arg_name] = get_triton_dtype(all_avals[tensor_arg_idx])
+            tensor_arg_idx += 1
 
     # Normalize grid to 3D
     if isinstance(grid, int):

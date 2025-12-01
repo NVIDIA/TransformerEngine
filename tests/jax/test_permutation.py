@@ -2,19 +2,28 @@
 #
 # See LICENSE for license information.
 
-"""Tests for permutation Triton kernels"""
+"""Tests for permutation Triton kernels and high-level APIs"""
 
 import jax
 import jax.numpy as jnp
 import pytest
 from jax import jit
 
-from transformer_engine.jax.triton.permutation import (
+# Low-level triton_extensions API
+from transformer_engine.jax.triton_extensions import (
     make_row_id_map,
     permute_with_mask_map,
     unpermute_with_mask_map,
     make_chunk_sort_map,
     sort_chunks_by_map,
+)
+
+# High-level API with VJP support
+from transformer_engine.jax.permutation import (
+    token_dispatch,
+    token_dispatch_with_probs,
+    token_combine,
+    sort_chunks_by_index,
 )
 from utils import assert_allclose, dtype_tols
 
@@ -723,3 +732,420 @@ class TestPermutation:
         # Compare with original input
         tols = dtype_tols(dtype)
         assert_allclose(recovered, inp, **tols)
+
+
+class TestHighLevelPermutationAPI:
+    """Test high-level permutation APIs (token_dispatch, token_combine, etc.)
+
+    These tests compare the high-level APIs against reference implementations
+    to verify correctness of both forward and backward passes.
+    """
+
+    @staticmethod
+    def generate_routing_map(
+        num_tokens: int,
+        num_experts: int,
+        tokens_per_expert: int = 2,
+        key: jax.Array = None,
+    ):
+        """Generate random routing map for testing"""
+        if key is None:
+            key = jax.random.PRNGKey(0)
+
+        routing_map = jnp.zeros((num_tokens, num_experts), dtype=jnp.int32)
+        for token_idx in range(num_tokens):
+            key, subkey = jax.random.split(key)
+            expert_indices = jax.random.choice(
+                subkey, num_experts, shape=(tokens_per_expert,), replace=False
+            )
+            routing_map = routing_map.at[token_idx, expert_indices].set(1)
+
+        return routing_map
+
+    # =========================================================================
+    # token_dispatch tests
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+            (64, 16, 512, 3),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_token_dispatch_forward(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test token_dispatch forward pass against reference implementation"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Call high-level API
+        output, row_id_map = token_dispatch(
+            inp, routing_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        # Compare against reference
+        ref_output, _ = reference_permute_with_mask_map(
+            inp, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32])
+    def test_token_dispatch_vjp(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test token_dispatch VJP (backward pass) against reference implementation"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Compute row_id_map once
+        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+
+        # Define loss function that uses token_dispatch
+        def loss_fn(x):
+            output, _ = token_dispatch(
+                x, routing_map, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
+            )
+            return jnp.sum(output**2)
+
+        # Compute gradient using JAX autodiff
+        grad_fn = jax.grad(loss_fn)
+        computed_grad = grad_fn(inp)
+
+        # Compute reference gradient manually:
+        # d_loss/d_inp = unpermute(d_loss/d_output)
+        # where d_loss/d_output = 2 * output
+        output, _ = token_dispatch(
+            inp, routing_map, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+        output_grad = 2 * output
+
+        # Reference backward: unpermute the gradient
+        ref_grad, _ = reference_unpermute_with_mask_map(
+            output_grad, row_id_map, None, None, num_tokens, num_experts, hidden_size
+        )
+
+        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
+        assert_allclose(computed_grad, ref_grad, **tols)
+
+    # =========================================================================
+    # token_dispatch_with_probs tests
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+            (64, 16, 512, 3),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_token_dispatch_with_probs_forward(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test token_dispatch_with_probs forward pass against reference"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data and probs
+        key, inp_key, prob_key = jax.random.split(key, 3)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+        probs = jax.random.uniform(
+            prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
+        )
+
+        # Call high-level API
+        output, permuted_probs, row_id_map = token_dispatch_with_probs(
+            inp, routing_map, probs, None, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        # Compare against reference
+        ref_output, ref_probs = reference_permute_with_mask_map(
+            inp, row_id_map, probs, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+        assert_allclose(permuted_probs, ref_probs, **tols)
+
+    # =========================================================================
+    # token_combine tests
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+            (64, 16, 512, 3),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    @pytest.mark.parametrize("with_merging_probs", [True, False])
+    def test_token_combine_forward(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype, with_merging_probs
+    ):
+        """Test token_combine forward pass against reference implementation"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate row_id_map
+        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+
+        # Generate input data (from expert outputs)
+        key, inp_key, merge_key = jax.random.split(key, 3)
+        inp = jax.random.uniform(
+            inp_key, (num_out_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        if with_merging_probs:
+            merging_probs = jax.random.uniform(
+                merge_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
+            )
+            # Normalize per token
+            merging_probs = merging_probs / (jnp.sum(merging_probs, axis=1, keepdims=True) + 1e-8)
+        else:
+            merging_probs = None
+
+        # Call high-level API
+        output = token_combine(inp, row_id_map, merging_probs, num_tokens, num_experts, hidden_size)
+
+        # Compare against reference
+        ref_output, _ = reference_unpermute_with_mask_map(
+            inp, row_id_map, merging_probs, None, num_tokens, num_experts, hidden_size
+        )
+
+        tols = dtype_tols(dtype)
+        relaxed_tols = dtype_tols(dtype, rtol=tols["rtol"] * 5, atol=tols["atol"] * 5)
+        assert_allclose(output, ref_output, **relaxed_tols)
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32])
+    def test_token_combine_vjp(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test token_combine VJP (backward pass) against reference implementation"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate row_id_map
+        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_out_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Define loss function that uses token_combine (no merging probs)
+        def loss_fn(x):
+            output = token_combine(x, row_id_map, None, num_tokens, num_experts, hidden_size)
+            return jnp.sum(output**2)
+
+        # Compute gradient using JAX autodiff
+        grad_fn = jax.grad(loss_fn)
+        computed_grad = grad_fn(inp)
+
+        # Compute reference gradient manually:
+        # d_loss/d_inp = permute(d_loss/d_output)
+        # where d_loss/d_output = 2 * output
+        output = token_combine(inp, row_id_map, None, num_tokens, num_experts, hidden_size)
+        output_grad = 2 * output
+
+        # Reference backward: permute the gradient
+        ref_grad, _ = reference_permute_with_mask_map(
+            output_grad, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
+        assert_allclose(computed_grad, ref_grad, **tols)
+
+    # =========================================================================
+    # sort_chunks_by_index tests
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_splits,total_tokens,hidden_size",
+        [
+            (4, 128, 256),
+            (8, 256, 512),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_sort_chunks_by_index_forward(self, num_splits, total_tokens, hidden_size, dtype):
+        """Test sort_chunks_by_index forward pass against reference"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate random split sizes
+        key, size_key = jax.random.split(key)
+        split_sizes = jax.random.randint(size_key, (num_splits,), 10, total_tokens // num_splits)
+        split_sizes = split_sizes.at[-1].set(total_tokens - jnp.sum(split_sizes[:-1]))
+
+        # Generate sorted indices
+        key, sort_key = jax.random.split(key)
+        sorted_indices = jax.random.permutation(sort_key, num_splits)
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (total_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Call high-level API
+        output, row_id_map = sort_chunks_by_index(
+            inp, split_sizes, sorted_indices, total_tokens, hidden_size
+        )
+
+        # Compare against reference
+        ref_output, _ = reference_sort_chunks_by_map(
+            inp, row_id_map, None, total_tokens, hidden_size, is_forward=True
+        )
+
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+
+    @pytest.mark.parametrize(
+        "num_splits,total_tokens,hidden_size",
+        [
+            (4, 128, 256),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32])
+    def test_sort_chunks_by_index_vjp(self, num_splits, total_tokens, hidden_size, dtype):
+        """Test sort_chunks_by_index VJP (backward pass) against reference"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate random split sizes
+        key, size_key = jax.random.split(key)
+        split_sizes = jax.random.randint(size_key, (num_splits,), 10, total_tokens // num_splits)
+        split_sizes = split_sizes.at[-1].set(total_tokens - jnp.sum(split_sizes[:-1]))
+
+        # Generate sorted indices
+        key, sort_key = jax.random.split(key)
+        sorted_indices = jax.random.permutation(sort_key, num_splits)
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (total_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Pre-compute row_id_map
+        row_id_map = make_chunk_sort_map(split_sizes, sorted_indices, total_tokens, num_splits)
+
+        # Define loss function
+        def loss_fn(x):
+            output, _ = sort_chunks_by_index(
+                x, split_sizes, sorted_indices, total_tokens, hidden_size
+            )
+            return jnp.sum(output**2)
+
+        # Compute gradient using JAX autodiff
+        grad_fn = jax.grad(loss_fn)
+        computed_grad = grad_fn(inp)
+
+        # Compute reference gradient manually:
+        # d_loss/d_inp = reverse_sort(d_loss/d_output)
+        output, _ = sort_chunks_by_index(
+            inp, split_sizes, sorted_indices, total_tokens, hidden_size
+        )
+        output_grad = 2 * output
+
+        # Reference backward: reverse sort (is_forward=False)
+        ref_grad, _ = reference_sort_chunks_by_map(
+            output_grad, row_id_map, None, total_tokens, hidden_size, is_forward=False
+        )
+
+        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
+        assert_allclose(computed_grad, ref_grad, **tols)
+
+    # =========================================================================
+    # Round-trip tests (token_dispatch -> expert processing -> token_combine)
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+            (64, 16, 512, 3),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_dispatch_combine_roundtrip(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test that token_dispatch followed by token_combine recovers original input"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Create uniform merging probs (equal weight for all routed experts)
+        merging_probs = routing_map.astype(dtype) / jnp.maximum(
+            jnp.sum(routing_map, axis=1, keepdims=True), 1.0
+        )
+
+        # Dispatch tokens to experts
+        dispatched, row_id_map = token_dispatch(
+            inp, routing_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
+        )
+
+        # Combine tokens back (with uniform merging)
+        combined = token_combine(
+            dispatched, row_id_map, merging_probs, num_tokens, num_experts, hidden_size
+        )
+
+        # Compare with original input
+        tols = dtype_tols(dtype)
+        relaxed_tols = dtype_tols(dtype, rtol=tols["rtol"] * 10, atol=tols["atol"] * 10)
+        assert_allclose(combined, inp, **relaxed_tols)
