@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import copy
 from dataclasses import dataclass
 
+
 @dataclass
 class LinearLowbitContext:
     q_forward_input = "Cast2Fp4e2m1"
@@ -10,7 +11,7 @@ class LinearLowbitContext:
     q_backward_weight = "Cast2Fp4e2m1"
     q_backward_outputgrad = "Cast2Fp4e2m1"
 
-        # SVD & low-rank 配置
+    # SVD & low-rank 配置
     activation_lowrank_niter = 2
     backward_lowrank_niter = 2
     q_scalar = 1.0
@@ -28,18 +29,19 @@ class LinearLowbitContext:
     gradacc_broadcast = False
 
     # 动态改变的参数
-    load_history=False
+    load_history = False
     use_metis = True
 
     def __repr__(self) -> str:
         """Pretty full-text representation of LinearLowbitContext."""
+
         def fn_name(f):
             return f.__name__ if callable(f) else repr(f)
 
         # schedules = ", ".join(self.schedule_list.keys())
 
         return (
-            f"LinearLowbitContext(\n"
+            "LinearLowbitContext(\n"
             f"  use_metis={self.use_metis},\n"
             f"  q_forward_weight={fn_name(self.q_forward_weight)},\n"
             f"  q_backward_input={fn_name(self.q_backward_input)},\n"
@@ -61,8 +63,9 @@ class LinearLowbitContext:
             f"  enable_weight_svd={self.enable_weight_svd}\n"
             f"  gradacc_broadcast={self.gradacc_broadcast}\n"
             f"  load_history={self.load_history}\n"
-            f")"
+            ")"
         )
+
     # === 新增：clone 方法 ===
     def clone(self):
         new_obj = self.__class__()  # 创建新实例
@@ -74,12 +77,13 @@ class LinearLowbitContext:
                 setattr(new_obj, k, copy.deepcopy(v))
         return new_obj
 
+
 @contextmanager
 def get_metis_context(**kwargs):
     """
     用于临时修改 LinearLowbitContext 全局配置的上下文管理器。
     进入时按 kwargs 修改，退出时自动恢复。
-    
+
     示例：
         with get_metis_context(q_scalar=0.5, enable_lowbit=False):
             # 临时使用低比特关闭配置
@@ -104,7 +108,6 @@ def get_metis_context(**kwargs):
             setattr(LinearLowbitContext, key, value)
 
 
-
 @contextmanager
 def load_svd_history():
     old_gradacc_status = LinearLowbitContext.load_history
@@ -115,6 +118,7 @@ def load_svd_history():
     finally:
         LinearLowbitContext.load_history = old_gradacc_status
 
+
 @contextmanager
 def no_use_metis():
     old_use_metis_status = LinearLowbitContext.use_metis
@@ -124,4 +128,3 @@ def no_use_metis():
         yield
     finally:
         LinearLowbitContext.use_metis = old_use_metis_status
-    

@@ -75,7 +75,7 @@ from ..cpu_offload import (
     mark_activation_offload,
 )
 from ...debug.pytorch.debug_state import TEDebugState
-from .metis.quant import  MetisSvdFunction
+from .metis.quant import MetisSvdFunction
 from .metis.metis_context import LinearLowbitContext
 
 __all__ = ["Linear"]
@@ -231,7 +231,11 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if isinstance(inputmat, QuantizedTensorStorage):
                     inputmat.update_usage(rowwise_usage=True)
-                elif enable_metis and LinearLowbitContext.use_metis and LinearLowbitContext.enable_activation_svd:
+                elif (
+                    enable_metis
+                    and LinearLowbitContext.use_metis
+                    and LinearLowbitContext.enable_activation_svd
+                ):
                     # ------------------------------------------------------
                     # Forward x SVD
                     # Note: x = U @ S @ V

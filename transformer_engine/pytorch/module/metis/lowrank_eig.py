@@ -14,6 +14,7 @@ from torch import Tensor
 
 from contextlib import contextmanager
 
+
 @contextmanager
 def _autocast_if_needed(enabled: bool, mp_dtype: Optional[torch.dtype]):
     if enabled and mp_dtype in (torch.bfloat16, torch.float16):
@@ -22,17 +23,17 @@ def _autocast_if_needed(enabled: bool, mp_dtype: Optional[torch.dtype]):
     else:
         yield
 
+
 def _mm_proj(A: Tensor, B: Tensor, *, use_mp: bool, mp_dtype: Optional[torch.dtype]) -> Tensor:
     """
     仅用于投影的 GEMM：在 autocast 下做 mm，然后立即转回 A.dtype。
     始终返回与 A 相同 dtype 的张量，避免精度持续下降。
     """
     with _autocast_if_needed(use_mp, mp_dtype):
-        C = torch.mm(A, B)   # 2D mm，性能更好
+        C = torch.mm(A, B)  # 2D mm，性能更好
     if C.dtype != A.dtype:
         C = C.to(A.dtype)
     return C
-
 
 
 def get_approximate_basis(
@@ -107,7 +108,8 @@ def get_approximate_basis(
             X = X - matmul(M, Q)
         Q = torch.linalg.qr(X).Q
     return Q
-    
+
+
 @_no_grad()
 def _cholqr(Y: torch.Tensor) -> torch.Tensor:
     G = Y.mH @ Y
@@ -119,6 +121,7 @@ def _cholqr(Y: torch.Tensor) -> torch.Tensor:
         return T.mH
     except RuntimeError:
         return torch.linalg.qr(Y, mode="reduced").Q
+
 
 def get_approximate_basis_new(
     A: Tensor,
@@ -151,16 +154,15 @@ def get_approximate_basis_new(
     # 合并 power-iteration：每轮只正交一次
     # 经典：Q ← orth( A (A^H Q) )，若有 M：A→(A-M)
     for _ in range(niter):
-        Z = matmul(A.mH, Q)                 # Z = A^H Q
+        Z = matmul(A.mH, Q)  # Z = A^H Q
         if M is not None:
-            Z = Z - matmul(M.mH, Q)         # Z -= M^H Q
-        Y = matmul(A, Z)                    # Y = A Z
+            Z = Z - matmul(M.mH, Q)  # Z -= M^H Q
+        Y = matmul(A, Z)  # Y = A Z
         if M is not None:
-            Y = Y - matmul(M, Z)            # Y -= M Z
-        Q = _cholqr(Y)                      # 仅在每轮末尾做一次正交
+            Y = Y - matmul(M, Z)  # Y -= M Z
+        Q = _cholqr(Y)  # 仅在每轮末尾做一次正交
 
     return Q
-
 
 
 def svd_lowrank(
@@ -221,9 +223,7 @@ def svd_lowrank(
         if not set(map(type, tensor_ops)).issubset(
             (torch.Tensor, type(None))
         ) and has_torch_function(tensor_ops):
-            return handle_torch_function(
-                svd_lowrank, tensor_ops, A, q=q, niter=niter, M=M
-            )
+            return handle_torch_function(svd_lowrank, tensor_ops, A, q=q, niter=niter, M=M)
     return _svd_lowrank(A, q=q, niter=niter, M=M)
 
 
@@ -261,9 +261,8 @@ def _svd_lowrank(
     return U, S, V
 
 
-
-
 # 复用你现有的 get_approximate_basis(A, q, niter, M)
+
 
 def svd_lowrank_eig(
     A: Tensor,
@@ -278,9 +277,12 @@ def svd_lowrank_eig(
     """
     if not torch.jit.is_scripting():
         tensor_ops = (A, M)
-        if not set(map(type, tensor_ops)).issubset((torch.Tensor, type(None))) and has_torch_function(tensor_ops):
+        if not set(map(type, tensor_ops)).issubset(
+            (torch.Tensor, type(None))
+        ) and has_torch_function(tensor_ops):
             return handle_torch_function(svd_lowrank_eig, tensor_ops, A, q=q, niter=niter, M=M)
     return _svd_lowrank_eig(A, q=q, niter=niter, M=M)
+
 
 def _svd_lowrank_eig(
     A: Tensor,
@@ -310,34 +312,34 @@ def _svd_lowrank_eig(
     Q = get_approximate_basis_new(A, q, niter=niter, M=M)  # (m, q)
 
     # 2) B = Q^H A  （2D mm + 仅在必要时 contiguous）
-    QH = Q.mH if Q.is_contiguous() else Q.mH.contiguous()   # (q, m)
-    A_c = A if A.is_contiguous() else A.contiguous()        # (m, n)
-    B = torch.mm(QH, A_c)                                   # (q, n)
+    QH = Q.mH if Q.is_contiguous() else Q.mH.contiguous()  # (q, m)
+    A_c = A if A.is_contiguous() else A.contiguous()  # (m, n)
+    B = torch.mm(QH, A_c)  # (q, n)
     if M is not None:
         Mc = M if M.is_contiguous() else M.contiguous()
-        B.sub_(torch.mm(QH, Mc))                            # B -= Q^H M
+        B.sub_(torch.mm(QH, Mc))  # B -= Q^H M
 
     # 3) G = B B^H；eigh（升序）→ S = sqrt(λ)，降序 & 同步列重排
-    G = torch.mm(B, B.mH)                                   # (q, q)
-    evals, Ue = torch.linalg.eigh(G)                        # evals 升序, Ue:(q,q)
-    
+    G = torch.mm(B, B.mH)  # (q, q)
+    evals, Ue = torch.linalg.eigh(G)  # evals 升序, Ue:(q,q)
+
     # 就地 clamp+sqrt，复用 evals 存 S
     evals.clamp_min_(0.0).sqrt_()
-    S = evals                                               # (q,)
+    S = evals  # (q,)
 
     # 降序重排（q 小，这一步分配/拷贝很便宜）
-    S = S.flip(-1)                                          # (q,)
-    Ue = Ue.flip(-1)                                        # (q,q) 仅翻列，与 S 对齐
+    S = S.flip(-1)  # (q,)
+    Ue = Ue.flip(-1)  # (q,q) 仅翻列，与 S 对齐
 
     # 4) U = Q Ue
-    U = torch.mm(Q, Ue)                                     # (m, q)
+    U = torch.mm(Q, Ue)  # (m, q)
 
     # 5) Ue 预缩放列（阈值保护）→ V = B^H @ Ue_scaled
     finfo = torch.finfo(A.real.dtype) if A.is_complex() else torch.finfo(A.dtype)
-    tol = finfo.eps * q * S.amax()                          # 标量
+    tol = finfo.eps * q * S.amax()  # 标量
     Sinv = torch.where(S > tol, S.reciprocal(), torch.zeros_like(S))
-    Ue.mul_(Sinv.unsqueeze(0))                               # 就地列缩放
-    V = torch.mm(B.mH, Ue)                                   # (n, q)
+    Ue.mul_(Sinv.unsqueeze(0))  # 就地列缩放
+    V = torch.mm(B.mH, Ue)  # (n, q)
 
     if flipped:
         U, V = V, U
@@ -348,8 +350,6 @@ def _svd_lowrank_eig(
 
 # ===== 新的 Two-Graph 图算子：与 test 脚本逻辑一致 =====
 from typing import Optional, Tuple, Dict
-
-
 
 
 class _TwoGraphEigSVD_Niter1:
@@ -371,24 +371,24 @@ class _TwoGraphEigSVD_Niter1:
         self.device, self.dtype = device, dtype
 
         # 持久缓冲：固定地址/stride 以便在图内复用
-        self.A = torch.empty(m, n, device=device, dtype=dtype)     # in
-        self.R = torch.empty(n, q, device=device, dtype=dtype)     # in（每轮随机采样，拷进来）
-        self.Y = torch.empty(m, q, device=device, dtype=dtype)     # tmp
-        self.Z = torch.empty(n, q, device=device, dtype=dtype)     # tmp
-        self.Q = torch.empty(m, q, device=device, dtype=dtype)     # out(front)
-        self.B = torch.empty(q, n, device=device, dtype=dtype)     # out(front)
-        self.G = torch.empty(q, q, device=device, dtype=dtype)     # out(front)
+        self.A = torch.empty(m, n, device=device, dtype=dtype)  # in
+        self.R = torch.empty(n, q, device=device, dtype=dtype)  # in（每轮随机采样，拷进来）
+        self.Y = torch.empty(m, q, device=device, dtype=dtype)  # tmp
+        self.Z = torch.empty(n, q, device=device, dtype=dtype)  # tmp
+        self.Q = torch.empty(m, q, device=device, dtype=dtype)  # out(front)
+        self.B = torch.empty(q, n, device=device, dtype=dtype)  # out(front)
+        self.G = torch.empty(q, q, device=device, dtype=dtype)  # out(front)
 
-        self.Ue   = torch.empty(q, q, device=device, dtype=dtype)  # in(back)
-        self.S    = torch.empty(q,   device=device, dtype=dtype)   # in(back)
-        self.Sinv = torch.empty(q,   device=device, dtype=dtype)   # in(back)
+        self.Ue = torch.empty(q, q, device=device, dtype=dtype)  # in(back)
+        self.S = torch.empty(q, device=device, dtype=dtype)  # in(back)
+        self.Sinv = torch.empty(q, device=device, dtype=dtype)  # in(back)
 
-        self.U = torch.empty(m, q, device=device, dtype=dtype)     # out(back)
-        self.V = torch.empty(n, q, device=device, dtype=dtype)     # out(back)
+        self.U = torch.empty(m, q, device=device, dtype=dtype)  # out(back)
+        self.V = torch.empty(n, q, device=device, dtype=dtype)  # out(back)
 
         # 两段图 + 专用捕获流（避免 cuSOLVER 在 capture 中首用）
         self._g_front = torch.cuda.CUDAGraph()
-        self._g_back  = torch.cuda.CUDAGraph()
+        self._g_back = torch.cuda.CUDAGraph()
         self._cap_stream = torch.cuda.Stream()
         self._captured = False
 
@@ -412,7 +412,8 @@ class _TwoGraphEigSVD_Niter1:
         # —— 关键：在“同一条私有流”上做完整预热 + 显式 cuSOLVER 预热 ——
         with torch.cuda.stream(self._cap_stream):
             # 预热 GEMM 路径
-            self.A.zero_(); self.R.zero_()
+            self.A.zero_()
+            self.R.zero_()
 
             # RF-Init 预热
             torch.mm(self.A, self.R, out=self.Y)
@@ -428,7 +429,9 @@ class _TwoGraphEigSVD_Niter1:
             torch.mm(self.B, self.B.mH, out=self.G)
 
             # Back 预热
-            self.Ue.zero_(); self.S.fill_(1.0); self.Sinv.fill_(1.0)
+            self.Ue.zero_()
+            self.S.fill_(1.0)
+            self.Sinv.fill_(1.0)
             torch.mm(self.Q, self.Ue, out=self.U)
             self.Ue.mul_(self.Sinv.unsqueeze(0))
             torch.mm(self.B.mH, self.Ue, out=self.V)
@@ -454,14 +457,14 @@ class _TwoGraphEigSVD_Niter1:
                 self._cholqr_inline_into_Q()  # Q1
 
                 # Build
-                torch.mm(self.Q.mH, self.A, out=self.B)   # B = Q^H A
-                torch.mm(self.B, self.B.mH, out=self.G)   # G = B B^H
+                torch.mm(self.Q.mH, self.A, out=self.B)  # B = Q^H A
+                torch.mm(self.B, self.B.mH, out=self.G)  # G = B B^H
 
             # back: U、缩放、V
             with torch.cuda.graph(self._g_back, pool=pool):
-                torch.mm(self.Q, self.Ue, out=self.U)         # U = Q Ue
-                self.Ue.mul_(self.Sinv.unsqueeze(0))          # Ue *= Sinv[None,:]
-                torch.mm(self.B.mH, self.Ue, out=self.V)      # V = B^H Ue
+                torch.mm(self.Q, self.Ue, out=self.U)  # U = Q Ue
+                self.Ue.mul_(self.Sinv.unsqueeze(0))  # Ue *= Sinv[None,:]
+                torch.mm(self.B.mH, self.Ue, out=self.V)  # V = B^H Ue
 
         self._captured = True
 
@@ -478,7 +481,9 @@ class _TwoGraphEigSVD_Niter1:
         # —— 原来是：evals, Ue_local = torch.linalg.eigh(self.G)
         Gh = (self.G + (self.G.mH if self.G.is_complex() else self.G.T)) * 0.5
         tau = torch.finfo(Gh.dtype).eps * torch.diagonal(Gh, 0, -2, -1).abs().mean()
-        evals, Ue_local = torch.linalg.eigh(Gh + tau * torch.eye(self.q, dtype=Gh.dtype, device=Gh.device))
+        evals, Ue_local = torch.linalg.eigh(
+            Gh + tau * torch.eye(self.q, dtype=Gh.dtype, device=Gh.device)
+        )
         evals.clamp_min_(0.0).sqrt_()
         S = evals.flip(-1)
         Ue_local = Ue_local.flip(-1)
@@ -503,7 +508,9 @@ class _TwoGraphEigSVD_Niter1:
 _ENGINE_CACHE_TWO_GRAPH: Dict[tuple, _TwoGraphEigSVD_Niter1] = {}
 
 
-def _get_two_graph_engine(m: int, n: int, q: int, dev: torch.device, dt: torch.dtype) -> _TwoGraphEigSVD_Niter1:
+def _get_two_graph_engine(
+    m: int, n: int, q: int, dev: torch.device, dt: torch.dtype
+) -> _TwoGraphEigSVD_Niter1:
     key = (dev.index if dev.type == "cuda" else -1, str(dt), int(m), int(n), int(q))
     eng = _ENGINE_CACHE_TWO_GRAPH.get(key)
     if eng is None:
@@ -555,6 +562,7 @@ def svd_lowrank_eig_graph(
 
 # ======== END: Two-Graph niter=1 with graph-safe cholQR ========
 
+
 # ======== BEGIN: Two-Graph niter=1 Pipelined with async CPU eig ========
 class _TwoGraphEigSVD_Niter1_Pipelined:
     def __init__(self, m: int, n: int, q: int, device: torch.device, dtype: torch.dtype):
@@ -562,25 +570,27 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
         self.device, self.dtype = device, dtype
 
         # device buffers (persisted) - 与原实现一致
-        self.A = torch.empty(m, n, device=device, dtype=dtype)     # in
-        self.R = torch.empty(n, q, device=device, dtype=dtype)     # in（每轮随机采样，拷进来）
-        self.Y = torch.empty(m, q, device=device, dtype=dtype)     # tmp
-        self.Z = torch.empty(n, q, device=device, dtype=dtype)     # tmp
-        self.Q = torch.empty(m, q, device=device, dtype=dtype)     # out(front)
-        self.B = torch.empty(q, n, device=device, dtype=dtype)     # out(front)
-        self.G = torch.empty(q, q, device=device, dtype=dtype)     # out(front)
-        self.G_stable = torch.finfo(self.G.dtype).eps * torch.eye(self.G.size(-1), device=self.G.device, dtype=self.G.dtype)
+        self.A = torch.empty(m, n, device=device, dtype=dtype)  # in
+        self.R = torch.empty(n, q, device=device, dtype=dtype)  # in（每轮随机采样，拷进来）
+        self.Y = torch.empty(m, q, device=device, dtype=dtype)  # tmp
+        self.Z = torch.empty(n, q, device=device, dtype=dtype)  # tmp
+        self.Q = torch.empty(m, q, device=device, dtype=dtype)  # out(front)
+        self.B = torch.empty(q, n, device=device, dtype=dtype)  # out(front)
+        self.G = torch.empty(q, q, device=device, dtype=dtype)  # out(front)
+        self.G_stable = torch.finfo(self.G.dtype).eps * torch.eye(
+            self.G.size(-1), device=self.G.device, dtype=self.G.dtype
+        )
 
-        self.Ue   = torch.empty(q, q, device=device, dtype=dtype)  # in(back)
-        self.S    = torch.empty(q,   device=device, dtype=dtype)   # in(back)
-        self.Sinv = torch.empty(q,   device=device, dtype=dtype)   # in(back)
+        self.Ue = torch.empty(q, q, device=device, dtype=dtype)  # in(back)
+        self.S = torch.empty(q, device=device, dtype=dtype)  # in(back)
+        self.Sinv = torch.empty(q, device=device, dtype=dtype)  # in(back)
 
-        self.U = torch.empty(m, q, device=device, dtype=dtype)     # out(back)
-        self.V = torch.empty(n, q, device=device, dtype=dtype)     # out(back)
+        self.U = torch.empty(m, q, device=device, dtype=dtype)  # out(back)
+        self.V = torch.empty(n, q, device=device, dtype=dtype)  # out(back)
 
         # CUDA Graphs + stream + capture flag (跟你原始实现一致)
         self._g_front = torch.cuda.CUDAGraph()
-        self._g_back  = torch.cuda.CUDAGraph()
+        self._g_back = torch.cuda.CUDAGraph()
         self._cap_stream = torch.cuda.Stream()
         self._captured = False
 
@@ -598,17 +608,17 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
         # L, _info = torch.linalg.cholesky_ex(self.G + self.G_stable, upper=False)
         # T = torch.linalg.solve_triangular(L, self.Y.mH, upper=False)
         # self.Q.copy_(T.mH)
-        
+
         # torch.mm(self.Y.mH, self.Y, out=self.G)
         # L, _info = torch.linalg.cholesky_ex(self.G + self.G_stable, upper=True)
         # T = torch.linalg.solve_triangular(L, self.Y, upper=True, left=False)
         # self.Q.copy_(T)
-        
+
         torch.mm(self.Y.mH, self.Y, out=self.G)
         self.G.add_(self.G_stable)
         L, _info = torch.linalg.cholesky_ex(self.G, upper=True)
         torch.linalg.solve_triangular(L, self.Y, upper=True, left=False, out=self.Q)
-        
+
         # torch.addmm(self.G_stable, self.Y.T, self.Y, out=self.G)
         # torch.linalg.cholesky_ex(self.G, upper=True, out=(self.Ue, self._info))
         # torch.linalg.solve_triangular(self.Ue, self.Y, upper=True, left=False, out=self.Q)
@@ -621,7 +631,8 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
 
         # 预热：同原实现，在专用流上做 cuSOLVER / kernel 预热
         with torch.cuda.stream(self._cap_stream):
-            self.A.zero_(); self.R.zero_()
+            self.A.zero_()
+            self.R.zero_()
             # RF-Init 预热
             torch.mm(self.A, self.R, out=self.Y)
             self._cholqr_inline_into_Q()
@@ -633,7 +644,9 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
             torch.mm(self.Q.mH, self.A, out=self.B)
             torch.mm(self.B, self.B.mH, out=self.G)
             # Back 预热
-            self.Ue.zero_(); self.S.fill_(1.0); self.Sinv.fill_(1.0)
+            self.Ue.zero_()
+            self.S.fill_(1.0)
+            self.Sinv.fill_(1.0)
             torch.mm(self.Q, self.Ue, out=self.U)
             self.Ue.mul_(self.Sinv.unsqueeze(0))
             torch.mm(self.B.mH, self.Ue, out=self.V)
@@ -667,9 +680,9 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
     def _cpu_eigh_and_process(self, G_cpu: torch.Tensor):
         # G_cpu is pinned CPU tensor; the device->host copy may still be in flight:
         # reading it will implicitly wait until DMA completes.
-        
+
         # evals, Ue = torch.linalg.eigh(G_cpu)   # CPU LAPACK
-        
+
         # Gh = (G_cpu + (G_cpu.mH if self.G.is_complex() else G_cpu.T)) * 0.5
         # tau = torch.finfo(Gh.dtype).eps * torch.diagonal(Gh, 0, -2, -1).abs().mean()
         try:
@@ -751,11 +764,15 @@ class _TwoGraphEigSVD_Niter1_Pipelined:
         """
         self.start_front_and_submit(A)
         return self.finish_back_and_replay()
-    
+
+
 # —— Pipelined Engine 缓存 ——（device, dtype, m, n, q）→ 引擎
 _ENGINE_CACHE_TWO_GRAPH_PIPELINED: Dict[tuple, _TwoGraphEigSVD_Niter1_Pipelined] = {}
 
-def _get_two_graph_pipelined_engine(m: int, n: int, q: int, dev: torch.device, dt: torch.dtype) -> _TwoGraphEigSVD_Niter1_Pipelined:
+
+def _get_two_graph_pipelined_engine(
+    m: int, n: int, q: int, dev: torch.device, dt: torch.dtype
+) -> _TwoGraphEigSVD_Niter1_Pipelined:
     key = (dev.index if dev.type == "cuda" else -1, str(dt), int(m), int(n), int(q))
     eng = _ENGINE_CACHE_TWO_GRAPH_PIPELINED.get(key)
     if eng is None:
@@ -763,6 +780,7 @@ def _get_two_graph_pipelined_engine(m: int, n: int, q: int, dev: torch.device, d
         eng.capture()
         _ENGINE_CACHE_TWO_GRAPH_PIPELINED[key] = eng
     return eng
+
 
 @_no_grad()
 def svd_lowrank_eig_graph_pipelined(
@@ -802,7 +820,9 @@ def svd_lowrank_eig_graph_pipelined(
         U, V = V, U
     return U, S, V
 
+
 # ======== END: Two-Graph niter=1 Pipelined with async CPU eig ========
+
 
 def pca_lowrank(
     A: Tensor,
@@ -872,9 +892,7 @@ def pca_lowrank(
 
     if not torch.jit.is_scripting():
         if type(A) is not torch.Tensor and has_torch_function((A,)):
-            return handle_torch_function(
-                pca_lowrank, (A,), A, q=q, center=center, niter=niter
-            )
+            return handle_torch_function(pca_lowrank, (A,), A, q=q, center=center, niter=niter)
 
     (m, n) = A.shape[-2:]
 
@@ -905,9 +923,7 @@ def pca_lowrank(
             device=column_indices.device,
         )
         indices[0] = column_indices
-        C_t = torch.sparse_coo_tensor(
-            indices, c.values(), (n, 1), dtype=dtype, device=A.device
-        )
+        C_t = torch.sparse_coo_tensor(indices, c.values(), (n, 1), dtype=dtype, device=A.device)
 
         ones_m1_t = torch.ones(A.shape[:-2] + (1, m), dtype=dtype, device=A.device)
         M = torch.sparse.mm(C_t, ones_m1_t).mT

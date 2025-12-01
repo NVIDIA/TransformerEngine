@@ -2,19 +2,26 @@
 #
 # See LICENSE for license information.
 import sys
-sys.path.append('/home/wty/workspace/TransformerEngine')
+
+sys.path.append("/home/wty/workspace/TransformerEngine")
 
 import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
+
 # from transformer_engine.pytorch.experimental import quantization_nvfp4
 from transformer_engine.pytorch.experimental.quantization_nvfp4 import NVFP4QuantizerRef
 
 
 from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.module import LinearLowbitContext,get_metis_context, load_svd_history
+from transformer_engine.pytorch.module import (
+    LinearLowbitContext,
+    get_metis_context,
+    load_svd_history,
+)
 import contextlib
+
 # import debugpy
 has_init = False
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -138,7 +145,7 @@ def reset_rng_states():
     torch.cuda.manual_seed(seed)
 
 
-def cuda_time_call_backward(fn,x,dx,times=1, **kwargs):
+def cuda_time_call_backward(fn, x, dx, times=1, **kwargs):
     """Run a callable on CUDA and measure elapsed time in milliseconds.
 
     Args:
@@ -152,21 +159,21 @@ def cuda_time_call_backward(fn,x,dx,times=1, **kwargs):
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     # Record start, run, record end, synchronize, compute elapsed
-    dummy_tensor = torch.rand(4096,4096,device="cuda")
-    dummy_matmul = torch.matmul(dummy_tensor,dummy_tensor)
+    dummy_tensor = torch.rand(4096, 4096, device="cuda")
+    dummy_matmul = torch.matmul(dummy_tensor, dummy_tensor)
     start.record()
     for _ in range(times):
-        result = fn.backward(x, retain_graph=True,**kwargs)
+        result = fn.backward(x, retain_graph=True, **kwargs)
         x.grad = None
         dx.grad = None
     # Ensure any CUDA kernels launched by fn are recorded before ending
     end.record()
     torch.cuda.synchronize()
-    elapsed = start.elapsed_time(end)/times
+    elapsed = start.elapsed_time(end) / times
     return result, elapsed
 
 
-def cuda_time_call(fn,*args,times=20, **kwargs):
+def cuda_time_call(fn, *args, times=20, **kwargs):
     """Run a callable on CUDA and measure elapsed time in milliseconds.
 
     Args:
@@ -180,15 +187,15 @@ def cuda_time_call(fn,*args,times=20, **kwargs):
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     # Record start, run, record end, synchronize, compute elapsed
-    dummy_tensor = torch.rand(4096,4096,device="cuda")
-    dummy_matmul = torch.matmul(dummy_tensor,dummy_tensor)
+    dummy_tensor = torch.rand(4096, 4096, device="cuda")
+    dummy_matmul = torch.matmul(dummy_tensor, dummy_tensor)
     start.record()
     for _ in range(times):
         result = fn(*args, **kwargs)
     # Ensure any CUDA kernels launched by fn are recorded before ending
     end.record()
     torch.cuda.synchronize()
-    elapsed = start.elapsed_time(end)/times
+    elapsed = start.elapsed_time(end) / times
     return result, elapsed
 
 
@@ -243,7 +250,7 @@ def check_nvfp4_module_versus_reference(
         )
     else:
         raise ValueError(f"Unsupported module class: {module_class}")
-    print("native_module=",native_module)
+    print("native_module=", native_module)
     # Create reference module with same weights
     reset_rng_states()
 
@@ -299,12 +306,11 @@ def check_nvfp4_module_versus_reference(
     ref_outputs = []
     baseline_outputs = []
     x_shape = (batch_size, seq_len, in_features)
-    print(f"x shape= {x_shape}, weight shape={(in_features,out_features)}"+"="*50)
+    print(f"x shape= {x_shape}, weight shape={(in_features,out_features)}" + "=" * 50)
     for step in range(num_steps):
         torch.manual_seed(1234 + step)
         torch.cuda.manual_seed(1234 + step)
 
-        
         x_val = torch.normal(mean=0.0, std=1.0, size=x_shape, dtype=x_dtype, device=device)
         x_native = x_val.clone().detach().requires_grad_(True)
         x_ref = x_val.clone().detach().requires_grad_(True)
@@ -319,14 +325,14 @@ def check_nvfp4_module_versus_reference(
         grad_output_baseline = grad_output_val.clone().detach()
 
         metis_param = {
-            "activation_lowrank_niter":0,
-            "backward_lowrank_niter":0,
-            "activation_lowrank_svd":min(in_features//64,64),
-            "backward_lowrank_svd":min(in_features//64,64),
-            "forward_svd_rank":min(in_features//64,64),
+            "activation_lowrank_niter": 0,
+            "backward_lowrank_niter": 0,
+            "activation_lowrank_svd": min(in_features // 64, 64),
+            "backward_lowrank_svd": min(in_features // 64, 64),
+            "forward_svd_rank": min(in_features // 64, 64),
             "enable_activation_svd": True,
             "enable_backward_svd": True,
-            "gradacc_broadcast":True
+            "gradacc_broadcast": True,
         }
         # "backward_broadcast_dim":0,
         metis_gradacc_broadcast_ctx = load_svd_history()
@@ -338,28 +344,51 @@ def check_nvfp4_module_versus_reference(
         # Native forward/backward
         with metis_gradacc_broadcast_ctx:
             # print("traing context==",LinearLowbitContext())
-            with te.autocast(enabled=True, recipe=GetRecipes.nvfp4_vanilla()), get_metis_context(**metis_param):
+            with te.autocast(enabled=True, recipe=GetRecipes.nvfp4_vanilla()), get_metis_context(
+                **metis_param
+            ):
                 # enable weight cache by giving is_first_microbatch
                 y_native, metis_forward_time = cuda_time_call(
                     native_module, x_native, is_first_microbatch=(step == 0)
                 )
         # Backward timing for native
-        _, metis_backward_time = cuda_time_call_backward(y_native, grad_output_metis,native_module.linear_residual.weight)
+        _, metis_backward_time = cuda_time_call_backward(
+            y_native, grad_output_metis, native_module.linear_residual.weight
+        )
 
         # Reference forward/backward
         y_ref = None
         with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_ref, ref_forward_time = cuda_time_call(ref_module, x_ref)
         # Backward timing for reference
-        _, ref_backward_time = cuda_time_call_backward(y_ref,grad_output_nvfp4,ref_module.weight)
+        _, ref_backward_time = cuda_time_call_backward(y_ref, grad_output_nvfp4, ref_module.weight)
 
-        baseline,baseline_time = cuda_time_call(baseline_module,x_base)
-        _,baseline_backward_time = cuda_time_call_backward(baseline,grad_output_baseline,baseline_module.weight)
-        print(f"="*20+f" Step {step} time summary begin, load_history == {load_history} "+"="*20)
-        print(f"baseline forward time (ms): {baseline_time}, backward time (ms): {baseline_backward_time}")
-        print(f"metis forward time (ms): ", metis_forward_time, ", backward time (ms): ", metis_backward_time)
-        print(f"nvfp4 reference forward time (ms): ", ref_forward_time, ", backward time (ms): ", ref_backward_time)
-        print(f"="*20+f" Step {step} time summary end "+"="*20)
+        baseline, baseline_time = cuda_time_call(baseline_module, x_base)
+        _, baseline_backward_time = cuda_time_call_backward(
+            baseline, grad_output_baseline, baseline_module.weight
+        )
+        print(
+            f"=" * 20
+            + f" Step {step} time summary begin, load_history == {load_history} "
+            + "=" * 20
+        )
+        print(
+            f"baseline forward time (ms): {baseline_time}, backward time (ms):"
+            f" {baseline_backward_time}"
+        )
+        print(
+            f"metis forward time (ms): ",
+            metis_forward_time,
+            ", backward time (ms): ",
+            metis_backward_time,
+        )
+        print(
+            f"nvfp4 reference forward time (ms): ",
+            ref_forward_time,
+            ", backward time (ms): ",
+            ref_backward_time,
+        )
+        print(f"=" * 20 + f" Step {step} time summary end " + "=" * 20)
         # exit()
         # Store results
         # native_outputs.append(
@@ -422,7 +451,7 @@ def check_nvfp4_module_versus_reference(
         x_ref = None
         x_base = None
 
-    mse_loss = torch.nn.MSELoss(reduction='mean')
+    mse_loss = torch.nn.MSELoss(reduction="mean")
     use_mse = True
     # Compare results across all steps
     # for step in range(num_steps):
@@ -439,7 +468,7 @@ def check_nvfp4_module_versus_reference(
     #         print(f"weight_grad MSE in nv fp4 pass:", mse_loss(ref_out["weight_grad"] , baseline_out["weight_grad"]).item())
     #     # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
     #     # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
-        
+
     #         if bias and native_out["bias_grad"] is not None and ref_out["bias_grad"] is not None:
     #             print(f"bias_grad MSE in metis fp4 pass:", mse_loss(native_out["bias_grad"] , baseline_out["bias_grad"]).item())
     #             print(f"bias_grad MSE in nv fp4 pass:", mse_loss(ref_out["bias_grad"] , baseline_out["bias_grad"]).item())
@@ -452,7 +481,7 @@ def check_nvfp4_module_versus_reference(
     #         print(f"weight_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["weight_grad"] - baseline_out["weight_grad"])).item())
     #     # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
     #     # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
-        
+
     #         if bias and native_out["bias_grad"] is not None and ref_out["bias_grad"] is not None:
     #             print(f"bias_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["bias_grad"] - baseline_out["bias_grad"])).item())
     #             print(f"bias_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["bias_grad"] - baseline_out["bias_grad"])).item())
@@ -516,7 +545,7 @@ def check_nvfp4_module_versus_reference(
 @pytest.mark.parametrize("bias", [False], ids=["no_bias"])
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("num_steps", [1, 10], ids=["single_step", "multi_step"])
-@pytest.mark.parametrize("with_rht", [False], ids=[ "no_rht"])
+@pytest.mark.parametrize("with_rht", [False], ids=["no_rht"])
 @pytest.mark.parametrize(
     "with_2d_quantization", [True, False], ids=["with_2d_quantization", "no_2d_quantization"]
 )

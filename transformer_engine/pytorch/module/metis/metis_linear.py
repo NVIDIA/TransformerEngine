@@ -20,6 +20,7 @@ from .metis_context import LinearLowbitContext
 
 __all__ = ["MetisLinear"]
 
+
 class MetisLinear(TransformerEngineBaseModule):
     """Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
@@ -137,6 +138,7 @@ class MetisLinear(TransformerEngineBaseModule):
     ) -> None:
         # print("current LinearLowbitContext=", LinearLowbitContext())
         from transformer_engine.pytorch.module.linear import Linear  # avoid circular import
+
         super().__init__()
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -177,10 +179,24 @@ class MetisLinear(TransformerEngineBaseModule):
         # print("Metis linear==",LinearLowbitContext())
         if LinearLowbitContext.enable_lowbit and not LinearLowbitContext.enable_weight_svd:
             # only quantize activation
-            self.linear_residual = Linear(in_features,out_features,bias=bias,enable_metis=True,init_method=init_method,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(
+                in_features,
+                out_features,
+                bias=bias,
+                enable_metis=True,
+                init_method=init_method,
+                **self.commonMetisSvdFunction_args,
+            )
         else:
             # only quantize weight
-            self.linear_residual = Linear(in_features,out_features,bias=bias,enable_metis=False,init_method=init_method,**self.commonMetisSvdFunction_args)
+            self.linear_residual = Linear(
+                in_features,
+                out_features,
+                bias=bias,
+                enable_metis=False,
+                init_method=init_method,
+                **self.commonMetisSvdFunction_args,
+            )
         # debugpy.breakpoint()
         if LinearLowbitContext.enable_weight_svd:
 
@@ -191,12 +207,19 @@ class MetisLinear(TransformerEngineBaseModule):
     @torch.no_grad()
     def initialize_weight_svd_decomposition(self):
         from transformer_engine.pytorch.module.linear import Linear  # avoid circular import
+
         device = self.linear_residual.weight.device
         weight_fp32 = self.linear_residual.weight.float()
         u, s, v = torch.linalg.svd(weight_fp32, full_matrices=False)
-        u = u.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
-        s = s.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
-        v = v.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
+        u = u.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
+        s = s.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
+        v = v.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
         if self.use_bias:
             bias = self.linear_residual.bias.to(device=device)
         else:
@@ -205,113 +228,128 @@ class MetisLinear(TransformerEngineBaseModule):
         # forward svd low rank
         if LinearLowbitContext.forward_svd_rank > 0:
             self.linear_residual = Linear(
-                self.linear_residual.weight.shape[1], 
+                self.linear_residual.weight.shape[1],
                 self.linear_residual.weight.shape[0],
-                bias=True if not bias is None else False, 
-                **self.commonMetisSvdFunction_args
+                bias=True if not bias is None else False,
+                **self.commonMetisSvdFunction_args,
             )
-                # device=device
+            # device=device
             if not bias is None:
                 self.linear_residual.bias.copy_(bias)
             self.linear_residual.weight.copy_(
-                w - \
-                u[:,LinearLowbitContext.forward_svd_rank:] @ \
-                torch.diag(s[LinearLowbitContext.forward_svd_rank:]) @ \
-                v[LinearLowbitContext.forward_svd_rank:]
-                )
+                w
+                - u[:, LinearLowbitContext.forward_svd_rank :]
+                @ torch.diag(s[LinearLowbitContext.forward_svd_rank :])
+                @ v[LinearLowbitContext.forward_svd_rank :]
+            )
         self.weight_svd_has_initialized = True
-        return u,s,v,bias
+        return u, s, v, bias
 
     @torch.no_grad()
     def update_weight_svd_decomposition(self):
         assert self.weight_svd_has_initialized
-        weight_fp32 = (self.ulinear.weight @ torch.diag(self.s) @  self.vlinear.weight).float()
-        u, s, v = torch.linalg.svd(
-            weight_fp32, full_matrices=False)
-        u = u.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
-        s = s.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
-        v = v.to(device = self.linear_residual.weight.get_device(),dtype=self.linear_residual.weight.dtype)
+        weight_fp32 = (self.ulinear.weight @ torch.diag(self.s) @ self.vlinear.weight).float()
+        u, s, v = torch.linalg.svd(weight_fp32, full_matrices=False)
+        u = u.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
+        s = s.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
+        v = v.to(
+            device=self.linear_residual.weight.get_device(), dtype=self.linear_residual.weight.dtype
+        )
         bias = self.ulinear.bias
-        return u,s,v,bias
+        return u, s, v, bias
 
     @staticmethod
     @torch.no_grad()
-    def init_tensor_with_data(source_tensor:torch.Tensor, weight_tensor:torch.Tensor):
+    def init_tensor_with_data(source_tensor: torch.Tensor, weight_tensor: torch.Tensor):
         weight_tensor.copy_(source_tensor.detach())
 
     def weight_svd_decomposition(self):
         print("start weight_svd_decomposition")
-        from transformer_engine.pytorch.module.linear import Linear # avoid circular import
+        from transformer_engine.pytorch.module.linear import Linear  # avoid circular import
+
         if not self.weight_svd_has_initialized:
-          u,s,v,bias = self.initialize_weight_svd_decomposition()
+            u, s, v, bias = self.initialize_weight_svd_decomposition()
         else:
-          u,s,v,bias = self.update_weight_svd_decomposition()
-        if LinearLowbitContext.enable_lowbit: 
+            u, s, v, bias = self.update_weight_svd_decomposition()
+        if LinearLowbitContext.enable_lowbit:
             # nv fp8
             # ******************************************************************
             # self.ss = u @ s @ u.transpose()
             # with fp8_model_init(enabled=True):
             #     self.uvlinear = te.Linear(
-            #         self.linear_residual.weight.shape[1], 
-            #         self.linear_residual.weight.shape[0], 
-            #         init_method=partial(BitLinear._init_telinear, u @ v), 
-            #         bias=False, 
+            #         self.linear_residual.weight.shape[1],
+            #         self.linear_residual.weight.shape[0],
+            #         init_method=partial(BitLinear._init_telinear, u @ v),
+            #         bias=False,
             #         device=self.device
             #     )
             if LinearLowbitContext.forward_svd_rank > 0:
                 self.vlinear = Linear(
-                    v.shape[1], 
-                    LinearLowbitContext.forward_svd_rank, # v.shape[0] // 30, 
-                    init_method=partial(MetisLinear.init_tensor_with_data,v[: LinearLowbitContext.forward_svd_rank, :]),
-                    bias = False,
-                    enable_metis=True,
-                    **self.commonMetisSvdFunction_args
-                    )
-                self.ulinear = Linear(
-                    LinearLowbitContext.forward_svd_rank, # u.shape[1] // 30,
-                    u.shape[0], 
+                    v.shape[1],
+                    LinearLowbitContext.forward_svd_rank,  # v.shape[0] // 30,
+                    init_method=partial(
+                        MetisLinear.init_tensor_with_data,
+                        v[: LinearLowbitContext.forward_svd_rank, :],
+                    ),
                     bias=False,
-                    init_method=partial(MetisLinear.init_tensor_with_data,u[:, : LinearLowbitContext.forward_svd_rank]), 
+                    enable_metis=True,
+                    **self.commonMetisSvdFunction_args,
+                )
+                self.ulinear = Linear(
+                    LinearLowbitContext.forward_svd_rank,  # u.shape[1] // 30,
+                    u.shape[0],
+                    bias=False,
+                    init_method=partial(
+                        MetisLinear.init_tensor_with_data,
+                        u[:, : LinearLowbitContext.forward_svd_rank],
+                    ),
                     **self.commonMetisSvdFunction_args,
                 )
                 # self.vlinear.weight.copy_(v[: LinearLowbitContext.forward_svd_rank, :])
                 # self.ulinear.weight.copy_(u[:, : LinearLowbitContext.forward_svd_rank])
             else:
                 self.vlinear = Linear(
-                    v.shape[1], 
-                    v.shape[0], # v.shape[0] // 30, 
-                    init_method=partial(MetisLinear.init_tensor_with_data,v),
+                    v.shape[1],
+                    v.shape[0],  # v.shape[0] // 30,
+                    init_method=partial(MetisLinear.init_tensor_with_data, v),
                     bias=False,
                     enable_metis=True,
                     **self.commonMetisSvdFunction_args,
-                    )
+                )
                 self.ulinear = Linear(
-                    u.shape[1], # u.shape[1] // 30, 
-                    u.shape[0], 
-                    init_method=partial(MetisLinear.init_tensor_with_data,u),
+                    u.shape[1],  # u.shape[1] // 30,
+                    u.shape[0],
+                    init_method=partial(MetisLinear.init_tensor_with_data, u),
                     bias=False,
                     **self.commonMetisSvdFunction_args,
                 )
                 # self.vlinear.weight.copy_(v)
                 # self.ulinear.weight.copy_(u)
 
-
             # forward svd low rank
-            if LinearLowbitContext.forward_svd_rank > 0 and bias :
+            if LinearLowbitContext.forward_svd_rank > 0 and bias:
                 self.ulinear.bias.copy_(bias)
         else:
-            self.vlinear = Linear(
-                v.shape[1], 
-                v.shape[0], 
-                init_method=partial(MetisLinear.init_tensor_with_data,v),
-                bias=False,
-                **self.commonMetisSvdFunction_args),
+            self.vlinear = (
+                Linear(
+                    v.shape[1],
+                    v.shape[0],
+                    init_method=partial(MetisLinear.init_tensor_with_data, v),
+                    bias=False,
+                    **self.commonMetisSvdFunction_args,
+                ),
+            )
             self.ulinear = Linear(
                 u.shape[1],
                 u.shape[0],
                 bias=False,
-                init_method=partial(MetisLinear.init_tensor_with_data,u),
-                **self.commonMetisSvdFunction_args)
+                init_method=partial(MetisLinear.init_tensor_with_data, u),
+                **self.commonMetisSvdFunction_args,
+            )
 
             # self.vlinear.weight.data = v.data
             # self.ulinear.weight.data = u.data
@@ -319,33 +357,31 @@ class MetisLinear(TransformerEngineBaseModule):
                 self.ulinear.bias.data = self.linear_residual.bias.data
                 #     self.linear_residual.bias.clone().cuda(self.linear_residual.weight.get_device())
                 # )
-        
+
         if LinearLowbitContext.forward_svd_rank > 0:
             self.register_parameter(
-                "s", 
-                torch.nn.Parameter(s[:LinearLowbitContext.forward_svd_rank]),
+                "s",
+                torch.nn.Parameter(s[: LinearLowbitContext.forward_svd_rank]),
             )
         else:
             self.register_parameter(
-                "s", 
+                "s",
                 torch.nn.Parameter(s),
             )
             # self.linear_residual = None
-    def forward(self,
-        inp: torch.Tensor,
-        **kvargs
-        ) -> torch.Tensor:
-        
+
+    def forward(self, inp: torch.Tensor, **kvargs) -> torch.Tensor:
+
         if LinearLowbitContext.enable_weight_svd:
-            y = self.vlinear(inp,**kvargs)
+            y = self.vlinear(inp, **kvargs)
             y = torch.mul(self.s, y)
-            y = self.ulinear(y,**kvargs)
+            y = self.ulinear(y, **kvargs)
             if LinearLowbitContext.forward_svd_rank > 0:
-                y += self.linear_residual(inp,**kvargs)
-            
+                y += self.linear_residual(inp, **kvargs)
+
         else:
-            y = self.linear_residual(inp,**kvargs)
-        
+            y = self.linear_residual(inp, **kvargs)
+
         return y
 
     def __repr__(self):
@@ -373,14 +409,34 @@ class MetisLinear(TransformerEngineBaseModule):
 
             # 主分支（线性残差）
             if hasattr(self, "linear_residual"):
-                lines.append(indent(f"linear_residual: {repr(self.linear_residual)} # enable_metis={self.linear_residual.enable_metis}\n", 6))
+                lines.append(
+                    indent(
+                        f"linear_residual: {repr(self.linear_residual)} #"
+                        f" enable_metis={self.linear_residual.enable_metis}\n",
+                        6,
+                    )
+                )
 
             # SVD 分支
             if hasattr(self, "vlinear"):
-                lines.append(indent(f"vlinear: {repr(self.vlinear)} # enable_metis={self.vlinear.enable_metis}\n", 6))
+                lines.append(
+                    indent(
+                        f"vlinear: {repr(self.vlinear)} #"
+                        f" enable_metis={self.vlinear.enable_metis}\n",
+                        6,
+                    )
+                )
             if hasattr(self, "ulinear"):
-                lines.append(indent(f"ulinear: {repr(self.ulinear)} # enable_metis={self.ulinear.enable_metis}\n", 6))
-            lines.append(indent(f"s: Tensor(shape={tuple(self.s.shape)}, dtype={self.s.dtype})\n", 6))
+                lines.append(
+                    indent(
+                        f"ulinear: {repr(self.ulinear)} #"
+                        f" enable_metis={self.ulinear.enable_metis}\n",
+                        6,
+                    )
+                )
+            lines.append(
+                indent(f"s: Tensor(shape={tuple(self.s.shape)}, dtype={self.s.dtype})\n", 6)
+            )
 
             return "".join(lines) + ")"
 
@@ -388,6 +444,11 @@ class MetisLinear(TransformerEngineBaseModule):
         else:
             lines = [header + ",\n"]
             # lines.append("  submodules:\n")
-            lines.append("      linear_residual: " + repr(self.linear_residual) + f"# enable_metis={self.linear_residual.enable_metis}" + "\n")
+            lines.append(
+                "      linear_residual: "
+                + repr(self.linear_residual)
+                + f"# enable_metis={self.linear_residual.enable_metis}"
+                + "\n"
+            )
             lines.append(")")
             return "".join(lines)

@@ -15,6 +15,7 @@ def get_torch_svd_lowrank():
         return torch.svd_lowrank
     else:
         from torch.linalg import svd_lowrank
+
         return svd_lowrank
 
 
@@ -45,8 +46,7 @@ def time_fn(label, fn, *args, warmup=2, runs=5, device="cuda"):
         times.append(elapsed_ms)
 
     avg_ms = sum(times) / len(times)
-    print(f"{label}: mean = {avg_ms:.3f} ms, "
-          f"min = {min(times):.3f} ms, max = {max(times):.3f} ms")
+    print(f"{label}: mean = {avg_ms:.3f} ms, min = {min(times):.3f} ms, max = {max(times):.3f} ms")
 
 
 def main():
@@ -54,8 +54,8 @@ def main():
     print(f"Using device: {device}")
 
     # ----------------- 构造 (512, 2048, 2048) 然后前两维合并 -----------------
-    B, M, N = 1, 2048, 2048   # 原始三维
-    rank = 32                   # 低秩 q / rank
+    B, M, N = 1, 2048, 2048  # 原始三维
+    rank = 32  # 低秩 q / rank
     dtype = torch.float32
 
     # A3: (512, 2048, 2048)
@@ -105,7 +105,9 @@ def main():
 
     if device.type == "cuda":
         time_fn("svd_lowrank_eig_graph", fn_svd_lowrank_eig_graph, device=dev_str)
-        time_fn("svd_lowrank_eig_graph_pipelined", fn_svd_lowrank_eig_graph_pipelined, device=dev_str)
+        time_fn(
+            "svd_lowrank_eig_graph_pipelined", fn_svd_lowrank_eig_graph_pipelined, device=dev_str
+        )
     else:
         print("\n[Skip] CUDA graph variants require GPU (device != cuda).")
 

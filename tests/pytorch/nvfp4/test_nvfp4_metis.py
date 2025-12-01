@@ -8,8 +8,13 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.experimental import quantization_nvfp4
 from transformer_engine.pytorch.experimental import utils
-from transformer_engine.pytorch.module import LinearLowbitContext,get_metis_context, load_svd_history
+from transformer_engine.pytorch.module import (
+    LinearLowbitContext,
+    get_metis_context,
+    load_svd_history,
+)
 import contextlib
+
 # import debugpy
 has_init = False
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -196,7 +201,7 @@ def check_nvfp4_module_versus_reference(
         )
     else:
         raise ValueError(f"Unsupported module class: {module_class}")
-    print("native_module=",native_module)
+    print("native_module=", native_module)
     # Create reference module with same weights
     reset_rng_states()
 
@@ -252,12 +257,11 @@ def check_nvfp4_module_versus_reference(
     ref_outputs = []
     baseline_outputs = []
     x_shape = (batch_size, seq_len, in_features)
-    print(f"x shape= {x_shape}, weight shape={(in_features,out_features)}"+"="*50)
+    print(f"x shape= {x_shape}, weight shape={(in_features,out_features)}" + "=" * 50)
     for step in range(num_steps):
         torch.manual_seed(1234 + step)
         torch.cuda.manual_seed(1234 + step)
 
-        
         x_val = torch.normal(mean=0.0, std=1.0, size=x_shape, dtype=x_dtype, device=device)
         x_native = x_val.clone().detach().requires_grad_(True)
         x_ref = x_val.clone().detach().requires_grad_(True)
@@ -272,13 +276,13 @@ def check_nvfp4_module_versus_reference(
         grad_output_baseline = grad_output_val.clone().detach()
 
         metis_param = {
-            "activation_lowrank_niter":2,
-            "activation_lowrank_svd":max(in_features//8,64),
-            "backward_lowrank_svd":max(in_features//8,64),
-            "forward_svd_rank":max(in_features//8,64),
+            "activation_lowrank_niter": 2,
+            "activation_lowrank_svd": max(in_features // 8, 64),
+            "backward_lowrank_svd": max(in_features // 8, 64),
+            "forward_svd_rank": max(in_features // 8, 64),
             "enable_activation_svd": True,
             "enable_backward_svd": True,
-            "gradacc_broadcast":True
+            "gradacc_broadcast": True,
         }
         metis_gradacc_broadcast_ctx = load_svd_history()
         load_history = True
@@ -302,15 +306,32 @@ def check_nvfp4_module_versus_reference(
         with te.autocast(enabled=True, recipe=nvfp4_recipe):
             y_ref, ref_forward_time = cuda_time_call(ref_module, x_ref)
         # Backward timing for reference
-        _, ref_backward_time = cuda_time_call(y_ref.backward,grad_output_nvfp4)
+        _, ref_backward_time = cuda_time_call(y_ref.backward, grad_output_nvfp4)
 
-        baseline,baseline_time = cuda_time_call(baseline_module,x_base)
-        _,baseline_backward_time = cuda_time_call(baseline.backward,grad_output_baseline)
-        print(f"="*20+f" Step {step} time summary begin, load_history == {load_history} "+"="*20)
-        print(f"baseline forward time (ms): {baseline_time}, backward time (ms): {baseline_backward_time}")
-        print(f"metis forward time (ms): ", metis_forward_time, ", backward time (ms): ", metis_backward_time)
-        print(f"nvfp4 reference forward time (ms): ", ref_forward_time, ", backward time (ms): ", ref_backward_time)
-        print(f"="*20+f" Step {step} time summary end "+"="*20)
+        baseline, baseline_time = cuda_time_call(baseline_module, x_base)
+        _, baseline_backward_time = cuda_time_call(baseline.backward, grad_output_baseline)
+        print(
+            f"=" * 20
+            + f" Step {step} time summary begin, load_history == {load_history} "
+            + "=" * 20
+        )
+        print(
+            f"baseline forward time (ms): {baseline_time}, backward time (ms):"
+            f" {baseline_backward_time}"
+        )
+        print(
+            f"metis forward time (ms): ",
+            metis_forward_time,
+            ", backward time (ms): ",
+            metis_backward_time,
+        )
+        print(
+            f"nvfp4 reference forward time (ms): ",
+            ref_forward_time,
+            ", backward time (ms): ",
+            ref_backward_time,
+        )
+        print(f"=" * 20 + f" Step {step} time summary end " + "=" * 20)
         # exit()
         # Store results
         native_outputs.append(
@@ -368,41 +389,93 @@ def check_nvfp4_module_versus_reference(
                 # "output_grad": (grad_output_baseline.grad.detach().clone() if grad_output_baseline is not None else None)
             }
         )
-    mse_loss = torch.nn.MSELoss(reduction='mean')
+    mse_loss = torch.nn.MSELoss(reduction="mean")
     use_mse = True
     # Compare results across all steps
     for step in range(num_steps):
         native_out = native_outputs[step]
         ref_out = ref_outputs[step]
         baseline_out = baseline_outputs[step]
-        print(f"="*20+f" Step {step} result begin"+"="*20)
+        print(f"=" * 20 + f" Step {step} result begin" + "=" * 20)
         if use_mse:
-            print(f"output MSE in metis fp4 pass load_svd_history: {step%2!=0} :", mse_loss(native_out["output"], baseline_out["output"]).item())
-            print(f"output MSE in nv fp4 pass:", mse_loss(ref_out["output"] , baseline_out["output"]).item())
-            print(f"input_grad MSE in metis fp4 pass load_svd_history: {step%2!=0}:", mse_loss(native_out["input_grad"] , baseline_out["input_grad"]).item())
-            print(f"input_grad MSE  in nv fp4 pass:", mse_loss(ref_out["input_grad"] , baseline_out["input_grad"]).item())
-            print(f"weight_grad MSE in metis fp4 pass  load_svd_history: {step%2!=0}:", mse_loss(native_out["weight_grad"] , baseline_out["weight_grad"]).item())
-            print(f"weight_grad MSE in nv fp4 pass:", mse_loss(ref_out["weight_grad"] , baseline_out["weight_grad"]).item())
-        # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
-        # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
-        
+            print(
+                f"output MSE in metis fp4 pass load_svd_history: {step%2!=0} :",
+                mse_loss(native_out["output"], baseline_out["output"]).item(),
+            )
+            print(
+                f"output MSE in nv fp4 pass:",
+                mse_loss(ref_out["output"], baseline_out["output"]).item(),
+            )
+            print(
+                f"input_grad MSE in metis fp4 pass load_svd_history: {step%2!=0}:",
+                mse_loss(native_out["input_grad"], baseline_out["input_grad"]).item(),
+            )
+            print(
+                f"input_grad MSE  in nv fp4 pass:",
+                mse_loss(ref_out["input_grad"], baseline_out["input_grad"]).item(),
+            )
+            print(
+                f"weight_grad MSE in metis fp4 pass  load_svd_history: {step%2!=0}:",
+                mse_loss(native_out["weight_grad"], baseline_out["weight_grad"]).item(),
+            )
+            print(
+                f"weight_grad MSE in nv fp4 pass:",
+                mse_loss(ref_out["weight_grad"], baseline_out["weight_grad"]).item(),
+            )
+            # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
+            # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
+
             if bias and native_out["bias_grad"] is not None and ref_out["bias_grad"] is not None:
-                print(f"bias_grad MSE in metis fp4 pass:", mse_loss(native_out["bias_grad"] , baseline_out["bias_grad"]).item())
-                print(f"bias_grad MSE in nv fp4 pass:", mse_loss(ref_out["bias_grad"] , baseline_out["bias_grad"]).item())
+                print(
+                    f"bias_grad MSE in metis fp4 pass:",
+                    mse_loss(native_out["bias_grad"], baseline_out["bias_grad"]).item(),
+                )
+                print(
+                    f"bias_grad MSE in nv fp4 pass:",
+                    mse_loss(ref_out["bias_grad"], baseline_out["bias_grad"]).item(),
+                )
         else:
-            print(f"output mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output"] - baseline_out["output"])).item())
-            print(f"output mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output"] - baseline_out["output"])).item())
-            print(f"input_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["input_grad"] - baseline_out["input_grad"])).item())
-            print(f"input_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["input_grad"] - baseline_out["input_grad"])).item())
-            print(f"weight_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["weight_grad"] - baseline_out["weight_grad"])).item())
-            print(f"weight_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["weight_grad"] - baseline_out["weight_grad"])).item())
-        # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
-        # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
-        
+            print(
+                f"output mean error in metis fp4 pass:",
+                torch.mean(torch.abs(native_out["output"] - baseline_out["output"])).item(),
+            )
+            print(
+                f"output mean error in nv fp4 pass:",
+                torch.mean(torch.abs(ref_out["output"] - baseline_out["output"])).item(),
+            )
+            print(
+                f"input_grad mean error in metis fp4 pass:",
+                torch.mean(torch.abs(native_out["input_grad"] - baseline_out["input_grad"])).item(),
+            )
+            print(
+                f"input_grad mean error in nv fp4 pass:",
+                torch.mean(torch.abs(ref_out["input_grad"] - baseline_out["input_grad"])).item(),
+            )
+            print(
+                f"weight_grad mean error in metis fp4 pass:",
+                torch.mean(
+                    torch.abs(native_out["weight_grad"] - baseline_out["weight_grad"])
+                ).item(),
+            )
+            print(
+                f"weight_grad mean error in nv fp4 pass:",
+                torch.mean(torch.abs(ref_out["weight_grad"] - baseline_out["weight_grad"])).item(),
+            )
+            # print(f"output_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["output_grad"] - baseline_out["output_grad"])).item())
+            # print(f"output_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["output_grad"] - baseline_out["output_grad"])).item())
+
             if bias and native_out["bias_grad"] is not None and ref_out["bias_grad"] is not None:
-                print(f"bias_grad mean error in metis fp4 pass:", torch.mean(torch.abs(native_out["bias_grad"] - baseline_out["bias_grad"])).item())
-                print(f"bias_grad mean error in nv fp4 pass:", torch.mean(torch.abs(ref_out["bias_grad"] - baseline_out["bias_grad"])).item())
-        print(f"="*20+f" Step {step} result end"+"="*20)
+                print(
+                    f"bias_grad mean error in metis fp4 pass:",
+                    torch.mean(
+                        torch.abs(native_out["bias_grad"] - baseline_out["bias_grad"])
+                    ).item(),
+                )
+                print(
+                    f"bias_grad mean error in nv fp4 pass:",
+                    torch.mean(torch.abs(ref_out["bias_grad"] - baseline_out["bias_grad"])).item(),
+                )
+        print(f"=" * 20 + f" Step {step} result end" + "=" * 20)
         # # Compare outputs
         # torch.testing.assert_close(
         #     native_out["output"],
@@ -462,7 +535,7 @@ def check_nvfp4_module_versus_reference(
 @pytest.mark.parametrize("bias", [False], ids=["no_bias"])
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("num_steps", [1, 3], ids=["single_step", "multi_step"])
-@pytest.mark.parametrize("with_rht", [False], ids=[ "no_rht"])
+@pytest.mark.parametrize("with_rht", [False], ids=["no_rht"])
 @pytest.mark.parametrize(
     "with_2d_quantization", [True, False], ids=["with_2d_quantization", "no_2d_quantization"]
 )
