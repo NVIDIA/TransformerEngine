@@ -92,6 +92,9 @@ def _make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    pre_warmup_hook: Optional[Callable] = None,
+    post_warmup_hook: Optional[Callable] = None,
+    init_chunk_handler: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -407,6 +410,8 @@ def _make_graphed_callables(
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
+                if pre_warmup_hook is not None:
+                    pre_warmup_hook()
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
@@ -458,6 +463,8 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
+                if post_warmup_hook is not None:
+                    post_warmup_hook()
             # The following code is added specifically for MCore's special requirements,
             # aimed at preventing warmup from altering the control flow.
             for module in func.modules():
@@ -481,6 +488,8 @@ def _make_graphed_callables(
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
+                if init_chunk_handler is not None:
+                    init_chunk_handler(vp_stage=c_id-1)
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
                     func = callables[_prefix_num_layers[m_chunk] + l_no]
@@ -679,14 +688,15 @@ def _make_graphed_callables(
             """Autograd function for graph replay."""
 
             @staticmethod
-            def forward(ctx, skip_fp8_weight_update, *inputs):
+            def forward(ctx, skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *inputs):
                 # pylint: disable=missing-function-docstring
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 if ctx.is_first_module and skip_fp8_weight_update is not None:
                     FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(skip_fp8_weight_update)
-
+                ctx.cuda_graph_stream = cuda_graph_stream
+                ctx.cuda_graph_event = cuda_graph_event
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
                     if (
@@ -696,7 +706,10 @@ def _make_graphed_callables(
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
-                fwd_graph.replay()
+                cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                with cuda_graph_stream:
+                    fwd_graph.replay()
+                torch.cuda.current_stream().wait_event(cuda_graph_event)
                 assert isinstance(static_outputs, tuple)
                 return tuple(o.detach() for o in static_outputs)
 
@@ -713,7 +726,10 @@ def _make_graphed_callables(
                         # incoming grad is already in the right place
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
-                bwd_graph.replay()
+                ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                with ctx.cuda_graph_stream:
+                    bwd_graph.replay()
+                torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
 
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
@@ -721,7 +737,7 @@ def _make_graphed_callables(
 
                 # Input args that didn't require grad expect a None gradient.
                 assert isinstance(static_grad_inputs, tuple)
-                return (None,) + tuple(
+                return (None, None, None) + tuple(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )
 
@@ -736,6 +752,12 @@ def _make_graphed_callables(
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
 
+            assert "cuda_graph_stream" in user_kwargs
+            assert "cuda_graph_event" in user_kwargs
+            cuda_graph_stream = user_kwargs["cuda_graph_stream"]
+            cuda_graph_event = user_kwargs["cuda_graph_event"]
+            user_kwargs.pop("cuda_graph_stream")
+            user_kwargs.pop("cuda_graph_event")
             # Check that required kwargs are provided
             for key in kwargs_keys:
                 if key not in user_kwargs:
@@ -751,7 +773,7 @@ def _make_graphed_callables(
             flatten_user_args, _ = _tree_flatten(user_args)
             flatten_user_kwargs, _ = _tree_flatten([user_kwargs[key] for key in kwargs_keys])
             func_args = tuple(flatten_user_args) + tuple(flatten_user_kwargs) + module_params
-            out = Graphed.apply(skip_fp8_weight_update, *func_args)
+            out = Graphed.apply(skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *func_args)
             return _tree_unflatten(out, output_unflatten_spec)
 
         return functionalized
@@ -927,6 +949,9 @@ def make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    pre_warmup_hook: Optional[Callable] = None,
+    post_warmup_hook: Optional[Callable] = None,
+    init_chunk_handler: Optional[Callable] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -1151,6 +1176,9 @@ def make_graphed_callables(
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+        pre_warmup_hook=pre_warmup_hook,
+        post_warmup_hook=post_warmup_hook,
+        init_chunk_handler=init_chunk_handler,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
