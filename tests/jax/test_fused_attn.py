@@ -230,7 +230,6 @@ def make_mask(
 @jax.jit
 def get_seqlens_and_offsets(segment_ids):
     batch, max_seqlen = segment_ids.shape
-    # TODO: should this be max_seqlen + 1 ?
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
     seqlens = seqlens_with_zero[..., 1:]
