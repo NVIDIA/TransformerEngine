@@ -177,6 +177,7 @@ def permute_with_mask_map(
     permuted_probs : Optional[jnp.ndarray]
         Permuted probabilities if probs was provided, None otherwise.
     """
+
     # one block per token, multiple blocks for hidden dimension
     def grid_fn(meta):
         return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
@@ -225,8 +226,8 @@ def permute_with_mask_map(
         inp,
         row_id_map,
         probs,
-        dummy_scale, # scale
-        dummy_permuted_scale, # permuted_scale
+        dummy_scale,  # scale
+        dummy_permuted_scale,  # permuted_scale
         0,
         row_id_stride_token,
         row_id_stride_expert,
