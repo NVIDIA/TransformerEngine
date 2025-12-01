@@ -489,7 +489,7 @@ def _make_graphed_callables(
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 if init_chunk_handler is not None:
-                    init_chunk_handler(vp_stage=c_id-1)
+                    init_chunk_handler(vp_stage=c_id - 1)
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
                     func = callables[_prefix_num_layers[m_chunk] + l_no]
@@ -773,7 +773,9 @@ def _make_graphed_callables(
             flatten_user_args, _ = _tree_flatten(user_args)
             flatten_user_kwargs, _ = _tree_flatten([user_kwargs[key] for key in kwargs_keys])
             func_args = tuple(flatten_user_args) + tuple(flatten_user_kwargs) + module_params
-            out = Graphed.apply(skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *func_args)
+            out = Graphed.apply(
+                skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *func_args
+            )
             return _tree_unflatten(out, output_unflatten_spec)
 
         return functionalized
