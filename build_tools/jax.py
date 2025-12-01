@@ -3,15 +3,14 @@
 # See LICENSE for license information.
 
 """JAX related extensions."""
-from importlib import metadata
-from typing import List
 import os
-
 from pathlib import Path
 from packaging import version
+
 import setuptools
 
-from .utils import cuda_version, get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
+from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
+from typing import List
 
 
 def install_requirements() -> List[str]:
