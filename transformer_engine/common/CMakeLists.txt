@@ -125,7 +125,6 @@ list(APPEND transformer_engine_cpp_sources
 list(APPEND transformer_engine_cuda_sources
      common.cu
      multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
@@ -163,21 +162,22 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
-     recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
-     gemm/cutlass_grouped_gemm.cu
-     cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
      activation/swiglu.cu
-     transpose/quantize_transpose_square_blockwise.cu
-     transpose/quantize_transpose_vector_blockwise_fp4.cu
-     hadamard_transform/hadamard_transform.cu
+     cast/cast.cu
+     gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
-     hadamard_transform/hadamard_transform_cast_fusion.cu)
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
