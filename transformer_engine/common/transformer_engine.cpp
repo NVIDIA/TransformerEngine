@@ -526,7 +526,6 @@ class GroupedTensorAllocator {
       NVTEGroupedTensor ret = reinterpret_cast<NVTEGroupedTensor>(index);
       free_list.pop_back();
       // 1-based indexing - fully reinitialize the tensor to avoid stale data
-      memory[index - 1].clear();
       memory[index - 1].scaling_mode = mode;
       memory[index - 1].num_tensors = num_tensors;
       memory[index - 1].logical_shape = logical_shape;
