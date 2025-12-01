@@ -471,6 +471,11 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
   };
 }
 
+int64_t nvte_comm_gemm_ctx_get_nranks(NVTECommGemmCtx* ctx) {
+  NVTE_API_CALL(nvte_comm_gemm_ctx_get_nranks);
+  return ctx->nranks;
+}
+
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_destroy);
   nvshmemx_sync_all_on_stream(ctx->stream.get());

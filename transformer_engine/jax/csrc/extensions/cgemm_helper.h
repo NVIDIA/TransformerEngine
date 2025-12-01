@@ -158,25 +158,17 @@ class CommunicatorHandler {
 };
 
 struct CollectiveGemmPlan {
-  std::unique_ptr<NVTECommGemmCtx> cublasmp_context;
+  NVTECommGemmCtx* cublasmp_context;
   std::unique_ptr<CommOverlapCore> userbuffers_context;
 
-  CollectiveGemmPlan(void *ctx) {
-    if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
-      cublasmp_context.reset(reinterpret_cast<NVTECommGemmCtx *>(ctx));
-    } else {
-      userbuffers_context.reset(reinterpret_cast<CommOverlapCore *>(ctx));
-    }
-  }
+  CollectiveGemmPlan(void *ctx);
 
-  void *get_context() {
-    if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
-      return reinterpret_cast<void *>(cublasmp_context.get());
-    } else {
-      return reinterpret_cast<void *>(userbuffers_context.get());
-    }
-  }
-}
+  CollectiveGemmPlan(ncclComm_t comm, int nranks, int rank);
+
+  ~CollectiveGemmPlan();
+
+  void *get_context();
+};
 
 // Plan registry for caching collective GEMM executors
 class CollectiveGemmPlanRegistry {

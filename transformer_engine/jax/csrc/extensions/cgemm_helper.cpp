@@ -132,18 +132,14 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
   // Allocate device memory for barrier operations
-  NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&handler._device_barrier), sizeof(int)));
 
   handler._initialize = true;
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-  if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_cublasmp_context();
-  } else {
-    std::vector<size_t> buffer_shape{1, 1};
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_userbuffers_context(
-        buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
-  }
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_plan(
+      {1, 1}, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER
+  );
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -159,6 +155,34 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
 int GetCgemmNumMaxStreams() {
   auto &config = CgemmConfig::get();
   return config.num_max_streams;
+}
+
+CollectiveGemmPlan::CollectiveGemmPlan(void *ctx) {
+  NVTE_CHECK(getenv<bool>("NVTE_WITH_CUBLASMP", false) == false,
+             "Internal TE/JAX error: CollectiveGemmPlan() initializer called for Userbuffers ",
+             "backend when NVTE_WITH_CUBLASMP=1.");
+  userbuffers_context.reset(reinterpret_cast<CommOverlapCore *>(ctx));
+}
+
+CollectiveGemmPlan::CollectiveGemmPlan(ncclComm_t comm, int nranks, int rank) {
+  NVTE_CHECK(getenv<bool>("NVTE_WITH_CUBLASMP", false) == true,
+             "Internal TE/JAX error: CollectiveGemmPlan() initializer called for cuBlasMp ",
+             "backend when NVTE_WITH_CUBLASMP=0.");
+  cublasmp_context = nvte_comm_gemm_ctx_create(comm, nranks, rank);
+}
+
+CollectiveGemmPlan::~CollectiveGemmPlan() {
+  if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+    nvte_comm_gemm_ctx_destroy(cublasmp_context);
+  }
+}
+
+void *CollectiveGemmPlan::get_context() {
+  if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
+    return reinterpret_cast<void *>(cublasmp_context);
+  } else {
+    return reinterpret_cast<void *>(userbuffers_context.get());
+  }
 }
 
 CollectiveGemmPlan *CollectiveGemmPlanRegistry::get_plan(
@@ -196,12 +220,11 @@ CollectiveGemmPlan *CollectiveGemmPlanRegistry::get_plan(
 
   std::unique_ptr<CollectiveGemmPlan> plan;
   if (getenv<bool>("NVTE_WITH_CUBLASMP", false)) {
-    auto ctx = nvte_comm_gemm_ctx_create(comm_handler.get_comm_for_current_device(),
-                                         comm_handler.num_total_devices,
-                                         comm_handler.get_global_rank());
-    plan = std::make_unique<CollectiveGemmPlan>(reinterpret_cast<void *>(ctx));
+    plan = std::make_unique<CollectiveGemmPlan>(comm_handler.get_comm_for_current_device(),
+                                                comm_handler.num_total_devices,
+                                                comm_handler.get_global_rank());
   } else {
-    auto ctx = CommOverlapP2PBase(
+    auto ctx = new CommOverlapP2PBase(
         buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
         comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
         comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,

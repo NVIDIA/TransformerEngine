@@ -179,15 +179,29 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
-    def test_te_bf16_all_gather_with_dp(self):
+    def test_te_bf16_all_gather_with_dp_userbuffers(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
-    def test_te_bf16_reduce_scatter_with_dp(self):
+    def test_te_bf16_reduce_scatter_with_dp_userbuffers(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
+    
+    def test_te_bf16_all_gather_with_dp_cublasmp(self):
+        """Test Collective GEMM with AllGather"""
+        os.environ["NVTE_WITH_CUBLASMP"] = "1"
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+        os.environ.pop("NVTE_WITH_CUBLASMP", None)
+
+    def test_te_bf16_reduce_scatter_with_dp_cublasmp(self):
+        """Test Collective GEMM with ReduceScatter"""
+        os.environ["NVTE_WITH_CUBLASMP"] = "1"
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
+        os.environ.pop("NVTE_WITH_CUBLASMP", None)
 
 
 if __name__ == "__main__":

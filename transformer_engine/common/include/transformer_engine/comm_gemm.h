@@ -52,6 +52,13 @@ enum NVTECommGemmAlgoType {
  */
 NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank);
 
+/*! \brief Get number of ranks from comm-gemm context.
+ *
+ *  \param[in]  ctx  Context.
+ *  \return     Number of ranks.
+ */
+int64_t nvte_comm_gemm_ctx_get_nranks(NVTECommGemmCtx* ctx);
+
 /*! \brief Destroy a comm-gemm context.
  *
  *  \param[in]  ctx  Context to destroy.

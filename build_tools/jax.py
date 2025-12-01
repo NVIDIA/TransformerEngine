@@ -3,14 +3,15 @@
 # See LICENSE for license information.
 
 """JAX related extensions."""
+from importlib import metadata
+from typing import List
 import os
+
 from pathlib import Path
 from packaging import version
-
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
-from typing import List
+from .utils import cuda_version, get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
 
 
 def install_requirements() -> List[str]:
@@ -81,6 +82,10 @@ def setup_jax_extension(
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
+            f"nvidia-cublasmp-cu{cuda_version()[0]}"
+        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
+        include_dirs.append(Path(cublasmp_dir) / "include")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
