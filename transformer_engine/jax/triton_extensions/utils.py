@@ -284,8 +284,6 @@ def triton_call_lowering(
             input_output_aliases_with_sizes,
         )
 
-        # Skip the single kernel call creation below
-        use_autotuned = True
     else:
         # Regular kernel: compile single config
         kernel = compile_triton(
@@ -298,11 +296,7 @@ def triton_call_lowering(
             compute_capability,
             enable_fp_fusion=False,
         )
-        use_autotuned = False
 
-    # Create kernel call (if not already created by autotuner)
-    if not use_autotuned:
-        # Create kernel parameters for single config
         kernel_params = []
         for aval in list(ctx.avals_in) + list(ctx.avals_out):
             kernel_params.append(gpu_triton.create_array_parameter(0, 16))
