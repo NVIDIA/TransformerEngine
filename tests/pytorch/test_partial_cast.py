@@ -120,6 +120,8 @@ def run_one_case(n, h, w, start_offset):
 
 
 def test_mxfp8_scaling_partial_cast():
+    torch.cuda.manual_seed(1234)
+
     run_one_case(3, 32, 64, 31)
     run_one_case(64 * 64 - 2, 64, 64, 1)
     run_one_case(16384 * 6144, 16384, 6144, 0)
@@ -127,9 +129,3 @@ def test_mxfp8_scaling_partial_cast():
     run_one_case(131072, 768, 256, 0)
     run_one_case(65536, 768, 256, 131072)
     run_one_case(98304, 128, 768, 0)
-
-
-if __name__ == "__main__":
-
-    torch.cuda.manual_seed(1234)
-    test_mxfp8_scaling_partial_cast()
