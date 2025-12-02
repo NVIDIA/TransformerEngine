@@ -708,13 +708,13 @@ class TestMismatchingQKVSharding:
         kv_segment_ids_spec,
     ):
         query = jax.random.uniform(
-            jax.random.PRNGKey(0), (batch_size, num_heads, seq_len, head_dim), dtype=jnp.bfloat16
+            jax.random.PRNGKey(0), (batch_size, seq_len, num_heads, head_dim), dtype=jnp.bfloat16
         )
         key = jax.random.uniform(
-            jax.random.PRNGKey(1), (batch_size, num_heads, seq_len, head_dim), dtype=jnp.bfloat16
+            jax.random.PRNGKey(1), (batch_size, seq_len, num_heads, head_dim), dtype=jnp.bfloat16
         )
         value = jax.random.uniform(
-            jax.random.PRNGKey(2), (batch_size, num_heads, seq_len, head_dim), dtype=jnp.bfloat16
+            jax.random.PRNGKey(2), (batch_size, seq_len, num_heads, head_dim), dtype=jnp.bfloat16
         )
         q_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
         kv_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
@@ -760,11 +760,11 @@ class TestMismatchingQKVSharding:
 
         return dpa_layer.apply(
             {},
-            query.swapaxes(1, 2).astype(jax.numpy.bfloat16),
-            key.swapaxes(1, 2).astype(jax.numpy.bfloat16),
-            value.swapaxes(1, 2).astype(jax.numpy.bfloat16),
+            query.astype(jax.numpy.bfloat16),
+            key.astype(jax.numpy.bfloat16),
+            value.astype(jax.numpy.bfloat16),
             segment_ids,
-        ).swapaxes(1, 2)
+        )
 
     def _impl(
         self,
