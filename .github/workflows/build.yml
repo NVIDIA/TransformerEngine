@@ -18,19 +18,22 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12 ccache
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: ccache
-        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
+        run: |
+          alias ccache=sccache
+          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -71,18 +74,19 @@ jobs:
         run: |
           docker exec builder bash -c '\
             apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 ccache && \
+            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
             pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
             apt-get clean \
           '
 
       - name: ccache
-        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec builder bash -c 'NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'alias ccache=sccache && NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
   jax:
@@ -93,21 +97,21 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: |
-          pip install pybind11[global]
-          apt-get update
-          apt-get install ccache
+        run: pip install pybind11[global]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: ccache
-        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v
+        run: |
+          alias ccache=sccache
+          NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
@@ -146,18 +150,17 @@ jobs:
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install ccache && \
             pip install pybind11[global] einops onnxscript && \
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
 
       - name: ccache
-        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec builder bash -c 'NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-cache-dir --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'alias ccache=sccache && NVTE_USE_CCACHE=1 CXX="sccache c++" pip install --no-cache-dir --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
