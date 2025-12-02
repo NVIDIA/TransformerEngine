@@ -27,9 +27,7 @@ jobs:
       - name: ccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: |
-          alias ccache=sccache
-          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
@@ -82,7 +80,7 @@ jobs:
       - name: ccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec builder bash -c 'alias ccache=sccache && NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
@@ -106,8 +104,7 @@ jobs:
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
         run: |
-          alias ccache=sccache
-          NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v
+          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
@@ -157,7 +154,7 @@ jobs:
       - name: ccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec builder bash -c 'alias ccache=sccache && NVTE_USE_CCACHE=1 CXX="sccache c++" pip install --no-cache-dir --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 CXX="sccache c++" pip install --no-cache-dir --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
