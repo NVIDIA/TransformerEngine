@@ -50,7 +50,8 @@ from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_nvtx_range_context,
-    _nvtx_enabled,
+    nvtx_range_push,
+    nvtx_range_pop,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
@@ -1074,9 +1075,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.training and is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
-        # with get_nvtx_range_context(self.__class__.__name__ + " forward"):
-        if _nvtx_enabled():
-            torch.cuda.nvtx.range_push(self.__class__.__name__ + " forward")
+        nvtx_range_push(self.__class__.__name__ + " forward")
         if not allow_non_contiguous and not inp.is_contiguous():
             inp = inp.contiguous()
         return inp
@@ -1085,8 +1084,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
-        if _nvtx_enabled():
-            torch.cuda.nvtx.range_pop()
+        nvtx_range_pop()
 
     @contextmanager
     def prepare_forward_ctx(
