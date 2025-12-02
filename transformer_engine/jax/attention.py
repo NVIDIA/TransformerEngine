@@ -393,7 +393,10 @@ def reorder_causal_load_balancing(
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        # stripe_size > 1 is only supported for CP+THD+AG+Striped
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size == 0:
+            raise ValueError("CP reordering stripe_size must not be zero")
         return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False, stripe_size)
     raise ValueError(f"Unsupported {strategy=}")
 
@@ -405,7 +408,8 @@ def inverse_reorder_causal_load_balancing(
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        # stripe_size > 1 is only supported for CP+THD+AG+Striped
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
         return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True, stripe_size)
     raise ValueError(f"Unsupported {strategy=}")
 
