@@ -92,8 +92,8 @@ class CommOverlapCore {
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
                   bool atomic_gemm);
 
-  CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm,
-                  bool is_p2p, bool atomic_gemm);
+  CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm, bool is_p2p,
+                  bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 
@@ -203,7 +203,7 @@ class CommOverlapBase : public CommOverlapCore {
 
   CommOverlapBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 16,
                   bool atomic_gemm = false)
-    : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, false, atomic_gemm) {}
+      : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, false, atomic_gemm) {}
 
   virtual ~CommOverlapBase();
 
@@ -287,7 +287,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   CommOverlapP2PBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
                      bool atomic_gemm = false)
-    : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, true, atomic_gemm) {}
+      : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, true, atomic_gemm) {}
 
   virtual ~CommOverlapP2PBase();
 
