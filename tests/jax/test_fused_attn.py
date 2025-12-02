@@ -353,7 +353,7 @@ class FusedAttnRunner:
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
     stripe_size: int = 0
-    num_segments_per_seq: int = 0
+    num_segments_per_seq: int | None = None
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -367,6 +367,14 @@ class FusedAttnRunner:
 
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
+
+    def __post_init__(self):
+        # Reset defaults for num_segments_per_seq if not explicitly passed
+        if self.num_segments_per_seq is None:
+            if self.qkv_layout.is_thd():
+                self.num_segments_per_seq = 2
+            else:
+                self.num_segments_per_seq = 1
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -579,9 +587,6 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            # If using default num segments of 0, set to 2
-            if self.num_segments_per_seq == 0:
-                self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -607,7 +612,6 @@ class FusedAttnRunner:
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )

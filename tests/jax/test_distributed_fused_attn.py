@@ -352,7 +352,7 @@ class TestDistributedContextParallelSelfAttn:
         use_scan_ring=False,
         window_size=None,
         stripe_size=0,
-        num_segments_per_seq=0,
+        num_segments_per_seq=None,
     ):
         if qkv_layout.is_thd():
             if not load_balanced and (
@@ -402,14 +402,14 @@ class TestDistributedContextParallelSelfAttn:
             bias_shape,
             window_size,
             SeqDescFormat.SegmentIDs,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
-            stripe_size=stripe_size,
-            num_segments_per_seq=num_segments_per_seq,
         )
 
         def check_has_backend_for_mask(mask_type):
