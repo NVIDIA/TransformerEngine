@@ -18,7 +18,6 @@
 #endif
 
 #include <cuda_runtime_api.h>
-#include "transformer_engine/transformer_engine.h"
 
 #include <cstdint>
 #include <functional>
@@ -32,6 +31,7 @@
 #include "./nvtx.h"
 #include "./util/cuda_driver.h"
 #include "./util/logging.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 

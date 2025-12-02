@@ -137,7 +137,11 @@ else:
         from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
     except ModuleNotFoundError as e:
         print(e)
-        print("Please install fa3 : pip install git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=hopper, usage : \"from flash_attn_3.flash_attn_interface import flash_attn_func\"")
+        print(
+            "Please install fa3 : pip install"
+            " git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=hopper, usage :"
+            ' "from flash_attn_3.flash_attn_interface import flash_attn_func"'
+        )
         from flash_attn_interface import flash_attn_func as flash_attn_func_v3
         from flash_attn_interface import (
             flash_attn_varlen_func as flash_attn_varlen_func_v3,
