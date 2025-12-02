@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 450" width="100%" style="max-width: 500px;">
+  <defs>
+    <style>
+      @import url("../../../_static/css/diagram-colors.css");
+      .title { font: bold 18px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 12px sans-serif; fill: #555; }
+      .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }
+      .fp8-block { fill: #87CEEB; stroke: #555; stroke-width: 1.5; }
+      .fp8-block-alt { fill: #5F9FCC; stroke: #555; stroke-width: 1.5; }
+    </style>
+  </defs>
+  <g id="rowwise-tensor">
+    <text x="250" y="50" class="title">Rowwise (1x32 blocks)</text>
+    <rect x="130" y="80" width="40" height="10" class="fp8-block"/>
+    <rect x="170" y="80" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="210" y="80" width="40" height="10" class="fp8-block"/>
+    <rect x="290" y="80" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="330" y="80" width="40" height="10" class="fp8-block"/>
+    <rect x="130" y="90" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="170" y="90" width="40" height="10" class="fp8-block"/>
+    <rect x="210" y="90" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="290" y="90" width="40" height="10" class="fp8-block"/>
+    <rect x="330" y="90" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="130" y="100" width="40" height="10" class="fp8-block"/>
+    <rect x="170" y="100" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="210" y="100" width="40" height="10" class="fp8-block"/>
+    <rect x="290" y="100" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="330" y="100" width="40" height="10" class="fp8-block"/>
+    <rect x="130" y="110" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="170" y="110" width="40" height="10" class="fp8-block"/>
+    <rect x="210" y="110" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="290" y="110" width="40" height="10" class="fp8-block"/>
+    <rect x="330" y="110" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="130" y="120" width="40" height="10" class="fp8-block"/>
+    <rect x="170" y="120" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="210" y="120" width="40" height="10" class="fp8-block"/>
+    <rect x="290" y="120" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="330" y="120" width="40" height="10" class="fp8-block"/>
+    <rect x="130" y="160" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="170" y="160" width="40" height="10" class="fp8-block"/>
+    <rect x="210" y="160" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="290" y="160" width="40" height="10" class="fp8-block"/>
+    <rect x="330" y="160" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="130" y="170" width="40" height="10" class="fp8-block"/>
+    <rect x="170" y="170" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="210" y="170" width="40" height="10" class="fp8-block"/>
+    <rect x="290" y="170" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="330" y="170" width="40" height="10" class="fp8-block"/>
+    <rect x="130" y="180" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="170" y="180" width="40" height="10" class="fp8-block"/>
+    <rect x="210" y="180" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="290" y="180" width="40" height="10" class="fp8-block"/>
+    <rect x="330" y="180" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="130" y="190" width="40" height="10" class="fp8-block"/>
+    <rect x="170" y="190" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="210" y="190" width="40" height="10" class="fp8-block"/>
+    <rect x="290" y="190" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="330" y="190" width="40" height="10" class="fp8-block"/>
+    <rect x="130" y="80" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="270" y="107.5" class="dots-text">…</text>
+    <text x="270" y="182.5" class="dots-text">…</text>
+    <text x="190" y="145" class="dots-text">…</text>
+    <text x="330" y="145" class="dots-text">…</text>
+    <text x="270" y="145" class="dots-text" transform="rotate(45 270 145)">…</text>
+  </g>
+  <g id="colwise-tensor">
+    <text x="250" y="250" class="title">Columnwise (32x1 blocks)</text>
+    <rect x="130" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="140" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="150" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="160" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="170" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="180" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="190" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="200" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="210" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="220" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="270" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="280" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="290" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="300" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="310" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="320" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="330" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="340" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="350" y="280" width="10" height="40" class="fp8-block"/>
+    <rect x="360" y="280" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="130" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="140" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="150" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="160" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="170" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="180" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="190" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="200" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="210" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="220" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="270" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="280" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="290" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="300" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="310" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="320" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="330" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="340" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="350" y="360" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="360" y="360" width="10" height="40" class="fp8-block"/>
+    <rect x="130" y="280" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="250" y="306" class="dots-text">…</text>
+    <text x="250" y="386" class="dots-text">…</text>
+    <text x="180" y="346" class="dots-text" transform="rotate(90 180 346)">…</text>
+    <text x="320" y="346" class="dots-text" transform="rotate(90 320 346)">…</text>
+    <text x="250" y="346" class="dots-text" transform="rotate(45 250 346)">…</text>
+  </g>
+</svg>

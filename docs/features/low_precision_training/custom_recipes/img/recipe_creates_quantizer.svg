@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 480" width="100%" style="max-width: 700px;">
+  <defs>
+    <style>
+      .box-blue { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .quantize { fill: #e8f5e9; stroke: #66bb6a; stroke-width: 2; rx: 6; }
+      .gemm-box { fill: #fff3e0; stroke: #ff9800; stroke-width: 2; }
+      .gemm-box-2 { fill: #fff3e0; stroke: #e91e63; stroke-width: 2; }
+      .layer-box { fill: #fce4ec; stroke: #e91e63; stroke-width: 2; }
+      
+      .text { font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; text-anchor: middle; fill: #212121; }
+      .text-bold { font-weight: 600; }
+      .text-small { font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; text-anchor: middle; fill: #424242; }
+      .label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; text-anchor: middle; fill: #616161; }
+      
+      .connector { stroke: #1976d2; stroke-width: 2; fill: none; }
+      .connector-dot { fill: #1976d2; }
+      .arrow { stroke: #1976d2; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#1976d2" />
+    </marker>
+  </defs>
+
+  <!-- Recipe on the left side -->
+  <rect x="15" y="175" width="95" height="85" rx="8" class="box-blue" />
+  <text x="62" y="212" class="text text-bold">Recipe</text>
+  <text x="62" y="232" class="label">Configuration</text>
+
+  <!-- LayerNormMLP outer box -->
+  <rect x="160" y="30" width="570" height="380" rx="10" class="layer-box" />
+  <text x="445" y="55" class="text text-bold">LayerNormMLP</text>
+
+  <!-- GEMM 1 -->
+  <rect x="175" y="70" width="210" height="325" rx="8" class="gemm-box" />
+  <text x="280" y="95" class="text text-bold">GEMM 1</text>
+
+  <!-- GEMM 1 Quantizers - more spacious -->
+  <rect x="200" y="110" width="160" height="42" rx="6" class="quantize" />
+  <text x="280" y="137" class="text-small">input quantizer</text>
+
+  <rect x="200" y="165" width="160" height="42" rx="6" class="quantize" />
+  <text x="280" y="192" class="text-small">weight quantizer</text>
+
+  <rect x="200" y="220" width="160" height="42" rx="6" class="quantize" />
+  <text x="280" y="247" class="text-small">output quantizer</text>
+
+  <rect x="200" y="275" width="160" height="42" rx="6" class="quantize" />
+  <text x="280" y="302" class="text-small">grad_input quantizer</text>
+
+  <rect x="200" y="330" width="160" height="42" rx="6" class="quantize" />
+  <text x="280" y="357" class="text-small">grad_output quantizer</text>
+
+  <!-- GEMM 2 -->
+  <rect x="500" y="70" width="220" height="325" rx="8" class="gemm-box-2" />
+  <text x="610" y="95" class="text text-bold">GEMM 2</text>
+
+  <!-- GEMM 2 Quantizers - more spacious -->
+  <rect x="530" y="110" width="160" height="42" rx="6" class="quantize" />
+  <text x="610" y="137" class="text-small">input quantizer</text>
+
+  <rect x="530" y="165" width="160" height="42" rx="6" class="quantize" />
+  <text x="610" y="192" class="text-small">weight quantizer</text>
+
+  <rect x="530" y="220" width="160" height="42" rx="6" class="quantize" />
+  <text x="610" y="247" class="text-small">output quantizer</text>
+
+  <rect x="530" y="275" width="160" height="42" rx="6" class="quantize" />
+  <text x="610" y="302" class="text-small">grad_input quantizer</text>
+
+  <rect x="530" y="330" width="160" height="42" rx="6" class="quantize" />
+  <text x="610" y="357" class="text-small">grad_output quantizer</text>
+
+  <!-- CONNECTORS AND ARROWS (drawn last so they appear on top) -->
+  
+  <!-- Main horizontal line from Recipe -->
+  <line x1="110" y1="217" x2="145" y2="217" class="connector" />
+  
+  <!-- Left vertical backbone -->
+  <line x1="145" y1="131" x2="145" y2="430" class="connector" />
+  <circle cx="145" cy="217" r="4" class="connector-dot" />
+
+  <!-- Bridge below LayerNormMLP -->
+  <line x1="145" y1="430" x2="475" y2="430" class="connector" />
+  <circle cx="145" cy="430" r="3" class="connector-dot" />
+  
+  <!-- Right vertical backbone in the gap -->
+  <line x1="475" y1="131" x2="475" y2="430" class="connector" />
+  <circle cx="475" cy="430" r="3" class="connector-dot" />
+
+  <!-- GEMM 1 arrows - horizontal from left backbone -->
+  <line x1="145" y1="131" x2="200" y2="131" class="arrow" />
+  <circle cx="145" cy="131" r="3" class="connector-dot" />
+  
+  <line x1="145" y1="186" x2="200" y2="186" class="arrow" />
+  <circle cx="145" cy="186" r="3" class="connector-dot" />
+  
+  <line x1="145" y1="241" x2="200" y2="241" class="arrow" />
+  <circle cx="145" cy="241" r="3" class="connector-dot" />
+  
+  <line x1="145" y1="296" x2="200" y2="296" class="arrow" />
+  <circle cx="145" cy="296" r="3" class="connector-dot" />
+  
+  <line x1="145" y1="351" x2="200" y2="351" class="arrow" />
+  <circle cx="145" cy="351" r="3" class="connector-dot" />
+
+  <!-- GEMM 2 arrows - horizontal from right backbone -->
+  <line x1="475" y1="131" x2="530" y2="131" class="arrow" />
+  <circle cx="475" cy="131" r="3" class="connector-dot" />
+  
+  <line x1="475" y1="186" x2="530" y2="186" class="arrow" />
+  <circle cx="475" cy="186" r="3" class="connector-dot" />
+  
+  <line x1="475" y1="241" x2="530" y2="241" class="arrow" />
+  <circle cx="475" cy="241" r="3" class="connector-dot" />
+  
+  <line x1="475" y1="296" x2="530" y2="296" class="arrow" />
+  <circle cx="475" cy="296" r="3" class="connector-dot" />
+  
+  <line x1="475" y1="351" x2="530" y2="351" class="arrow" />
+  <circle cx="475" cy="351" r="3" class="connector-dot" />
+  
+</svg>

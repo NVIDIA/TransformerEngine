@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 110" width="100%" style="max-width: 550px;">
+  <defs>
+    <style>
+      .hp { fill: #ede7f6; stroke: #673ab7; stroke-width: 2; }
+      .fp8 { fill: #fff8e1; stroke: #ffa726; stroke-width: 2; }
+      .quantize { fill: #e8f5e9; stroke: #66bb6a; stroke-width: 2; }
+      
+      .text { font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; text-anchor: middle; fill: #212121; }
+      .text-bold { font-weight: 600; }
+      .label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; text-anchor: middle; fill: #424242; }
+      
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#616161" />
+    </marker>
+  </defs>
+
+  <!-- Input Tensor -->
+  <rect x="15" y="20" width="150" height="70" rx="6" class="hp" />
+  <text x="90" y="50" class="text text-bold">Input Tensor</text>
+  <text x="90" y="68" class="label">(High Precision)</text>
+
+  <!-- Arrow from Input to Quantizer -->
+  <line x1="165" y1="55" x2="205" y2="55" class="arrow" />
+
+  <!-- Quantizer -->
+  <rect x="205" y="20" width="160" height="70" rx="6" class="quantize" />
+  <text x="285" y="50" class="text text-bold">Quantizer</text>
+  <text x="285" y="68" class="label">Internal State &amp; Logic</text>
+
+  <!-- Arrow from Quantizer to QuantizedTensor -->
+  <line x1="365" y1="55" x2="405" y2="55" class="arrow" />
+
+  <!-- QuantizedTensor -->
+  <rect x="405" y="20" width="160" height="70" rx="6" class="fp8" />
+  <text x="485" y="50" class="text text-bold">QuantizedTensor</text>
+  <text x="485" y="68" class="label">Data + Scale</text>
+  
+</svg>
+
