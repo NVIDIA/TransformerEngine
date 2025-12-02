@@ -60,24 +60,19 @@ class TestTritonBinding:
 
         name = "te_amax_triton_test"
         multiple_results = False
-        impl_static_args = (1,)
-        inner_primitive = None
-        outer_primitive = None
+        impl_static_args = ()
 
         @staticmethod
-        def abstract(x_aval, *, block_size):
-            del block_size
+        def abstract(x_aval):
             return jax.core.ShapedArray((1,), jnp.float32)
 
         @staticmethod
-        def impl(x, block_size):
+        def impl(x):
             assert TestTritonBinding.AmaxTritonPrimitive.inner_primitive is not None
-            return TestTritonBinding.AmaxTritonPrimitive.inner_primitive.bind(
-                x, block_size=block_size
-            )
+            return TestTritonBinding.AmaxTritonPrimitive.inner_primitive.bind(x)
 
         @staticmethod
-        def lowering(ctx, x, *, block_size):
+        def lowering(ctx, x):
             """MLIR lowering using Triton kernel."""
             n_elements = 1
             for dim in ctx.avals_in[0].shape:
@@ -85,11 +80,11 @@ class TestTritonBinding:
 
             # For autotuned kernels, use the minimum BLOCK_SIZE from configs
             # to ensure all elements are processed by all configs
-            min_block_size = min(
-                config.kwargs.get("BLOCK_SIZE", block_size)
+            block_size = min(
+                config.kwargs.get('BLOCK_SIZE')
                 for config in TestTritonBinding.amax_kernel.configs
             )
-            grid = (triton.cdiv(n_elements, min_block_size),)
+            grid = (triton.cdiv(n_elements, block_size),)
 
             return triton_call_lowering(
                 ctx,
@@ -103,9 +98,9 @@ class TestTritonBinding:
     register_primitive(AmaxTritonPrimitive)
 
     @staticmethod
-    def _triton_amax(x: jnp.ndarray, block_size: int = 1024) -> jnp.ndarray:
+    def _triton_amax(x: jnp.ndarray) -> jnp.ndarray:
         """Compute amax using Triton kernel."""
-        return TestTritonBinding.AmaxTritonPrimitive.outer_primitive.bind(x, block_size=block_size)
+        return TestTritonBinding.AmaxTritonPrimitive.outer_primitive.bind(x)
 
     @pytest_parametrize_wrapper("shape", [(1024, 1024)])
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
