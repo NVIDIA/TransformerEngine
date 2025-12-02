@@ -48,4 +48,42 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
       start_offset, block_len, static_cast<NVTEDType>(out_dtype), at::cuda::getCurrentCUDAStream());
 }
 
+void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
+                                        at::Tensor amax_colwise, int rows, int cols,
+                                        size_t start_offset) {
+  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(amax_rowwise.is_contiguous(), "amax_rowwise must be contiguous");
+  TORCH_CHECK(amax_colwise.is_contiguous(), "amax_colwise must be contiguous");
+
+  const TensorWrapper input_cu = makeTransformerEngineTensor(input);
+  TensorWrapper amax_rowwise_cu = makeTransformerEngineTensor(amax_rowwise);
+  TensorWrapper amax_colwise_cu = makeTransformerEngineTensor(amax_colwise);
+
+  nvte_mxfp8_scaling_compute_partial_amax(input_cu.data(), amax_rowwise_cu.data(),
+                                          amax_colwise_cu.data(), rows, cols, start_offset,
+                                          at::cuda::getCurrentCUDAStream());
+}
+
+void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwise,
+                                at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
+                                const at::Tensor &scale_inv_colwise, int rows, int cols,
+                                size_t start_offset) {
+  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(output_rowwise.is_contiguous(), "output_rowwise must be contiguous");
+  TORCH_CHECK(output_colwise.is_contiguous(), "output_colwise must be contiguous");
+  TORCH_CHECK(scale_inv_rowwise.is_contiguous(), "scale_inv_rowwise must be contiguous");
+  TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
+
+  const TensorWrapper input_cu = makeTransformerEngineTensor(input);
+  TensorWrapper output_rowwise_cu = makeTransformerEngineTensor(output_rowwise);
+  TensorWrapper output_colwise_cu = makeTransformerEngineTensor(output_colwise);
+  const TensorWrapper scale_inv_rowwise_cu = makeTransformerEngineTensor(scale_inv_rowwise);
+  const TensorWrapper scale_inv_colwise_cu = makeTransformerEngineTensor(scale_inv_colwise);
+
+  nvte_mxfp8_scaling_partial_cast(input_cu.data(), output_rowwise_cu.data(),
+                                  output_colwise_cu.data(), scale_inv_rowwise_cu.data(),
+                                  scale_inv_colwise_cu.data(), rows, cols, start_offset,
+                                  at::cuda::getCurrentCUDAStream());
+}
+
 }  // namespace transformer_engine::pytorch
