@@ -7,7 +7,11 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_compute_scale_inv_e8m0
+from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.optimizers.multi_tensor_apply import multi_tensor_applier
+
+
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
 
 
 def compute_partial_amax_reference(inp, amax_rowwise, amax_colwise, h, w, start_offset):
@@ -119,6 +123,7 @@ def run_one_case(n, h, w, start_offset):
     torch.testing.assert_close(output_colwise, output_colwise_ref, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 def test_mxfp8_scaling_partial_cast():
     torch.cuda.manual_seed(1234)
 

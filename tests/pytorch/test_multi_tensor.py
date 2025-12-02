@@ -7,6 +7,7 @@ import torch
 
 import transformer_engine.pytorch
 import transformer_engine_torch as tex
+from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.optimizers import MultiTensorApply
 
 from references.quantize_scale_calc import scale_from_amax_tensor
@@ -23,6 +24,7 @@ input_size_pairs = [
     (555, 33333),
 ]
 appliers = [MultiTensorApply(2048 * 32), MultiTensorApply(333), MultiTensorApply(33333)]
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
 
 
 @pytest.mark.parametrize("input_size_pair", input_size_pairs)
@@ -261,6 +263,7 @@ def test_multi_tensor_compute_scale_and_scale_inv(
         torch.testing.assert_close(scale_inv, scale_inv_ref, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 @pytest.mark.parametrize("input_size_pair", input_size_pairs + [(1, 1)])
 @pytest.mark.parametrize("applier", appliers)
 @pytest.mark.parametrize("repeat", [1, 55])
