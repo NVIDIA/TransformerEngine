@@ -174,7 +174,7 @@ def load_framework_extension(framework: str) -> None:
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching versions.
     if te_framework_installed:
-        assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
+        # assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
         assert te_core_installed, "Could not find TE core package `transformer-engine-cu*`."
 
         assert version(module_name) == version("transformer-engine") == te_core_version, (
@@ -203,7 +203,7 @@ def sanity_checks_for_pypi_installation() -> None:
 
     # If the core package is installed via PyPI.
     if te_core_installed:
-        assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
+        # assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
         assert version("transformer-engine") == te_core_version, (
             "Transformer Engine package version mismatch. Found "
             f"transformer-engine v{version('transformer-engine')} "

@@ -18,7 +18,7 @@
 #endif
 
 #include <cuda_runtime_api.h>
-#include <transformer_engine/transformer_engine.h>
+#include "transformer_engine/transformer_engine.h"
 
 #include <cstdint>
 #include <functional>

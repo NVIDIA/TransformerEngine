@@ -16,6 +16,7 @@
 #include <string>
 
 #include "../util/logging.h"
+#include "../util/cuda_driver.h"
 #include "nvshmem_waitkernel.h"
 
 __global__ void __launch_bounds__(1)
