@@ -651,7 +651,7 @@ class TestDistributedContextParallelSelfAttn:
                 "scanloop is not supported"
             )
         # Set the stripe size to 1 (ring attention only support stripe_size=1)
-        stripe_size = 1 if qkv_layout.is_thd() else 0 
+        stripe_size = 1 if qkv_layout.is_thd() else 0
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
