@@ -165,7 +165,8 @@ class CollectiveGemmPlanRegistry {
   }
 
   CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                JAXX_Collective_Op collective_op);
+                                JAXX_Collective_Op collective_op,
+                                bool use_cublasmp = false);
 
  private:
   CollectiveGemmPlanRegistry() {}

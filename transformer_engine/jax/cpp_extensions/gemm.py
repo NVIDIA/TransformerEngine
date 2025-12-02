@@ -386,7 +386,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
     inner_primitive = None
     outer_primitive = None
 
@@ -411,6 +411,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
     ):
         del use_split_accumulator, transpose_batch_sequence
 
@@ -538,7 +539,11 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            workspace_size *= get_cgemm_num_max_streams()
+            if use_cublasmp:
+                # cuBlasMp manages its own cuBlasLt workspaces per stream
+                workspace_size = 0
+            else:
+                workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -573,6 +578,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
     ):
         del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
 
@@ -617,6 +623,7 @@ class GemmPrimitive(BasePrimitive):
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
             "collective_op": int(collective_op.value),
+            "use_cublasmp": use_cublasmp,
         }
 
         operand_output_aliases = {}
@@ -651,6 +658,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
     ):
         if scaling_mode.is_1d_block_scaling():
             lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
@@ -718,6 +726,7 @@ class GemmPrimitive(BasePrimitive):
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=is_outer,
+            use_cublasmp=use_cublasmp,
         )
         # Alter output blocks for CGEMM AG
         if (
@@ -769,6 +778,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
     ):
         return GemmPrimitive.impl(
             lhs,
@@ -790,6 +800,7 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
             is_outer,
             collective_op,
+            use_cublasmp,
         )
 
     @staticmethod
@@ -803,10 +814,11 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
+        collective_op,
+        use_cublasmp,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
@@ -840,6 +852,7 @@ class GemmPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=sequence_dim,
                 is_outer=is_outer,
+                use_cublasmp=use_cublasmp,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -1002,6 +1015,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
         mesh,
         arg_infos,
         result_infos,
@@ -1013,6 +1027,7 @@ class GemmPrimitive(BasePrimitive):
             result_infos,
             is_outer,
             sequence_dim,
+            use_cublasmp,
         )
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
@@ -1047,6 +1062,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
         mesh,
         arg_infos,
         result_infos,
@@ -1125,6 +1141,7 @@ class GemmPrimitive(BasePrimitive):
                 sequence_dim=inferred_sequence_dim,
                 is_outer=False,
                 collective_op=collective_op,
+                use_cublasmp=use_cublasmp,
             )
 
             if reduce_spec is not None:
@@ -1156,6 +1173,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        use_cublasmp,
         mesh,
         operand_types,
         result_types,
@@ -1250,6 +1268,7 @@ def _te_gemm(
     use_split_accumulator: bool = None,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
+    use_cublasmp: bool = False,
 ) -> Tuple[jax.Array, ...]:
 
     if grad or fuse_gelu:
@@ -1353,6 +1372,7 @@ def _te_gemm(
         sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
         collective_op=collective_op,
+        use_cublasmp=use_cublasmp,
     )
 
 

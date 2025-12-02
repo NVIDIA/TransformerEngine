@@ -23,6 +23,14 @@
 
 using namespace std::placeholders;
 
+bool nvte_built_with_cublasmp() {
+#ifdef NVTE_WITH_CUBLASMP
+  return true;
+#else
+  return false;
+#endif
+}
+
 namespace transformer_engine {
 
 namespace {
@@ -33,10 +41,6 @@ std::vector<size_t> shape_to_vector(const NVTEShape &shape) {
 
 }  // namespace
 
-/***************************************************************************************************
- * Comm+GEMM Overlap Common Core
- **************************************************************************************************/
-
 bool ubuf_built_with_mpi() {
 #ifdef NVTE_UB_WITH_MPI
   return true;
@@ -44,6 +48,10 @@ bool ubuf_built_with_mpi() {
   return false;
 #endif
 }
+
+/***************************************************************************************************
+ * Comm+GEMM Overlap Common Core
+ **************************************************************************************************/
 
 CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
@@ -67,6 +75,30 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 
   initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
              num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+}
+
+CommOverlapCore::CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size,
+                                 int num_comm_sm, bool is_p2p, bool atomic_gemm) {
+  _with_cublasmp = true;
+
+  nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(nccl_comm_ptr), tp_size, tp_rank);
+
+  _num_comm_sm = num_comm_sm;
+  _is_p2p = is_p2p;
+  _atomic_gemm = atomic_gemm;
+  if (_is_p2p) {
+    if (_atomic_gemm) {
+      _algo_type = kNVTECommGemmAlgoAtomicP2P;
+    } else {
+      _algo_type = kNVTECommGemmAlgoSplitP2P;
+    }
+  } else {
+    if (_atomic_gemm) {
+      _algo_type = kNVTECommGemmAlgoAtomicMulticast;
+    } else {
+      _algo_type = kNVTECommGemmAlgoSplitMulticast;
+    }
+  }
 }
 
 void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_streams,
@@ -134,39 +166,43 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 }
 
 CommOverlapCore::~CommOverlapCore() {
-  cudaEventDestroy(_stop_comm);
-  cudaEventDestroy(_start_comm);
-  cudaEventDestroy(_stop_compute);
-  cudaEventDestroy(_start_compute);
-  if (_comm_launch_event) {
-    cudaEventDestroy(_comm_launch_event);
-  }
-
-  if (_atomic_gemm) {
-    cudaFree(_counter.dptr());
-  }
-
-  for (size_t i = 0; i < _stream_compute.size(); i++) {
-    cudaStreamSynchronize(_stream_compute[i]);
-    cudaStreamDestroy(_stream_compute[i]);
-  }
-
-  auto error = cudaGetLastError();
-  if (error != cudaSuccess) {
-    NVTE_WARN("Error detected while destroying communicator: ", cudaGetErrorString(error));
-  }
-
-  if (_comm_created) {
-    try {
-#ifdef NVTE_UB_WITH_MPI
-      destroy_communicator_mpi(_ub_comm);
-#else
-      destroy_communicator(_ub_comm);
-#endif
-    } catch (const std::exception &e) {
-      NVTE_WARN("Error destroying communicator, cleanup may be incomplete:\n", e.what());
+  if (_with_cublasmp) {
+    nvte_comm_gemm_ctx_destroy(_cublasmp_ctx);
+  } else {
+    cudaEventDestroy(_stop_comm);
+    cudaEventDestroy(_start_comm);
+    cudaEventDestroy(_stop_compute);
+    cudaEventDestroy(_start_compute);
+    if (_comm_launch_event) {
+      cudaEventDestroy(_comm_launch_event);
     }
-    _comm_created = false;
+
+    if (_atomic_gemm) {
+      cudaFree(_counter.dptr());
+    }
+
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
+      cudaStreamSynchronize(_stream_compute[i]);
+      cudaStreamDestroy(_stream_compute[i]);
+    }
+
+    auto error = cudaGetLastError();
+    if (error != cudaSuccess) {
+      NVTE_WARN("Error detected while destroying communicator: ", cudaGetErrorString(error));
+    }
+
+    if (_comm_created) {
+      try {
+  #ifdef NVTE_UB_WITH_MPI
+        destroy_communicator_mpi(_ub_comm);
+  #else
+        destroy_communicator(_ub_comm);
+  #endif
+      } catch (const std::exception &e) {
+        NVTE_WARN("Error destroying communicator, cleanup may be incomplete:\n", e.what());
+      }
+      _comm_created = false;
+    }
   }
 }
 
@@ -272,6 +308,34 @@ TensorWrapper CommOverlapCore::get_buffer_chunk_like(const TensorWrapper &source
   return chunk;
 }
 
+void CommOverlapCore::cublasmp_ag_gemm(
+    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
+    TensorWrapper &bias, TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
+    cudaStream_t stream_main) {
+  int64_t m = transa ? A.size(0) : A.size(1);
+  int64_t n_local = transb ? B.size(1) : B.size(0);
+  int64_t n = n_local * _tp_size;
+  int64_t k = transa ? A.size(1) : A.size(0);
+
+  nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                        pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                        stream_main, _algo_type);
+}
+
+void CommOverlapCore::cublasmp_gemm_rs(
+    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
+    TensorWrapper &bias, TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
+    cudaStream_t stream_main) {
+  int64_t m = transa ? A.size(0) : A.size(1);
+  int64_t n = transb ? B.size(1) : B.size(0);
+  int64_t k_local = transa ? A.size(1) : A.size(0);
+  int64_t k = k * _tp_size;
+
+  nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                            stream_main, _algo_type);
+}
+
 /***************************************************************************************************
  * Comm+GEMM Overlap Base (Pipelined / Collective)
  **************************************************************************************************/
@@ -313,9 +377,11 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
 }
 
 CommOverlapBase::~CommOverlapBase() {
-  cudaEventDestroy(_start_d2dcopy);
-  cudaStreamSynchronize(_stream_comm);
-  cudaStreamDestroy(_stream_comm);
+  if (!_with_cublasmp) {
+    cudaEventDestroy(_start_d2dcopy);
+    cudaStreamSynchronize(_stream_comm);
+    cudaStreamDestroy(_stream_comm);
+  }
 }
 
 /*
@@ -328,6 +394,8 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
                                    bool accumulate, bool use_split_accumulator,
                                    CommOverlapType comm_type, TensorWrapper &rs_output,
                                    cudaStream_t stream_main) {
+  NVTE_CHECK(!_with_cublasmp, "Bulk overlap is not supported with cuBlasMp");
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -385,10 +453,15 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
                                              TensorWrapper &workspace, bool grad, bool accumulate,
                                              bool use_split_accumulator, TensorWrapper &rs_output,
                                              cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+  
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
   _ub_comm->cga_size = _cga_size;
+  
   // Get GEMM dimensions
   size_t m = transa ? A.size(0) : A.size(1);
   size_t k = transa ? A.size(1) : A.size(0);
@@ -481,6 +554,10 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                        bool grad, bool accumulate, bool use_split_accumulator,
                                        TensorWrapper &rs_output, cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+
   // Get GEMM dimensions
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
@@ -724,16 +801,20 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
-  cudaEventDestroy(_stop_recv);
-  cudaEventDestroy(_stop_send);
-  cudaStreamDestroy(_stream_recv);
-  for (size_t i = 0; i < _stream_send.size(); i++) {
-    cudaStreamDestroy(_stream_send[i]);
+  if (!_with_cublasmp) {
+    cudaEventDestroy(_stop_recv);
+    cudaEventDestroy(_stop_send);
+    cudaStreamDestroy(_stream_recv);
+    for (size_t i = 0; i < _stream_send.size(); i++) {
+      cudaStreamDestroy(_stream_send[i]);
+    }
   }
 }
 
 void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
                                           bool local_chunk, bool rowwise) {
+  if (_with_cublasmp) return;  // cuBlasMp executes its own copy-into-buffer op
+
   // Check element size
   const size_t element_size = source.element_size();
   NVTE_CHECK(_ubuf.element_size() == element_size,
@@ -788,6 +869,10 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
     const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
     TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
     bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy, cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -890,6 +975,10 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
                                           bool use_split_accumulator, TensorWrapper &B_copy,
                                           cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1057,6 +1146,10 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
     TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
     bool accumulate, bool use_split_accumulator, TensorWrapper &rs_output,
     cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1121,6 +1214,10 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
                                           bool use_split_accumulator, TensorWrapper &rs_output,
                                           cudaStream_t stream_main) {
+  if (_with_cublasmp) {
+    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate, stream_main);
+  }
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
