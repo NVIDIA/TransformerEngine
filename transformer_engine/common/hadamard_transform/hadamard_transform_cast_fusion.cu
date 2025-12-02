@@ -742,9 +742,8 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
 
   // Amax estimation scale: when > 0, amax is scaled by this factor
   // This allows estimating post-RHT amax from pre-RHT amax
-  const float amax_scale = (quant_config.amax_estimation_scale > 0.0f)
-                               ? quant_config.amax_estimation_scale
-                               : 1.0f;
+  const float amax_scale =
+      (quant_config.amax_estimation_scale > 0.0f) ? quant_config.amax_estimation_scale : 1.0f;
 
   // Template arguments
   using TA = cute::bfloat16_t;

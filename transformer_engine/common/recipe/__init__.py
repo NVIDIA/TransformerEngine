@@ -463,8 +463,12 @@ class NVFP4BlockScaling(Recipe):
     use_post_rht_amax_estimation: bool = (
         os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION", "0") == "1"
     )
-    post_rht_amax_estimation_scale_fwd_inp = float(os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_X_SCALE", "1.0"))
-    post_rht_amax_estimation_scale_bwd_grad = float(os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_G_SCALE", "1.0"))
+    post_rht_amax_estimation_scale_fwd_inp = float(
+        os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_X_SCALE", "1.0")
+    )
+    post_rht_amax_estimation_scale_bwd_grad = float(
+        os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_G_SCALE", "1.0")
+    )
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
