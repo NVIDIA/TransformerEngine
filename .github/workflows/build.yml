@@ -18,14 +18,16 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          apt-get install -y git python3.9 pip cudnn9-cuda-12 ccache
           pip install cmake==3.21.0 pybind11[global] ninja
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
       - name: 'Build'
-        run: pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
@@ -69,13 +71,15 @@ jobs:
         run: |
           docker exec builder bash -c '\
             apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
+            apt-get install -y git python3.9 pip cudnn9-cuda-12 ccache && \
             pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
             apt-get clean \
           '
 
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
@@ -89,13 +93,18 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install pybind11[global]
+        run: |
+          pip install pybind11[global]
+          apt-get update
+          apt-get install ccache
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
       - name: 'Build'
-        run: pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
@@ -137,12 +146,16 @@ jobs:
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
+            apt-get update && \
+            apt-get install ccache && \
             pip install pybind11[global] einops onnxscript && \
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
 
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
+        run: docker exec builder bash -c 'NVTE_USE_CCACHE=1 CXX="ccache c++" pip install --no-cache-dir --no-build-isolation . -v --no-deps'
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
