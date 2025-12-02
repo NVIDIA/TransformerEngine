@@ -290,6 +290,10 @@ struct QuantizationConfig {
   NVTETensor rng_state = nullptr;
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
+  // Scale factor for estimating post-RHT amax from pre-RHT amax.
+  // When <= 0.0f, true post-RHT amax is used (default behavior).
+  // When > 0.0f, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
+  float amax_estimation_scale = 0.0f;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(bool),                          // force_pow_2_scales
@@ -298,7 +302,8 @@ struct QuantizationConfig {
       sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(bool),                          // nvfp4_2d_quantization
-      sizeof(bool)                           // stochastic_rounding
+      sizeof(bool),                          // stochastic_rounding
+      sizeof(float)                          // amax_estimation_scale
   };
 };
 

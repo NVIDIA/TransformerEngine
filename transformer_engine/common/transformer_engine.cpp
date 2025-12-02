@@ -705,6 +705,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigStochasticRounding:
       std::memcpy(&config_.stochastic_rounding, buf, attr_size);
       break;
+    case kNVTEQuantizationConfigAmaxEstimationScale:
+      std::memcpy(&config_.amax_estimation_scale, buf, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }

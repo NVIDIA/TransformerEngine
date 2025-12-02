@@ -139,7 +139,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             TSFC    * SFC,
             TiledMMA mma,
             float const* global_amax,
-            const size_t* rng_state)
+            const size_t* rng_state,
+            float amax_scale)
 {
   using namespace cute;
   using X = Underscore;
@@ -407,7 +408,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
     tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    const float global_amax_val = *global_amax;
+    // Apply amax estimation scale if provided (amax_scale > 0 means estimation is enabled)
+    const float global_amax_val = (*global_amax) * amax_scale;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
     tmem_allocation_result_barrier.arrive_and_wait();
@@ -543,7 +545,8 @@ rht_gemm_ntt_w_sfc(int m, int n,
         const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
-        int k_tile_size = 2048)
+        int k_tile_size = 2048,
+        float amax_scale = 1.0f)
 {
   using namespace cute;
 
@@ -662,7 +665,8 @@ rht_gemm_ntt_w_sfc(int m, int n,
        C, dC, sC,
        SFC,
        mma, global_amax,
-       rng_state);
+       rng_state,
+       amax_scale);
 }
 
 // this function is used to wrap the rht_gemm_ntt_w_sfc function
@@ -678,7 +682,8 @@ rht_gemm_ttt_wrapper(int m, int n,
         const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
-        int k_tile_size = 1024)
+        int k_tile_size = 1024,
+        float amax_scale = 1.0f)
 {
   // in addition to transpose the input tensor A
   // we also need to reshape m, n to at best
@@ -696,7 +701,8 @@ rht_gemm_ttt_wrapper(int m, int n,
     SFC, global_amax,
     rng_state,
     sm_count, stream,
-    k_tile_size);
+    k_tile_size,
+    amax_scale);
 }
 
 }  // namespace
@@ -733,6 +739,12 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
                "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
   }
+
+  // Amax estimation scale: when > 0, amax is scaled by this factor
+  // This allows estimating post-RHT amax from pre-RHT amax
+  const float amax_scale = (quant_config.amax_estimation_scale > 0.0f)
+                               ? quant_config.amax_estimation_scale
+                               : 1.0f;
 
   // Template arguments
   using TA = cute::bfloat16_t;
@@ -813,7 +825,8 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
           /*rng_state=*/rng_state,
           /*sm_count=*/sm_count,
           /*stream=*/stream,
-          /*k_tile_size=*/k_tile_size););
+          /*k_tile_size=*/k_tile_size,
+          /*amax_scale=*/amax_scale););
 }
 
 }  // namespace transformer_engine

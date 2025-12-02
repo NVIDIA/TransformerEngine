@@ -126,11 +126,16 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    // Check if amax estimation is enabled (scale > 0 means we can use pre-RHT amax)
+    const bool use_amax_estimation = nvfp4_quantizer_cpp->amax_estimation_scale > 0.0f;
+    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax &&
+        !use_amax_estimation) {
+      // Post-RHT amax is handled within NVFP4 quantizer (need true post-RHT amax)
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-      // TE kernel supports amax output
+      // TE kernel supports amax output.
+      // When use_amax_estimation is true, LayerNorm computes pre-RHT amax,
+      // and the quantizer will scale it to estimate post-RHT amax.
       impl = Impl::FUSED_NORM_AMAX_NVFP4;
     }
   }
@@ -355,11 +360,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    // Check if amax estimation is enabled (scale > 0 means we can use pre-RHT amax)
+    const bool use_amax_estimation = nvfp4_quantizer_cpp->amax_estimation_scale > 0.0f;
+    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax &&
+        !use_amax_estimation) {
+      // Post-RHT amax is handled within NVFP4 quantizer (need true post-RHT amax)
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-      // TE kernel supports amax output
+      // TE kernel supports amax output.
+      // When use_amax_estimation is true, LayerNorm computes pre-RHT amax,
+      // and the quantizer will scale it to estimate post-RHT amax.
       impl = Impl::FUSED_NORM_AMAX_NVFP4;
     }
   }

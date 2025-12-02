@@ -127,6 +127,12 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
+    """Scale factor for estimating post-RHT amax from pre-RHT amax.
+    When None, true post-RHT amax is computed (default behavior).
+    When set to a float, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
+    """
+    amax_estimation_scale: Optional[float]
+
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
     rht_matrix: torch.Tensor
@@ -143,6 +149,7 @@ class NVFP4Quantizer(Quantizer):
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
         with_random_sign_mask: bool = True,
+        amax_estimation_scale: Optional[float] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
@@ -152,6 +159,7 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        self.amax_estimation_scale = amax_estimation_scale
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -191,6 +199,7 @@ class NVFP4Quantizer(Quantizer):
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
+            amax_estimation_scale=self.amax_estimation_scale,
         )
         quantizer.internal = self.internal
         quantizer.rht_matrix = self.rht_matrix

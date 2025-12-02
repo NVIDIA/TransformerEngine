@@ -1140,6 +1140,15 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
 
+  // Amax estimation scale: when > 0, post-RHT amax is estimated from pre-RHT amax
+  // Default to 0.0 (disabled) if the attribute doesn't exist
+  if (py::hasattr(quantizer, "amax_estimation_scale")) {
+    auto scale = quantizer.attr("amax_estimation_scale");
+    this->amax_estimation_scale = scale.is_none() ? 0.0f : scale.cast<float>();
+  } else {
+    this->amax_estimation_scale = 0.0f;
+  }
+
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
@@ -1459,6 +1468,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
+  quant_config.set_amax_estimation_scale(this->amax_estimation_scale);
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
@@ -1486,11 +1496,16 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
 
   // Compute amax.
+  // When amax_estimation_scale > 0, we estimate post-RHT amax from pre-RHT amax,
+  // so we skip the RHT+amax kernel and compute simple pre-RHT amax instead.
+  const bool use_amax_estimation = this->amax_estimation_scale > 0.0f;
+
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
       NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
     }
-    if (this->with_post_rht_amax) {
+    if (this->with_post_rht_amax && !use_amax_estimation) {
+      // Compute true post-RHT amax using RHT+amax kernel
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
@@ -1498,8 +1513,33 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                      this->rht_matrix_random_sign_mask_t, stream);
       });
+    } else if (use_amax_estimation) {
+      // EXPERIMENTAL: Skip RHT+amax kernel, compute pre-RHT amax instead if required.
+      // The kernel will scale this by amax_estimation_scale to estimate post-RHT amax.
+      if (compute_amax) {
+        auto rowwise_amax_ptr = out.get_amax().data_ptr;
+        auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+        void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+        NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer for estimation");
+
+        // Compute pre-RHT amax of input tensor
+        out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+        NVTE_SCOPED_GIL_RELEASE(
+            { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+        out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+
+        // Make sure row-wise and column-wise amaxes match
+        if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+        if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+      }
     } else {
-      // raise error since it's not supported yet
+      // with_rht but not with_post_rht_amax and not using estimation
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
     }
   } else {  // Without RHT

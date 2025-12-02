@@ -336,6 +336,11 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
   /*! Whether to enable stochastic rounding */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Scale factor for estimating post-RHT amax from pre-RHT amax.
+   *  When <= 0.0f, true post-RHT amax is used (default behavior).
+   *  When > 0.0f, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
+   */
+  kNVTEQuantizationConfigAmaxEstimationScale = 7,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -878,6 +883,16 @@ class QuantizationConfigWrapper {
   void set_stochastic_rounding(bool stochastic_rounding) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
                                            &stochastic_rounding, sizeof(bool));
+  }
+
+  /*! \brief Set amax estimation scale for post-RHT amax estimation
+   *
+   *  When <= 0.0f, true post-RHT amax is used (default behavior).
+   *  When > 0.0f, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
+   */
+  void set_amax_estimation_scale(float amax_estimation_scale) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEstimationScale,
+                                           &amax_estimation_scale, sizeof(float));
   }
 
  private:
