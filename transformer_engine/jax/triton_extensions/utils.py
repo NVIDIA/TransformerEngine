@@ -302,7 +302,7 @@ def triton_call_lowering(
         )
 
         kernel_params = []
-        for aval in list(ctx.avals_in) + list(ctx.avals_out):
+        for _ in list(ctx.avals_in) + list(ctx.avals_out):
             kernel_params.append(gpu_triton.create_array_parameter(0, 16))
 
         kernel_call = gpu_triton.TritonKernelCall(
