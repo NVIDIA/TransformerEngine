@@ -83,7 +83,13 @@ class TestTritonBinding:
             for dim in ctx.avals_in[0].shape:
                 n_elements *= dim
 
-            grid = (triton.cdiv(n_elements, block_size),)
+            # For autotuned kernels, use the minimum BLOCK_SIZE from configs
+            # to ensure all elements are processed by all configs
+            min_block_size = min(
+                config.kwargs.get('BLOCK_SIZE', block_size)
+                for config in TestTritonBinding.amax_kernel.configs
+            )
+            grid = (triton.cdiv(n_elements, min_block_size),)
 
             return triton_call_lowering(
                 ctx,
