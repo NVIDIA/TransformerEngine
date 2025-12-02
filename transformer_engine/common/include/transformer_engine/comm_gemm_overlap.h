@@ -9,6 +9,7 @@
 
 #include <cuda.h>
 #include <cuda_fp8.h>
+#include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -16,6 +17,12 @@
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
+
+/* \brief Check if TE is built with cuBlasMp.
+ *
+ * \return True if TE is built with cuBlasMp.
+ */
+bool nvte_built_with_cublasmp();
 
 namespace transformer_engine {
 
@@ -59,6 +66,10 @@ class CommOverlapCore {
   bool _atomic_gemm{false};
   bool _is_p2p{false};
 
+  bool _with_cublasmp{false};
+  NVTECommGemmCtx *_cublasmp_ctx{nullptr};
+  NVTECommGemmAlgoType _algo_type = kNVTECommGemmAlgoDefault;
+
   TensorWrapper _ubuf;
   TensorWrapper _counter;
   float *_ubuf_scale_inv;
@@ -80,6 +91,9 @@ class CommOverlapCore {
                   int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
                   bool atomic_gemm);
+
+  CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm,
+                  bool is_p2p, bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 
@@ -108,6 +122,16 @@ class CommOverlapCore {
   bool is_p2p_overlap() { return _is_p2p; }
 
   bool is_fp8_ubuf() { return _ubuf.element_size() == 1; }
+
+  bool with_cublasmp() { return _with_cublasmp; }
+
+  void cublasmp_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        bool grad, bool accumulate, cudaStream_t stream_main);
+
+  void cublasmp_gemm_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        bool grad, bool accumulate, cudaStream_t stream_main);
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                             bool transb, TensorWrapper &D, TensorWrapper &bias,
@@ -176,6 +200,10 @@ class CommOverlapBase : public CommOverlapCore {
                   int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
                   bool set_sm_margin = true, bool atomic_gemm = false,
                   bool rs_overlap_first_gemm = false);
+
+  CommOverlapBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 16,
+                  bool atomic_gemm = false)
+    : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, false, atomic_gemm) {}
 
   virtual ~CommOverlapBase();
 
@@ -256,6 +284,10 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);
+
+  CommOverlapP2PBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
+                     bool atomic_gemm = false)
+    : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, true, atomic_gemm) {}
 
   virtual ~CommOverlapP2PBase();
 

@@ -526,6 +526,11 @@ class CommOverlapHelper : torch::CustomClassHolder {
                     ExtComm comm);
 
   void ub_barrier(ExtComm comm);
+
+  int64_t get_nccl_comm_ptr(std::string comm_name) {
+    NVTE_CHECK(backend_is_nccl, "Cannot get nccComm_t ptr if backend is not NCCL.");
+    return reinterpret_cast<c10d::ProcessGroupNCCL *>(pgs[comm_name])->getCommPtr();
+  }
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
@@ -536,6 +541,11 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
               bool set_sm_margin = true, bool atomic_gemm = false,
               bool rs_overlap_first_gemm = false);
+
+  CommOverlap(CommOverlapHelper *helper, int tp_size, int tp_rank, int num_comm_sm = 16,
+              bool atomic_gemm = false)
+    : CommOverlapBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
+                      atomic_gemm) {}
 
   ~CommOverlap() {}
 
@@ -557,6 +567,11 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
                  bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
+
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_size, int tp_rank, int num_comm_sm = 16,
+                 bool atomic_gemm = false)
+    : CommOverlapP2PBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
+                         atomic_gemm) {}
 
   ~CommOverlapP2P() {}
 
