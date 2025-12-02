@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import pytest
 import torch
 
 import transformer_engine.pytorch as te
