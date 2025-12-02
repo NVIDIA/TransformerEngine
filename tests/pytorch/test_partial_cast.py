@@ -12,7 +12,7 @@ from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.optimizers.multi_tensor_apply import multi_tensor_applier
 
 
-mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 
 
 def compute_partial_amax_reference(inp, amax_rowwise, amax_colwise, h, w, start_offset):

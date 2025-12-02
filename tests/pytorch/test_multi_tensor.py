@@ -24,7 +24,7 @@ input_size_pairs = [
     (555, 33333),
 ]
 appliers = [MultiTensorApply(2048 * 32), MultiTensorApply(333), MultiTensorApply(33333)]
-mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available()
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 
 
 @pytest.mark.parametrize("input_size_pair", input_size_pairs)
