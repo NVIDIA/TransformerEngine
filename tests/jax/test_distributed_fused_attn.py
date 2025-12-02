@@ -690,6 +690,10 @@ class TestMismatchingQKVSharding:
                 "fsdp",
                 "context",
             ),
+            axis_types=(
+                jax.sharding.AxisType.Auto,
+                jax.sharding.AxisType.Auto,
+            ),
         )
         with global_shard_guard(mesh_resource), mesh:
             yield mesh, mesh_resource
