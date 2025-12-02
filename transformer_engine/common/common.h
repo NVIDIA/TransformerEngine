@@ -102,7 +102,17 @@ struct SimpleTensor {
     return acc;
   }
 
+  /*! Whether the data pointer can be accessed. */
   bool has_data() const { return dptr != nullptr && numel() > 0; }
+
+  /*! Whether the tensor is 1D and has zero entries.
+   *
+   *  This checks whether the tensor shape matches a
+   *  default-initialized tensor. It returns false for tensors that
+   *  are not 1D, even if they have zero entries, because their shape
+   *  is non-trivial.
+   */
+  bool has_zero_shape() const { return shape.size() == 1 && shape[0] == 0; }
 
   void clear() {
     dptr = nullptr;
@@ -169,19 +179,18 @@ struct Tensor {
   }
 
   size_t dim() const {
-    // Check whether a tensor shape matches an uninitialized tensor
-    auto is_shape_trivial = [](const std::vector<size_t> &shape) -> bool {
-      return shape.size() == 1 && shape[0] == 0;
-    };
-
     // Choose data buffer based on whether it is initialized
     // Note: Logically each tensor format interprets its data
     // differently, but for simplicity we assume they all use row-wise
     // and column-wise data similarly.
     bool use_columnwise_shape = false;
-    if (!is_shape_trivial(data.shape)) {
+    if (data.has_data()) {
       use_columnwise_shape = false;
-    } else if (!is_shape_trivial(columnwise_data.shape)) {
+    } else if (columnwise_data.has_data()) {
+      use_columnwise_shape = true;
+    } else if (!data.has_zero_shape()) {
+      use_columnwise_shape = false;
+    } else if (!columnwise_data.has_zero_shape()) {
       use_columnwise_shape = true;
     }
 
@@ -193,12 +202,20 @@ struct Tensor {
   }
 
   std::vector<size_t> shape() const {
-    // Check whether a tensor shape matches an uninitialized tensor
-    auto is_shape_trivial = [](const std::vector<size_t> &shape) -> bool {
-      return shape.size() == 1 && shape.front() == 0;
-    };
-    const auto is_data_shape_trivial = is_shape_trivial(data.shape);
-    const auto is_columnwise_data_shape_trivial = is_shape_trivial(columnwise_data.shape);
+    // Choose data buffer based on whether it is initialized
+    // Note: Logically each tensor format interprets its data
+    // differently, but for simplicity we assume they all use row-wise
+    // and column-wise data similarly.
+    bool use_columnwise_shape = false;
+    if (data.has_data()) {
+      use_columnwise_shape = false;
+    } else if (columnwise_data.has_data()) {
+      use_columnwise_shape = true;
+    } else if (!data.has_zero_shape()) {
+      use_columnwise_shape = false;
+    } else if (!columnwise_data.has_zero_shape()) {
+      use_columnwise_shape = true;
+    }
 
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
@@ -208,7 +225,7 @@ struct Tensor {
       case NVTE_NVFP4_1D_SCALING: {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
-        if (is_data_shape_trivial && !is_columnwise_data_shape_trivial) {
+        if (use_columnwise_shape) {
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
             ret.reserve(columnwise_data.shape.size());
@@ -224,7 +241,7 @@ struct Tensor {
       case NVTE_MXFP8_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
-        if (is_data_shape_trivial && !is_columnwise_data_shape_trivial) {
+        if (use_columnwise_shape) {
           return columnwise_data.shape;
         }
         return data.shape;
