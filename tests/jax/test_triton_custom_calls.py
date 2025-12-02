@@ -81,8 +81,7 @@ class TestTritonBinding:
             # For autotuned kernels, use the minimum BLOCK_SIZE from configs
             # to ensure all elements are processed by all configs
             block_size = min(
-                config.kwargs.get('BLOCK_SIZE')
-                for config in TestTritonBinding.amax_kernel.configs
+                config.kwargs.get("BLOCK_SIZE") for config in TestTritonBinding.amax_kernel.configs
             )
             grid = (triton.cdiv(n_elements, block_size),)
 
