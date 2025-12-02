@@ -127,7 +127,8 @@ class CommunicatorHandler {
 
   int get_tp_num_domains() const { return tp_num_domains; }
 
-  static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
+  static void init(int num_total_devices, int num_devices_per_process, int process_id,
+                   int tp_size, bool use_cublasmp = false);
 
  private:
   ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
@@ -180,7 +181,7 @@ class CollectiveGemmPlanRegistry {
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
                                  int tp_size, int num_max_streams, int gemm_priority,
                                  int comm_priority, int num_comm_sm, bool use_ce,
-                                 bool aggregate_ag);
+                                 bool aggregate_ag, bool use_cublasmp = false);
 
 int GetCgemmNumMaxStreams();
 
