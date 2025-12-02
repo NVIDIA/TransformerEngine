@@ -328,8 +328,8 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
-    pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
-    pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
+    pytest.param([2, 128, 8, 128], id="2-128xCPx2-8-128"),
+    pytest.param([4, 256, 16, 64], id="4-256xCPx2-16-64"),
 ]
 
 
