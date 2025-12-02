@@ -94,6 +94,7 @@ struct SimpleTensor {
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
+  /*! Number of tensor elements. */
   size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
@@ -101,7 +102,6 @@ struct SimpleTensor {
     }
     return acc;
   }
-  bool has_data() const noexcept { return dptr != nullptr && numel() > 0; }
 
   /*! Whether the data pointer can be accessed. */
   bool has_data() const { return dptr != nullptr && numel() > 0; }
@@ -115,6 +115,7 @@ struct SimpleTensor {
    */
   bool has_zero_shape() const { return shape.size() == 1 && shape[0] == 0; }
 
+  /*! Reset to match default-initialized tensor. */
   void clear() {
     dptr = nullptr;
     shape.resize(1);
@@ -136,17 +137,9 @@ struct Tensor {
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
 
-  Tensor()
-      : data(),
-        columnwise_data(),
-        amax(),
-        columnwise_amax(),
-        scale(),
-        scale_inv(),
-        columnwise_scale_inv(),
-        scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
-        nvte_tensor(0) {}
+  Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
 
+  /*! Reset tensor data. */
   void clear() {
     data.clear();
     columnwise_data.clear();
@@ -160,6 +153,7 @@ struct Tensor {
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
+  /*! Number of tensor elements. */
   size_t numel() const {
     size_t acc = 1;
     for (const auto dim : shape()) {
@@ -168,54 +162,80 @@ struct Tensor {
     return acc;
   }
 
+  /*! Whether the tensor data pointer can be accessed. */
   bool has_data() const { return data.has_data(); }
 
+  /*! Whether the tensor column-wise data pointer can be accessed. */
   bool has_columnwise_data() const { return columnwise_data.has_data(); }
 
+  /*! Datatype of tensor elements. */
   DType dtype() const {
-    if (has_data()) return data.dtype;
-    if (has_columnwise_data()) return columnwise_data.dtype;
-    // Fallback, used e.g. in workspace
+    // Choose data buffer based on whether it is initialized
+    // Note: Logically each tensor format interprets its data
+    // differently, but for simplicity we assume they all use row-wise
+    // and column-wise data similarly.
+    bool use_columnwise_data = false;
+    if (data.has_data()) {
+      use_columnwise_data = false;
+    } else if (columnwise_data.has_data()) {
+      use_columnwise_data = true;
+    } else if (!data.has_zero_shape()) {
+      use_columnwise_data = false;
+    } else if (!columnwise_data.has_zero_shape()) {
+      use_columnwise_data = true;
+    }
+
+    // Get data buffer type
+    if (use_columnwise_data) {
+      return columnwise_data.dtype;
+    }
     return data.dtype;
   }
 
+  /*! Number of tensor dimensions. */
   size_t dim() const {
     // Choose data buffer based on whether it is initialized
     // Note: Logically each tensor format interprets its data
     // differently, but for simplicity we assume they all use row-wise
     // and column-wise data similarly.
-    bool use_columnwise_shape = false;
+    bool use_columnwise_data = false;
     if (data.has_data()) {
-      use_columnwise_shape = false;
+      use_columnwise_data = false;
     } else if (columnwise_data.has_data()) {
-      use_columnwise_shape = true;
+      use_columnwise_data = true;
     } else if (!data.has_zero_shape()) {
-      use_columnwise_shape = false;
+      use_columnwise_data = false;
     } else if (!columnwise_data.has_zero_shape()) {
-      use_columnwise_shape = true;
+      use_columnwise_data = true;
     }
 
     // Infer number of dims based on data
-    if (use_columnwise_shape) {
+    if (use_columnwise_data) {
       return columnwise_data.shape.size();
     }
     return data.shape.size();
   }
 
+  /*! Tensor dimensions.
+   *
+   *  This is the logical tensor shape. The underlying data may have a
+   *  different shape, e.g. the column-wise data for some tensor
+   *  formats are transposed.
+   */
   std::vector<size_t> shape() const {
     // Choose data buffer based on whether it is initialized
     // Note: Logically each tensor format interprets its data
     // differently, but for simplicity we assume they all use row-wise
     // and column-wise data similarly.
-    bool use_columnwise_shape = false;
+    bool use_columnwise_data = false;
     if (data.has_data()) {
-      use_columnwise_shape = false;
+      use_columnwise_data = false;
     } else if (columnwise_data.has_data()) {
-      use_columnwise_shape = true;
+      use_columnwise_data = true;
     } else if (!data.has_zero_shape()) {
-      use_columnwise_shape = false;
+      use_columnwise_data = false;
     } else if (!columnwise_data.has_zero_shape()) {
-      use_columnwise_shape = true;
+      use_columnwise_data = true;
     }
 
     // Each tensor format interprets its data differently
@@ -226,7 +246,7 @@ struct Tensor {
       case NVTE_NVFP4_1D_SCALING: {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
-        if (use_columnwise_shape) {
+        if (use_columnwise_data) {
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
             ret.reserve(columnwise_data.shape.size());
@@ -242,7 +262,7 @@ struct Tensor {
       case NVTE_MXFP8_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
-        if (use_columnwise_shape) {
+        if (use_columnwise_data) {
           return columnwise_data.shape;
         }
         return data.shape;
