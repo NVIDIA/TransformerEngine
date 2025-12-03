@@ -42,13 +42,13 @@ class RMSNorm(BasicOperation):
 
     Parameters
     ----------
-    normalized_shape: int or iterable of int
+    normalized_shape : int or iterable of int
         Inner dimensions of input tensor
     eps : float, default = 1e-5
         A value added to the denominator for numerical stability
-    device: torch.device, default = default CUDA device
+    device : torch.device, default = default CUDA device
         Tensor device
-    dtype: torch.dtype, default = default dtype
+    dtype : torch.dtype, default = default dtype
         Tensor datatype
     zero_centered_gamma : bool, default = 'False'
         If `True`, the :math:`\gamma` parameter is initialized to zero
@@ -57,7 +57,7 @@ class RMSNorm(BasicOperation):
             .. math::
                 y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma)
 
-    sm_margin: int, default = 0
+    sm_margin : int, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
         For more fine-grained control, provide a dict with the SM

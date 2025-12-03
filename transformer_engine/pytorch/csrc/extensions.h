@@ -335,6 +335,15 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const DType out_dtype);
 
+void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
+                                        at::Tensor amax_colwise, int rows, int cols,
+                                        size_t start_offset);
+
+void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwise,
+                                at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
+                                const at::Tensor &scale_inv_colwise, int rows, int cols,
+                                size_t start_offset);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
@@ -450,6 +459,9 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void multi_tensor_compute_scale_and_scale_inv_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     float max_fp8, bool force_pow_2_scales, float epsilon);
+
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists);
 
 /***************************************************************************************************
  * padding

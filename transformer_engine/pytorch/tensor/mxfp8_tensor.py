@@ -204,16 +204,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    data: torch.Tensor
+    data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
+    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
                    be applied when casting from FP8 to higher
                    precision.
-    dtype: torch.dtype, default = torch.float32
+    dtype : torch.dtype, default = torch.float32
            Nominal tensor datatype.
 
     """

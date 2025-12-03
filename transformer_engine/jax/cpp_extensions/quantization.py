@@ -40,11 +40,11 @@ from ..quantize import (
     GroupedScaledTensor1x,
     Quantizer,
     GroupedQuantizer,
-    QuantizeLayout,
     ScalingMode,
     compute_scale_from_amax,
     NoScaleTensor,
     get_rht_matrix,
+    QuantizeLayout,
 )
 
 

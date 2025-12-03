@@ -273,6 +273,128 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   CheckScaleTensorShape(t, name);
 }
 
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name) {
+  NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
+
+  // Helper lambda to validate shape arrays
+  // All three arrays are OPTIONAL:
+  // - first_dims: empty if all tensors have same first dimension
+  // - last_dims: empty if all tensors have same last dimension
+  // - tensor_offsets: empty if all tensors have same shape (offsets are predictable)
+  auto check_shape_array = [&](const SimpleTensor &arr, const char *arr_name) {
+    if (arr.has_data()) {
+      NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
+      NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
+                 " must have dtype Int64");
+      NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name, " size (",
+                 arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
+    }
+  };
+
+  // Validate shape arrays (all optional)
+  check_shape_array(t.first_dims, "first_dims");
+  check_shape_array(t.last_dims, "last_dims");
+  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets is required if any dimension varies
+  // (i.e., required unless all_same_shape())
+  if (!t.all_same_shape()) {
+    NVTE_CHECK(
+        t.tensor_offsets.dptr != nullptr, "Grouped tensor ", name,
+        " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
+  }
+
+  // Validate logical_shape
+  NVTE_CHECK(t.logical_shape.ndim == 2, "Grouped tensor ", name, " logical_shape must be 2D");
+  NVTE_CHECK(t.logical_shape.data[0] > 0 && t.logical_shape.data[1] > 0, "Grouped tensor ", name,
+             " logical_shape must have positive dimensions");
+
+  // Validate all data fields are 1D (flattened)
+  if (t.has_data()) {
+    NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name, " data must be 1D");
+  }
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.shape.size() == 1, "Grouped tensor ", name,
+               " columnwise_data must be 1D");
+  }
+
+  // Validate data size matches logical_shape
+  size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
+  if (t.has_data()) {
+    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name, " data size (",
+               t.data.numel(), ") must match logical_shape size (", expected_numel, ")");
+  }
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
+               " columnwise_data size (", t.columnwise_data.numel(),
+               ") must match logical_shape size (", expected_numel, ")");
+  }
+}
+
+// Helper function to check scale_inv for both input and output
+static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name, bool is_output) {
+  const char *tensor_type = is_output ? "output" : "input";
+
+  // Helper to check scale_inv for both rowwise and columnwise layouts
+  auto check_scales = [&](DType expected_dtype) {
+    if (t.has_data()) {
+      NVTE_CHECK(t.scale_inv.has_data(), tensor_type, " ", name,
+                 " rowwise scale_inv must be allocated");
+      NVTE_CHECK(t.scale_inv.dtype == expected_dtype, tensor_type, " ", name,
+                 " rowwise scale_inv has invalid dtype (expected ", to_string(expected_dtype),
+                 ", got ", to_string(t.scale_inv.dtype), ")");
+    }
+    if (t.has_columnwise_data()) {
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), tensor_type, " ", name,
+                 " columnwise scale_inv must be allocated");
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_dtype, tensor_type, " ", name,
+                 " columnwise scale_inv has invalid dtype (expected ", to_string(expected_dtype),
+                 ", got ", to_string(t.columnwise_scale_inv.dtype), ")");
+    }
+  };
+
+  // Determine expected dtype based on data type and scaling mode
+  if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat32);
+  } else if (is_mxfp8_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat8E8M0);
+  } else if (is_nvfp4_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat8E4M3);
+  } else {
+    // Non-quantized types should not have scale/scale_inv
+    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type,
+               " ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv not supported for non-quantized ",
+               tensor_type, " ", name);
+  }
+}
+
+void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name) {
+  NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name,
+             " not allocated");
+  CheckGroupedScaleInv(t, name, false);
+  CheckGroupedTensorShapeArrays(t, name);
+}
+
+void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, bool allow_empty) {
+  if (!allow_empty) {
+    NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
+               " not allocated");
+  }
+
+  // Only perform dtype-specific validation if data is allocated
+  if (t.has_data() || t.has_columnwise_data()) {
+    // Amax validation for delayed scaling
+    if (is_fp8_dtype(t.dtype()) && t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      NVTE_CHECK(t.amax.has_data(), "Output ", name, " amax must be allocated");
+      NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Output ", name, " amax must be Float32");
+    }
+    CheckGroupedScaleInv(t, name, true);
+  }
+
+  CheckGroupedTensorShapeArrays(t, name);
+}
+
 class TensorAllocator {
  public:
   static TensorAllocator &instance() {
@@ -384,6 +506,89 @@ Tensor *convertNVTETensor(const NVTETensor t) {
 Tensor *convertNVTETensorCheck(const NVTETensor t) {
   Tensor *ptr = TensorAllocator::instance().convertNVTETensor(t);
   NVTE_CHECK(ptr != nullptr, "Invalid tensor.");
+  return ptr;
+}
+
+// GroupedTensor allocator - similar pattern to TensorAllocator
+class GroupedTensorAllocator {
+ public:
+  static GroupedTensorAllocator &instance() {
+    static GroupedTensorAllocator allocator;
+    return allocator;
+  }
+
+  ~GroupedTensorAllocator() {}
+
+  NVTEGroupedTensor Allocate(NVTEScalingMode mode, size_t num_tensors, NVTEShape logical_shape) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!free_list.empty()) {
+      uintptr_t index = free_list.back();
+      NVTEGroupedTensor ret = reinterpret_cast<NVTEGroupedTensor>(index);
+      free_list.pop_back();
+      // 1-based indexing - fully reinitialize the tensor to avoid stale data
+      memory[index - 1].scaling_mode = mode;
+      memory[index - 1].num_tensors = num_tensors;
+      memory[index - 1].logical_shape = logical_shape;
+      memory[index - 1].nvte_tensor = ret;
+      return ret;
+    }
+    if (memory.size() < memory.capacity()) {
+      memory.emplace_back(mode, num_tensors);
+      GroupedTensor &t = memory.back();
+      size = memory.size();
+      // 1-based indexing
+      uintptr_t index = memory.size();
+      t.logical_shape = logical_shape;
+      t.nvte_tensor = reinterpret_cast<NVTEGroupedTensor>(index);
+      return reinterpret_cast<NVTEGroupedTensor>(index);
+    }
+    NVTE_ERROR(
+        "Cannot allocate a new NVTEGroupedTensor. Maximum number of grouped tensors reached: ",
+        MAX_GROUPED_TENSOR_NUM, ". There is probably a memory leak in your application.");
+  }
+
+  void Free(NVTEGroupedTensor t) {
+    std::lock_guard<std::mutex> lock(mutex);
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    if (index == 0) return;
+    NVTE_CHECK(index <= memory.size(), "Invalid grouped tensor.");
+    free_list.push_back(index);
+    // Clean up
+    memory[index - 1].clear();
+  }
+
+  GroupedTensor *convertNVTEGroupedTensor(NVTEGroupedTensor t) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    // 1-based indexing to enable 0-initialization of NVTEGroupedTensor
+    // to be invalid tensor
+    static_assert(nullptr == 0);
+    if (index != 0 && index <= size) {
+      return &(memory[index - 1]);
+    }
+    return nullptr;
+  }
+
+ private:
+  GroupedTensorAllocator() {
+    std::lock_guard<std::mutex> lock(mutex);
+    memory.reserve(MAX_GROUPED_TENSOR_NUM);
+  }
+
+  std::mutex mutex;
+  std::atomic<size_t> size;
+  // Allocate at most 20 MB for grouped tensors
+  const size_t MAX_GROUPED_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(GroupedTensor);
+  std::vector<uintptr_t> free_list;
+  std::vector<GroupedTensor> memory;
+};
+
+GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor t) {
+  return GroupedTensorAllocator::instance().convertNVTEGroupedTensor(t);
+}
+
+GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor t) {
+  GroupedTensor *ptr = GroupedTensorAllocator::instance().convertNVTEGroupedTensor(t);
+  NVTE_CHECK(ptr != nullptr, "Invalid grouped tensor.");
   return ptr;
 }
 
@@ -729,4 +934,133 @@ int nvte_is_non_tn_fp8_gemm_supported() {
                        deviceComputeCapability >= 130;
   });
   return cache[device_id];
+}
+
+// Grouped Tensor C API implementations
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                             NVTEShape logical_shape) {
+  NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
+  NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+  NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
+             "Logical shape must have positive dimensions");
+  NVTEGroupedTensor ret = transformer_engine::GroupedTensorAllocator::instance().Allocate(
+      scaling_mode, num_tensors, logical_shape);
+  return ret;
+}
+
+void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor) {
+  transformer_engine::GroupedTensorAllocator::instance().Free(tensor);
+}
+
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
+                                   const NVTEBasicTensor *param) {
+  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
+  auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
+  NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
+  NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
+
+  switch (param_name) {
+    case kNVTEGroupedRowwiseData:
+      t->data = *param;
+      break;
+    case kNVTEGroupedColumnwiseData:
+      t->columnwise_data = *param;
+      break;
+    case kNVTEGroupedScale:
+      t->scale = *param;
+      break;
+    case kNVTEGroupedAmax:
+      t->amax = *param;
+      break;
+    case kNVTEGroupedRowwiseScaleInv:
+      t->scale_inv = *param;
+      break;
+    case kNVTEGroupedColumnwiseScaleInv:
+      t->columnwise_scale_inv = *param;
+      break;
+    case kNVTEGroupedColumnwiseAmax:
+      t->columnwise_amax = *param;
+      break;
+    case kNVTEGroupedFirstDims:
+      t->first_dims = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->first_dims.dtype == transformer_engine::DType::kInt64,
+                 "first_dims must have dtype Int64");
+      break;
+    case kNVTEGroupedLastDims:
+      t->last_dims = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->last_dims.dtype == transformer_engine::DType::kInt64,
+                 "last_dims must have dtype Int64");
+      break;
+    case kNVTEGroupedTensorOffsets:
+      t->tensor_offsets = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->tensor_offsets.dtype == transformer_engine::DType::kInt64,
+                 "tensor_offsets must have dtype Int64");
+      break;
+    default:
+      NVTE_ERROR("Unknown grouped tensor parameter!");
+  }
+}
+
+NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                              NVTEGroupedTensorParam param_name) {
+  if (tensor == nullptr) {
+    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+
+  switch (param_name) {
+    case kNVTEGroupedRowwiseData:
+      return t.data;
+    case kNVTEGroupedColumnwiseData:
+      return t.columnwise_data;
+    case kNVTEGroupedScale:
+      return t.scale;
+    case kNVTEGroupedAmax:
+      return t.amax;
+    case kNVTEGroupedRowwiseScaleInv:
+      return t.scale_inv;
+    case kNVTEGroupedColumnwiseScaleInv:
+      return t.columnwise_scale_inv;
+    case kNVTEGroupedColumnwiseAmax:
+      return t.columnwise_amax;
+    case kNVTEGroupedFirstDims:
+      return t.first_dims;
+    case kNVTEGroupedLastDims:
+      return t.last_dims;
+    case kNVTEGroupedTensorOffsets:
+      return t.tensor_offsets;
+    default:
+      NVTE_ERROR("Unknown grouped tensor parameter!");
+  }
+}
+
+size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor) {
+  auto *t = transformer_engine::convertNVTEGroupedTensor(tensor);
+  if (t == nullptr) return 0;
+  return t->num_tensors;
+}
+
+NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor) {
+  auto *t = transformer_engine::convertNVTEGroupedTensor(tensor);
+  if (t == nullptr) return kNVTEFloat32;
+  return static_cast<NVTEDType>(t->dtype());
+}
+
+NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return NVTE_DELAYED_TENSOR_SCALING;
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.scaling_mode;
+}
+
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return nvte_make_shape(nullptr, 0);
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.logical_shape;
 }

@@ -15,7 +15,7 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
@@ -1045,20 +1045,20 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   size of each output sample.
     eps : float, default = 1e-5
          a value added to the denominator of layer normalization for numerical stability.
-    bias : bool, default = `True`
-          if set to `False`, the layer will not learn an additive bias.
+    bias : bool, default = True
+          if set to ``False``, the layer will not learn an additive bias.
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
                    type of normalization applied.
-    init_method : Callable, default = `None`
-                 used for initializing weights in the following way: `init_method(weight)`.
-                 When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    return_layernorm_output : bool, default = `False`
-                             if set to `True`, output of layernorm is returned from the forward
+    init_method : Callable, default = None
+                 used for initializing weights in the following way: ``init_method(weight)``.
+                 When set to ``None``, defaults to ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    return_layernorm_output : bool, default = False
+                             if set to ``True``, output of layernorm is returned from the forward
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    return_layernorm_output_gathered : bool, default = `False`
-                             if set to `True`, output of layernorm is returned after the all
+    return_layernorm_output_gathered : bool, default = False
+                             if set to ``True``, output of layernorm is returned after the all
                              gather operation. Ignored if return_layernorm_output is False.
                              Example use case: with sequence parallel, input to residual connection
                              for transformer module (e.g. LoRA) will need to be gathered.
@@ -1069,10 +1069,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                       they are used to make the names of equally-sized parameters. If a dict
                       (preferably an OrderedDict) is provided, the keys are used as names and
                       values as split sizes along dim 0. The resulting parameters will have
-                      names that end in `_weight` or `_bias`, so trailing underscores are
+                      names that end in ``_weight`` or ``_bias``, so trailing underscores are
                       stripped from any provided names.
     zero_centered_gamma : bool, default = 'False'
-                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         if set to ``'True'``, gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
 
                          .. math::
@@ -1082,53 +1082,53 @@ class LayerNormLinear(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    name: str, default = `None`
+    name : str, default = None
         name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
-    tp_group : ProcessGroup, default = `None`
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
     tp_size : int, default = 1
              used as TP (tensor parallel) world size when TP groups are not formed during
              initialization. In this case, users must call the
-             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    parallel_mode : {None, 'column', 'row'}, default = `None`
+    parallel_mode : {None, 'column', 'row'}, default = None
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
-                   When set to `None`, no communication is performed.
+                   When set to ``None``, no communication is performed.
 
     Optimization parameters
     -----------------------
     fuse_wgrad_accumulation : bool, default = 'False'
-                             if set to `True`, enables fusing of creation and accumulation of
+                             if set to ``True``, enables fusing of creation and accumulation of
                              the weight gradient. When enabled, it is assumed that the weights
-                             have an additional `main_grad` attribute (used instead of the
-                             regular `grad`) which is a pre-allocated buffer of the correct
+                             have an additional ``main_grad`` attribute (used instead of the
+                             regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in. This argument along with
                              weight tensor having attribute 'overwrite_main_grad' set to True
-                             will overwrite `main_grad` instead of accumulating.
-    return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias itself, but
+                             will overwrite ``main_grad`` instead of accumulating.
+    return_bias : bool, default = False
+                 when set to ``True``, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+    params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    delay_wgrad_compute : bool, default = `False`
-                         Whether or not to delay weight gradient computation. If set to `True`,
-                         it's the user's responsibility to call `module.backward_dw` to compute
+    delay_wgrad_compute : bool, default = False
+                         Whether or not to delay weight gradient computation. If set to ``True``,
+                         it's the user's responsibility to call ``module.backward_dw`` to compute
                          weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
     """
 

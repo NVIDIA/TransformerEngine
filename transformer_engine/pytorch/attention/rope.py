@@ -287,16 +287,16 @@ def _apply_rotary_pos_emb_base(
 
     Parameters
     ----------
-    t: torch.Tensor
+    t : torch.Tensor
         Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which rotary positional
         embedding will be applied.
-    freqs: torch.Tensor
+    freqs : torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` or `[s2, b, 1, d2]`
         and dtype 'float', with `s2 >= s` and `d2 <= d`.
-    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    tensor_format : {'sbhd', 'bshd'}, default = 'sbhd'
         Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is of shape
         `[seq, bs, ...]`.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
     """
     # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
@@ -324,7 +324,7 @@ def _get_freqs_on_this_cp_rank(
     """Get the position embedding on the current context parallel rank.
 
     Args:
-        freqs: torch.Tensor. Positional embedding tensor in shape `[s2, 1, 1, d2]`.
+        freqs: torch.Tensor. Positional embedding tensor of shape `[s2, 1, 1, d2]`.
         seqlen: int. Length of the current sequence.
         cp_size: int. Context parallel world size.
         cp_rank: int. Context parallel rank.
@@ -372,29 +372,29 @@ def apply_rotary_pos_emb(
 
     Parameters
     ----------
-    t: torch.Tensor
+    t : torch.Tensor
         Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
         rotary positional embedding will be applied.
-    freqs: torch.Tensor
+    freqs : torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    start_positions: torch.Tensor, default = None.
+    start_positions : torch.Tensor, default = None.
         Tokens in a sequence `i` should be applied with position encoding offset by
         `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+    tensor_format : {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
         is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
         of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
-    fused: bool, default = False
+    fused : bool, default = False
         Whether to use a fused applying RoPE implementation.
-    cu_seqlens: torch.Tensor, default = None.
+    cu_seqlens : torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
         Should be `cu_seqlens_padded` when cp_size > 1.
-    cp_size: int, default = 1.
+    cp_size : int, default = 1.
         Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    cp_rank: int, default = 0.
+    cp_rank : int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
     assert (
@@ -492,32 +492,32 @@ def apply_fused_qkv_rotary_pos_emb(
 
     Parameters
     ----------
-    qkv: torch.Tensor
+    qkv : torch.Tensor
         Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which
         rotary positional embedding will be applied. This tensor has q, k, v concatenated
         along the last dimension.
-    q_freqs: torch.Tensor
+    q_freqs : torch.Tensor
         Rotary positional embedding Q tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    k_freqs: torch.Tensor
+    k_freqs : torch.Tensor
         Rotary positional embedding K tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    qkv_split_arg_list: List[int]
+    qkv_split_arg_list : List[int]
         List of integers that specify the split of the qkv tensor. The list should have 3 elements,
         the first element is the number of elements in the q tensor, the second element is the number
         of elements in the k tensor, and the third element is the number of elements in the v tensor.
         The sum of the elements in the list should be equal to the last dimension of the qkv tensor.
-    start_positions: torch.Tensor, default = None.
+    start_positions : torch.Tensor, default = None.
         Tokens in a sequence `i` should be applied with position encoding offset by
         `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    tensor_format : {'sbhd', 'bshd'}, default = 'sbhd'
         is `bshd` if `qkv` is of shape `[bs, seq, ...]`, or `sbhd` if `qkv` is
         of shape `[seq, bs, ...]`.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
-    cp_size: int, default = 1.
+    cp_size : int, default = 1.
         Context parallel world size.
-    cp_rank: int, default = 0.
+    cp_rank : int, default = 0.
         Context parallel rank.
     """
 

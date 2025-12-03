@@ -7,21 +7,13 @@
 # pylint: disable=wrong-import-position
 
 import functools
-from packaging.version import Version as PkgVersion
 
 import torch
 
 from transformer_engine.common import load_framework_extension
-
-
-@functools.lru_cache(maxsize=None)
-def torch_version() -> tuple[int, ...]:
-    """Get PyTorch version"""
-    return PkgVersion(str(torch.__version__)).release
-
+from transformer_engine.pytorch.torch_version import torch_version
 
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
-
 
 load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear

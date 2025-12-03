@@ -24,7 +24,7 @@ class AllReduce(BasicOperation):
 
     Parameters
     ----------
-    process_group: torch.distributed.ProcessGroup, default = world group
+    process_group : torch.distributed.ProcessGroup, default = world group
         Process group for communication
 
     """

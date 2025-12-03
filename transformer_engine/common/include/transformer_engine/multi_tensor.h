@@ -265,6 +265,21 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
                                                         float max_fp8, int force_pow_2_scales,
                                                         float epsilon, cudaStream_t stream);
 
+/*!  \brief Compute E8M0 scale_inv for a list of tensors.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
+ *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
+ *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
+ *  \param[in]      stream                  CUDA stream used for this operation.
+ */
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **tensor_lists,
+                                                   const size_t num_tensor_lists,
+                                                   const size_t num_tensors_per_list,
+                                                   cudaStream_t stream);
+
 /*! \brief Split a tensor along dimension 0 and compute the amax for each split.
  *
  *  This function is experimental and the API is not stable.
