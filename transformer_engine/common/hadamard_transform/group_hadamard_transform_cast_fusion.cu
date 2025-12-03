@@ -212,7 +212,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
   using TensorC = decltype(
       make_tensor(
-          subbyte_iterator<TC>((TC*)nullptr),    // engine
+          subbyte_iterator<TC>(recast_ptr<TC>(nullptr)),    // engine
           make_shape(int{}, int{}),              // (M, N_i)
           Stride2D{}                             // stride (dM, dN)
       )
@@ -220,7 +220,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
   using TensorSFC = decltype(
     make_tensor(
-        make_gmem_ptr((TSFC*)nullptr),
+        make_gmem_ptr(recast_ptr<TSFC>(nullptr)),
         make_layout(
             make_shape(
                 int{},                                   // M
