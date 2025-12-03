@@ -145,7 +145,9 @@ class TestMoEMLPWithRecipes:
         mlp_up_quantizer_sets = self._get_quantizer_sets(recipe, E)
         mlp_down_quantizer_sets = self._get_quantizer_sets(recipe, E)
 
-        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=jnp.bfloat16) / jnp.sqrt(M)
+        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=jnp.bfloat16) / jnp.sqrt(
+            M
+        )
         routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=jnp.bfloat16)
         routing = jax.nn.softmax(routing, axis=-1)  # Normalize routing weights
         up_weights = jax.random.normal(
