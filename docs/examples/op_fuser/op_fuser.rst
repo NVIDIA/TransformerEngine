@@ -184,7 +184,7 @@ arguments and the extra outputs will be returned.
     # Forward pass
     x = torch.randn(16384, 4096, device="cuda")
     y, residual = fc1(x)
-    y = fc2(x, residual)
+    y = fc2(y, residual)
 
 .. figure:: ./residual_layernorm_mlp.png
    :align: center
