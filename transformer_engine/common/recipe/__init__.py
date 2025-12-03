@@ -437,7 +437,7 @@ class NVFP4BlockScaling(Recipe):
              **EXPERIMENTAL**: If set to `True`, post-RHT amax is estimated from pre-RHT amax
              instead of being computed by a separate RHT+amax kernel. This can reduce the
              number of kernel launches but may affect numerical accuracy.
-    post_rht_amax_estimation_scale_fwd_inp : float, default = 2.0
+    post_rht_amax_estimation_scale_fwd_inp : float, default = 1.0
              Scale factor for estimating post-RHT amax for forward input activations.
              Only used when `use_post_rht_amax_estimation=True`.
     post_rht_amax_estimation_scale_bwd_grad : float, default = 1.0
