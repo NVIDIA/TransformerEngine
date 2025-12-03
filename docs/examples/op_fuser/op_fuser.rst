@@ -66,9 +66,9 @@ Thus, using the operation fuser simply involves constructing
     # Construct operations and fuse
     mlp = te.ops.Sequential(
         te.ops.LayerNorm(hidden_size),
-        te.ops.Linear(ffn_size, hidden_size),
+        te.ops.Linear(hidden_size, ffn_size),
         te.ops.SwiGLU(),
-        te.ops.Linear(hidden_size, ffn_size // 2),
+        te.ops.Linear(ffn_size // 2, hidden_size),
     )
 
     # Forward pass
@@ -99,7 +99,7 @@ quantized compute.
     with te.quantized_model_init():
         fc1 = te.ops.Sequential(
             te.ops.LayerNorm(4096),
-            te.ops.Linear(28672, 4096),
+            te.ops.Linear(4096, 28672),
         )
 
     # Forward pass within autocast context
@@ -137,7 +137,7 @@ adding ``Quantize`` operations.
             te.ops.Quantize(),
         )
         fc1 = te.ops.Sequential(
-            te.ops.Linear(28672, 4096),
+            te.ops.Linear(4096, 28672),
         )
 
     # Forward pass
@@ -173,11 +173,11 @@ arguments and the extra outputs will be returned.
     fc1 = te.ops.Sequential(
         te.ops.LayerNorm(4096),
         te.ops.MakeExtraOutput(),  # Output residual
-        te.ops.Linear(28672, 4096),
+        te.ops.Linear(4096, 28672),
         te.ops.SwiGLU(),
     )
     fc2 = te.ops.Sequential(
-        te.ops.Linear(4096, 14336),
+        te.ops.Linear(14336, 4096),
         te.ops.AddExtraInput(),  # Add residual
     )
 
