@@ -1290,6 +1290,59 @@ class TestFusedQuantize:
         )
 
 
+class TestQuantizeWithVmap:
+    """Test vmap support for quantization primitives."""
+
+    @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE])
+    def test_vmap_quantize(self, in_dtype, scaling_mode, q_layout):
+        """Test that vmap works with tex.quantize using the general batcher."""
+        # Determine q_dtype based on scaling mode
+        if scaling_mode.is_nvfp4_scaling:
+            q_dtype = jnp.float4_e2m1fn
+        else:
+            q_dtype = jnp.float8_e4m3fn
+
+        # Create batched input (E, M, K) - E experts
+        E, M, K = 4, 64, 128
+        key = jax.random.PRNGKey(0)
+        batched_input = jax.random.uniform(key, (E, M, K), in_dtype)
+
+        # Create per-expert quantizers
+        quantizers = [
+            QuantizerFactory.create(
+                q_dtype=q_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+            )
+            for _ in range(E)
+        ]
+
+        # Stack quantizers for vmap
+        stacked_quantizers = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *quantizers)
+
+        # Vmap over expert dimension
+        def quantize_single(x, quantizer):
+            return tex.quantize(x, quantizer=quantizer, flatten_axis=-1)
+
+        vmapped_quantize = jax.vmap(quantize_single, in_axes=(0, 0))
+        result = vmapped_quantize(batched_input, stacked_quantizers)
+
+        # Verify shapes
+        assert result.data.shape == (E, M, K)
+        assert result.scale_inv.shape[0] == E  # Per-expert scales
+
+        # Compare with calling quantize for each expert individually
+        individual_results = []
+        for i in range(E):
+            res_i = tex.quantize(batched_input[i], quantizer=quantizers[i], flatten_axis=-1)
+            individual_results.append(res_i.data)
+
+        expected = jnp.stack(individual_results, axis=0)
+        assert_allclose(result.data, expected, dtype=quantizers[0].q_dtype)
+
+
 valid_fp8_gemm_operand_types = [
     (jnp.float8_e4m3fn, jnp.float8_e4m3fn),
     (jnp.float8_e5m2, jnp.float8_e4m3fn),

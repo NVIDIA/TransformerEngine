@@ -361,34 +361,24 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         stochastic_rounding,
         use_rht,
     ):
-        """
-        to describe batch rules for vmap
-        """
-        del is_outer
+        """Batch rule for quantization primitive using general batcher."""
         check_valid_batch_dims(batch_dims)
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
-        x, scale, amax, sr_rng_state, post_rht_amax, rht_matrix = batched_args
-        x_bdim, scale_bdim, amax_bdim, _, _, _ = batch_dims
 
-        out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim, x_bdim
-        return (
-            BaseDBiasQuantizePrimitive.outer_primitive.bind(
-                x,
-                scale,
-                amax,
-                sr_rng_state,
-                post_rht_amax,
-                rht_matrix,
-                out_dtype=out_dtype,
-                scaling_mode=scaling_mode,
-                q_layout=q_layout,
-                flatten_axis=flatten_axis,
-                scale_dtype=scale_dtype,
-                is_dbias=is_dbias,
-                stochastic_rounding=stochastic_rounding,
-                use_rht=use_rht,
-            ),
-            out_bdims,
+        return BaseDBiasQuantizePrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "scaling_mode": scaling_mode,
+                "q_layout": q_layout,
+                "flatten_axis": flatten_axis,
+                "scale_dtype": scale_dtype,
+                "is_dbias": is_dbias,
+                "is_outer": is_outer,
+                "stochastic_rounding": stochastic_rounding,
+                "use_rht": use_rht,
+            },
         )
 
     @staticmethod
