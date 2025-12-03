@@ -44,7 +44,7 @@ _is_graph_capturing_function: Optional[Callable[[], bool]] = None
 
 
 def _is_graph_capturing() -> bool:
-    """Whether function is called within `make_graphed_callables`
+    """Whether function is called within ``make_graphed_callables``
 
     Avoid circular import with lazy import.
 

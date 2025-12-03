@@ -37,7 +37,8 @@ Description and usage
 Basic usage
 ^^^^^^^^^^^
 
-At the most basic level, the operation fuser API involves two classes:
+At the most basic level, the operation fuser API involves two classes
+in the ``transformer_engine.pytorch.ops`` submodule:
 
 - ``FusibleOperation``: An abstract base class for tensor operations.
   Examples include ``Linear``, ``LayerNorm``, and ``AllReduce``. It is
@@ -248,6 +249,3 @@ Misconceptions
   workflows, which makes them challenging to decompose into simple
   operations that work with the fuser. They are also carefully
   hand-tuned to achieve maximum performance.
-
-Creating a custom fused operation
----------------------------------

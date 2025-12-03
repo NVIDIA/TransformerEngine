@@ -153,7 +153,7 @@ class GELU(_ActivationOperation):
 
        \text{GELU}(x) \approx \frac{x}{2} \left( 1 + \tanh\left( 0.797x+0.036 x^3 \right) \right)
 
-    See `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
+    See `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`__.
 
     """
 
@@ -188,7 +188,7 @@ class GEGLU(_ActivationOperation):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
-    See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+    See `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__.
 
     """
 
@@ -202,8 +202,8 @@ class GEGLU(_ActivationOperation):
 class QGELU(_ActivationOperation):
     r"""Quick Gaussian Error Linear Unit
 
-    Quick GELU from `HuggingFace<https://github.com/huggingface/transformers/blob/3e93dd295b5343557a83bc07b0b2ea64c926f9b4/src/transformers/activations.py#L90>`__
-    and `paper<https://github.com/hendrycks/GELUs>`__.
+    Quick GELU from `HuggingFace <https://github.com/huggingface/transformers/blob/3e93dd295b5343557a83bc07b0b2ea64c926f9b4/src/transformers/activations.py#L90>`__
+    and `paper <https://github.com/hendrycks/GELUs>`__.
 
     .. math::
 
@@ -285,7 +285,7 @@ class ReGLU(_ActivationOperation):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
-    See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+    See `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__.
 
     """
 
@@ -303,7 +303,7 @@ class SReLU(_ActivationOperation):
 
        \text{SReLU}(x) = \max(x^2,0)
 
-    See `Primer: Searching for Efficient Transformers for Language Modeling<https://arxiv.org/abs/2109.08668v2>`__.
+    See `Primer: Searching for Efficient Transformers for Language Modeling <https://arxiv.org/abs/2109.08668v2>`__.
 
     """
 
@@ -383,8 +383,8 @@ class SwiGLU(_ActivationOperation):
 
     The Sigmoid Linear Unit (SiLU) gating function is also known as
     the swish function. See
-    `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__
-    and `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
+    `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__
+    and `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`__ .
 
     """
 
@@ -397,7 +397,7 @@ class SwiGLU(_ActivationOperation):
 
 class ClampedSwiGLU(_ActivationOperation):
     r"""GPT-OSS
-    Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
+    Implementation based on `GPT-OSS <https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
 
     This activation has two differences compared to the original SwiGLU
        1. Both gate and pre-activations are clipped based on parameter limit.

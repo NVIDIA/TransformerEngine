@@ -143,6 +143,70 @@ Tensor saving and restoring functions
 
 .. autoapifunction:: transformer_engine.pytorch.restore_from_saved
 
+Operation fuser
+---------------
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Sequential
+   :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.ops.FusibleOperation
+   :members: fuser_forward, fuser_backward
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Linear
+
+.. autoapiclass:: transformer_engine.pytorch.ops.AddExtraInput
+
+.. autoapiclass:: transformer_engine.pytorch.ops.AllGather
+
+.. autoapiclass:: transformer_engine.pytorch.ops.AllReduce
+
+.. autoapiclass:: transformer_engine.pytorch.ops.BasicLinear
+   :members: _functional_forward, _functional_backward
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Bias
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ClampedSwiGLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ConstantScale
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Dropout
+
+.. autoapiclass:: transformer_engine.pytorch.ops.GEGLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.GELU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Identity
+
+.. autoapiclass:: transformer_engine.pytorch.ops.L2Normalization
+
+.. autoapiclass:: transformer_engine.pytorch.ops.LayerNorm
+
+.. autoapiclass:: transformer_engine.pytorch.ops.MakeExtraOutput
+
+.. autoapiclass:: transformer_engine.pytorch.ops.QGELU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.QGEGLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Quantize
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ReGLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ReLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ReduceScatter
+
+.. autoapiclass:: transformer_engine.pytorch.ops.Reshape
+
+.. autoapiclass:: transformer_engine.pytorch.ops.RMSNorm
+
+.. autoapiclass:: transformer_engine.pytorch.ops.SReGLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.SReLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.SiLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.SwiGLU
+
 Deprecated functions
 --------------------
 
