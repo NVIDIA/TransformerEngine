@@ -423,7 +423,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
     // (optional) path for faster math, use multiply to repalce div 
-    // static constexpr float fp4_max_inv = 1.0f / fp4_max;
+    static constexpr float fp4_max_inv = 1.0f / fp4_max;
 
     const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
     // (optional) path for faster math, use multiply to repalce div 
@@ -485,7 +485,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         }
 
         // regular path for slower math, use divide
-        pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
+        pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max_inv);
+        // pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
         pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
         // (optional) path for faster math, use multiply to repalce div 
         // pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
