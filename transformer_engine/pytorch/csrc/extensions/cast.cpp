@@ -723,6 +723,13 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(quantizers.size() == num_tensors, "Expected ", num_tensors,
              " NVFP4 quantizers, but got ", quantizers.size(), ".");
 
+  // sanity check all the quantizers have the same scaling mode
+  bool all_same_scaling_mode =
+      std::all_of(quantizers.begin(), quantizers.end(), [&](const NVFP4Quantizer *quantizer) {
+        return quantizer->get_scaling_mode() == quantizers.front()->get_scaling_mode();
+      });
+  NVTE_CHECK(all_same_scaling_mode, "All quantizers must have the same scaling mode");
+
   // Trivial cases
   if (num_tensors == 0) {
     return;

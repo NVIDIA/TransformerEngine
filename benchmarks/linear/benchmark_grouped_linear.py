@@ -53,7 +53,7 @@ ncu -f -o ./benchmarks/linear/ncu_b200_numgemm_8_nvfp4_rht_amax \
     --set=full \
     --kernel-name "GroupHadamardAmaxTmaKernel" \
     -s 5 -c 5 \
-    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4 --profile
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe nvfp4
 
 """
 
