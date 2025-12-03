@@ -489,6 +489,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
+    // (optional) path for faster math, use multiply to repalce div 
     // static constexpr float fp4_max_inv = 1.0f / fp4_max;
 
     // get global amax pointer
@@ -539,6 +540,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
     float global_amax_val = *global_amax_ptr;
     float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+    // (optional) path for faster math, use multiply to repalce div 
     // float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
     float global_decode_scale = 1.0f / global_encode_scale;
 
@@ -557,6 +559,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
         if (tensor_id != new_tensor_id) {
           global_amax_val = *global_amax_ptr;
           global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+          // (optional) path for faster math, use multiply to repalce div 
           // global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
           global_decode_scale = 1.0f / global_encode_scale;
           tensor_id = new_tensor_id;
@@ -646,7 +649,7 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
         ++accumulator_pipe_consumer_state;
 
-        // TODO(zhongbo): Maybe remove it for better perf. Cast data from FP32 to BF16 to FP32.
+        // TODO(zhongbo): (optional) Maybe remove it for better perf. Cast data from FP32 to BF16 to FP32.
         auto convert_accum_to_bf16 = cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator, FragmentSize>{};
         auto convert_bf16_to_accum = cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t, FragmentSize>{};
         tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
@@ -658,15 +661,19 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
           vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
         }
 
+        // regular path for slower math, use divide
         pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
         pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
+        // (optional) path for faster math, use multiply to repalce div 
         // pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
         auto pvscales_cvted = cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
         tC_rRowSFD_frg(_0{}) = pvscales_cvted;
         auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(tC_rRowSFD_frg(_0{}));
         auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(qpvscale_ups, global_decode_scale);
+        // regular path for slower math, use divide to repalce div 
         auto acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+        // (optional) path for faster math, use fast math reciprocal approximate to repalce div 
         // auto acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
 
         // Initialize RNG for tile
