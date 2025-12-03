@@ -102,7 +102,7 @@ jobs:
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
         run: |
-          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 CXX="sccache c++" pip install --no-build-isolation . -v
+          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
