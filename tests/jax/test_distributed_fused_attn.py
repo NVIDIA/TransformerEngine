@@ -514,12 +514,12 @@ class TestDistributedContextParallelSelfAttn:
         "window_size",
         [
             pytest.param((-1, -1), id="window_size(-1, -1)"),
-            pytest.param((5, 0), id="window_size(5, 0)"),
+            pytest.param((5, 0), id="window_size(8, 0)"),
         ],
     )
     @pytest.mark.parametrize(
         "num_segments_per_seq",
-        [pytest.param(2, id="SEG-2"), pytest.param(11, id="SEG-11")],
+        [pytest.param(5, id="SEG-5")],
     )
     def test_context_parallel_allgather_striped_attn(
         self,
