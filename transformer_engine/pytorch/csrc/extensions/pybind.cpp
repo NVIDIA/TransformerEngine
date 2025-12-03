@@ -276,6 +276,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_scaling_compute_partial_amax",
+        &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
+        "Compute partial amax from master weights for fp8 mxfp8 scaling", py::arg("input"),
+        py::arg("amax_rowwise"), py::arg("amax_colwise"), py::arg("rows"), py::arg("cols"),
+        py::arg("start_offset"), py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_scaling_partial_cast", &transformer_engine::pytorch::mxfp8_scaling_partial_cast,
+        "Partial cast from master weights for fp8 mxfp8 scaling", py::arg("input"),
+        py::arg("output_rowwise"), py::arg("output_colwise"), py::arg("scale_inv_rowwise"),
+        py::arg("scale_inv_colwise"), py::arg("rows"), py::arg("cols"), py::arg("start_offset"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
@@ -427,6 +437,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_and_scale_inv",
         &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_inv_e8m0",
+        &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
+        "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",
