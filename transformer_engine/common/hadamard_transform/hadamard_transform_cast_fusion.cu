@@ -422,11 +422,11 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
-    // (optional) path for faster math, use multiply to repalce div 
+    // (optional) path for faster math, use multiply to repalce div
     static constexpr float fp4_max_inv = 1.0f / fp4_max;
 
     const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-    // (optional) path for faster math, use multiply to repalce div 
+    // (optional) path for faster math, use multiply to repalce div
     // const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
     const float global_decode_scale = 1.0f / global_encode_scale;
     auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
@@ -488,7 +488,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max_inv);
         // pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
         pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
-        // (optional) path for faster math, use multiply to repalce div 
+        // (optional) path for faster math, use multiply to repalce div
         // pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
         auto pvscales_cvted = cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
@@ -497,7 +497,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(qpvscale_ups, global_decode_scale);
         // regular path for slower math, use divide
         auto acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
-        // (optional) path for faster math, use fast math reciprocal approximate to repalce div 
+        // (optional) path for faster math, use fast math reciprocal approximate to repalce div
         // auto acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
 
         // Initialize RNG for tile
