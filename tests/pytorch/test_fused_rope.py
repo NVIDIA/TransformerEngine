@@ -58,10 +58,6 @@ def test_fused_rope(
         # are with the maximum length of the rope embeddings.
         pytest.skip("Skipping test with margin=0 and start_positions=True")
 
-    if start_positions == True and cp_size > 1:
-        # `start_positions` is only supported for `cp_size=1` and inference.
-        pytest.skip("Skipping test with cp_size>1 and start_positions=True")
-
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     t = torch.rand(
@@ -102,11 +98,8 @@ def test_fused_rope(
             cp_rank=cp_rank,
         ).to(dtype)
         loss_unfused = loss_func(output_unfused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            loss_unfused.backward()
-            grad_unfused = t.grad.detach().clone()
-
+        loss_unfused.backward()
+        grad_unfused = t.grad.detach().clone()
         t.grad = None
 
         # fused
@@ -121,17 +114,12 @@ def test_fused_rope(
             cp_rank=cp_rank,
         )
         loss_fused = loss_func(output_fused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            loss_fused.backward()
-            grad_fused = t.grad.detach().clone()
+        loss_fused.backward()
+        grad_fused = t.grad.detach().clone()
         t.grad = None
 
         torch.testing.assert_close(output_fused, output_unfused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            torch.testing.assert_close(grad_fused, grad_unfused)
-
+        torch.testing.assert_close(grad_fused, grad_unfused)
         assert output_fused.is_contiguous()
 
 
@@ -155,10 +143,6 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
-
-    if start_positions == True and cp_size > 1:
-        # `start_positions` is only supported for `cp_size=1` and inference.
-        pytest.skip("Skipping test with cp_size>1 and start_positions=True")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -214,10 +198,8 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         ).to(dtype)
         loss_unfused = loss_func(output_unfused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            loss_unfused.backward()
-            grad_unfused = t.grad.detach().clone()
+        loss_unfused.backward()
+        grad_unfused = t.grad.detach().clone()
         t.grad = None
 
         # fused
@@ -233,18 +215,142 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         )
         loss_fused = loss_func(output_fused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            loss_fused.backward()
-            grad_fused = t.grad.detach().clone()
+        loss_fused.backward()
+        grad_fused = t.grad.detach().clone()
         t.grad = None
 
         torch.testing.assert_close(output_fused, output_unfused)
-
-        if not isinstance(start_positions, torch.Tensor):
-            torch.testing.assert_close(grad_fused, grad_unfused)
-
+        torch.testing.assert_close(grad_fused, grad_unfused)
         assert output_fused.is_contiguous()
+
+
+@pytest.mark.parametrize("start_positions", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [128, 256])
+@pytest.mark.parametrize("rotary_percent", [1.0])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad])
+@pytest.mark.parametrize("cp_size", [2])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_unfused_rope_thd_vs_bshd(
+    dtype: torch.dtype,
+    hidden_size: int,
+    rotary_percent: float,
+    loss_func: Callable,
+    cp_size: int,
+    interleaved: bool,
+    start_positions: bool,
+) -> None:
+    """
+    This is just a sanity check to ensure that the unfused RoPE in THD/SBHD/BSHD
+    formats are the same.
+    """
+    device = torch.device("cuda:0")
+    seqlen, max_seqlen = 16, 2048
+    batch_size, head_num = 4, 256
+
+    # NOTE: dtype=torch.int32 is important, otherwise the cumsum will be in int64 and
+    # that causes unexpected issues.
+    seq_lens = torch.tensor([seqlen for _ in range(batch_size)], dtype=torch.int32)
+
+    cu_seqlens = torch.cumsum(torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens]), dim=0).to(
+        device=device, dtype=torch.int32
+    )
+
+    # Create a tensor in THD format
+    thd = torch.rand(
+        (cu_seqlens[-1] // cp_size, head_num, hidden_size),
+        dtype=dtype,
+        device=device,
+    )
+    thd.requires_grad = True
+
+    # Clone the tensor to create a tensor in BSHD format
+    bshd = thd.view(batch_size, -1, head_num, hidden_size).clone().detach()
+    bshd = bshd.to(dtype=dtype, device=device)
+    bshd.requires_grad = True
+
+    # Clone the tensor to create a tensor in SBHD format
+    sbhd = bshd.transpose(1, 0).clone().detach()
+    sbhd = sbhd.to(dtype=dtype, device=device)
+    sbhd.requires_grad = True
+
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
+    emb = rotary_pos_emb(max_seqlen)
+    assert emb.is_contiguous()
+
+    start_positions = cu_seqlens[:-1] if start_positions else None
+
+    for cp_rank in range(cp_size):
+        # unfused bshd
+        output_unfused_bshd = apply_rotary_pos_emb(
+            bshd.float(),
+            emb,
+            start_positions=start_positions,
+            interleaved=interleaved,
+            fused=False,
+            tensor_format="bshd",
+            cu_seqlens=cu_seqlens,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        ).to(dtype)
+        loss_unfused_bshd = loss_func(output_unfused_bshd)
+        loss_unfused_bshd.backward()
+        grad_unfused_bshd = bshd.grad.detach().clone()
+        bshd.grad = None
+
+        # unfused sbhd
+        output_unfused_sbhd = apply_rotary_pos_emb(
+            sbhd.float(),
+            emb,
+            start_positions=start_positions,
+            interleaved=interleaved,
+            fused=False,
+            tensor_format="sbhd",
+            cu_seqlens=cu_seqlens,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        ).to(dtype)
+
+        loss_unfused_sbhd = loss_func(output_unfused_sbhd)
+        loss_unfused_sbhd.backward()
+        grad_unfused_sbhd = sbhd.grad.detach().clone()
+        sbhd.grad = None
+
+        # unfused thd
+        output_unfused_thd = apply_rotary_pos_emb(
+            thd.float(),
+            emb,
+            start_positions=start_positions,
+            tensor_format="thd",
+            interleaved=interleaved,
+            fused=False,
+            cu_seqlens=cu_seqlens,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        ).to(dtype)
+
+        loss_unfused_thd = loss_func(output_unfused_thd)
+        loss_unfused_thd.backward()
+        grad_unfused_thd = thd.grad.detach().clone()
+        thd.grad = None
+
+        torch.testing.assert_close(
+            output_unfused_bshd.reshape(*output_unfused_thd.shape), output_unfused_thd
+        )
+        torch.testing.assert_close(
+            output_unfused_sbhd.transpose(1, 0).reshape(*output_unfused_thd.shape),
+            output_unfused_thd,
+        )
+        torch.testing.assert_close(
+            grad_unfused_bshd.reshape(*grad_unfused_thd.shape), grad_unfused_thd
+        )
+        torch.testing.assert_close(
+            grad_unfused_sbhd.transpose(1, 0).reshape(*grad_unfused_thd.shape), grad_unfused_thd
+        )
+
+        assert output_unfused_thd.is_contiguous()
+        assert output_unfused_bshd.is_contiguous()
+        assert output_unfused_sbhd.is_contiguous()
 
 
 @pytest.mark.parametrize("start_positions", [True, False])
@@ -373,3 +479,19 @@ def test_fused_qkv_rope(
 
         if not isinstance(start_positions, torch.Tensor):
             torch.testing.assert_close(grad_fused, grad_unfused)
+
+
+def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_without_autocast():
+    rope_layer = RotaryPositionEmbedding(128)
+
+    rope_embeddings_no_autocast = rope_layer(max_seq_len=1024)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        rope_embeddings_autocast = rope_layer(max_seq_len=1024)
+
+    torch.testing.assert_close(
+        rope_embeddings_no_autocast.to(dtype=torch.bfloat16),
+        rope_embeddings_autocast.to(dtype=torch.bfloat16),
+        atol=1e-8,
+        rtol=1e-8,
+    )

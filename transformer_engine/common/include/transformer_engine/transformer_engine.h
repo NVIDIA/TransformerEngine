@@ -66,6 +66,7 @@ enum NVTETensorParam {
   kNVTEAmax = 3,               /*!< Amax tensor */
   kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
   kNVTENumTensorParams
 };
 
@@ -88,10 +89,9 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
-  /*! Single NVFP4 scale per block of 16 contiguous elements in forward pass (FWD),
-    and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
-  */
-  NVTE_FWD_NVFP4_BWD_MXFP8_SCALING = 4,
+  /*! Single scale per block of 16 elements consecutive in either
+   * rowwise or columnwise direction */
+  NVTE_NVFP4_1D_SCALING = 4,
   NVTE_INVALID_SCALING = 100
 };
 
@@ -330,6 +330,12 @@ enum NVTEQuantizationConfigAttribute {
    *  likely be refactored away in the future.
    */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
+  /*! RNG state (NVTETensor with 2 elements - seed and offset */
+  kNVTEQuantizationConfigRNGState = 4,
+  /*! Whether to use 2D block scaling for NVFP4 */
+  kNVTEQuantizationConfigNVFP42DQuantization = 5,
+  /*! Whether to enable stochastic rounding */
+  kNVTEQuantizationConfigStochasticRounding = 6,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -387,6 +393,114 @@ int nvte_is_non_tn_fp8_gemm_supported();
 */
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
+/*! \brief TE Grouped Tensor type
+ *
+ * NVTEGroupedTensor is a collection of tensors with potentially different shapes
+ * but the same dtype and scaling mode. It does not own the memory it points to.
+ */
+typedef void *NVTEGroupedTensor;
+
+/*! \enum NVTEGroupedTensorParam
+ *  \brief Indicates the kind of the grouped tensor parameter to set/get.
+ */
+enum NVTEGroupedTensorParam {
+  kNVTEGroupedRowwiseData = 0,        /*!< Data usable in rowwise manner */
+  kNVTEGroupedColumnwiseData = 1,     /*!< Data usable in columnwise manner */
+  kNVTEGroupedScale = 2,              /*!< Scale tensor */
+  kNVTEGroupedAmax = 3,               /*!< Amax tensor */
+  kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTEGroupedFirstDims = 7, /*!< First dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedTensorOffsets =
+      9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTENumGroupedTensorParams
+};
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Create a new TE grouped tensor.
+ *
+ * Create a new TE grouped tensor. Before use its parameters need to be set.
+ * TE grouped tensors are just wrappers on top of raw data and do not
+ * own memory.
+ *
+ *  \param[in] scaling_mode    Scaling mode of the grouped tensor.
+ *  \param[in] num_tensors     Number of tensors in the group (must be > 0).
+ *  \param[in] logical_shape   Logical 2D shape of the grouped data.
+ *
+ *  \return A new TE grouped tensor.
+ */
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                             NVTEShape logical_shape);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Destroy a TE grouped tensor.
+ *
+ * Since the TE grouped tensor does not own memory, the underlying
+ * data is not freed during this operation.
+ *
+ *  \param[in] tensor Grouped tensor to be destroyed.
+ */
+void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Set a parameter of the grouped tensor.
+ *
+ *  \param[in/out] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be set.
+ *  \param[in] param The value to be set (NVTEBasicTensor).
+ */
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
+                                   const NVTEBasicTensor *param);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a value of the parameter of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be queried.
+ *
+ *  \return NVTEBasicTensor containing the parameter data.
+ */
+NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                              NVTEGroupedTensorParam param_name);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get the number of tensors in a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Number of tensors in the group.
+ */
+size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a grouped tensor's data type.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return A data type of the grouped tensor.
+ */
+NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a scaling mode of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Scaling mode of the grouped tensor.
+ */
+NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get the logical shape of a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Logical 2D shape.
+ */
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -430,6 +544,15 @@ inline bool is_fp8_dtype(const DType t) {
  *  \param[in] DType      TE Datatype of interest
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
+
+/*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
+ *
+ * Return true if TE datatype is high precision
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_high_precision_dtype(const DType t) {
+  return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
+}
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -566,6 +689,11 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseScaleInv, dptr, type, shape);
   }
 
+  template <typename ShapeType>
+  TensorWrapper &set_columnwise_amax(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -588,6 +716,10 @@ class TensorWrapper {
 
   NVTEBasicTensor get_columnwise_scale_inv() const noexcept {
     return get_parameter(kNVTEColumnwiseScaleInv);
+  }
+
+  NVTEBasicTensor get_columnwise_amax() const noexcept {
+    return get_parameter(kNVTEColumnwiseAmax);
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -836,6 +968,24 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_,
                                            kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
                                            &format, sizeof(Float8BlockScaleTensorFormat));
+  }
+
+  /*! \brief Set stochastic rounding state */
+  void set_rng_state(NVTETensor rng_state) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigRNGState, &rng_state,
+                                           sizeof(NVTETensor));
+  }
+
+  /*! \brief Set whether to use 2D block scaling for NVFP4 */
+  void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
+                                           &nvfp4_2d_quantization, sizeof(bool));
+  }
+
+  /*! \brief Set whether to use stochastic rounding */
+  void set_stochastic_rounding(bool stochastic_rounding) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
+                                           &stochastic_rounding, sizeof(bool));
   }
 
  private:

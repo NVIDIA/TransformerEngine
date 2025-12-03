@@ -45,7 +45,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers
+from build_tools.utils import copy_common_headers, min_python_version_str
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
     setup_pytorch_extension,
@@ -75,21 +75,29 @@ def get_platform():
 
 def get_wheel_url():
     """Construct the wheel URL for the current platform."""
-    torch_version_raw = parse(torch.__version__)
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
     nvte_version = te_version()
-    torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
     # Determine the version numbers that will be used to determine the correct wheel
     # We're using the CUDA version used to build torch, not the one currently installed
     # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
     torch_cuda_version = parse(torch.version.cuda)
-    # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
+    # For CUDA 12 we only compile for CUDA 12.3
     # to save CI time. Minor versions should be compatible.
-    torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
-    # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
+    if torch_cuda_version.major == 12:
+        torch_cuda_version = parse("12.3")
+    elif torch_cuda_version.major == 13:
+        torch_cuda_version = parse("13.0")
+    else:
+        raise ValueError(f"CUDA version {torch_cuda_version} not supported")
+
+    if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch":
+        torch_version = str(os.environ.get("NVIDIA_PYTORCH_VERSION"))
+    else:
+        torch_version = f"{torch.__version__}"
+
     cuda_version = f"{torch_cuda_version.major}"
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
@@ -109,8 +117,10 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
         if FORCE_BUILD:
             super().run()
+            return
 
         wheel_url, wheel_filename = get_wheel_url()
         print("Guessing wheel URL: ", wheel_url)
@@ -129,10 +139,12 @@ class CachedWheelsCommand(_bdist_wheel):
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
+            return
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
+            return
 
 
 if __name__ == "__main__":
@@ -145,14 +157,25 @@ if __name__ == "__main__":
         )
     ]
 
+    # Setup version and requirements.
+    # Having the framework extension depend on the core lib allows
+    # us to detect CUDA version dynamically during compilation and
+    # choose the correct wheel for te core lib.
+    __version__ = te_version()
+    cuda_major_version = parse(torch.version.cuda).major
+    assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
+    te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
+    install_requires = install_requirements() + [te_core]
+
     # Configure package
     setuptools.setup(
         name=PACKAGE_NAME,
-        version=te_version(),
+        version=__version__,
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
-        install_requires=install_requirements(),
+        python_requires=f">={min_python_version_str()}",
+        install_requires=install_requires,
         tests_require=test_requirements(),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

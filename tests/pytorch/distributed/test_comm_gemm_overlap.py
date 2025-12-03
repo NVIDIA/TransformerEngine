@@ -9,13 +9,12 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 if torch.cuda.device_count() < 2:
     pytest.skip("Comm+GEMM overlap requires at least 2 GPUs.")
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -121,12 +120,18 @@ def _run_layer_with_overlap(
     os.environ["PYTORCH_JIT"] = "0"
     os.environ["NVTE_TORCH_COMPILE"] = "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    if te.get_device_compute_capability() <= (8, 0):
+        # We've experienced numerical discrepancies in Flash Attention
+        # backward when running with Userbuffers on A100s. This does
+        # not show up in more recent GPUs.
+        os.environ["NVTE_FLASH_ATTN"] = "0"
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
     os.unsetenv("PYTORCH_JIT")
     os.unsetenv("NVTE_TORCH_COMPILE")
     os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
+    os.unsetenv("NVTE_FLASH_ATTN")
 
     if (
         result.returncode != 0

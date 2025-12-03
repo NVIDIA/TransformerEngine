@@ -14,11 +14,12 @@ from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
+from jax.ad_checkpoint import checkpoint_name as jax_checkpoint_name
 
-from transformer_engine_jax import QuantizeLayout
 
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
+from .misc import QuantizeLayout
 from ..sharding import (
     with_sharding_constraint_by_logical_axes as original_with_sharding_constraint_by_logical_axes,
 )
@@ -89,6 +90,17 @@ class AbstractBaseTensor(ABC):
             The tensor with applied sharding constraints
         """
 
+    @abstractmethod
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+
 
 @dataclass
 class AbstractBaseTensor1x(AbstractBaseTensor):
@@ -128,9 +140,7 @@ class NoScaleTensor(AbstractBaseTensor1x):
     def get_tensor(self, usage: TensorUsage):
         """Returns the tensor based on the tensor usage."""
         q_layout = ScalingMode.NO_SCALING.get_quantize_layout(usage)
-        assert (
-            q_layout == QuantizeLayout.ROWWISE
-        ), "Only ROWWISE layout is supported for NoScaleTensor"
+        assert q_layout.is_rowwise_only, "Only ROWWISE layout is supported for NoScaleTensor"
         return self
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
@@ -151,6 +161,18 @@ class NoScaleTensor(AbstractBaseTensor1x):
             data=data,
             amax=self.amax,
         )
+
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        assert quantizer is None, "NoScaleTensor does not support quantization."
+        return self
 
 
 class ScaledTensor(ABC):
@@ -175,6 +197,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
         is_colwise: Whether the tensor uses column-wise quantization
         data_layout: The data_layout specification for the tensor
         flatten_axis: The quantization axis for the tensor
+        has_rht_applied: Whether the tensor had the Randomized Hadamard Transform (RHT) applied during quantization
     """
 
     scale_inv: jnp.ndarray
@@ -184,6 +207,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     is_colwise: bool
     data_layout: str
     flatten_axis: int
+    has_rht_applied: bool
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -201,13 +225,32 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
         else:
             unpadded_scale_shape = self.scaling_mode.get_scale_shape(
                 self.data.shape,
+                data_layout=self.data_layout,
                 is_colwise=self.is_colwise,
                 is_padded=False,
-                flatten_axis=self.flatten_axis,
+                # expect the flatten_axis wrt the N layout
+                flatten_axis=(
+                    self.flatten_axis
+                    if self.data_layout == "N"
+                    else self.data.ndim - self.flatten_axis
+                ),
             )
-            assert self.scale_inv.shape == unpadded_scale_shape, (
-                "Unpadded inverse scale factor has wrong shape, expected"
-                f" {unpadded_scale_shape} but got {self.scale_inv.shape}."
+            unpadded_scale_shape_broadcast = self.scaling_mode.get_scale_shape(
+                self.data.shape,
+                data_layout=self.data_layout,
+                is_colwise=self.is_colwise,
+                is_padded=False,
+                # expect the flatten_axis wrt the N layout
+                flatten_axis=(
+                    self.flatten_axis
+                    if self.data_layout == "N"
+                    else self.data.ndim - self.flatten_axis
+                ),
+                broadcast_2d_scale_shape_to_1d=True,
+            )
+            assert self.scale_inv.shape in (unpadded_scale_shape, unpadded_scale_shape_broadcast), (
+                f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or"
+                f" {unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
             )
 
     def tree_flatten(self):
@@ -224,6 +267,7 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
             self.is_colwise,
             self.data_layout,
             self.flatten_axis,
+            self.has_rht_applied,
         )
         return (children, aux_data)
 
@@ -242,8 +286,8 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     def get_tensor(self, usage: TensorUsage):
         """Returns the tensor based on the tensor usage."""
         q_layout = self.scaling_mode.get_quantize_layout(usage)
-        colwise_usage_valid = q_layout == QuantizeLayout.COLWISE and self.is_colwise
-        rowwise_usage_valid = q_layout == QuantizeLayout.ROWWISE and not self.is_colwise
+        colwise_usage_valid = q_layout.is_colwise_only and self.is_colwise
+        rowwise_usage_valid = q_layout.is_rowwise_only and not self.is_colwise
 
         if colwise_usage_valid or rowwise_usage_valid:
             return self
@@ -279,23 +323,37 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
 
         data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
 
-        if self.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            # TODO(Phuong): Handle padding !?
+        if self.scaling_mode.is_block_scaling:  # Both MXFP8 and NVFP4
             scale_inv = with_sharding_constraint_by_logical_axes(self.scale_inv, axis_names)
         else:
             scale_inv = self.scale_inv
 
         return ScaledTensor1x(
             data=data,
-            scale_inv=scale_inv,
             amax=self.amax,
+            scale_inv=scale_inv,
             scaling_mode=self.scaling_mode,
             dq_dtype=self.dq_dtype,
             _dq_func=self._dq_func,
             is_colwise=self.is_colwise,
             data_layout=self.data_layout,
             flatten_axis=self.flatten_axis,
+            has_rht_applied=self.has_rht_applied,
         )
+
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        if quantizer is None or quantizer.checkpoint_name is None:
+            return self
+
+        return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
 
 
 @register_pytree_node_class
@@ -335,6 +393,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         self.group_sizes = group_sizes
         self.original_shape = original_shape
         self.group_axis = group_axis
+        # TODO(Phuong):Handle RHT for grouped quantization once grouped quantization supports NVFP4
         super().__init__(
             data=data,
             scale_inv=scale_inv,
@@ -345,6 +404,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             is_colwise=is_colwise,
             data_layout=data_layout,
             flatten_axis=flatten_axis,
+            has_rht_applied=False,
         )
 
     def __post_init__(self):
@@ -398,6 +458,20 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
         raise NotImplementedError
 
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        if quantizer is None or quantizer.checkpoint_name is None:
+            return self
+
+        return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
+
 
 @register_pytree_node_class
 @dataclass
@@ -442,10 +516,10 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
         q_layout_rowwise = self.rowwise_tensor.scaling_mode.get_quantize_layout(usage)
         q_layout_colwise = self.colwise_tensor.scaling_mode.get_quantize_layout(usage)
 
-        if q_layout_rowwise == QuantizeLayout.ROWWISE:
+        if q_layout_rowwise.is_rowwise_only:
             return self.rowwise_tensor
 
-        if q_layout_colwise == QuantizeLayout.COLWISE:
+        if q_layout_colwise.is_colwise_only:
             return self.colwise_tensor
 
         raise ValueError(
@@ -474,6 +548,9 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
 
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
+    def checkpoint(self, quantizer):
+        raise NotImplementedError
+
 
 @dataclass
 class ScaledTensorFactory:
@@ -496,6 +573,7 @@ class ScaledTensorFactory:
         group_sizes=None,
         original_shape=None,
         group_axis=0,
+        has_rht_applied=False,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -511,6 +589,7 @@ class ScaledTensorFactory:
             group_sizes: Array of ints containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            has_rht_applied: Whether the tensor had the Randomized Hadamard Transform (RHT) applied during quantization (default: False)
 
         Returns:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
@@ -521,13 +600,13 @@ class ScaledTensorFactory:
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
         if group_sizes is not None:
-            flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
+            flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
 
             # Handling attrs of transposed tensors
-            group_axis = len(original_shape) + group_axis if group_axis < 0 else group_axis
+            group_axis = (len(original_shape) + group_axis) % len(original_shape)
             if data_layout == "T":
                 if original_shape[0] == group_sizes.size:
                     original_shape = (
@@ -560,7 +639,7 @@ class ScaledTensorFactory:
             )
 
         # Handling attrs of transposed tensors
-        flatten_axis = data.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+        flatten_axis = (data.ndim + flatten_axis) % data.ndim
         if data_layout == "T":
             flatten_axis = data.ndim - flatten_axis
 
@@ -574,6 +653,7 @@ class ScaledTensorFactory:
             is_colwise=is_colwise,
             data_layout=data_layout,
             flatten_axis=flatten_axis,
+            has_rht_applied=has_rht_applied,
         )
 
     @staticmethod
@@ -583,6 +663,7 @@ class ScaledTensorFactory:
         colwise_data,
         colwise_scale_inv,
         amax=None,
+        colwise_amax=None,
         scaling_mode=ScalingMode.NO_SCALING,
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
@@ -590,6 +671,8 @@ class ScaledTensorFactory:
         group_sizes=None,
         original_shape=None,
         group_axis=0,
+        rowwise_has_rht_applied=False,
+        colwise_has_rht_applied=False,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -606,12 +689,16 @@ class ScaledTensorFactory:
             group_sizes: Array containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            colwise_has_rht_applied: Whether the column-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
         Returns:
             A ScaledTensor2x instance
         """
         if amax is None:
             amax = jnp.empty((1,), dtype=jnp.float32)
+        if colwise_amax is None:
+            colwise_amax = amax
 
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
@@ -626,11 +713,12 @@ class ScaledTensorFactory:
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            has_rht_applied=rowwise_has_rht_applied,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
             colwise_scale_inv,
-            amax,
+            colwise_amax,
             scaling_mode,
             dq_dtype,
             is_colwise=True,
@@ -639,6 +727,7 @@ class ScaledTensorFactory:
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            has_rht_applied=colwise_has_rht_applied,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -649,6 +738,7 @@ class ScaledTensorFactory:
         colwise_data: jnp.ndarray,
         colwise_scale_inv: jnp.ndarray,
         amax=None,
+        colwise_amax=None,
         scaling_mode: ScalingMode = ScalingMode.NO_SCALING,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         data_layout: str = "NN",
@@ -657,6 +747,8 @@ class ScaledTensorFactory:
         group_sizes: jnp.ndarray = None,
         original_shape: Tuple[int] = None,
         group_axis: int = 0,
+        rowwise_has_rht_applied: bool = False,
+        colwise_has_rht_applied: bool = False,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -673,17 +765,22 @@ class ScaledTensorFactory:
             group_sizes: Array containing the size of each group (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
             group_axis: The axis along which grouping is performed (default: 0)
+            rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            colwise_has_rht_applied: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
         """
-        if q_layout == QuantizeLayout.ROWWISE_COLWISE:
+        assert not rowwise_has_rht_applied, "RHT is not supported for rowwise quantization yet"
+
+        if q_layout.is_rowwise_colwise:
             return ScaledTensorFactory.create_2x(
                 data,
                 scale_inv,
                 colwise_data,
                 colwise_scale_inv,
                 amax,
+                colwise_amax,
                 scaling_mode,
                 dq_dtype,
                 data_layout=data_layout,
@@ -691,22 +788,24 @@ class ScaledTensorFactory:
                 group_sizes=group_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
+                rowwise_has_rht_applied=rowwise_has_rht_applied,
+                colwise_has_rht_applied=colwise_has_rht_applied,
             )
 
-        is_colwise = q_layout == QuantizeLayout.COLWISE
-        if is_colwise:
+        if q_layout.is_colwise_only:
             return ScaledTensorFactory.create_1x(
                 colwise_data,
                 colwise_scale_inv,
-                amax,
+                colwise_amax if colwise_amax is not None else amax,
                 scaling_mode,
                 dq_dtype,
-                is_colwise=is_colwise,
+                is_colwise=True,
                 data_layout=data_layout[0],
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
+                has_rht_applied=colwise_has_rht_applied,
             )
 
         return ScaledTensorFactory.create_1x(
@@ -715,12 +814,13 @@ class ScaledTensorFactory:
             amax,
             scaling_mode,
             dq_dtype,
-            is_colwise=is_colwise,
+            is_colwise=False,
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
+            has_rht_applied=rowwise_has_rht_applied,
         )
 
 

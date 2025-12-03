@@ -18,13 +18,14 @@ import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.module.base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_cublas_workspace_size_bytes,
+from transformer_engine.pytorch import (
+    Float8Tensor,
+    Float8Quantizer,
+    MXFP8Quantizer,
 )
+import transformer_engine.pytorch.cpp_extensions as tex
+from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
+from transformer_engine.pytorch.module.base import fill_userbuffers_buffer_for_all_gather
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -171,12 +172,12 @@ def _parse_args(argv=None, namespace=None):
         opts.p2p = True
 
     if opts.atomic:
-        if not te.fp8.check_fp8_support():
+        if not te.is_fp8_available():
             assert opts.quantization == "none", "Atomic GEMM is only supported in FP8."
         opts.quantization = "fp8"
 
     if opts.fp8_output:
-        assert ops.quantization == "fp8", "FP8 output is only supported with FP8 compute."
+        assert opts.quantization == "fp8", "FP8 output is only supported with FP8 compute."
 
     return opts
 
@@ -414,10 +415,6 @@ def _main(opts):
             std=opts.std,
         )
 
-    # Allocate cuBLAS workspace
-    workspace_size = 3 * get_cublas_workspace_size_bytes()
-    workspace = torch.empty(workspace_size, dtype=torch.uint8, device="cuda")
-
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
     if opts.bulk_overlap:
         ker_g = torch.transpose(kernel_t, 0, 1)
@@ -614,7 +611,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel_t_fp8,
             gemm_inp,
-            workspace,
             out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
             quantization_params=out_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
@@ -632,7 +628,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel2_t_fp8,
             gemm2_inp,
-            workspace,
             out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
             quantization_params=out2_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
@@ -645,7 +640,6 @@ def _main(opts):
         return tex.general_gemm(
             kernel_t,
             gemm_inp,
-            workspace,
             out_dtype=torch.bfloat16,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,

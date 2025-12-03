@@ -10,10 +10,8 @@ import os
 
 import torch
 
-from ...utils import clear_tensor_data
-from ... import torch_version
-from .._common import maybe_dequantize
-from ..op import BasicOperation, OperationContext
+from ...torch_version import torch_version
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
@@ -22,6 +20,9 @@ from ...jit import (
     warmup_jit_l2normalization_all_dtypes,
 )
 from ...tensor import Quantizer
+from ...utils import clear_tensor_data
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize
 
 
 class L2Normalization(BasicOperation):
@@ -39,11 +40,11 @@ class L2Normalization(BasicOperation):
     ----------
     eps : float, default = 1e-6
         A value added to the denominator for numerical stability
-    seq_length: int, default = None
+    seq_length : int, default = None
         sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
         functions are warmed up before training to ensure same kernels are used for forward
         propagation and activation recompute phase.
-    micro_batch_size: int, default = None
+    micro_batch_size : int, default = None
         batch size per training step. Needed for JIT Warmup, a technique where jit
         fused functions are warmed up before training to ensure same kernels are
         used for forward propagation and activation recompute phase.
@@ -101,6 +102,8 @@ class L2Normalization(BasicOperation):
 
         # Save state for backward pass
         if requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y

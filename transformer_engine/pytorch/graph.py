@@ -6,6 +6,8 @@
 from collections.abc import Iterable
 import contextlib
 import gc
+import warnings
+from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
@@ -15,8 +17,8 @@ from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from .fp8 import (
-    fp8_autocast,
+from .quantization import (
+    autocast,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -84,7 +86,7 @@ def _make_graphed_callables(
     sample_args: SingleOrTuple[Tuple[torch.Tensor, ...]],
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
-    fp8_weight_caching: bool = False,
+    cache_quantized_params: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
     _num_layers_per_chunk: Optional[List[int]] = None,
@@ -126,6 +128,8 @@ def _make_graphed_callables(
         )
 
     # Check sizes of args
+    _order_without_wgrad = None
+    delay_wgrad_compute = False
     if _order is None:
         assert len(sample_args) == len(callables)
         assert len(sample_kwargs) == len(callables)
@@ -144,17 +148,34 @@ def _make_graphed_callables(
         # values indicate backward passes. Each
         # entry in sample_args corresponds to one of the forward
         # passes.
-        num_model_chunks = max(_order)
-        num_microbatches = len(_order) // num_model_chunks // 2
-        assert num_model_chunks * num_microbatches * 2 == len(_order)
+        _order_without_wgrad = []
+        for c_id in _order:
+            if ceil(c_id) != c_id:
+                delay_wgrad_compute = True
+                continue
+            _order_without_wgrad.append(c_id)
+        num_model_chunks = max(_order_without_wgrad)
+        num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
+        assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad)
+
+        # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
+        # allows for fine-grained graph capture order.
+        if delay_wgrad_compute:
+            assert (
+                _num_layers_per_chunk is not None
+            ), "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
+            for num_layers in _num_layers_per_chunk:
+                assert (
+                    num_layers == 1
+                ), "Each model chunk must have only one layer when delay_wgrad_compute is True."
 
         # Determine number of layers in each model chunk.
         if _num_layers_per_chunk is None:
-            assert len(sample_args) * 2 >= len(_order) and (
-                len(sample_args) * 2 % len(_order) == 0
+            assert len(sample_args) * 2 >= len(_order_without_wgrad) and (
+                len(sample_args) * 2 % len(_order_without_wgrad) == 0
             ), (
-                f"{len(sample_args)} * 2 >= {len(_order)} and {len(sample_args)} * 2 %"
-                f" {len(_order)} == 0"
+                f"{len(sample_args)} * 2 >= {len(_order_without_wgrad)} and {len(sample_args)} * 2"
+                f" % {len(_order_without_wgrad)} == 0"
             )
             num_layers = len(sample_args) // num_model_chunks // num_microbatches
             _num_layers_per_chunk = [num_layers] * num_model_chunks
@@ -174,7 +195,7 @@ def _make_graphed_callables(
             + f"entries when order input is provided but got {len(callables)}."
         )
         assert len(sample_args) == total_num_layers * num_microbatches, (
-            f"Expected {total_num_layers * num_microbatches}"
+            f"Expected {total_num_layers * num_microbatches} "
             + f"args tuple, but got {len(sample_args)}."
         )
 
@@ -213,7 +234,7 @@ def _make_graphed_callables(
         consumed_sample_q = {}
         fwd_idx = [0] * num_model_chunks
         for c_id in _order:
-            m_chunk = abs(c_id) - 1
+            m_chunk = abs(ceil(c_id)) - 1
 
             if c_id > 0:
                 sample_start_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
@@ -240,6 +261,8 @@ def _make_graphed_callables(
                         sample_args[per_callable_fwd_idx] = sample_args[reuse_fwd_idx]
                         sample_kwargs[per_callable_fwd_idx] = sample_kwargs[reuse_fwd_idx]
                 fwd_idx[m_chunk] += 1
+            elif ceil(c_id) != c_id:
+                continue
             else:
                 num_consumed_samples = min(
                     len(fwd_sample_qs[m_chunk]), _num_layers_per_chunk[m_chunk]
@@ -252,7 +275,7 @@ def _make_graphed_callables(
                     consumed_sample_q[sample_keys].append(per_callable_fwd_idx)
                 fwd_sample_qs[m_chunk] = fwd_sample_qs[m_chunk][num_consumed_samples:]
 
-    if fp8_weight_caching:
+    if cache_quantized_params:
         # Initialize flag that controls FP8 weight updates
         FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
 
@@ -321,14 +344,16 @@ def _make_graphed_callables(
 
     fwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     bwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
+    bwd_dw_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
     # For cases with multiple active RNG states, e.g. TP.
     if graph_safe_rng_available():
         for _, state in get_all_rng_states().items():
-            for fwd_graph, bwd_graph in zip(fwd_graphs, bwd_graphs):
+            for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
                 fwd_graph.register_generator_state(state)
                 bwd_graph.register_generator_state(state)
+                bwd_dw_graph.register_generator_state(state)
 
     mempool = graph_pool_handle() if pool is None else pool
 
@@ -365,21 +390,8 @@ def _make_graphed_callables(
     ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
 
     # Filter the TE modules that cudagraph can access.
-    visited_te_modules = set()
-
-    def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
-        if isinstance(module, TransformerEngineBaseModule):
-            visited_te_modules.add(module)
-        # If forward is called on a BasicOperation directly the hook will run
-        elif isinstance(module, BasicOperation):
-            visited_te_modules.add(module)
-        # If forward is called on a te.ops.Sequential it is not called on its constituent ops
-        elif isinstance(module, Sequential):
-            assert module._module_groups is not None, "Should have been initialized by warmup"
-            for module_group in module._module_groups:
-                if isinstance(module_group, OperationFuser):
-                    for basic_op in module_group._basic_ops:
-                        visited_te_modules.add(basic_op)
+    visited_te_modules = {}
+    need_bwd_dw_graph = {}
 
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
@@ -387,6 +399,31 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
+
+            def hook_fn(
+                module, inputs, outputs, func_idx=func_idx
+            ):  # pylint: disable=unused-argument
+                modules = set()
+                if isinstance(module, TransformerEngineBaseModule):
+                    modules.add(module)
+                # If forward is called on a BasicOperation directly the hook will run
+                elif isinstance(module, BasicOperation):
+                    modules.add(module)
+                # If forward is called on a te.ops.Sequential it is not called on its constituent ops
+                elif isinstance(module, Sequential):
+                    assert (
+                        module._module_groups is not None
+                    ), "Should have been initialized by warmup"
+                    for module_group in module._module_groups:
+                        if isinstance(module_group, OperationFuser):
+                            for basic_op in module_group._basic_ops:
+                                modules.add(basic_op)
+                if modules:
+                    if func_idx not in visited_te_modules:
+                        visited_te_modules[func_idx] = modules
+                    else:
+                        visited_te_modules[func_idx].update(modules)
+
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
@@ -431,6 +468,15 @@ def _make_graphed_callables(
                             module_params_with_grad
                         )
                         per_callable_static_input_surfaces[func_idx] = static_input_surface
+
+                    # Run wgrad. This is essential for some TE modules when they have
+                    # delay_wgrad_compute enabled.
+                    need_backward_dw = False
+                    for module in visited_te_modules.get(func_idx, set()):
+                        if hasattr(module, "need_backward_dw") and module.need_backward_dw():
+                            need_backward_dw = True
+                            module.backward_dw()
+                    need_bwd_dw_graph[func_idx] = need_backward_dw
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
@@ -453,9 +499,11 @@ def _make_graphed_callables(
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
         static_grad_outputs_dict = {}
+        wgrad_validation_list = [None] * len(_order)
         previous_chunk_last_callable_bwd_idx = None
-        for c_id in _order:
+        for i, c_id in enumerate(_order):
             if c_id > 0:
+                assert isinstance(c_id, int), "Forward order value must be an integer."
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
@@ -475,12 +523,65 @@ def _make_graphed_callables(
                 fwd_idx[m_chunk] += 1
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
-                m_chunk = -c_id - 1
+                m_chunk = -ceil(c_id) - 1
                 previous_per_callable_bwd_idx = None
                 for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
                     per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
+                    if ceil(c_id) == c_id and need_bwd_dw_graph[per_callable_bwd_idx]:
+                        # Check if bwd graph has corresponding wgrad graph:
+                        # Number of dgrad backward graphs should be equal to number of
+                        # wgrad backward graphs.
+                        # Note: For MCore, the validation rule is more strict (the next backward
+                        # of dgrad graph must be corresponding wgrad graph).
+                        if wgrad_validation_list[i] is None:
+                            same_bwd_c_id_list = [i]
+                            num_wgrad_c_id = 0
+                            for idx in range(i + 1, len(_order)):
+                                if _order[idx] > 0:
+                                    continue
+                                if _order[idx] == c_id:
+                                    same_bwd_c_id_list.append(idx)
+                                if _order[idx] + 0.5 == c_id:
+                                    num_wgrad_c_id += 1
+                                if len(same_bwd_c_id_list) == num_wgrad_c_id:
+                                    for same_c_id_idx in same_bwd_c_id_list:
+                                        wgrad_validation_list[same_c_id_idx] = True
+                                    break
+                                if len(same_bwd_c_id_list) < num_wgrad_c_id:
+                                    # It's impossible to have more wgrad than dgrad.
+                                    wgrad_validation_list[i] = False
+                                    break
+                            if wgrad_validation_list[i] is None:
+                                wgrad_validation_list[i] = False
+                            assert wgrad_validation_list[i], (
+                                f"Number of wgrad graph({num_wgrad_c_id}) doesn't match number "
+                                f"of dgrad graphs ({len(same_bwd_c_id_list)}) for chunk {c_id}."
+                            )
+                    elif ceil(c_id) != c_id:
+                        per_callable_bwd_idx -= _num_layers_per_chunk[m_chunk]
+                        assert is_training, "Only training mode supports backward_dw."
+                        # If no one module needs the backward_dw, the bwd_dw_graph will be empty.
+                        # So skip capturing it. For backward_dw, the order value is c_id - 0.5 to indicate
+                        # the specific order of backward_dw.
+                        assert ceil(c_id) - c_id == 0.5, (
+                            "The order diff of wgrad and dgrad must be 0.5, "
+                            f"get {ceil(c_id) - c_id}."
+                        )
+                        assert need_bwd_dw_graph[
+                            per_callable_bwd_idx
+                        ], "No module needs wgrad computation but get float in order"
+                        bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
+                        with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+                            for module in visited_te_modules[per_callable_bwd_idx]:
+                                if (
+                                    hasattr(module, "need_backward_dw")
+                                    and module.need_backward_dw()
+                                ):
+                                    module.backward_dw()
+                        continue
+
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
@@ -561,8 +662,8 @@ def _make_graphed_callables(
                                     per_callable_static_grad_inputs[idx]
                                 )
                             previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
-
-                bwd_idx[m_chunk] += 1
+                if ceil(c_id) == c_id:
+                    bwd_idx[m_chunk] += 1
     else:
         # Capture forward graphs
         per_callable_static_outputs = []
@@ -581,10 +682,12 @@ def _make_graphed_callables(
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
         per_callable_static_grad_inputs = []
-        for static_input_surface, static_outputs, bwd_graph in zip(
+        for static_input_surface, static_outputs, bwd_graph, bwd_dw_graph, bwd_idx in zip(
             reversed(per_callable_static_input_surfaces),
             reversed(per_callable_static_outputs),
             reversed(bwd_graphs),
+            reversed(bwd_dw_graphs),
+            reversed(range(len(per_callable_static_input_surfaces))),
         ):
             # For now, assumes all static_outputs require grad
             static_grad_outputs = tuple(
@@ -600,6 +703,11 @@ def _make_graphed_callables(
                         allow_unused=allow_unused_input,
                         retain_graph=retain_graph_in_backward,
                     )
+                if need_bwd_dw_graph[bwd_idx]:
+                    with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+                        for module in visited_te_modules[bwd_idx]:
+                            if hasattr(module, "need_backward_dw") and module.need_backward_dw():
+                                module.backward_dw()
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.
@@ -687,7 +795,7 @@ def _make_graphed_callables(
 
             # Decide whether to update FP8 weights
             skip_fp8_weight_update = None
-            if fp8_weight_caching:
+            if cache_quantized_params:
                 assert "is_first_microbatch" in user_kwargs and isinstance(
                     user_kwargs["is_first_microbatch"], bool
                 ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
@@ -714,6 +822,21 @@ def _make_graphed_callables(
 
         return functionalized
 
+    def make_graphed_attribute_functions(graph_idx):
+
+        # Attach backward_dw as an attribute to the graphed callable.
+        def backward_dw():
+            if need_bwd_dw_graph.get(graph_idx, False):
+                bwd_dw_graphs[graph_idx].replay()
+
+        # Attach reset as an attribute to the graphed callable.
+        def reset():
+            fwd_graphs[graph_idx].reset()
+            bwd_graphs[graph_idx].reset()
+            bwd_dw_graphs[graph_idx].reset()
+
+        return backward_dw, reset
+
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
@@ -731,9 +854,10 @@ def _make_graphed_callables(
         )
 
         func = graph_callables[i]
+        te_modules = visited_te_modules.get(i, set())
         if isinstance(func, torch.nn.Module):
 
-            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd):
+            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd, te_modules):
                 def new_fwd(*user_args, **user_kwargs):
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
@@ -742,7 +866,7 @@ def _make_graphed_callables(
                         if FP8GlobalStateManager.is_fp8_enabled():
                             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
                             for m in func.modules():
-                                if m not in visited_te_modules:
+                                if m not in te_modules:
                                     # Only Set the FP8 meta for the modules included by forward
                                     continue
                                 if isinstance(m, TransformerEngineBaseModule):
@@ -779,7 +903,7 @@ def _make_graphed_callables(
 
                 return new_fwd
 
-            forward = make_graphed_forward(func, func.training, graphed, func.forward)
+            forward = make_graphed_forward(func, func.training, graphed, func.forward, te_modules)
             if _order is None:
                 func.forward = forward
                 ret.append(func)
@@ -787,6 +911,10 @@ def _make_graphed_callables(
                 ret.append(forward)
         else:
             ret.append(graphed)
+
+        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
+        setattr(ret[-1], "backward_dw", backward_dw_func)
+        setattr(ret[-1], "reset", reset_func)
 
     if just_one_callable:
         return ret[0]
@@ -796,14 +924,14 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: Optional[Recipe],
+    recipe: Optional[Recipe],
 ) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
 
-    if not isinstance(fp8_recipe, DelayedScaling):
+    if not isinstance(recipe, DelayedScaling):
         return None
 
     fp8_tensors = []
@@ -812,10 +940,10 @@ def save_fp8_tensors(
             module_tensors = None
             if isinstance(m, TransformerEngineBaseModule):
                 if m.primary_weights_in_fp8:
-                    m.adjust_amax_history_length(fp8_recipe.amax_history_len)
+                    m.adjust_amax_history_length(recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
             elif isinstance(m, BasicOperation):
-                m.reset_recipe_state(recipe=fp8_recipe)
+                m.reset_recipe_state(recipe=recipe)
                 module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors
@@ -850,11 +978,16 @@ def make_graphed_callables(
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
-    fp8_enabled: SingleOrTuple[bool] = False,
-    fp8_calibrating: bool = False,
+    fp8_enabled: Optional[SingleOrTuple[bool]] = None,
+    fp8_calibrating: Optional[bool] = None,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
-    fp8_weight_caching: bool = False,
+    fp8_weight_caching: Optional[bool] = None,
+    enabled: Optional[SingleOrTuple[bool]] = None,
+    calibrating: Optional[bool] = None,
+    recipe: Optional[Recipe] = None,
+    amax_reduction_group: Optional[dist_group_type] = None,
+    cache_quantized_params: Optional[bool] = None,
     _order: Optional[List[int]] = None,
     _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
@@ -870,6 +1003,11 @@ def make_graphed_callables(
     `original PyTorch implementation <https://pytorch.org/docs/stable/generated/torch.cuda.make_graphed_callables.html>`_
     for more documentation.
 
+    .. warning::
+
+       Arguments 'fp8_enabled', 'fp8_calibrating', 'fp8_recipe', 'fp8_group', and 'fp8_weight_caching' are deprecated.
+       Use arguments 'enabled', 'calibrating', 'recipe', 'amax_reduction_group', and 'cache_quantized_params' instead.
+
     Graphing parameters
     -------------------
     modules: (tuple of) callable
@@ -878,46 +1016,126 @@ def make_graphed_callables(
                  Positional arguments to callable(s).
     num_warmup_iters: int, default = 3
                       Number of warmup iterations.
-    allow_unused_input: bool, default = `False`
+    allow_unused_input: bool, default = False
                         Whether to handle case where callable inputs
                         and outputs are disconnected in compute graph.
     sample_kwargs: (tuple of) dict, optional
                    Keyword arguments to callable(s)
-    pool: (tuple of) int, default = `None`, optional
+    pool: (tuple of) int, default = None, optional
           An instance returned from function `torch.cuda.graph_pool_handle` that hints
           this graph may share memory with the indicated pool.
-    retain_graph_in_backward: bool, default = `False`
+    retain_graph_in_backward: bool, default = False
                               Whether to set retain_graph=True in backward graph capture.
-    _reuse_graph_input_output_buffers: bool, default = `False`
+    _reuse_graph_input_output_buffers: bool, default = False
         Reduce memory usage by reusing input/output data buffers between
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
 
-    FP8-related parameters
-    ----------------------
-    fp8_enabled: (tuple of) bool, default = `False`
-                 whether or not to enable fp8.
-                 If tuple, the length must match the number of modules.
-    fp8_calibrating: bool, default = `False`
-                     calibration mode allows collecting statistics such as amax and scale
-                     data of fp8 tensors even when executing without fp8 enabled. This is
-                     useful for saving an inference ready fp8 checkpoint while training
-                     using a higher precision.
-    fp8_recipe: Recipe, default = `None`
-                recipe used for FP8 training.
-    fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
-               distributed group over which amaxes for the fp8 tensors
-               are reduced at the end of each training step.
-    fp8_weight_caching: bool, default = `False`
-                        Whether or not to cache FP8 weights across microbatches. if set to `True`,
-                        the `is_first_microbatch` boolean argument must be passed into the forward
-                        method for TransformerEngine modules. When storing primary weights in FP8
-                        using TE's `fp8_model_init` API and using an FP8 aware optimizer, this arg
-                        must be set to `False` if calculating weight transposes' outside TE, e.g.,
-                        in the optimizer step.
+    Quantization parameters
+    -----------------------
+    enabled: (tuple of) bool, default = False
+             whether or not to enable low precision quantization (FP8/FP4).
+             If tuple, the length must match the number of modules.
+    calibrating: bool, default = False
+                 calibration mode allows collecting statistics such as amax and scale
+                 data of quantized tensors even when executing without quantization enabled.
+                 This is useful for saving an inference ready checkpoint while training
+                 using a higher precision.
+    recipe: recipe.Recipe, default = None
+            recipe used for low precision quantization.
+    amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = None
+                          distributed group over which amaxes for the quantized tensors
+                          are reduced at the end of each training step.
+    cache_quantized_params: bool, default = False
+                            Whether or not to cache quantized weights across microbatches. if set to `True`,
+                            the `is_first_microbatch` boolean argument must be passed into the forward
+                            method for TransformerEngine modules. When storing primary weights in low precision
+                            using TE's `quantized_model_init` API and using an quantization aware optimizer,
+                            this arg must be set to `False` if calculating weight transposes' outside TE, e.g.,
+                            in the optimizer step.
 
     """
+
+    # Handle deprecated args. If old kwargs are set, they are prioritized with warning.
+    if fp8_enabled is not None:
+        if enabled is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_enabled` kwarg "
+                "in favor of `enabled`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_enabled` kwarg in favor of `enabled`. "
+            "`fp8_enabled` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        enabled = fp8_enabled
+    if enabled is None:
+        enabled = False
+
+    if fp8_calibrating is not None:
+        if calibrating is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_calibrating` kwarg "
+                "in favor of `calibrating`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_calibrating` kwarg in favor of "
+            "`calibrating`. `fp8_calibrating` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        calibrating = fp8_calibrating
+    if calibrating is None:
+        calibrating = False
+
+    if fp8_recipe is not None:
+        if recipe is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg in favor of "
+                "`recipe`. `fp8_recipe` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_recipe` kwarg "
+                "in favor of `recipe`, but both kwargs are set."
+            )
+        recipe = fp8_recipe
+
+    if fp8_group is not None:
+        if amax_reduction_group is None:
+            warnings.warn(
+                "make_graphed_callables has deprecated `fp8_group` kwarg in favor of "
+                "`amax_reduction_group`. `fp8_group` will be removed in a future release.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_group` kwarg "
+                "in favor of `amax_reduction_group`, but both kwargs are set."
+            )
+        amax_reduction_group = fp8_group
+
+    if fp8_weight_caching is not None:
+        if cache_quantized_params is not None:
+            raise ValueError(
+                "make_graphed_callables has deprecated `fp8_weight_caching` kwarg "
+                "in favor of `cache_quantized_params`, but both kwargs are set."
+            )
+        warnings.warn(
+            "make_graphed_callables has deprecated `fp8_weight_caching` kwarg in favor of "
+            "`cache_quantized_params`. `fp8_weight_caching` will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        cache_quantized_params = fp8_weight_caching
+    if cache_quantized_params is None:
+        cache_quantized_params = False
+
     set_capture_start()
 
     # Handle single module.
@@ -926,21 +1144,21 @@ def make_graphed_callables(
         just_one_callable = True
         modules = (modules,)
 
-    if not isinstance(fp8_enabled, tuple):
-        assert isinstance(fp8_enabled, bool), "fp8_enabled must be a bool or a tuple of bools"
-        fp8_enabled = (fp8_enabled,) * len(modules)
+    if not isinstance(enabled, tuple):
+        assert isinstance(enabled, bool), "enabled must be a bool or a tuple of bools"
+        enabled = (enabled,) * len(modules)
     else:
-        assert len(fp8_enabled) == len(
+        assert len(enabled) == len(
             modules
-        ), f"fp8_enabled length ({len(fp8_enabled)}) must match modules length ({len(modules)})"
-    if any(fp8_enabled) and fp8_recipe is None:
-        fp8_recipe = get_default_fp8_recipe()
-    elif not any(fp8_enabled):
-        fp8_recipe = None
-    module_uses_fp8 = dict(zip((id(m) for m in modules), fp8_enabled))
+        ), f"enabled length ({len(enabled)}) must match modules length ({len(modules)})"
+    if any(enabled) and recipe is None:
+        recipe = get_default_fp8_recipe()
+    elif not any(enabled):
+        recipe = None
+    module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
 
     # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
+    saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
 
     # FP8 wrapper.
     old_call_funcs = {}
@@ -954,11 +1172,11 @@ def make_graphed_callables(
 
         # Wrap the original call function of the module class.
         def call_func(self, *args, **kwargs):
-            with fp8_autocast(
+            with autocast(
                 enabled=module_uses_fp8.get(id(self), False),
-                calibrating=fp8_calibrating,
-                fp8_recipe=fp8_recipe,
-                fp8_group=fp8_group,
+                calibrating=calibrating,
+                recipe=recipe,
+                amax_reduction_group=amax_reduction_group,
                 _graph=True,
             ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)
@@ -992,7 +1210,7 @@ def make_graphed_callables(
         sample_args,
         num_warmup_iters=num_warmup_iters,
         allow_unused_input=allow_unused_input,
-        fp8_weight_caching=fp8_weight_caching,
+        cache_quantized_params=cache_quantized_params,
         sample_kwargs=sample_kwargs,
         _order=_order,
         _num_layers_per_chunk=_num_layers_per_chunk,

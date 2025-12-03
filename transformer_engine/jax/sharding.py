@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 import warnings
+
 import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
@@ -43,9 +44,6 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
 
 def _validate_mesh_resource_configuration(mesh_resource):
     """Validate that the mesh resource configuration is consistent and conflict-free."""
-    is_dp_enabled = (
-        mesh_resource.dp_resource is not None and get_mesh_axis_size(mesh_resource.dp_resource) > 1
-    )
     is_tp_enabled = (
         mesh_resource.tp_resource is not None and get_mesh_axis_size(mesh_resource.tp_resource) > 1
     )
@@ -53,16 +51,7 @@ def _validate_mesh_resource_configuration(mesh_resource):
         mesh_resource.tpsp_resource is not None
         and get_mesh_axis_size(mesh_resource.tpsp_resource) > 1
     )
-    is_fsdp_enabled = (
-        mesh_resource.fsdp_resource is not None
-        and get_mesh_axis_size(mesh_resource.fsdp_resource) > 1
-    )
 
-    assert not (is_dp_enabled and is_fsdp_enabled), (
-        "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
-        f" Got dp_resource={mesh_resource.dp_resource} and"
-        f" fsdp_resource={mesh_resource.fsdp_resource}"
-    )
     assert not (is_tp_enabled and is_tpsp_enabled), (
         "Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time."
         f" Got tp_resource={mesh_resource.tp_resource} and"
@@ -74,6 +63,16 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     Generate a dict to map logical axes to mesh axes.
     """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh is None or mesh.empty:
+        # If no mesh is defined, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
+    abstract_mesh = get_abstract_mesh()
+    if sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
+        # If all mesh axes are manual axes, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
     gsr = global_mesh_resource()
 
     is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
@@ -130,7 +129,22 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     # We want to exclude the axes that already used by shard_map and shard_map
     # only sets those in the abstract_mesh, not the physical one
     manual_axis_names = get_abstract_mesh().manual_axes
-    cleaned_axis_names = tuple(name if name not in manual_axis_names else None for name in pspec)
+
+    # Multiple mesh axes can be mapped to a single shape axis, so we need to unpack and process tuples here too
+    def filter_manual_axes(name_or_tuple):
+        if isinstance(name_or_tuple, tuple):
+            out = tuple(n for n in name_or_tuple if n not in manual_axis_names)
+            if len(out) == 0:
+                return None
+            return out
+        if name_or_tuple in manual_axis_names:
+            return None
+        return name_or_tuple
+
+    cleaned_axis_names = tuple(filter_manual_axes(name_or_tuple) for name_or_tuple in pspec)
+
+    if cleaned_axis_names == (None,) * len(cleaned_axis_names):
+        return x
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
@@ -220,6 +234,19 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_num_devices_in_mesh(mesh=None):
+    """
+    Get the number of devices in the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return 1
+    return np.prod(list(mesh.shape.values()))
 
 
 def get_mesh_axis_size(axis, mesh=None):
@@ -349,6 +376,21 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
+def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh):
+    """Perform all-reduce sum operation along data parallelism and sequence parallelism axes.
+
+    Args:
+        x: Input tensor to reduce
+        mesh: JAX mesh for distributed computation
+
+    Returns:
+        Reduced tensor
+    """
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().tpsp_resource, mesh)
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+
+
 def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
     """Perform all-reduce max operation along all axes except pipeline parallelism.
 
@@ -364,3 +406,21 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
+
+
+def tpsp_axis_size():
+    """
+    Get the size of the tensor parallelism axis.
+    Return 1 if no TP axis is set.
+    """
+    return get_mesh_axis_size(global_mesh_resource().tpsp_resource)
+
+
+def dp_or_fsdp_axis_size():
+    """
+    Get the size of the data parallelism or FSDP axis.
+    Return 1 if no DP/FSDP axis is set.
+    """
+    dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
+    fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
+    return dp_size if dp_size > 1 else fsdp_size

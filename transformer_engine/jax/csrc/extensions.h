@@ -13,6 +13,7 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -32,27 +33,38 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/multi_stream.h"
 
-// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
-
 namespace transformer_engine {
 namespace jax {
+
+struct ClampedSwigluConfig {
+  float limit;
+  float alpha;
+};
+
+struct ActivationConfig {
+  ClampedSwigluConfig clamped_swiglu;
+};
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeInitializeHandler);
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
-                                                   JAXX_Scaling_Mode scaling_mode, bool is_2x);
+                                                   JAXX_Scaling_Mode scaling_mode,
+                                                   JAXX_Quantize_Layout quantize_layout);
 
 // Normalization
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardHandler);
 
 pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
@@ -74,9 +86,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                               DType in_dtype, DType out_dtype,
+                                               DType in_dtype, DType out_dtype, DType scale_dtype,
                                                JAXX_Scaling_Mode scaling_mode,
-                                               QuantizeLayout q_layout);
+                                               JAXX_Quantize_Layout quantize_layout);
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
@@ -96,34 +108,40 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DType kv_dtype,
-                                            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                            NVTE_Mask_Type mask_type, float dropout_probability,
-                                            size_t q_num_heads, size_t kv_num_heads,
-                                            size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t qk_head_dim, size_t v_head_dim,
-                                            int64_t window_size_left, int64_t window_size_right);
+NVTE_Fused_Attn_Backend GetFusedAttnBackend(
+    bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
+    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
+    int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
-    size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
+    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
+    DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
+    int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
-    bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
-    int64_t window_size_right);
+    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
+    DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
+    int64_t window_size_left, int64_t window_size_right);
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
 // Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+
+// Amax
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
@@ -133,5 +151,18 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConfig,
+                                      ::xla::ffi::StructMember<float>("limit"),
+                                      ::xla::ffi::StructMember<float>("alpha"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::ActivationConfig,
+    ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
+
+// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_

@@ -8,7 +8,7 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit, _UNSPECIFIED
+from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
@@ -17,14 +17,6 @@ from utils import assert_allclose, is_devices_enough
 
 def generate_configs():
     configs = []
-    if is_devices_enough(2):
-        configs.append(
-            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
-        )
-        configs.append(
-            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2")
-        )
-
     if is_devices_enough(4):
         configs.append(
             pytest.param(
@@ -32,10 +24,17 @@ def generate_configs():
                 (2, 2),
                 ("dp", "tpsp"),
                 MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
-                id=f"n4_dp2_tp2",
+                id="n4_dp2_tp2",
             )
         )
 
+    if is_devices_enough(2):
+        configs.append(
+            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
+        )
+        configs.append(
+            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2"),
+        )
     return configs
 
 
@@ -155,13 +154,15 @@ def compare_ops(
         grad_args = tuple(range(len(inputs)))
 
     target_grad_func = jax.value_and_grad(target_func, argnums=grad_args)
-    target_pjitter = pjit(target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    target_fwd, target_grads = target_pjitter(*inputs, **kwargs)
-    target_hlo = target_pjitter.lower(*inputs, **kwargs).compile().as_text()
+    target_jitter = jax.jit(
+        target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings
+    )
+    target_fwd, target_grads = target_jitter(*inputs, **kwargs)
+    target_hlo = target_jitter.lower(*inputs, **kwargs).compile().as_text()
 
     ref_grad_func = jax.value_and_grad(ref_func, argnums=grad_args)
-    ref_pjitter = pjit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    ref_fwd, ref_grads = ref_pjitter(*inputs, **kwargs)
+    ref_jitter = jax.jit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
+    ref_fwd, ref_grads = ref_jitter(*inputs, **kwargs)
 
     assert_allclose(target_fwd, ref_fwd, dtype=metric_fwd_dtype)
 

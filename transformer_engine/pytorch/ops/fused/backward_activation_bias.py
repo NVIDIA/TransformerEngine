@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import Recipe
+from transformer_engine.pytorch.quantization import Recipe
 from transformer_engine.pytorch.ops.basic import Bias
 from transformer_engine.pytorch.ops.basic.activation import (
     _ActivationOperation,
@@ -90,15 +90,15 @@ def fuse_backward_activation_bias(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Backward pass operations and the indices of the corresponding
         basic operations.
-    recipe: Recipe, optional
+    recipe : Recipe, optional
         Used quantization recipe
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated backward pass operations
 
     """

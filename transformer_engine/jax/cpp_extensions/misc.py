@@ -6,8 +6,6 @@
 import os
 import functools
 from typing import Tuple
-from importlib.metadata import version as get_pkg_version
-from packaging.version import Version as PkgVersion
 
 import numpy as np
 
@@ -75,7 +73,8 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.int64.dtype: TEDType.kInt64,
         jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
         jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
-        jnp.uint8.dtype: TEDType.kByte,
+        jnp.float8_e8m0fnu.dtype: TEDType.kFloat8E8M0,
+        jnp.float4_e2m1fn.dtype: TEDType.kFloat4E2M1,
     }
 
     if jax_dtype not in converter:
@@ -117,7 +116,7 @@ def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis=-1):
         transpose. Note, transpose_axis should be greater than static_axis_boundary
 
     examples:
-        X in shape (dim0, dim1, dim2, dim3, dim4)
+        X of shape (dim0, dim1, dim2, dim3, dim4)
 
         static_axis_boundary == -1, transpose_axis == 2
             Xt = (dim2, dim3, dim4, dim0, dim1)
@@ -149,16 +148,6 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
-
-
-@functools.lru_cache(maxsize=None)
-def jax_version_meet_requirement(version: str):
-    """
-    Helper function checking if required JAX version is available
-    """
-    jax_version = PkgVersion(get_pkg_version("jax"))
-    jax_version_required = PkgVersion(version)
-    return jax_version >= jax_version_required
 
 
 def get_xla_flag(flag: str, default=None, cast=str):
@@ -218,7 +207,9 @@ def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quant
             break
     # _quantize_dbias_impl forcing 1x quantization for tensor scaling switches q_layout to ROWWISE,
     # but this fails when bias fusion is turned on with arch < 100.
-    force_1x_quantization = quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
+    force_1x_quantization = (
+        quantizer.scaling_mode.is_tensor_scaling() and quantizer.q_layout.is_rowwise_colwise
+    )
     return (
         (force_1x_quantization or quantizer.q_layout == QuantizeLayout.ROWWISE)
         and arch_l_100
@@ -240,7 +231,9 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     @return: the output of 'f' with the colwise output calculated
     """
     should_apply_war = (
-        quantizer is not None and quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
+        quantizer is not None
+        and quantizer.scaling_mode.is_tensor_scaling()
+        and quantizer.q_layout.is_rowwise_colwise
     )
     if not should_apply_war:
         return None
@@ -293,3 +286,11 @@ class NamedSharding(jax.sharding.NamedSharding):
         Create a new NamedSharding with the same mesh and spec but with a new description.
         """
         return NamedSharding(self.mesh, self.spec, desc=desc)
+
+
+@functools.lru_cache(maxsize=1)
+def is_all_reduce_in_float32():
+    """
+    Check if all-reduce is in float32
+    """
+    return os.getenv("NVTE_JAX_ALL_REDUCE_IN_FP32", "0") == "1"

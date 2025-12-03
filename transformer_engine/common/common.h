@@ -48,7 +48,13 @@ inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
 
+inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
+
+inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+
+inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
@@ -95,6 +101,7 @@ struct SimpleTensor {
     }
     return acc;
   }
+  bool has_data() const noexcept { return dptr != nullptr && numel() > 0; }
 
   void clear() {
     dptr = nullptr;
@@ -108,6 +115,7 @@ struct Tensor {
   SimpleTensor data;
   SimpleTensor columnwise_data;
   SimpleTensor amax;
+  SimpleTensor columnwise_amax;
   SimpleTensor scale;
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
@@ -119,6 +127,7 @@ struct Tensor {
       : data(),
         columnwise_data(),
         amax(nullptr, {1}, DType::kFloat32),
+        columnwise_amax(nullptr, {1}, DType::kFloat32),
         scale(nullptr, {1}, DType::kFloat32),
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
@@ -129,6 +138,7 @@ struct Tensor {
     data.clear();
     columnwise_data.clear();
     amax.clear();
+    columnwise_amax.clear();
     scale.clear();
     scale_inv.clear();
     columnwise_scale_inv.clear();
@@ -145,9 +155,11 @@ struct Tensor {
     return acc;
   }
 
+  // TODO(Tim): Change this to use data.has_data()
   bool has_data() const noexcept { return data.dptr != nullptr; }
 
   // Check for size (not just pointer) for 0-dim or no token cases.
+  // TODO(Tim): Change this to use columnwise_data.has_data()
   bool has_columnwise_data() const noexcept {
     return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
   }
@@ -175,21 +187,38 @@ struct Tensor {
      */
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
-        if (!has_data() && has_columnwise_data()) {
+      case NVTE_NVFP4_1D_SCALING: {
+        // Choose data buffer based on whether it is initialized
+        // Note: Uninitialized buffers currently have shape=[].
+        // However, this is logically incorrect. 0-D tensors have 1
+        // entry, and uninitialized tensors should have shape=[0].
+        bool use_columnwise_shape = false;
+        if (data.dptr != nullptr) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.dptr != nullptr) {
+          use_columnwise_shape = true;
+        } else if (data.shape.size() != 0) {
+          use_columnwise_shape = false;
+        } else if (columnwise_data.shape.size() != 0) {
+          use_columnwise_shape = true;
+        }
+
+        // Infer shape based on data
+        if (use_columnwise_shape) {
+          // Column-wise data is transposed
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
+            ret.reserve(columnwise_data.shape.size());
             for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
               ret.push_back(columnwise_data.shape[i]);
             }
             ret.push_back(columnwise_data.shape.front());
           }
           return ret;
-        } else {
-          return data.shape;
         }
-        break;
+        return data.shape;
+      }
       case NVTE_MXFP8_1D_SCALING:
-      case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING:
         if (!has_data() && has_columnwise_data()) {
           return columnwise_data.shape;
         } else {
@@ -255,18 +284,147 @@ struct Tensor {
   }
 };
 
+struct GroupedTensor {
+ public:
+  /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+  /*
+  Grouped tensor is a collection of tensors with different shapes but the same dtype and scaling mode
+
+  Shape Representation:
+  - logical_shape: 2D shape representing the conceptual layouy, i.e. the shape when member tensors are flattened to 2D and stacked together (REQUIRED)
+    + When all_same_shape(): [num_tensors * M, N] where each tensor is (M, N)
+    + When varying_first_dim(): [~sum_of_first_dims, N] where N is common
+    + When varying_last_dim(): [M, ~sum_of_last_dims] where M is common
+    + When varying_both_dims(): [1, total_elements] (fully flattened)
+
+  - first_dims and last_dims are OPTIONAL (empty if dimension is uniform)
+    + Empty first_dims: all tensors have the same first dimension
+    + Empty last_dims: all tensors have the same last dimension
+    + Both empty: all tensors have identical shapes
+    + Both set: each tensor has unique shape (first_dims[i], last_dims[i])
+
+  Data Layout:
+  - ALL data fields are stored as 1D flattened arrays (data, columnwise_data, scale_inv, etc.)
+  - logical_shape provides the conceptual 2D interpretation
+  - All data is stored on device in contiguous layout
+  */
+
+  SimpleTensor data;
+  SimpleTensor columnwise_data;
+  SimpleTensor scale_inv;
+  SimpleTensor columnwise_scale_inv;
+  SimpleTensor amax;
+  SimpleTensor columnwise_amax;
+  SimpleTensor scale;  // for FP8-DS only
+
+  // Shape information (OPTIONAL - empty if dimension is uniform across all tensors)
+  // first_dims[i] = first dimension of tensor i (empty if all tensors have same first dim)
+  // last_dims[i] = last dimension of tensor i (empty if all tensors have same last dim)
+  SimpleTensor first_dims;  // Device pointer to int64_t array of length num_tensors (or empty)
+  SimpleTensor last_dims;   // Device pointer to int64_t array of length num_tensors (or empty)
+
+  // Offsets for indexing into contiguous 1D layout (OPTIONAL - not needed if all_same_shape())
+  // tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
+  // Usage: tensor_i_ptr = (char*)data.dptr + tensor_offsets[i] * element_size
+  // If empty and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
+  SimpleTensor tensor_offsets;  // Device pointer to int64_t array of length num_tensors (or empty)
+
+  // Logical shape: conceptual 2D shape of the grouped data (REQUIRED)
+  // Represents how the 1D flattened data should be interpreted as 2D
+  // Always 2D with positive dimensions
+  NVTEShape logical_shape;
+
+  NVTEScalingMode scaling_mode;
+  size_t num_tensors;
+  NVTEGroupedTensor nvte_tensor;
+
+  GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
+      : data(),
+        columnwise_data(),
+        scale_inv(),
+        columnwise_scale_inv(),
+        amax(),
+        columnwise_amax(),
+        scale(),
+        num_tensors(num_tensors),
+        first_dims(nullptr, {}, DType::kInt64),
+        last_dims(nullptr, {}, DType::kInt64),
+        tensor_offsets(nullptr, {}, DType::kInt64),
+        logical_shape(nvte_make_shape(nullptr, 0)),
+        scaling_mode(scaling_mode),
+        nvte_tensor(0) {}
+
+  explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
+
+  bool has_data() const noexcept { return data.has_data(); }
+  bool has_columnwise_data() const noexcept { return columnwise_data.has_data(); }
+
+  bool all_same_first_dim() const noexcept { return !first_dims.has_data(); }
+  bool all_same_last_dim() const noexcept { return !last_dims.has_data(); }
+  bool all_same_shape() const noexcept { return !first_dims.has_data() && !last_dims.has_data(); }
+  bool varying_both_dims() const noexcept { return first_dims.has_data() && last_dims.has_data(); }
+
+  size_t get_common_first_dim() const {
+    NVTE_CHECK(all_same_first_dim(), "First dim varies across tensors");
+    NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+    if (all_same_shape()) {
+      // When both dims are uniform: logical_shape = [num_tensors * M, N]
+      return logical_shape.data[0] / num_tensors;
+    } else {
+      // When varying last dims but not first dim: logical_shape = [M, sum_of_last_dims]
+      return logical_shape.data[0];
+    }
+  }
+  size_t get_common_last_dim() const {
+    NVTE_CHECK(all_same_last_dim(), "Last dim varies across tensors");
+    NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+    // For both uniform and varying first dim cases: logical_shape[1] is the common last dim
+    return logical_shape.data[1];
+  }
+
+  DType dtype() const {
+    if (has_data()) return data.dtype;
+    if (has_columnwise_data()) return columnwise_data.dtype;
+    // Fallback, used e.g. in workspace or when allow_empty=true
+    return data.dtype;
+  }
+
+  void clear() {
+    data.clear();
+    columnwise_data.clear();
+    scale_inv.clear();
+    columnwise_scale_inv.clear();
+    amax.clear();
+    columnwise_amax.clear();
+    scale.clear();
+    first_dims.clear();
+    last_dims.clear();
+    tensor_offsets.clear();
+    logical_shape = nvte_make_shape(nullptr, 0);
+    num_tensors = 0;
+    scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+    nvte_tensor = 0;
+  }
+};
+
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
   Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
       Float8BlockScaleTensorFormat::GEMM_READY;
+  NVTETensor rng_state = nullptr;
+  bool nvfp4_2d_quantization = false;
+  bool stochastic_rounding = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),                         // force_pow_2_scales
-      sizeof(float),                        // amax_epsilon
-      sizeof(NVTETensor),                   // noop_tensor
-      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
+      sizeof(bool),                          // force_pow_2_scales
+      sizeof(float),                         // amax_epsilon
+      sizeof(NVTETensor),                    // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
+      sizeof(NVTETensor),                    // rng_seed and offset
+      sizeof(bool),                          // nvfp4_2d_quantization
+      sizeof(bool)                           // stochastic_rounding
   };
 };
 
@@ -298,6 +456,8 @@ using fp8e8m0 = __nv_fp8_e8m0;
 #endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif
 using e8m0_t = uint8_t;
 
@@ -334,17 +494,20 @@ struct TypeExtrema;
 template <>
 struct TypeExtrema<fp4e2m1> {
   static constexpr float max = 6.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 #endif
 
 template <>
 struct TypeExtrema<fp8e4m3> {
   static constexpr float max = 448.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>
 struct TypeExtrema<fp8e5m2> {
   static constexpr float max = 57344.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>
@@ -558,6 +721,18 @@ struct TypeInfo {
       NVTE_ERROR("Invalid type.");                                   \
   }
 
+// Add a pack_size argument to select the packed type for FP4
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4x2_ONLY(dtype, pack_size, type, ...) \
+  switch (dtype) {                                                             \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat4E2M1: {                                                 \
+      using type = __nv_fp4x2_storage_t;                                       \
+      { __VA_ARGS__ }                                                          \
+    } break;                                                                   \
+    default:                                                                   \
+      NVTE_ERROR("Invalid type.");                                             \
+  }
+
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
   switch (dtype) {                                               \
     using namespace transformer_engine;                          \
@@ -717,10 +892,11 @@ void checkCuDriverContext(CUstream stream);
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 // Set up parameters to create TMA descriptor.
-void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
-                          const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                          const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_num_bits);
+void create_2D_tensor_map(
+    CUtensorMap &tensorMap, const SimpleTensor &tensor, const uint64_t globalY,
+    const uint64_t globalX, const uint32_t shmemY, const uint32_t shmemX,
+    const uint32_t stride_elems, const uint32_t offset_elems, const size_t type_num_bits,
+    const CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
 
 bool is_supported_by_CC_100();
 
@@ -729,6 +905,16 @@ std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensor
 
 Tensor *convertNVTETensor(const NVTETensor tensor);
 Tensor *convertNVTETensorCheck(const NVTETensor tensor);
+
+GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor tensor);
+GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor tensor);
+
+// Helper functions for GroupedTensor validation
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name);
+void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name);
+void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name,
+                              bool allow_empty = false);
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

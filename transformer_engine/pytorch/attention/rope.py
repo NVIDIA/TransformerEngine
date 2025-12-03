@@ -66,6 +66,9 @@ class RotaryPositionEmbedding(torch.nn.Module):
         """
         Create rotary position embedding frequencies.
 
+        This function is particularly sensitive to the use of mixed precision, so we disable the
+        autocast context if it is enabled.
+
         Parameters
         ----------
         max_seq_len: int
@@ -73,26 +76,27 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             Fixed offset for frequencies.
         """
-        seq = (
-            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-            + offset
-        )
+        with torch.autocast(enabled=False, device_type="cuda"):
+            seq = (
+                torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+                + offset
+            )
 
-        if (
-            self.pretrained_max_position_embeddings is not None
-            and self.seq_len_interpolation_factor is not None
-        ):
             if (
-                max_seq_len
-                > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor
+                self.pretrained_max_position_embeddings is not None
+                and self.seq_len_interpolation_factor is not None
             ):
-                # dynamic linear scaling (length > position we have learned)
-                seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
-            else:
-                # fixed linear scaling
-                seq *= 1 / self.seq_len_interpolation_factor
+                if (
+                    max_seq_len
+                    > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor
+                ):
+                    # dynamic linear scaling (length > position we have learned)
+                    seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
+                else:
+                    # fixed linear scaling
+                    seq *= 1 / self.seq_len_interpolation_factor
 
-        freqs = torch.einsum("i , j -> i j", seq, self.inv_freq)
+            freqs = torch.einsum("i , j -> i j", seq, self.inv_freq)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
         if not self.interleaved:
@@ -145,7 +149,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             cp_size,
             cp_rank,
         )
-        ctx.save_for_backward(freqs, cu_seqlens)
+        ctx.save_for_backward(freqs, cu_seqlens, start_positions)
         ctx.tensor_format = tensor_format
         ctx.cp_size = cp_size
         ctx.cp_rank = cp_rank
@@ -156,10 +160,11 @@ class FusedRoPEFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """Fused RoPE backward."""
-        freqs, cu_seqlens = ctx.saved_tensors
+        freqs, cu_seqlens, start_positions = ctx.saved_tensors
         grad_input = tex.fused_rope_backward(
             grad_output,
             freqs,
+            start_positions,
             QKVFormat[ctx.tensor_format],
             ctx.interleaved,
             cu_seqlens,
@@ -167,7 +172,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             ctx.cp_rank,
         )
 
-        return grad_input, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None
 
 
 class FusedQKVRoPEFunc(torch.autograd.Function):
@@ -274,7 +279,6 @@ def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
 def _apply_rotary_pos_emb_base(
     t: torch.Tensor,
     freqs: torch.Tensor,
-    start_positions: torch.Tensor = None,
     tensor_format: str = "sbhd",
     interleaved: bool = False,
 ) -> torch.Tensor:
@@ -283,49 +287,23 @@ def _apply_rotary_pos_emb_base(
 
     Parameters
     ----------
-    t: torch.Tensor
+    t : torch.Tensor
         Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which rotary positional
         embedding will be applied.
-    freqs: torch.Tensor
-        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-        with `s2 >= s` and `d2 <= d`.
-    start_positions: torch.Tensor, default = None.
-        Tokens in a sequence `i` should be applied with position encoding offset by
-        `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    freqs : torch.Tensor
+        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` or `[s2, b, 1, d2]`
+        and dtype 'float', with `s2 >= s` and `d2 <= d`.
+    tensor_format : {'sbhd', 'bshd'}, default = 'sbhd'
         Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is of shape
         `[seq, bs, ...]`.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
     """
-    max_seq_len = freqs.shape[0]
-    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-    # In case `start_positions` are provided, create a staggered `freqs` tensor
-    # offset by the values in `start_positions`.
-    # `start_positions` is only supported for `cp_size=1` and inference.
-    if start_positions is not None:
-        max_offset = torch.max(start_positions)
-        assert (
-            max_offset + cur_seq_len <= max_seq_len
-        ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
-
-        # Stack staggered rope embeddings along the batch dimension
-        freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
-
-        # Note that from this point, `freqs` has a shape `(s,b,1,d)`.
-
-    # Only apply the rotary embeddings up to the sequence length of the running
-    # input.
-    assert (
-        cur_seq_len <= max_seq_len
-    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
-
     # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
     # [seq, b, 1, dim] -> [b, seq, 1, dim]
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)
+
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
@@ -346,7 +324,7 @@ def _get_freqs_on_this_cp_rank(
     """Get the position embedding on the current context parallel rank.
 
     Args:
-        freqs: torch.Tensor. Positional embedding tensor in shape `[s2, 1, 1, d2]`.
+        freqs: torch.Tensor. Positional embedding tensor of shape `[s2, 1, 1, d2]`.
         seqlen: int. Length of the current sequence.
         cp_size: int. Context parallel world size.
         cp_rank: int. Context parallel rank.
@@ -362,7 +340,7 @@ def _get_freqs_on_this_cp_rank(
         )
 
     # cp_size == 1
-    return freqs
+    return freqs[:seqlen]
 
 
 def apply_rotary_pos_emb(
@@ -384,57 +362,52 @@ def apply_rotary_pos_emb(
         Training:
             qkv_formats:            "thd", "bshd", "sbhd"
             context parallel:       yes
-            start_positions:        no
+            start_positions:        yes
             interleaving:           yes
         Inference:
             qkv_formats:            "thd", "bshd", "sbhd"
             context parallelism:    no
             start_positions:        yes
-            interleaving:            yes
+            interleaving:           yes
 
     Parameters
     ----------
-    t: torch.Tensor
+    t : torch.Tensor
         Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
         rotary positional embedding will be applied.
-    freqs: torch.Tensor
+    freqs : torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    start_positions: torch.Tensor, default = None.
+    start_positions : torch.Tensor, default = None.
         Tokens in a sequence `i` should be applied with position encoding offset by
         `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+    tensor_format : {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
         is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
         of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
-    fused: bool, default = False
+    fused : bool, default = False
         Whether to use a fused applying RoPE implementation.
-    cu_seqlens: torch.Tensor, default = None.
+    cu_seqlens : torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
         Should be `cu_seqlens_padded` when cp_size > 1.
-    cp_size: int, default = 1.
+    cp_size : int, default = 1.
         Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    cp_rank: int, default = 0.
+    cp_rank : int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
-
-    # `start_positions` is only supported for `cp_size=1` and inference.
-    assert not (
-        cp_size > 1 and start_positions is not None
-    ), """start_positions != None with CP SIZE > 1 is not supported!"""
-
     assert (
         tensor_format != "thd" or cu_seqlens is not None
     ), "cu_seqlens must not be None when tensor_format is 'thd'."
 
+    # Fused apply rope logic for THD/BSHD/SBHD formats
     if fused:
         return FusedRoPEFunc.apply(
             t, freqs, start_positions, tensor_format, interleaved, cu_seqlens, cp_size, cp_rank
         )
 
-    # Unfused THD format
+    # Unfused apply rope logic for THD format
     if tensor_format == "thd":
         cu_seqlens = cu_seqlens // cp_size
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -443,15 +416,18 @@ def apply_rotary_pos_emb(
         # `s1hd` tensors (for each sequence) and applies rotary embedding to
         # those sequences individually.
         # Note that if `start_positions` is not `None`, then for each sequence,
-        # it's corresponding rope offset is also supplied from `start_positions`
-        # individually.
+        # the freqs supplied are offset by the corresponding `start_positions` value.
         return torch.cat(
             [
                 _apply_rotary_pos_emb_base(
                     x.unsqueeze(1),
-                    _get_freqs_on_this_cp_rank(freqs, x.size(0), cp_size, cp_rank),
-                    start_positions=(
-                        start_positions[idx : idx + 1] if start_positions is not None else None
+                    _get_freqs_on_this_cp_rank(
+                        (
+                            freqs[start_positions[idx] :] if start_positions is not None else freqs
+                        ),  # offset the freqs
+                        x.size(0),
+                        cp_size,
+                        cp_rank,
                     ),
                     interleaved=interleaved,
                 )
@@ -459,17 +435,28 @@ def apply_rotary_pos_emb(
             ]
         ).squeeze(1)
 
-    # Unfused SBHD/BSHD format
+    # Unfused apply rope logic for SBHD/BSHD format follows ...
+
     if tensor_format == "sbhd":
         seqlen = t.size(0)
     elif tensor_format == "bshd":
         seqlen = t.size(1)
     else:
         raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+
+    if start_positions is not None:
+        max_offset = torch.max(start_positions)
+        assert (
+            max_offset + seqlen * cp_size <= freqs.shape[0]
+        ), f"Rotary Embeddings only suppported up to {freqs.shape[0]} sequence length!"
+
+        # Stack staggered rope embeddings along the batch dimension
+        freqs = torch.concatenate([freqs[i : i + seqlen * cp_size] for i in start_positions], dim=1)
+        # Note that from this point, `freqs` has a shape `(s,b,1,d)`.
+
     return _apply_rotary_pos_emb_base(
         t,
         _get_freqs_on_this_cp_rank(freqs, seqlen, cp_size, cp_rank),
-        start_positions,
         tensor_format,
         interleaved=interleaved,
     )
@@ -501,36 +488,36 @@ def apply_fused_qkv_rotary_pos_emb(
             qkv_formats:            "bshd", "sbhd"
             context parallelism:    no
             start_positions:        yes
-            interleaving:            yes
+            interleaving:           yes
 
     Parameters
     ----------
-    qkv: torch.Tensor
+    qkv : torch.Tensor
         Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which
         rotary positional embedding will be applied. This tensor has q, k, v concatenated
         along the last dimension.
-    q_freqs: torch.Tensor
+    q_freqs : torch.Tensor
         Rotary positional embedding Q tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    k_freqs: torch.Tensor
+    k_freqs : torch.Tensor
         Rotary positional embedding K tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
-    qkv_split_arg_list: List[int]
+    qkv_split_arg_list : List[int]
         List of integers that specify the split of the qkv tensor. The list should have 3 elements,
         the first element is the number of elements in the q tensor, the second element is the number
         of elements in the k tensor, and the third element is the number of elements in the v tensor.
         The sum of the elements in the list should be equal to the last dimension of the qkv tensor.
-    start_positions: torch.Tensor, default = None.
+    start_positions : torch.Tensor, default = None.
         Tokens in a sequence `i` should be applied with position encoding offset by
         `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    tensor_format : {'sbhd', 'bshd'}, default = 'sbhd'
         is `bshd` if `qkv` is of shape `[bs, seq, ...]`, or `sbhd` if `qkv` is
         of shape `[seq, bs, ...]`.
-    interleaved: bool, default = False
+    interleaved : bool, default = False
         Whether to use interleaved rotary position embedding.
-    cp_size: int, default = 1.
+    cp_size : int, default = 1.
         Context parallel world size.
-    cp_rank: int, default = 0.
+    cp_rank : int, default = 0.
         Context parallel rank.
     """
 

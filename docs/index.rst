@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Transformer Engine documentation
-==============================================
+=================================
 
 .. ifconfig:: "dev" in release
 
@@ -29,7 +29,7 @@ Transformer Engine documentation
    :caption: Getting Started
 
    installation
-   examples/quickstart.ipynb
+   getting_started
    faq
 
 .. toctree::
@@ -46,6 +46,7 @@ Transformer Engine documentation
    examples/fp8_primer.ipynb
    examples/advanced_optimizations.ipynb
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
+   examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
    examples/onnx/onnx_export.ipynb
 
 .. toctree::
