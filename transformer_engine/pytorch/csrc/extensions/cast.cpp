@@ -766,8 +766,9 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   if (quantizer.stochastic_rounding) {
     // TODO(zhongbo): remove the for loop of generating rng states with a single call
     // with rng_elts_per_thread = 1024 * num_tensors
-    // Change to the bulk generate rng states api when grouped quantize is available
-    const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
+    // RHT path is fully grouped kernels, which we can be optimized
+    bool with_bulk_generate_rng_states = quantizer.with_rht;
+    const size_t rng_elts_per_thread = with_bulk_generate_rng_states ? 1024 * num_tensors : 1024;
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
     rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -780,6 +781,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
           static_cast<void *>(rng_state_ptr), std::vector<size_t>{2}, DType::kInt64));
       quant_config_list[i].set_rng_state(te_rng_state_list[i].data());
       quant_config_list[i].set_stochastic_rounding(true);
+      // break the loop if we are using bulk generate rng states
+      if (with_bulk_generate_rng_states) {
+        break;
+      }
     }
   }
 
