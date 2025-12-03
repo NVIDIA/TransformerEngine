@@ -318,6 +318,7 @@ def _load_cuda_library_from_system(lib_name: str):
         if path is None:
             continue
         libs = glob.glob(f"{path}/**/lib{lib_name}{_get_sys_extension()}*", recursive=True)
+        libs = [lib for lib in libs if "stub" not in lib]
         libs.sort(reverse=True, key=os.path.basename)
         if libs:
             return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
