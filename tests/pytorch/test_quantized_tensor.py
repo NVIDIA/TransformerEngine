@@ -53,9 +53,12 @@ DimsType = Union[Iterable[int], int]
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+
 
 # delayed scaling
 def to_float8(
@@ -462,6 +465,7 @@ class TestCurrentScalingFloat8Tensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
 
+
 class TestAllQuantizedTensors:
     @staticmethod
     def setup_class(cls) -> None:
@@ -469,7 +473,7 @@ class TestAllQuantizedTensors:
         seed = 1234
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
-    
+
     @pytest.mark.parametrize("quantization", ["fp8", "mxfp8", "fp8_blockwise", "nvfp4"])
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
@@ -526,11 +530,11 @@ class TestAllQuantizedTensors:
         # Chunk tensors
         ref_splits = torch.chunk(ref_tensor, chunks, dim=dim)
         quantized_splits = torch.chunk(quantized_tensor, chunks, dim=dim)
-       # Check splits
+        # Check splits
         for ref_split, quantized_split in zip(ref_splits, quantized_splits):
             # Check split shapes
             assert ref_split.size() == quantized_split.size()
-        
+
             # Check that splits are quantized when expected
             if quantization == "fp8":
                 assert isinstance(quantized_split, Float8Tensor)
