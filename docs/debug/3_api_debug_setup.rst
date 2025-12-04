@@ -11,7 +11,8 @@ Please refer to the Nvidia-DL-Framework-Inspect `documentation <https://github.c
 Below, we outline the steps for debug initialization.
 
 initialize()
------------
+------------
+
 
 Must be called once on every rank in the global context to initialize Nvidia-DL-Framework-Inspect.
 
@@ -34,7 +35,7 @@ Must be called once on every rank in the global context to initialize Nvidia-DL-
         log_dir="./log_dir")
 
 set_tensor_reduction_group()
---------------------------
+----------------------------
 
 Needed only for logging tensor stats. In multi-GPU training, activation and gradient tensors are distributed across multiple nodes. This method lets you specify the group for the reduction of stats; see the `reduction group section <./4_distributed.rst#reduction-groups>`_ for more details.
 
@@ -61,7 +62,7 @@ If the tensor reduction group is not specified, then statistics are reduced acro
     # activation/gradient tensor statistics are reduced along pipeline_parallel_group
 
 set_weight_tensor_tp_group_reduce()
----------------------------------
+-----------------------------------
 
 By default, weight tensor statistics are reduced within the tensor parallel group. This function allows you to disable that behavior; for more details, see `reduction group section <./4_distributed.rst#reduction-groups>`_.
 
