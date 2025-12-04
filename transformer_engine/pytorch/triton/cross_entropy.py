@@ -36,6 +36,11 @@ def cross_entropy_forward(
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
+
+    n_non_ignore = (target.view(-1) != ignore_idx).sum().item()
+    if n_non_ignore == 0:
+        n_non_ignore = n_rows  # Fallback to avoid division by zero
+
     assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
@@ -90,14 +95,14 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
-        n_non_ignore=n_rows,
+        n_non_ignore=n_non_ignore,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
 
-    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
+    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
 
     return loss, _input
 
