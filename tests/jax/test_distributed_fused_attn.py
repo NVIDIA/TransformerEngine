@@ -351,7 +351,7 @@ class TestDistributedContextParallelSelfAttn:
         use_shardy,
         use_scan_ring=False,
         window_size=None,
-        stripe_size=0,
+        stripe_size=None,
         num_segments_per_seq=None,
     ):
         if qkv_layout.is_thd():
@@ -651,7 +651,7 @@ class TestDistributedContextParallelSelfAttn:
                 "scanloop is not supported"
             )
         # Set the stripe size to 1 (ring attention only support stripe_size=1)
-        stripe_size = 1 if qkv_layout.is_thd() else 0
+        stripe_size = 1 if qkv_layout.is_thd() else None
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -693,7 +693,7 @@ class TestDistributedContextParallelSelfAttn:
     ):
         kv_groups = 8
         # Set the stripe size to 1 (ring attention only support stripe_size=1)
-        stripe_size = 1 if qkv_layout.is_thd() else 0
+        stripe_size = 1 if qkv_layout.is_thd() else None
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,

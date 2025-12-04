@@ -94,7 +94,7 @@ class _FusedAttnConfig:
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring P2P + THD + SWA
-    stripe_size: int  # Only for CP + Striped. For, Ring P2P , stripe_size=1 only.
+    stripe_size: int | None  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
 
 
 @dataclass(frozen=True)
@@ -1239,8 +1239,8 @@ def reorder_causal_striped(
 ):
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
-    if stripe_size == 0:
-        raise ValueError("CP reordering stripe_size must not be zero")
+    if stripe_size <= 0:
+        raise ValueError(f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive integer")
     if origin_shape[seq_dim] % (cp_size * stripe_size) != 0:
         raise ValueError(
             "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_size but got"
@@ -1288,8 +1288,8 @@ class _FusedAttnCPWithAllGatherHelper:
                 f" {','.join(map(str, allowed_layouts))} got: {self.config.qkv_layout}"
             )
 
-        if (not self.config.qkv_layout.is_thd() and self.config.stripe_size != 0) or (
-            self.config.qkv_layout.is_thd() and self.config.stripe_size == 0
+        if (not self.config.qkv_layout.is_thd() and self.config.stripe_size is not None) or (
+            self.config.qkv_layout.is_thd() and self.config.stripe_size is None
         ):
             raise ValueError(
                 f"{header} only supports Dual Chunk load balancing with BSHD layouts and Striped"
@@ -3311,7 +3311,7 @@ def fused_attn_fwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
-    stripe_size: int = 0,
+    stripe_size: int | None = None,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3350,7 +3350,7 @@ def fused_attn_fwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
-        stripe_size (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -3467,7 +3467,7 @@ def fused_attn_bwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
-    stripe_size: int = 0,
+    stripe_size: int | None = None,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3507,7 +3507,7 @@ def fused_attn_bwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
-        stripe_size (int): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         Tuple[jnp.ndarray, ...], jnp.ndarray:
         - The first tuple contains the gradients with respect to the input `qkv` tensors in the

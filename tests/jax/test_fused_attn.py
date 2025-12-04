@@ -352,7 +352,7 @@ class FusedAttnRunner:
     bias_shape: BiasShape
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
-    stripe_size: int = 0
+    stripe_size: int | None = None
     num_segments_per_seq: int | None = None
 
     # Specifies sharding resources for distributed tests
