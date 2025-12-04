@@ -407,13 +407,13 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
   // Check that output tensor matches input tensor
   if (has_rowwise_scale_inv) {
-    NVTE_CHECK(output->scale_inv.dptr != nullptr,
+    NVTE_CHECK(output->scale_inv.has_data(),
                "Output tensor does not have row-wise scaling factors.");
     NVTE_CHECK(m * k == output->scale_inv.numel(), "Expected output tensor to have ", m * k,
                " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
   }
   if (has_columnwise_scale_inv) {
-    NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
+    NVTE_CHECK(output->columnwise_scale_inv.has_data(),
                "Output tensor does not have column-wise scaling factors.");
     NVTE_CHECK(
         m * k == output->columnwise_scale_inv.numel(), "Expected output tensor to have ", m * k,
@@ -708,14 +708,14 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       NVTE_CHECK(k > 0, "Input scale inverse should be 2D!");
 
       if (all_has_data) {
-        NVTE_CHECK(output[i]->scale_inv.dptr != nullptr, "Output tensor ", i,
+        NVTE_CHECK(output[i]->scale_inv.has_data(), "Output tensor ", i,
                    " does not have row-wise scaling factors.");
         NVTE_CHECK(m * k == output[i]->scale_inv.numel(), "Expected output tensor ", i, " to have ",
                    m * k, " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape,
                    ".");
       }
       if (all_has_columnwise_data) {
-        NVTE_CHECK(output[i]->columnwise_scale_inv.dptr != nullptr, "Output tensor ", i,
+        NVTE_CHECK(output[i]->columnwise_scale_inv.has_data(), "Output tensor ", i,
                    " does not have column-wise scaling factors.");
         NVTE_CHECK(m * k == output[i]->columnwise_scale_inv.numel(), "Expected output tensor ", i,
                    " to have ", m * k, " column-wise scaling factors, but got shape=",

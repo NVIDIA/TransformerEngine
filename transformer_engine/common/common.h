@@ -74,6 +74,10 @@ inline size_t product(const std::vector<size_t> &shape) {
   return ret;
 }
 
+size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
+size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
+                             const DType buffer_dtype);
+
 struct SimpleTensor {
   void *dptr;
   std::vector<size_t> shape;
@@ -96,26 +100,20 @@ struct SimpleTensor {
 
   /*! Number of tensor elements. */
   size_t numel() const {
-    size_t acc = 1;
-    for (const auto &dim : shape) {
-      acc *= dim;
-    }
-    return acc;
+    return product(shape);
   }
 
-  /*! Whether the data pointer can be accessed. */
-  bool has_data() const { return dptr != nullptr && numel() > 0; }
+  /*! Whether the tensor is not uninitialized. */
+  bool has_data() const {
+    return !(dptr == nullptr && shape.size() == 1 && shape[0] == 0);
+  }
 
-  /*! Whether the tensor is 1D and has zero entries.
-   *
-   *  This checks whether the tensor shape matches a
-   *  default-initialized tensor. It returns false for tensors that
-   *  are not 1D, even if they have zero entries, because their shape
-   *  is non-trivial.
-   */
-  bool has_zero_shape() const { return shape.size() == 1 && shape[0] == 0; }
+  /*! Buffer size in bytes. */
+  size_t buffer_size_bytes() const {
+    return get_buffer_size_bytes(numel(), dtype);
+  }
 
-  /*! Reset to match default-initialized tensor. */
+  /*! Reset to uninitialized tensor. */
   void clear() {
     dptr = nullptr;
     shape.resize(1);
@@ -155,38 +153,21 @@ struct Tensor {
 
   /*! Number of tensor elements. */
   size_t numel() const {
-    size_t acc = 1;
-    for (const auto dim : shape()) {
-      acc *= dim;
+    if (!has_data() && has_columnwise_data()) {
+      return product(columnwise_data.shape);
     }
-    return acc;
+    return product(data.shape);
   }
 
-  /*! Whether the tensor data pointer can be accessed. */
+  /*! Whether the tensor data buffer is not uninitialized. */
   bool has_data() const { return data.has_data(); }
 
-  /*! Whether the tensor column-wise data pointer can be accessed. */
+  /*! Whether the tensor column-wise data buffer is not uninitialized. */
   bool has_columnwise_data() const { return columnwise_data.has_data(); }
 
   /*! Datatype of tensor elements. */
   DType dtype() const {
-    // Choose data buffer based on whether it is initialized
-    // Note: Logically each tensor format interprets its data
-    // differently, but for simplicity we assume they all use row-wise
-    // and column-wise data similarly.
-    bool use_columnwise_data = false;
-    if (data.has_data()) {
-      use_columnwise_data = false;
-    } else if (columnwise_data.has_data()) {
-      use_columnwise_data = true;
-    } else if (!data.has_zero_shape()) {
-      use_columnwise_data = false;
-    } else if (!columnwise_data.has_zero_shape()) {
-      use_columnwise_data = true;
-    }
-
-    // Get data buffer type
-    if (use_columnwise_data) {
+    if (!has_data() && has_columnwise_data()) {
       return columnwise_data.dtype;
     }
     return data.dtype;
@@ -194,23 +175,7 @@ struct Tensor {
 
   /*! Number of tensor dimensions. */
   size_t dim() const {
-    // Choose data buffer based on whether it is initialized
-    // Note: Logically each tensor format interprets its data
-    // differently, but for simplicity we assume they all use row-wise
-    // and column-wise data similarly.
-    bool use_columnwise_data = false;
-    if (data.has_data()) {
-      use_columnwise_data = false;
-    } else if (columnwise_data.has_data()) {
-      use_columnwise_data = true;
-    } else if (!data.has_zero_shape()) {
-      use_columnwise_data = false;
-    } else if (!columnwise_data.has_zero_shape()) {
-      use_columnwise_data = true;
-    }
-
-    // Infer number of dims based on data
-    if (use_columnwise_data) {
+    if (!has_data() && has_columnwise_data()) {
       return columnwise_data.shape.size();
     }
     return data.shape.size();
@@ -223,21 +188,6 @@ struct Tensor {
    *  formats are transposed.
    */
   std::vector<size_t> shape() const {
-    // Choose data buffer based on whether it is initialized
-    // Note: Logically each tensor format interprets its data
-    // differently, but for simplicity we assume they all use row-wise
-    // and column-wise data similarly.
-    bool use_columnwise_data = false;
-    if (data.has_data()) {
-      use_columnwise_data = false;
-    } else if (columnwise_data.has_data()) {
-      use_columnwise_data = true;
-    } else if (!data.has_zero_shape()) {
-      use_columnwise_data = false;
-    } else if (!columnwise_data.has_zero_shape()) {
-      use_columnwise_data = true;
-    }
-
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
@@ -246,7 +196,7 @@ struct Tensor {
       case NVTE_NVFP4_1D_SCALING: {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
-        if (use_columnwise_data) {
+        if (!has_data() && has_columnwise_data()) {
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
             ret.reserve(columnwise_data.shape.size());
@@ -262,7 +212,7 @@ struct Tensor {
       case NVTE_MXFP8_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
-        if (use_columnwise_data) {
+        if (!has_data() && has_columnwise_data()) {
           return columnwise_data.shape;
         }
         return data.shape;
@@ -366,10 +316,10 @@ struct GroupedTensor {
         columnwise_amax(),
         scale(),
         num_tensors(num_tensors),
-        first_dims(nullptr, {}, DType::kInt64),
-        last_dims(nullptr, {}, DType::kInt64),
-        tensor_offsets(nullptr, {}, DType::kInt64),
-        logical_shape(nvte_make_shape(nullptr, 0)),
+        first_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
+        last_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
+        tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
+        logical_shape(nvte_make_shape(nullptr, 1)),
         scaling_mode(scaling_mode),
         nvte_tensor(0) {}
 
@@ -402,9 +352,9 @@ struct GroupedTensor {
   }
 
   DType dtype() const {
-    if (has_data()) return data.dtype;
-    if (has_columnwise_data()) return columnwise_data.dtype;
-    // Fallback, used e.g. in workspace or when allow_empty=true
+    if (!has_data() && has_columnwise_data()) {
+      return columnwise_data.dtype;
+    }
     return data.dtype;
   }
 
@@ -419,7 +369,7 @@ struct GroupedTensor {
     first_dims.clear();
     last_dims.clear();
     tensor_offsets.clear();
-    logical_shape = nvte_make_shape(nullptr, 0);
+    logical_shape = nvte_make_shape(nullptr, 1);
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
@@ -887,10 +837,6 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
-
-size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
-size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
-                             const DType buffer_dtype);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
 void CheckInputTensor(const Tensor &t, const std::string &name);

@@ -142,18 +142,13 @@ void *nvte_tensor_columnwise_data(const NVTETensor tensor);
 
 /*! \brief Construct a shape from an array of dimension sizes.
  *
- *  \param[data] Pointer to start of shape array.
+ *  \param[data] Pointer to start of shape array. If NULL, the shape
+ *               will be filled with zeros.
  *  \param[data] Number of dimensions (must be <= 14)
  *
  *  \return A shape. The shape will own its own copy of the data.
  */
 NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
-
-/*! \brief Construct a shape with a single zero.
- *
- *  \return A shape with a single zero. The shape will own its own copy of the data.
- */
-NVTEShape nvte_make_zero_shape();
 
 /*! \brief Get a tensor's data shape.
  *
@@ -747,7 +742,7 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_zero_shape();
+      return emptyShape;
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -758,7 +753,7 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_zero_shape();
+      return emptyShape;
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
@@ -882,7 +877,7 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_zero_shape();
+      return emptyShape;
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
