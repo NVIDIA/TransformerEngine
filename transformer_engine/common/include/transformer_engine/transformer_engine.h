@@ -67,6 +67,7 @@ enum NVTETensorParam {
   kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
   kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumTensorParams
 };
 
@@ -262,7 +263,39 @@ NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor);
  */
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
+/*! \brief Set a parameter of a tensor.
+ *
+ *  \param[in/out] tensor        Tensor.
+ *  \param[in]     param         Tensor parameter type.
+ *  \param[in]     buf           Memory address to read parameter value.
+ *  \param[in]     size_in_bytes Size of buf.
+ */
+void nvte_set_tensor_param_v2(NVTETensor *tensor,
+                              NVTETensorParam param,
+                              const void *buf,
+                              size_t size_in_bytes);
+
+/*! \brief Query an option in quantization config.
+ *
+ *  \param[in]  tensor        Tensor.
+ *  \param[in]  param         Tensor parameter type.
+ *  \param[out] buf           Memory address to write parameter value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
+ */
+void nvte_get_tensor_param_v2(const NVTETensor tensor,
+                              NVTETensorParam param,
+                              void *buf,
+                              size_t size_in_bytes,
+                              size_t *size_written);
+
 /*! \brief Set a parameter of the tensor.
+ *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_set_tensor_param_v2 for other parameter types.
  *
  *  \param[in/out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
@@ -272,6 +305,9 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
                            const NVTEBasicTensor *param);
 
 /*! \brief Get a value of the parameter of the tensor.
+ *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_get_tensor_param_v2 for other parameter types.
  *
  *  \param[in] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
@@ -346,14 +382,14 @@ NVTEQuantizationConfig nvte_create_quantization_config();
 
 /*! \brief Query an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Quantization config.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
@@ -361,10 +397,10 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Quantization config.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,

@@ -762,7 +762,8 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
       t->columnwise_amax = *param;
       break;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", (size_t)param_name,
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
   }
 }
 
@@ -787,7 +788,8 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
     case kNVTEColumnwiseAmax:
       return t.columnwise_amax;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", (size_t)param_name,
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
   }
 }
 
