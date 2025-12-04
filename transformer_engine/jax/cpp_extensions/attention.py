@@ -2132,10 +2132,10 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     kv_seqlens_for_rank,
                     q_seq_offsets_for_rank,
                     kv_seq_offsets_for_rank,
-                    q_seqlen,  # q seg ids should be empty ids so just passing q seqlens (empty) instead
-                    kv_seqlen,  # kv seg ids should be empty ids so just passing kv seqlens (empty) instead
-                    q_seq_offsets,  # q seg pos should be empty pos so just passing q seqoffsets (empty) instead
-                    k_seq_offsets,  # kv seg pos should be empty pos so just passing kv seqoffsets (empty) instead
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
                     config=helper.get_step_config_for_striped(
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
@@ -2159,7 +2159,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     _kv_segment_pos_ag,
                     seed,
                 )
-                for idx in range(cp_size)
+                for _ in range(cp_size)
             ]
             return lax.switch(cp_rank, functions)
 
@@ -2292,10 +2292,10 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     kv_seqlens_for_rank,
                     q_seq_offsets_for_rank,
                     kv_seq_offsets_for_rank,
-                    q_seqlen,  # q seg ids should be empty ids so just passing q seqlens (empty) instead
-                    kv_seqlen,  # kv seg ids should be empty ids so just passing kv seqlens (empty) instead
-                    q_seq_offsets,  # q seg pos should be empty pos so just passing q seqoffsets (empty) instead
-                    k_seq_offsets,  # kv seg pos should be empty pos so just passing kv seqoffsets (empty) instead
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
                     config=helper.get_step_config_for_striped(
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
@@ -2327,7 +2327,7 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     _q_segment_pos,
                     _kv_segment_pos_ag,
                 )
-                for idx in range(cp_size)
+                for _ in range(cp_size)
             ]
 
             dq, dk_local, dv_local, dbias = lax.switch(cp_rank, functions)
