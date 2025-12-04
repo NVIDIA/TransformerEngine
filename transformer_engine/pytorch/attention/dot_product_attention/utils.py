@@ -889,8 +889,7 @@ def get_attention_backend(
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
             logger.debug(
-                "Disabling FusedAttention as it does not support sliding window attention"
-                " for FP8"
+                "Disabling FusedAttention as it does not support sliding window attention for FP8"
             )
             use_fused_attention = False
         elif attention_dropout != 0.0:

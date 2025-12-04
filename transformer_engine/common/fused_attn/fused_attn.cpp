@@ -510,17 +510,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 // NVTE fused attention FWD with packed QKV
 // DEPRECATED: This API is deprecated. (Should there be a version by which this is going to be removed? @cyang)
 // Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
-void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
-                                   const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
-                                   NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
-                                   const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
-                                   size_t max_seqlen, bool is_training, bool return_max_logit,
-                                   bool cuda_graph, float attn_scale, float dropout,
-                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                   NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   bool bottom_right_diagonal,
-                                   NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd_qkvpacked(
+    const NVTETensor QKV, const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+    NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
+    const NVTETensor cu_seqlens_padded, const NVTETensor rng_state, size_t max_seqlen,
+    bool is_training, bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
 
@@ -594,10 +591,10 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     fused_attn_arbitrary_seqlen_fwd(
         b, h, h, max_seqlen, max_seqlen, d, d, t, t, 0, 0, 0, 0, 0, 0, is_training,
         return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, &Q_view, &K_view, &V_view, input_Bias,
-        input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens,
-        input_cu_seqlens_padded, input_cu_seqlens_padded, nullptr, nullptr, input_rng_state,
-        wkspace, stream, handle);
+        window_size_left, window_size_right, bottom_right_diagonal, &Q_view, &K_view, &V_view,
+        input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens,
+        input_cu_seqlens, input_cu_seqlens_padded, input_cu_seqlens_padded, nullptr, nullptr,
+        input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
@@ -635,8 +632,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     size_t max_seqlen, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic, bool cuda_graph,
-    NVTETensor workspace, cudaStream_t stream) {
+    bool deterministic, bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
 
@@ -732,10 +728,10 @@ void nvte_fused_attn_bwd_qkvpacked(
     fused_attn_arbitrary_seqlen_bwd(
         b, h, h, max_seqlen, max_seqlen, d, d, t, t, attn_scale, dropout, qkv_layout, bias_type,
         attn_mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
-        deterministic, &Q_view, &K_view, &V_view, input_O, input_dO, input_Bias, input_SoftmaxOffset,
-        output_S, &dQ_view, &dK_view, &dV_view, output_dBias, output_dSoftmaxOffset, input_cu_seqlens,
-        input_cu_seqlens, input_cu_seqlens_padded, input_cu_seqlens_padded, input_rng_state,
-        wkspace, stream, handle);
+        deterministic, &Q_view, &K_view, &V_view, input_O, input_dO, input_Bias,
+        input_SoftmaxOffset, output_S, &dQ_view, &dK_view, &dV_view, output_dBias,
+        output_dSoftmaxOffset, input_cu_seqlens, input_cu_seqlens, input_cu_seqlens_padded,
+        input_cu_seqlens_padded, input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention "
@@ -1224,8 +1220,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic,
-                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
+                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+                         NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);

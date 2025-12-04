@@ -129,9 +129,9 @@ struct FADescriptor_v1 {
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.attnScale, rhs.isTraining,
                     rhs.dropoutProbability, rhs.layout, rhs.mask_type, rhs.softmax_type,
-                    rhs.window_size_left, rhs.window_size_right, rhs.bottom_right_diagonal, rhs.deterministic,
-                    rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
-                    rhs.dqkv_tensor_type, rhs.generate_max_sum_exp);
+                    rhs.window_size_left, rhs.window_size_right, rhs.bottom_right_diagonal,
+                    rhs.deterministic, rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type,
+                    rhs.do_tensor_type, rhs.dqkv_tensor_type, rhs.generate_max_sum_exp);
   }
 };
 

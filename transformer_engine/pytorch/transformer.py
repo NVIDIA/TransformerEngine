@@ -768,7 +768,9 @@ class TransformerLayer(torch.nn.Module):
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
         if enc_dec_window_size is None:
             enc_dec_window_size = self.enc_dec_window_size
-        enc_dec_window_size = dpa_utils.check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
+        enc_dec_window_size = dpa_utils.check_set_window_size(
+            enc_dec_attn_mask_type, enc_dec_window_size
+        )
 
         if bottom_right_diagonal is None:
             bottom_right_diagonal = self.bottom_right_diagonal

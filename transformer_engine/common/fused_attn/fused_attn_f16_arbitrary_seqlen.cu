@@ -793,8 +793,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       }
 
       fe::DiagonalAlignment_t const &diagonal_alignment =
-        bottom_right_diagonal ? fe::DiagonalAlignment_t::BOTTOM_RIGHT
-                              : fe::DiagonalAlignment_t::TOP_LEFT;
+          bottom_right_diagonal ? fe::DiagonalAlignment_t::BOTTOM_RIGHT
+                                : fe::DiagonalAlignment_t::TOP_LEFT;
       sdpa_backward_options.set_diagonal_alignment(diagonal_alignment);
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
@@ -1200,11 +1200,11 @@ void fused_attn_arbitrary_seqlen_fwd(
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
       return_max_logit, attn_scale, p_dropout, qkv_layout, bias_type, mask_type, softmax_type,
-      window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK, devPtrV, devPtrBias,
-      devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset,
-      devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ,
-      devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
-      stream, handle);
+      window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK, devPtrV,
+      devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed,
+      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
+      devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
+      &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1227,13 +1227,13 @@ void fused_attn_arbitrary_seqlen_bwd(
     size_t num_tokens_kv, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic, const Tensor *input_Q, const Tensor *input_K,
-    const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO,
-    const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_S,
-    Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
-    Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-    const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state,
-    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    bool deterministic, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
+    const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
+    const Tensor *input_SoftmaxOffset, Tensor *output_S, Tensor *output_dQ, Tensor *output_dK,
+    Tensor *output_dV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
+    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
+    const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
+    cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto QKV_type = input_Q->data.dtype;
   void *devPtrQ = input_Q->data.dptr;
