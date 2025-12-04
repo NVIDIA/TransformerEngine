@@ -101,7 +101,12 @@ struct SimpleTensor {
   /*! Number of tensor elements. */
   size_t numel() const { return product(shape); }
 
-  /*! Whether the tensor is not uninitialized. */
+  /*! Whether the tensor is initialized.
+   *
+   *  Tensors with non-trivial shapes are considered initialized. This
+   *  means that there is no guarantee that the data pointer can be
+   *  safely accessed.
+   */
   bool has_data() const { return !(dptr == nullptr && shape.size() == 1 && shape[0] == 0); }
 
   /*! Buffer size in bytes. */
@@ -153,10 +158,20 @@ struct Tensor {
     return product(data.shape);
   }
 
-  /*! Whether the tensor data buffer is not uninitialized. */
+  /*! Whether the tensor data buffer is not uninitialized.
+   *
+   *  Buffers with non-trivial shapes are considered initialized. This
+   *  means that there is no guarantee that the data pointer can be
+   *  safely accessed.
+   */
   bool has_data() const { return data.has_data(); }
 
-  /*! Whether the tensor column-wise data buffer is not uninitialized. */
+  /*! Whether the tensor column-wise data buffer is not uninitialized.
+   *
+   *  Buffers with non-trivial shapes are considered initialized. This
+   *  means that there is no guarantee that the data pointer can be
+   *  safely accessed.
+   */
   bool has_columnwise_data() const { return columnwise_data.has_data(); }
 
   /*! Datatype of tensor elements. */
