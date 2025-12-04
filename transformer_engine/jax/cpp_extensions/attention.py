@@ -94,7 +94,9 @@ class _FusedAttnConfig:
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring P2P + THD + SWA
-    stripe_size: int | None  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
+    stripe_size: (
+        int | None
+    )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
 
 
 @dataclass(frozen=True)
@@ -1240,7 +1242,10 @@ def reorder_causal_striped(
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
     if stripe_size <= 0:
-        raise ValueError(f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive integer")
+        raise ValueError(
+            f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+            " integer"
+        )
     if origin_shape[seq_dim] % (cp_size * stripe_size) != 0:
         raise ValueError(
             "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_size but got"

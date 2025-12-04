@@ -392,16 +392,24 @@ def reorder_causal_load_balancing(
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
         if stripe_size is not None:
-            raise ValueError(f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be None")
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
         # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
         # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
         if stripe_size is not None and stripe_size <= 0:
-            raise ValueError(f"Incorrect value for CP striped reordering {stripe_size=}. stripe_size must be a positive integer")
+            raise ValueError(
+                f"Incorrect value for CP striped reordering {stripe_size=}. stripe_size must be a"
+                " positive integer"
+            )
         # Supporting old API defaults of stripe_size=1
         effective_stripe_size = 1 if stripe_size is None else stripe_size
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False, effective_stripe_size)
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, False, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -411,16 +419,24 @@ def inverse_reorder_causal_load_balancing(
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
         if stripe_size is not None:
-            raise ValueError(f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be None")
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
         # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
         # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
         if stripe_size is not None and stripe_size <= 0:
-            raise ValueError(f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive integer")
+            raise ValueError(
+                f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+                " integer"
+            )
         # Supporting old API defaults of stripe_size=1
         effective_stripe_size = 1 if stripe_size is None else stripe_size
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True, effective_stripe_size)
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, True, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
