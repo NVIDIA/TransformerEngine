@@ -99,19 +99,13 @@ struct SimpleTensor {
   }
 
   /*! Number of tensor elements. */
-  size_t numel() const {
-    return product(shape);
-  }
+  size_t numel() const { return product(shape); }
 
   /*! Whether the tensor is not uninitialized. */
-  bool has_data() const {
-    return !(dptr == nullptr && shape.size() == 1 && shape[0] == 0);
-  }
+  bool has_data() const { return !(dptr == nullptr && shape.size() == 1 && shape[0] == 0); }
 
   /*! Buffer size in bytes. */
-  size_t buffer_size_bytes() const {
-    return get_buffer_size_bytes(numel(), dtype);
-  }
+  size_t buffer_size_bytes() const { return get_buffer_size_bytes(numel(), dtype); }
 
   /*! Reset to uninitialized tensor. */
   void clear() {

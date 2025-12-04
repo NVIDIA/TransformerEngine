@@ -215,8 +215,8 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   } else {
     NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 input ", name);
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ", name);
-    NVTE_CHECK(!t.columnwise_scale_inv.has_data(),
-               "Scale_inv is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ",
+               name);
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
@@ -274,8 +274,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   } else {
     NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 output ", name);
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 output ", name);
-    NVTE_CHECK(!t.columnwise_scale_inv.has_data(),
-               "Scale_inv is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ",
+               name);
   }
 
   if (!allow_empty) {
