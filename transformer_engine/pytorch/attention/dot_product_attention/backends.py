@@ -261,6 +261,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -449,6 +450,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     actual_seqlens_q=actual_seqlens_q if "padding" in attn_mask_type else None,
                     actual_seqlens_kv=actual_seqlens_kv if "padding" in attn_mask_type else None,
                     alibi_slopes=alibi_slopes,
+                    # (This should be replaced with `bottom_right_diagonal` which is passed from the arguments)
                     bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                 )
             matmul_result = torch.baddbmm(
@@ -1110,6 +1112,7 @@ class FusedAttnFunc(torch.autograd.Function):
         attn_mask_type,
         softmax_type,
         window_size,
+        bottom_right_diagonal,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
@@ -1213,6 +1216,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 softmax_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
@@ -1290,6 +1294,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 softmax_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
                 softmax_offset,
                 return_max_logit,
@@ -1377,6 +1382,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.softmax_type = softmax_type
         ctx.window_size = window_size
+        ctx.bottom_right_diagonal = bottom_right_diagonal
         ctx.fused_attention_backend = (
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
@@ -1527,6 +1533,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_mask_type,
                         ctx.softmax_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                         is_graph_capturing(),
                     )
@@ -1592,6 +1599,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_mask_type,
                         ctx.softmax_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                         is_graph_capturing(),
                     )
@@ -1616,6 +1624,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             d_bias,
+            None,
             None,
             None,
             None,
@@ -1728,6 +1737,7 @@ class FusedAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1935,6 +1945,7 @@ class FusedAttention(torch.nn.Module):
                     attn_mask_type,
                     self.softmax_type,
                     window_size,
+                    bottom_right_diagonal,
                     None,  # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd,

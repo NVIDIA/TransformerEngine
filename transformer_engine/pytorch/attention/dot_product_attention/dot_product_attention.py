@@ -228,6 +228,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in ``forward`` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                Align sliding window and ALiBi diagonal to the top left (`False`)
+                or bottom right (`True`) corner of the softmax matrix in the encoder.
+                If `None`, it will be set to `False` for `attn_mask_type` =
+                {'causal', 'padding_causal'} and `True` for other mask types.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -324,6 +329,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_format: str = "sbhd",
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -350,6 +356,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -811,6 +818,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_kv: int = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -963,6 +971,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                        causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
+        bottom_right_diagonal: Optional[bool], default = None
+                    Align sliding window and ALiBi diagonal to the top left (`False`)
+                    or bottom right (`True`) corner of the softmax matrix in the encoder.
+                    If `None`, it will be set to `False` for `attn_mask_type` =
+                    {'causal', 'padding_causal'} and `True` for other mask types.
         checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1081,6 +1094,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size is None:
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
             # checks for qkv_format
             if qkv_format is None:
@@ -1322,6 +1344,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
@@ -1474,6 +1497,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         fused_attention_backend=fused_attention_backend,
                         core_attention_bias_type=fu_core_attention_bias_type,
                         core_attention_bias=fu_core_attention_bias,
@@ -1504,6 +1528,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     fused_attention_backend=fused_attention_backend,
                     core_attention_bias_type=fu_core_attention_bias_type,
                     core_attention_bias=fu_core_attention_bias,
@@ -1538,6 +1563,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -1561,6 +1587,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
