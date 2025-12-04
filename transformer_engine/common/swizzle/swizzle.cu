@@ -452,8 +452,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     dim3 num_blocks(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m);
     int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
 
-    int original_M, original_K;
-    void *input_scale_inv_ptr, *output_scale_inv_ptr;
+    int original_M{0}, original_K{0};
+    void *input_scale_inv_ptr{nullptr}, *output_scale_inv_ptr{nullptr};
     switch (scaling_mode) {
       case NVTE_MXFP8_1D_SCALING: {
         original_M = input->flat_first_dim();
