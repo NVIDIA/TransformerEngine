@@ -38,7 +38,7 @@ def cross_entropy_forward(
 
     n_non_ignore = (target.view(-1) != ignore_idx).sum().item()
     if n_non_ignore == 0:
-        n_non_ignore = n_rows  # Fallback to avoid division by zero
+        n_non_ignore = 1
 
     assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
