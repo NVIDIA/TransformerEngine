@@ -36,7 +36,6 @@ def cross_entropy_forward(
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
-
     n_non_ignore = (target.view(-1) != ignore_idx).sum().item()
     if n_non_ignore == 0:
         n_non_ignore = n_rows  # Fallback to avoid division by zero
@@ -102,7 +101,9 @@ def cross_entropy_forward(
         num_warps=32,
     )
 
-    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
+    loss = (
+        torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
+    )
 
     return loss, _input
 
