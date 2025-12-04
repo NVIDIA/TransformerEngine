@@ -263,6 +263,28 @@ NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor);
  */
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
+/*! \brief Set a parameter of the tensor.
+ *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_set_tensor_param_v2 for other parameter types.
+ *
+ *  \param[in/out] tensor Tensor.
+ *  \param[in] param_name The parameter to be set.
+ *  \param[in] param The value to be set.
+ */
+void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
+                           const NVTEBasicTensor *param);
+
+/*! \brief Get a value of the parameter of the tensor.
+ *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_get_tensor_param_v2 for other parameter types.
+ *
+ *  \param[in] tensor Tensor.
+ *  \param[in] param_name The parameter to be set.
+ */
+NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
+
 /*! \brief Set a parameter of a tensor.
  *
  *  \param[in/out] tensor        Tensor.
@@ -291,28 +313,6 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor,
                               void *buf,
                               size_t size_in_bytes,
                               size_t *size_written);
-
-/*! \brief Set a parameter of the tensor.
- *
- *  This only supports tensor parameters of type NVTEBasicTensor. Use
- *  nvte_set_tensor_param_v2 for other parameter types.
- *
- *  \param[in/out] tensor Tensor.
- *  \param[in] param_name The parameter to be set.
- *  \param[in] param The value to be set.
- */
-void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
-                           const NVTEBasicTensor *param);
-
-/*! \brief Get a value of the parameter of the tensor.
- *
- *  This only supports tensor parameters of type NVTEBasicTensor. Use
- *  nvte_get_tensor_param_v2 for other parameter types.
- *
- *  \param[in] tensor Tensor.
- *  \param[in] param_name The parameter to be set.
- */
-NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
 
 /*! \brief Get the granularity of scaling of this tensor.
  *

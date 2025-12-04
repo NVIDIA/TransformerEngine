@@ -122,6 +122,20 @@ struct Tensor {
 
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
+  /*! Whether scaling factors are in format expected by GEMM */
+  bool with_gemm_swizzled_scales = false;
+
+  /*! Map from NVTETensorParam to parameter sizes */
+  static constexpr size_t attr_sizes[] = {
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEScale
+      sizeof(NVTEBasicTensor),  // kNVTEAmax
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
+      sizeof(bool)              // kNVTEWithGEMMSwizzledScales
+  };
 
   Tensor()
       : data(),
@@ -143,6 +157,7 @@ struct Tensor {
     scale_inv.clear();
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+    with_gemm_swizzled_scales = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
