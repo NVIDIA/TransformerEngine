@@ -52,10 +52,12 @@ Quantizer::Quantizer(const py::handle& quantizer) {
     this->rowwise_usage = true;
     this->columnwise_usage = true;
     this->internal = false;
+    this->optimize_for_gemm = false;
   } else {
     this->rowwise_usage = quantizer.attr("rowwise_usage").cast<bool>();
     this->columnwise_usage = quantizer.attr("columnwise_usage").cast<bool>();
     this->internal = quantizer.attr("internal").cast<bool>();
+    this->optimize_for_gemm = quantizer.attr("optimize_for_gemm").cast<bool>();
     this->quantizer = quantizer;
   }
 }
@@ -906,6 +908,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
                                                                    DType dtype) const {
   using namespace pybind11::literals;
 
+  // Scale layout
+  const bool with_gemm_swizzled_scales = false;  /// TODO Enable when self->optimize_for_gemm
+
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   size_t flat_first_dim = 1;
@@ -951,11 +956,12 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   py::object out_py;
   if (internal) {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
-    out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py,
-                              "columnwise_data"_a = columnwise_data_py,
-                              "rowwise_scale_inv"_a = rowwise_scale_inv_py,
-                              "columnwise_scale_inv"_a = columnwise_scale_inv_py,
-                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+    out_py = MXFP8TensorClass(rowwise_data_py,
+                              rowwise_scale_inv_py,
+                              columnwise_data_py,
+                              columnwise_scale_inv_py,
+                              this->dtype, this->quantizer,
+                              with_gemm_swizzled_scales);
   } else {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass));
     out_py = MXFP8TensorClass("shape"_a = shape_int64, "dtype"_a = GetATenDType(dtype),
@@ -963,7 +969,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
                               "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
                               "columnwise_scale_inv"_a = columnwise_scale_inv_py,
-                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
+                              "with_gemm_swizzled_scales"_a = with_gemm_swizzled_scales);
   }
 
   // Construct C++ MXFP8 tensor
@@ -978,6 +985,10 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
                                      columnwise_scale_inv_shape);
   }
+  nvte_set_tensor_param_v2(out_cpp.data(),
+                           NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales,
+                           sizeof(with_gemm_swizzled_scales));
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -986,6 +997,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "MXFP8Quantizer must output to MXFP8Tensor.");
+
+  // Scaling factor format
+  auto with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -1083,6 +1097,10 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                      getTensorShape(*columnwise_scale_inv));
   }
+  nvte_set_tensor_param_v2(out_cpp.data(),
+                           NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales,
+                           sizeof(with_gemm_swizzled_scales));
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};

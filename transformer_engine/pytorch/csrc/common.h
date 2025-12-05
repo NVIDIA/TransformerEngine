@@ -120,6 +120,7 @@ class Quantizer {
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;
+  bool optimize_for_gemm = false;
   py::handle quantizer;
 
  protected:
