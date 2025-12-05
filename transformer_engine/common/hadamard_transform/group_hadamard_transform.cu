@@ -459,7 +459,7 @@ void group_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
   }
 
   // Multi zero out multiple amaxes if needed
-  // Curretly don't support multi-launch when num_tensors is larger than kMaxTensorsPerKernel
+  // Currently don't support multi-launch when num_tensors is larger than kMaxTensorsPerKernel
   // let the number of threads equal to number of tensors, use 1 block, kMaxTensorsPerKernel threads per block
   dim3 block_setup_amax(kMaxTensorsPerKernel);
   dim3 grid_setup_amax(1);
