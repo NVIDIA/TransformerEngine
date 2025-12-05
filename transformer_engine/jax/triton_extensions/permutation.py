@@ -87,7 +87,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
         row_id_stride_expert = 1
 
         grid = (num_experts, triton.cdiv(num_tokens, block_size))
-        
+
         # All scalar arguments must be passed as constexprs
         return triton_call_lowering(
             ctx,
@@ -238,7 +238,13 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
     multiple_results = True
     # scale and permuted_scale are dummy inputs (not used when PERMUTE_SCALE=False)
     # but they need to be in the signature for the kernel call
-    impl_static_args = (5, 6, 7, 8, 9)  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs
+    impl_static_args = (
+        5,
+        6,
+        7,
+        8,
+        9,
+    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs
     inner_primitive = None
     outer_primitive = None
 
