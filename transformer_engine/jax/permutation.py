@@ -16,8 +16,8 @@ Token Combine (Unpermute):
     - Backward: Permute gradients (scatter to experts)
 """
 
-from typing import Optional, Tuple
 from functools import partial
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -38,38 +38,30 @@ __all__ = [
 ]
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+
+
 def token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
-    row_id_map: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
     num_out_tokens: int,
-    hidden_size: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Dispatch tokens to experts based on routing map.
 
     This is the forward pass of the MoE permutation. Tokens are scattered
-    to their designated experts according to the routing map.
+    to their designated experts according to the routing map. The row_id_map
+    is computed internally from the routing_map.
 
     Parameters
     ----------
     inp : jnp.ndarray
-        Input tensor of shape [num_tokens, hidden_size].
+        Input tensor of shape [batch, sequence, hidden_size] or [num_tokens, hidden_size].
     routing_map : jnp.ndarray
-        Routing mask of shape [num_tokens, num_experts]. Values: 1 = routed, 0 = not routed.
-    row_id_map : Optional[jnp.ndarray]
-        Pre-computed row ID map. If None, will be computed from routing_map.
-    num_tokens : int
-        Number of input tokens.
-    num_experts : int
-        Number of experts.
+        Routing mask of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
+        Values: 1 = routed, 0 = not routed.
     num_out_tokens : int
-        Number of output tokens (total routed tokens).
-    hidden_size : int
-        Hidden dimension size.
+        The number of output tokens after permutation. This should equal the sum of
+        routing_map and must be provided explicitly for JIT compatibility.
 
     Returns
     -------
@@ -78,8 +70,44 @@ def token_dispatch(
     row_id_map : jnp.ndarray
         Row ID map for use in token_combine (shape [num_tokens, num_experts * 2 + 1]).
     """
-    if row_id_map is None:
-        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+    return _token_dispatch(inp, routing_map, num_out_tokens)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _token_dispatch(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    num_out_tokens: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Internal token_dispatch with custom VJP."""
+    (output, row_id_map), _ = _token_dispatch_fwd_rule(
+        inp, routing_map, num_out_tokens
+    )
+    return output, row_id_map
+
+
+def _token_dispatch_fwd_rule(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    num_out_tokens: int,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int, int]]:
+    """Forward pass rule for token_dispatch."""
+    # Infer dimensions from input shapes
+    num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
+    hidden_size = inp.shape[-1]
+    num_experts = routing_map.shape[-1]
+
+    # Verify consistency between inp and routing_map
+    routing_num_tokens = (
+        routing_map.shape[0] * routing_map.shape[1] if routing_map.ndim == 3 else routing_map.shape[0]
+    )
+    assert num_tokens == routing_num_tokens, (
+        f"Token count mismatch: inp has {num_tokens} tokens, "
+        f"routing_map has {routing_num_tokens} tokens"
+    )
+
+    # Always compute row_id_map internally from routing_map
+    row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
 
     output, _ = permute_with_mask_map(
         inp,
@@ -91,38 +119,19 @@ def token_dispatch(
         hidden_size,
     )
 
-    return output, row_id_map
+    # Return (primals, residuals)
+    residuals = (row_id_map, num_tokens, num_experts, hidden_size)
+    return (output, row_id_map), residuals
 
 
-def _token_dispatch_fwd(
-    inp: jnp.ndarray,
+def _token_dispatch_bwd_rule(
     routing_map: jnp.ndarray,
-    row_id_map: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
     num_out_tokens: int,
-    hidden_size: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    """Forward pass for token_dispatch VJP."""
-    output, row_id_map_out = token_dispatch(
-        inp, routing_map, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
-    )
-    # Only save row_id_map in residuals; num_tokens, num_experts, hidden_size
-    # come from nondiff_argnums and are passed directly to bwd
-    residuals = row_id_map_out
-    return (output, row_id_map_out), residuals
-
-
-def _token_dispatch_bwd(
-    num_tokens: int,
-    num_experts: int,
-    num_out_tokens: int,
-    hidden_size: int,
-    residuals: jnp.ndarray,
+    residuals: Tuple[jnp.ndarray, int, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, None, None]:
-    """Backward pass for token_dispatch: unpermute the gradients."""
-    row_id_map = residuals
+) -> Tuple[jnp.ndarray]:
+    """Backward pass rule for token_dispatch."""
+    row_id_map, num_tokens, num_experts, hidden_size = residuals
     output_grad, _ = g  # Ignore row_id_map gradient
 
     # Backward: unpermute gradients (gather from experts back to tokens)
@@ -136,46 +145,39 @@ def _token_dispatch_bwd(
         hidden_size,
     )
 
-    # Return gradients for (inp, routing_map, row_id_map)
-    # routing_map and row_id_map don't need gradients
-    return inp_grad, None, None
+    return (inp_grad,)
 
 
-token_dispatch.defvjp(_token_dispatch_fwd, _token_dispatch_bwd)
+_token_dispatch.defvjp(_token_dispatch_fwd_rule, _token_dispatch_bwd_rule)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7))
+# =============================================================================
+# Token Dispatch with Probs with VJP
+# =============================================================================
+
+
 def token_dispatch_with_probs(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
     probs: jnp.ndarray,
-    row_id_map: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
     num_out_tokens: int,
-    hidden_size: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Dispatch tokens to experts with routing probabilities.
 
+    The row_id_map is computed internally from the routing_map.
+
     Parameters
     ----------
     inp : jnp.ndarray
-        Input tensor of shape [num_tokens, hidden_size].
+        Input tensor of shape [batch, sequence, hidden_size] or [num_tokens, hidden_size].
     routing_map : jnp.ndarray
-        Routing mask of shape [num_tokens, num_experts].
+        Routing mask of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
     probs : jnp.ndarray
-        Routing probabilities of shape [num_tokens, num_experts].
-    row_id_map : Optional[jnp.ndarray]
-        Pre-computed row ID map. If None, will be computed from routing_map.
-    num_tokens : int
-        Number of input tokens.
-    num_experts : int
-        Number of experts.
+        Routing probabilities of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
     num_out_tokens : int
-        Number of output tokens.
-    hidden_size : int
-        Hidden dimension size.
+        The number of output tokens after permutation. This should equal the sum of
+        routing_map and must be provided explicitly for JIT compatibility.
 
     Returns
     -------
@@ -186,8 +188,46 @@ def token_dispatch_with_probs(
     row_id_map : jnp.ndarray
         Row ID map for use in token_combine.
     """
-    if row_id_map is None:
-        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+    return _token_dispatch_with_probs(inp, routing_map, probs, num_out_tokens)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1, 3))
+def _token_dispatch_with_probs(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    probs: jnp.ndarray,
+    num_out_tokens: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Internal token_dispatch_with_probs with custom VJP."""
+    (output, permuted_probs, row_id_map), _ = _token_dispatch_with_probs_fwd_rule(
+        inp, routing_map, probs, num_out_tokens
+    )
+    return output, permuted_probs, row_id_map
+
+
+def _token_dispatch_with_probs_fwd_rule(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    probs: jnp.ndarray,
+    num_out_tokens: int,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int, int]]:
+    """Forward pass rule for token_dispatch_with_probs."""
+    # Infer dimensions from input shapes
+    num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
+    hidden_size = inp.shape[-1]
+    num_experts = routing_map.shape[-1]
+
+    # Verify consistency between inp and routing_map
+    routing_num_tokens = (
+        routing_map.shape[0] * routing_map.shape[1] if routing_map.ndim == 3 else routing_map.shape[0]
+    )
+    assert num_tokens == routing_num_tokens, (
+        f"Token count mismatch: inp has {num_tokens} tokens, "
+        f"routing_map has {routing_num_tokens} tokens"
+    )
+
+    # Always compute row_id_map internally from routing_map
+    row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
 
     output, permuted_probs = permute_with_mask_map(
         inp,
@@ -199,38 +239,19 @@ def token_dispatch_with_probs(
         hidden_size,
     )
 
-    return output, permuted_probs, row_id_map
+    # Return (primals, residuals)
+    residuals = (row_id_map, num_tokens, num_experts, hidden_size)
+    return (output, permuted_probs, row_id_map), residuals
 
 
-def _token_dispatch_with_probs_fwd(
-    inp: jnp.ndarray,
+def _token_dispatch_with_probs_bwd_rule(
     routing_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    row_id_map: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
     num_out_tokens: int,
-    hidden_size: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    """Forward pass for token_dispatch_with_probs VJP."""
-    output, permuted_probs, row_id_map_out = token_dispatch_with_probs(
-        inp, routing_map, probs, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
-    )
-    # Only save row_id_map; other sizes come from nondiff_argnums
-    residuals = row_id_map_out
-    return (output, permuted_probs, row_id_map_out), residuals
-
-
-def _token_dispatch_with_probs_bwd(
-    num_tokens: int,
-    num_experts: int,
-    num_out_tokens: int,
-    hidden_size: int,
-    residuals: jnp.ndarray,
+    residuals: Tuple[jnp.ndarray, int, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, None, jnp.ndarray, None]:
-    """Backward pass for token_dispatch_with_probs."""
-    row_id_map = residuals
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Backward pass rule for token_dispatch_with_probs."""
+    row_id_map, num_tokens, num_experts, hidden_size = residuals
     output_grad, permuted_probs_grad, _ = g
 
     # Backward: unpermute gradients
@@ -244,10 +265,12 @@ def _token_dispatch_with_probs_bwd(
         hidden_size,
     )
 
-    return inp_grad, None, probs_grad, None
+    return inp_grad, probs_grad
 
 
-token_dispatch_with_probs.defvjp(_token_dispatch_with_probs_fwd, _token_dispatch_with_probs_bwd)
+_token_dispatch_with_probs.defvjp(
+    _token_dispatch_with_probs_fwd_rule, _token_dispatch_with_probs_bwd_rule
+)
 
 
 # =============================================================================
@@ -255,14 +278,10 @@ token_dispatch_with_probs.defvjp(_token_dispatch_with_probs_fwd, _token_dispatch
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
 def token_combine(
     inp: jnp.ndarray,
     row_id_map: jnp.ndarray,
-    merging_probs: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
-    hidden_size: int,
+    merging_probs: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """
     Combine tokens from experts back to original token positions.
@@ -277,20 +296,42 @@ def token_combine(
     row_id_map : jnp.ndarray
         Row ID map from token_dispatch of shape [num_tokens, num_experts * 2 + 1].
     merging_probs : Optional[jnp.ndarray]
-        Merging weights of shape [num_tokens, num_experts]. If provided, tokens
-        from different experts are weighted-summed. If None, tokens are summed directly.
-    num_tokens : int
-        Number of output tokens (original token count).
-    num_experts : int
-        Number of experts.
-    hidden_size : int
-        Hidden dimension size.
+        Merging weights of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
+        If provided, tokens from different experts are weighted-summed.
+        If None, tokens are summed directly.
 
     Returns
     -------
     output : jnp.ndarray
         Combined output tensor of shape [num_tokens, hidden_size].
     """
+    return _token_combine(inp, row_id_map, merging_probs)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _token_combine(
+    inp: jnp.ndarray,
+    row_id_map: jnp.ndarray,
+    merging_probs: Optional[jnp.ndarray],
+) -> jnp.ndarray:
+    """Internal token_combine with custom VJP."""
+    output, _ = _token_combine_fwd_rule(inp, row_id_map, merging_probs)
+    return output
+
+
+def _token_combine_fwd_rule(
+    inp: jnp.ndarray,
+    row_id_map: jnp.ndarray,
+    merging_probs: Optional[jnp.ndarray],
+) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, int]]:
+    """Forward pass rule for token_combine."""
+    # Infer dimensions from row_id_map shape: [num_tokens, num_experts * 2 + 1]
+    num_tokens = row_id_map.shape[0]
+    num_experts = (row_id_map.shape[1] - 1) // 2
+    hidden_size = inp.shape[-1]
+    num_out_tokens = inp.shape[0]
+
+    # Call triton extension
     output, _ = unpermute_with_mask_map(
         inp,
         row_id_map,
@@ -301,53 +342,24 @@ def token_combine(
         hidden_size,
     )
 
-    return output
-
-
-def _token_combine_fwd(
-    inp: jnp.ndarray,
-    row_id_map: jnp.ndarray,
-    merging_probs: Optional[jnp.ndarray],
-    num_tokens: int,
-    num_experts: int,
-    hidden_size: int,
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray], int]]:
-    """Forward pass for token_combine VJP."""
-    output = token_combine(inp, row_id_map, merging_probs, num_tokens, num_experts, hidden_size)
-
-    # Save for backward:
-    # - row_id_map: needed for permutation
-    # - merging_probs: needed if we want to scale gradients
-    # - num_out_tokens: computed from inp.shape[0], not in nondiff_argnums
-    # Note: num_tokens, num_experts, hidden_size come from nondiff_argnums
-    num_out_tokens = inp.shape[0]
-    residuals = (row_id_map, merging_probs, num_out_tokens)
+    # Return (primal, residuals)
+    residuals = (row_id_map, merging_probs, num_tokens, num_experts, hidden_size, num_out_tokens)
     return output, residuals
 
 
-def _token_combine_bwd(
-    num_tokens: int,
-    num_experts: int,
-    hidden_size: int,
-    residuals: Tuple[jnp.ndarray, Optional[jnp.ndarray], int],
+def _token_combine_bwd_rule(
+    row_id_map: jnp.ndarray,
+    residuals: Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, int],
     g: jnp.ndarray,
-) -> Tuple[jnp.ndarray, None, Optional[jnp.ndarray]]:
-    """Backward pass for token_combine: permute the gradients.
-
-    Note: num_tokens, num_experts, hidden_size come from nondiff_argnums.
-    """
-    row_id_map, merging_probs, num_out_tokens = residuals
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+    """Backward pass rule for token_combine."""
+    row_id_map, merging_probs, num_tokens, num_experts, hidden_size, num_out_tokens = residuals
     output_grad = g
 
     with_merging_probs = merging_probs is not None
 
     if with_merging_probs:
-        # Need to compute gradient for merging_probs
-        # This requires a specialized backward kernel
-        # For now, we use the simple approach: permute with merging_probs applied
-
         # Scale output_grad by merging_probs before permuting back
-        # inp_grad[dest] = output_grad[src] * merging_probs[src, expert]
         inp_grad, _ = permute_with_mask_map(
             output_grad,
             row_id_map,
@@ -357,12 +369,7 @@ def _token_combine_bwd(
             num_out_tokens,
             hidden_size,
         )
-
-        # Compute gradient for merging_probs
-        # d_loss/d_merging_probs = sum over hidden (fwd_inp * output_grad)
-        # This requires the forward input and computing per-expert contributions
-        # For simplicity, we'll set this to None and require users to handle it
-        # In practice, you'd need a specialized kernel for this
+        # TODO: Compute gradient for merging_probs with specialized kernel
         merging_probs_grad = None
     else:
         # Simple case: just permute gradients back
@@ -377,10 +384,10 @@ def _token_combine_bwd(
         )
         merging_probs_grad = None
 
-    return inp_grad, None, merging_probs_grad
+    return inp_grad, merging_probs_grad
 
 
-token_combine.defvjp(_token_combine_fwd, _token_combine_bwd)
+_token_combine.defvjp(_token_combine_fwd_rule, _token_combine_bwd_rule)
 
 
 # =============================================================================
@@ -388,13 +395,10 @@ token_combine.defvjp(_token_combine_fwd, _token_combine_bwd)
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
 def sort_chunks_by_index(
     inp: jnp.ndarray,
     split_sizes: jnp.ndarray,
     sorted_indices: jnp.ndarray,
-    num_tokens: int,
-    hidden_size: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Sort chunks of tokens according to sorted indices.
@@ -402,15 +406,11 @@ def sort_chunks_by_index(
     Parameters
     ----------
     inp : jnp.ndarray
-        Input tensor of shape [num_tokens, hidden_size].
+        Input tensor of shape [batch, sequence, hidden_size] or [num_tokens, hidden_size].
     split_sizes : jnp.ndarray
         Sizes of each chunk of shape [num_splits].
     sorted_indices : jnp.ndarray
         Permutation indices for chunks of shape [num_splits].
-    num_tokens : int
-        Total number of tokens.
-    hidden_size : int
-        Hidden dimension size.
 
     Returns
     -------
@@ -419,7 +419,31 @@ def sort_chunks_by_index(
     row_id_map : jnp.ndarray
         Row ID map for reversing the sort.
     """
+    return _sort_chunks_by_index(inp, split_sizes, sorted_indices)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _sort_chunks_by_index(
+    inp: jnp.ndarray,
+    split_sizes: jnp.ndarray,
+    sorted_indices: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Internal sort_chunks_by_index with custom VJP."""
+    (output, row_id_map), _ = _sort_chunks_by_index_fwd_rule(inp, split_sizes, sorted_indices)
+    return output, row_id_map
+
+
+def _sort_chunks_by_index_fwd_rule(
+    inp: jnp.ndarray,
+    split_sizes: jnp.ndarray,
+    sorted_indices: jnp.ndarray,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int]]:
+    """Forward pass rule for sort_chunks_by_index."""
+    # Infer dimensions from input shape
+    num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
+    hidden_size = inp.shape[-1]
     num_splits = split_sizes.shape[0]
+
     row_id_map = make_chunk_sort_map(split_sizes, sorted_indices, num_tokens, num_splits)
 
     output, _ = sort_chunks_by_map(
@@ -431,39 +455,22 @@ def sort_chunks_by_index(
         is_forward=True,
     )
 
-    return output, row_id_map
-
-
-def _sort_chunks_by_index_fwd(
-    inp: jnp.ndarray,
-    split_sizes: jnp.ndarray,
-    sorted_indices: jnp.ndarray,
-    num_tokens: int,
-    hidden_size: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    """Forward pass for sort_chunks_by_index VJP."""
-    output, row_id_map = sort_chunks_by_index(
-        inp, split_sizes, sorted_indices, num_tokens, hidden_size
-    )
-    # Only save row_id_map; num_tokens, hidden_size come from nondiff_argnums
-    residuals = row_id_map
+    # Return (primals, residuals)
+    residuals = (row_id_map, num_tokens, hidden_size)
     return (output, row_id_map), residuals
 
 
-def _sort_chunks_by_index_bwd(
-    num_tokens: int,
-    hidden_size: int,
-    residuals: jnp.ndarray,
+def _sort_chunks_by_index_bwd_rule(
+    split_sizes: jnp.ndarray,
+    sorted_indices: jnp.ndarray,
+    residuals: Tuple[jnp.ndarray, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, None, None]:
-    """Backward pass for sort_chunks_by_index: reverse sort.
-
-    Note: num_tokens, hidden_size come from nondiff_argnums.
-    """
-    row_id_map = residuals
+) -> Tuple[jnp.ndarray]:
+    """Backward pass rule for sort_chunks_by_index."""
+    row_id_map, num_tokens, hidden_size = residuals
     output_grad, _ = g
 
-    # Backward: reverse the sort (is_forward=False)
+    # Backward: reverse the sort
     inp_grad, _ = sort_chunks_by_map(
         output_grad,
         row_id_map,
@@ -473,7 +480,7 @@ def _sort_chunks_by_index_bwd(
         is_forward=False,
     )
 
-    return inp_grad, None, None
+    return (inp_grad,)
 
 
-sort_chunks_by_index.defvjp(_sort_chunks_by_index_fwd, _sort_chunks_by_index_bwd)
+_sort_chunks_by_index.defvjp(_sort_chunks_by_index_fwd_rule, _sort_chunks_by_index_bwd_rule)

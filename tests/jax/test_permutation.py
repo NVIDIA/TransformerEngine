@@ -790,10 +790,8 @@ class TestHighLevelPermutationAPI:
             inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
-        # Call high-level API
-        output, row_id_map = token_dispatch(
-            inp, routing_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
-        )
+        # Call high-level API (new signature)
+        output, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
 
         # Compare against reference
         ref_output, _ = reference_permute_with_mask_map(
@@ -813,7 +811,7 @@ class TestHighLevelPermutationAPI:
     def test_token_dispatch_vjp(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
     ):
-        """Test token_dispatch VJP (backward pass) against reference implementation"""
+        """Test token_dispatch VJP (backward pass) using value_and_grad"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
@@ -826,27 +824,23 @@ class TestHighLevelPermutationAPI:
             inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
-        # Compute row_id_map once
-        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
-
         # Define loss function that uses token_dispatch
         def loss_fn(x):
-            output, _ = token_dispatch(
-                x, routing_map, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
-            )
+            output, _ = token_dispatch(x, routing_map, num_out_tokens)
             return jnp.sum(output**2)
 
-        # Compute gradient using JAX autodiff
-        grad_fn = jax.grad(loss_fn)
-        computed_grad = grad_fn(inp)
+        # Compute value and gradient using JAX value_and_grad
+        loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
         # Compute reference gradient manually:
         # d_loss/d_inp = unpermute(d_loss/d_output)
         # where d_loss/d_output = 2 * output
-        output, _ = token_dispatch(
-            inp, routing_map, row_id_map, num_tokens, num_experts, num_out_tokens, hidden_size
-        )
+        output, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
         output_grad = 2 * output
+
+        # Verify loss value
+        expected_loss = jnp.sum(output**2)
+        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
 
         # Reference backward: unpermute the gradient
         ref_grad, _ = reference_unpermute_with_mask_map(
@@ -887,9 +881,9 @@ class TestHighLevelPermutationAPI:
             prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
         )
 
-        # Call high-level API
+        # Call high-level API (new signature)
         output, permuted_probs, row_id_map = token_dispatch_with_probs(
-            inp, routing_map, probs, None, num_tokens, num_experts, num_out_tokens, hidden_size
+            inp, routing_map, probs, num_out_tokens
         )
 
         # Compare against reference
@@ -900,6 +894,54 @@ class TestHighLevelPermutationAPI:
         tols = dtype_tols(dtype)
         assert_allclose(output, ref_output, **tols)
         assert_allclose(permuted_probs, ref_probs, **tols)
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        [
+            (32, 8, 256, 2),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32])
+    def test_token_dispatch_with_probs_vjp(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
+    ):
+        """Test token_dispatch_with_probs VJP using value_and_grad"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data and probs
+        key, inp_key, prob_key = jax.random.split(key, 3)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+        probs = jax.random.uniform(
+            prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
+        )
+
+        # Define loss function that uses token_dispatch_with_probs
+        # We compute gradients w.r.t. both inp and probs
+        def loss_fn(x, p):
+            output, permuted_probs, _ = token_dispatch_with_probs(
+                x, routing_map, p, num_out_tokens
+            )
+            return jnp.sum(output**2) + jnp.sum(permuted_probs**2)
+
+        # Compute value and gradient using JAX value_and_grad
+        loss_val, (inp_grad, probs_grad) = jax.value_and_grad(loss_fn, argnums=(0, 1))(inp, probs)
+
+        # Verify the loss value
+        output, permuted_probs, _ = token_dispatch_with_probs(
+            inp, routing_map, probs, num_out_tokens
+        )
+        expected_loss = jnp.sum(output**2) + jnp.sum(permuted_probs**2)
+        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
+
+        # Verify gradients are computed (non-zero for non-trivial inputs)
+        assert inp_grad.shape == inp.shape
+        assert probs_grad.shape == probs.shape
 
     # =========================================================================
     # token_combine tests
@@ -924,8 +966,12 @@ class TestHighLevelPermutationAPI:
         routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
-        # Generate row_id_map
-        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+        # Get row_id_map from token_dispatch (which computes it internally)
+        key, dummy_key = jax.random.split(key)
+        dummy_inp = jax.random.uniform(
+            dummy_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+        _, row_id_map = token_dispatch(dummy_inp, routing_map, num_out_tokens)
 
         # Generate input data (from expert outputs)
         key, inp_key, merge_key = jax.random.split(key, 3)
@@ -943,7 +989,7 @@ class TestHighLevelPermutationAPI:
             merging_probs = None
 
         # Call high-level API
-        output = token_combine(inp, row_id_map, merging_probs, num_tokens, num_experts, hidden_size)
+        output = token_combine(inp, row_id_map, merging_probs)
 
         # Compare against reference
         ref_output, _ = reference_unpermute_with_mask_map(
@@ -964,17 +1010,21 @@ class TestHighLevelPermutationAPI:
     def test_token_combine_vjp(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
     ):
-        """Test token_combine VJP (backward pass) against reference implementation"""
+        """Test token_combine VJP using value_and_grad"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
         routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
-        # Generate row_id_map
-        row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+        # Get row_id_map from token_dispatch (which computes it internally)
+        key, dummy_key = jax.random.split(key)
+        dummy_inp = jax.random.uniform(
+            dummy_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+        _, row_id_map = token_dispatch(dummy_inp, routing_map, num_out_tokens)
 
-        # Generate input data
+        # Generate input data for token_combine
         key, inp_key = jax.random.split(key)
         inp = jax.random.uniform(
             inp_key, (num_out_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
@@ -982,18 +1032,21 @@ class TestHighLevelPermutationAPI:
 
         # Define loss function that uses token_combine (no merging probs)
         def loss_fn(x):
-            output = token_combine(x, row_id_map, None, num_tokens, num_experts, hidden_size)
+            output = token_combine(x, row_id_map, None)
             return jnp.sum(output**2)
 
-        # Compute gradient using JAX autodiff
-        grad_fn = jax.grad(loss_fn)
-        computed_grad = grad_fn(inp)
+        # Compute value and gradient using JAX value_and_grad
+        loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
         # Compute reference gradient manually:
         # d_loss/d_inp = permute(d_loss/d_output)
         # where d_loss/d_output = 2 * output
-        output = token_combine(inp, row_id_map, None, num_tokens, num_experts, hidden_size)
+        output = token_combine(inp, row_id_map, None)
         output_grad = 2 * output
+
+        # Verify loss value
+        expected_loss = jnp.sum(output**2)
+        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
 
         # Reference backward: permute the gradient
         ref_grad, _ = reference_permute_with_mask_map(
@@ -1034,10 +1087,8 @@ class TestHighLevelPermutationAPI:
             inp_key, (total_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
-        # Call high-level API
-        output, row_id_map = sort_chunks_by_index(
-            inp, split_sizes, sorted_indices, total_tokens, hidden_size
-        )
+        # Call high-level API (new signature)
+        output, row_id_map = sort_chunks_by_index(inp, split_sizes, sorted_indices)
 
         # Compare against reference
         ref_output, _ = reference_sort_chunks_by_map(
@@ -1055,7 +1106,7 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32])
     def test_sort_chunks_by_index_vjp(self, num_splits, total_tokens, hidden_size, dtype):
-        """Test sort_chunks_by_index VJP (backward pass) against reference"""
+        """Test sort_chunks_by_index VJP using value_and_grad"""
         key = jax.random.PRNGKey(42)
 
         # Generate random split sizes
@@ -1073,26 +1124,23 @@ class TestHighLevelPermutationAPI:
             inp_key, (total_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
-        # Pre-compute row_id_map
-        row_id_map = make_chunk_sort_map(split_sizes, sorted_indices, total_tokens, num_splits)
-
         # Define loss function
         def loss_fn(x):
-            output, _ = sort_chunks_by_index(
-                x, split_sizes, sorted_indices, total_tokens, hidden_size
-            )
+            output, _ = sort_chunks_by_index(x, split_sizes, sorted_indices)
             return jnp.sum(output**2)
 
-        # Compute gradient using JAX autodiff
-        grad_fn = jax.grad(loss_fn)
-        computed_grad = grad_fn(inp)
+        # Compute value and gradient using JAX value_and_grad
+        loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
         # Compute reference gradient manually:
         # d_loss/d_inp = reverse_sort(d_loss/d_output)
-        output, _ = sort_chunks_by_index(
-            inp, split_sizes, sorted_indices, total_tokens, hidden_size
-        )
+        # Get row_id_map from sort_chunks_by_index output
+        output, row_id_map = sort_chunks_by_index(inp, split_sizes, sorted_indices)
         output_grad = 2 * output
+
+        # Verify loss value
+        expected_loss = jnp.sum(output**2)
+        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
 
         # Reference backward: reverse sort (is_forward=False)
         ref_grad, _ = reference_sort_chunks_by_map(
@@ -1135,15 +1183,11 @@ class TestHighLevelPermutationAPI:
             jnp.sum(routing_map, axis=1, keepdims=True), 1.0
         )
 
-        # Dispatch tokens to experts
-        dispatched, row_id_map = token_dispatch(
-            inp, routing_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
-        )
+        # Dispatch tokens to experts (new signature)
+        dispatched, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
 
-        # Combine tokens back (with uniform merging)
-        combined = token_combine(
-            dispatched, row_id_map, merging_probs, num_tokens, num_experts, hidden_size
-        )
+        # Combine tokens back (with uniform merging) (new signature)
+        combined = token_combine(dispatched, row_id_map, merging_probs)
 
         # Compare with original input
         tols = dtype_tols(dtype)

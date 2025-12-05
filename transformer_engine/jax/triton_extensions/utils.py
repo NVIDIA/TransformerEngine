@@ -192,7 +192,7 @@ def triton_call_lowering(
                 ctx, my_kernel, x,
                 grid=(triton.cdiv(n_elements, block_size),),
                 constexprs={
-                    "n_elements": n_elements,  # scalar arg (not tl.constexpr in kernel)
+                    "n_elements": n,  # scalar arg (not tl.constexpr in kernel)
                     "BLOCK_SIZE": block_size,  # tl.constexpr arg
                 },
             )
@@ -211,18 +211,9 @@ def triton_call_lowering(
     # Scalar arguments should be passed via constexprs and will be
     # specialized into the kernel at compile time
     all_avals = list(ctx.avals_in) + list(ctx.avals_out)
-    signature = {}
     constexpr_names = set(constexprs.keys()) if constexprs else set()
-
-    tensor_arg_idx = 0
-    for arg_name in arg_names:
-        if arg_name in constexpr_names:
-            # Skip constexpr/scalar args - they're specialized at compile time
-            continue
-        elif tensor_arg_idx < len(all_avals):
-            # Tensor arg - add to signature
-            signature[arg_name] = get_triton_dtype(all_avals[tensor_arg_idx])
-            tensor_arg_idx += 1
+    tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
+    signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
 
     # Normalize grid to 3D
     if isinstance(grid, int):
