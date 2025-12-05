@@ -61,7 +61,11 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    "sphinx_rtd_theme",
+]
 
 source_suffix = ".rst"
 
@@ -94,6 +98,7 @@ napoleon_custom_sections = [
     ("Values", "params_style"),
     ("Graphing parameters", "params_style"),
     ("FP8-related parameters", "params_style"),
+    ("Quantization parameters", "params_style"),
 ]
 
 breathe_projects = {"TransformerEngine": root_path / "docs" / "doxygen" / "xml"}
@@ -101,4 +106,23 @@ breathe_default_project = "TransformerEngine"
 
 autoapi_generate_api_docs = False
 autoapi_dirs = [root_path / "transformer_engine"]
-autoapi_ignore = ["*/_[!_]*"]
+autoapi_ignore = ["*test*"]
+
+
+# There are 2 warnings about the same namespace (transformer_engine) in two different c++ api
+# docs pages. This seems to be the only way to suppress these warnings.
+def setup(app):
+    """Custom Sphinx setup to filter warnings."""
+    import logging
+
+    # Filter out duplicate C++ declaration warnings
+    class DuplicateDeclarationFilter(logging.Filter):
+        def filter(self, record):
+            message = record.getMessage()
+            if "Duplicate C++ declaration" in message and "transformer_engine" in message:
+                return False
+            return True
+
+    # Apply filter to Sphinx logger
+    logger = logging.getLogger("sphinx")
+    logger.addFilter(DuplicateDeclarationFilter())

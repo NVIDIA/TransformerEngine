@@ -1,0 +1,118 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+name: Build PyTorch Wheel
+description: Builds a PyTorch wheel for TransformerEngine
+
+inputs:
+  release-version:
+    description: 'The release version to use for the build'
+    required: true
+  python-version:
+    description: 'The Python version to use for the build'
+    required: true
+  cuda-version:
+    description: 'The CUDA version to use for the build'
+    required: true
+  cudnn-version:
+    description: 'The cuDNN version to use for the build'
+    required: true
+  torch-version:
+    description: 'The PyTorch version to use for the build'
+    required: true
+  cxx11_abi:
+    description: 'Enable torch flag C++11 ABI (TRUE/FALSE)'
+    required: true
+  base-image:
+    description: 'The base image to use for the build'
+    required: false
+  aarch:
+    description: 'The architecture to use for the build'
+    required: true
+outputs:
+  wheel_name:
+    description: 'The name of the built wheel'
+    value: ${{ steps.build_wheel.outputs.wheel_name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Move /var/lib/docker/
+      shell: bash -euxo pipefail {0}
+      run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+      with:
+        root-reserve-mb: 5120
+        temp-reserve-mb: 32
+        swap-size-mb: 10240
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        build-mount-path: '/var/lib/docker/'
+
+    - name: Restore /var/lib/docker/
+      shell: bash -euxo pipefail {0}
+      run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.release-version }}
+        submodules: recursive
+
+    - name: Checkout build tools
+      uses: actions/checkout@v4
+      with:
+        path: build-tools
+        submodules: recursive
+
+    - name: Build image
+      shell: bash -euxo pipefail {0}
+      env:
+        BASE_IMAGE: ${{ inputs.base-image }}
+      run: |
+        if [[ "${BASE_IMAGE}" == "" ]]; then
+          docker build \
+            -t transformer-engine-build \
+            -f build-tools/.github/actions/build-pytorch-wheel/Dockerfile \
+            --build-arg PYTHON_VERSION=${{ inputs.python-version }} \
+            --build-arg TORCH_VERSION=${{ inputs.torch-version }} \
+            --build-arg CUDA_VERSION=${{ inputs.cuda-version }} \
+            --build-arg CUDNN_MAJOR_VERSION=${{ inputs.cudnn-version }} \
+            --build-arg AARCH=${{ inputs.aarch }} \
+            .
+        else
+          docker pull ${BASE_IMAGE}
+          docker tag ${BASE_IMAGE} transformer-engine-build
+        fi
+    - name: Build wheel
+      shell: bash -euxo pipefail {0}
+      id: build_wheel
+      env:
+        CXX11_ABI: ${{ inputs.cxx11_abi }}
+      run: |
+        echo ::group::Build wheel
+
+        EXIT_CODE=$(docker run \
+            --rm \
+            --shm-size=64g \
+            --workdir /workspace/transformer_engine/pytorch \
+            --volume $(pwd):/workspace \
+            --volume $GITHUB_OUTPUT:$GITHUB_OUTPUT \
+            -e PIP_CONSTRAINT= \
+            -e CXX11_ABI=$CXX11_ABI \
+            -e GITHUB_OUTPUT=$GITHUB_OUTPUT \
+            transformer-engine-build bash /workspace/build-tools/.github/actions/build-pytorch-wheel/build.sh | tail -n 1)
+
+        # Do not fail the job if timeout killed the build
+        exit $EXIT_CODE
+        echo ::endgroup::
+
+    - name: Log Built Wheels
+      shell: bash -euxo pipefail {0}
+      run: |
+        ls transformer_engine/pytorch/dist
