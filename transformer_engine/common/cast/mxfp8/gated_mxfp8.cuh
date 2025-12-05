@@ -686,6 +686,7 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   if (USE_COLWISE_SCALING) {
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
   }
+  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Scaling tensor must be in compact layout.");
 
   ScalingType scaling_type;
   if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {

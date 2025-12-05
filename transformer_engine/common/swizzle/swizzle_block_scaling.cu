@@ -98,7 +98,8 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
 
   // calculate this warp's input base pointer
   constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
-  const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
+  const void* const warp_src = (reinterpret_cast<const uint8_t *>(in)
+                                + in_tile_y * in_y_stride + in_tile_x * in_x_stride);
 
   // load scaling factors for this lane's initial four 1x128 tiles
   uint4 sf;
@@ -128,7 +129,8 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
 
   // store them cooperatively for 512 1x32 tiles in a 128x128 tile
   constexpr uint32_t out_x_stride = 512;
-  void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
+  void* const warp_dst = (reinterpret_cast<uint8_t *>(out)
+                          + out_tile_y * out_y_stride + out_tile_x * out_x_stride);
   reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
 }
 
@@ -258,6 +260,11 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
   NVTE_CHECK(input->scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
   NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
              "Output must have E8M0 scaling factors");
+
+  NVTE_CHECK(input->with_gemm_swizzled_scales,
+             "Expected input tensor with scales in swizzled layout for GEMM.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Expected output tensor with scales in swizzled layout for GEMM.");
 
   NVTE_CHECK(input->data.dptr != nullptr, "Input must have rowwise data");
   NVTE_CHECK(output->data.dptr == input->data.dptr, "Output must share data with input");
