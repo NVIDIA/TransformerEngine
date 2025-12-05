@@ -190,7 +190,7 @@ def triton_call_lowering(
             n = ctx.avals_in[0].size
             return triton_call_lowering(
                 ctx, my_kernel, x,
-                grid=(triton.cdiv(n_elements, block_size),),
+                grid=(triton.cdiv(n, block_size),),
                 constexprs={
                     "n_elements": n,  # scalar arg (not tl.constexpr in kernel)
                     "BLOCK_SIZE": block_size,  # tl.constexpr arg

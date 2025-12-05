@@ -924,9 +924,7 @@ class TestHighLevelPermutationAPI:
         # Define loss function that uses token_dispatch_with_probs
         # We compute gradients w.r.t. both inp and probs
         def loss_fn(x, p):
-            output, permuted_probs, _ = token_dispatch_with_probs(
-                x, routing_map, p, num_out_tokens
-            )
+            output, permuted_probs, _ = token_dispatch_with_probs(x, routing_map, p, num_out_tokens)
             return jnp.sum(output**2) + jnp.sum(permuted_probs**2)
 
         # Compute value and gradient using JAX value_and_grad

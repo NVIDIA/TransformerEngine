@@ -38,8 +38,6 @@ __all__ = [
 ]
 
 
-
-
 def token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
@@ -80,9 +78,7 @@ def _token_dispatch(
     num_out_tokens: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Internal token_dispatch with custom VJP."""
-    (output, row_id_map), _ = _token_dispatch_fwd_rule(
-        inp, routing_map, num_out_tokens
-    )
+    (output, row_id_map), _ = _token_dispatch_fwd_rule(inp, routing_map, num_out_tokens)
     return output, row_id_map
 
 
@@ -99,7 +95,9 @@ def _token_dispatch_fwd_rule(
 
     # Verify consistency between inp and routing_map
     routing_num_tokens = (
-        routing_map.shape[0] * routing_map.shape[1] if routing_map.ndim == 3 else routing_map.shape[0]
+        routing_map.shape[0] * routing_map.shape[1]
+        if routing_map.ndim == 3
+        else routing_map.shape[0]
     )
     assert num_tokens == routing_num_tokens, (
         f"Token count mismatch: inp has {num_tokens} tokens, "
@@ -219,7 +217,9 @@ def _token_dispatch_with_probs_fwd_rule(
 
     # Verify consistency between inp and routing_map
     routing_num_tokens = (
-        routing_map.shape[0] * routing_map.shape[1] if routing_map.ndim == 3 else routing_map.shape[0]
+        routing_map.shape[0] * routing_map.shape[1]
+        if routing_map.ndim == 3
+        else routing_map.shape[0]
     )
     assert num_tokens == routing_num_tokens, (
         f"Token count mismatch: inp has {num_tokens} tokens, "
