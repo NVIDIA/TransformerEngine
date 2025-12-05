@@ -1,0 +1,12 @@
+Processing ./dist/transformer_engine_torch-2.11.0.dev0+76323235.tar.gz
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: transformer-engine-torch
+  Building wheel for transformer-engine-torch (pyproject.toml): started
+  Building wheel for transformer-engine-torch (pyproject.toml): finished with status 'done'
+  Created wheel for transformer-engine-torch: filename=transformer_engine_torch-2.11.0.dev0-cp312-cp312-linux_x86_64.whl size=740493 sha256=0fc13c291d626e41dca5db249f6f513ccae600235e2b4e91f1c93340794e396a
+  Stored in directory: /root/.cache/pip/wheels/d0/0e/b8/a20718a0ab29cad4476eb46f9b95133527bdfa8b968184b500
+Successfully built transformer-engine-torch
+Installing collected packages: transformer-engine-torch
+Successfully installed transformer-engine-torch-2.11.0.dev0
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
