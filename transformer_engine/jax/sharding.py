@@ -59,6 +59,14 @@ def _validate_mesh_resource_configuration(mesh_resource):
     )
 
 
+def is_mesh_available() -> bool:
+    """
+    Check if a physical mesh is available.
+    """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    return mesh is not None and not mesh.empty
+
+
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
     Generate a dict to map logical axes to mesh axes.
