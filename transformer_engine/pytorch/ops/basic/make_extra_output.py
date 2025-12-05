@@ -35,7 +35,7 @@ class MakeExtraOutput(BasicOperation):
     operations break some autograd assumptions and they can result
     in subtle, esoteric bugs.
 
-    Compare to `AddExtraInput`, which does a similar operation in the
+    Compare to ``AddExtraInput``, which does a similar operation in the
     backward pass.
 
     """
