@@ -808,40 +808,33 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
     ):
-        del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
-        # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
-        out_bdims = (None,)
+        # Validate batch dimensions
+        if lhs_bdims is not None or rhs_bdims is not None:
+            assert lhs_bdims == rhs_bdims, (
+                "Batched GEMM requires matching batch dimensions, "
+                f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+            )
 
-        # Bias gradient is never batched
-        bias_bdims = (None,)
-
-        # Pre-GeLU output, if exists, is batched like GEMM output
-        pre_gelu_bdims = (None,)
-        if fuse_gelu and not grad:
-            pre_gelu_bdims = out_bdims
-
-        return (
-            GemmPrimitive.outer_primitive.bind(
-                *batched_args,
-                out_dtype=out_dtype,
-                contracting_dims=contracting_dims,
-                scaling_mode=scaling_mode,
-                fuse_bias=fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
-                use_split_accumulator=use_split_accumulator,
-                collective_op=collective_op,
-                transpose_batch_sequence=transpose_batch_sequence,
-                sequence_dim=sequence_dim,
-                is_outer=is_outer,
-            ),
-            (out_bdims, bias_bdims, pre_gelu_bdims),
+        # Use general batcher from BasePrimitive
+        return GemmPrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "contracting_dims": contracting_dims,
+                "scaling_mode": scaling_mode,
+                "fuse_bias": fuse_bias,
+                "fuse_gelu": fuse_gelu,
+                "grad": grad,
+                "use_split_accumulator": use_split_accumulator,
+                "collective_op": collective_op,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "sequence_dim": sequence_dim,
+                "is_outer": is_outer,
+            },
         )
 
     @staticmethod
