@@ -2074,7 +2074,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
-        ):
+        ): # pylint: disable=unused-argument
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
 
@@ -2226,7 +2226,7 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
-        ):
+        ): # pylint: disable=unused-argument
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
 
@@ -2241,8 +2241,6 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                 rng_state,
                 output,
                 doutput,
-                q_seqlen,
-                kv_seqlen,
                 _q_segment_ids,
                 kv_segment_ids_ag,
                 _q_segment_pos,
@@ -2320,8 +2318,6 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     rng_state,
                     output,
                     doutput,
-                    q_seqlen,
-                    kv_seqlen,
                     _q_segment_ids,
                     _kv_segment_ids_ag,
                     _q_segment_pos,
