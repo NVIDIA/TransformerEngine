@@ -293,7 +293,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
  */
-void nvte_set_tensor_param_v2(NVTETensor *tensor,
+void nvte_set_tensor_param_v2(NVTETensor tensor,
                               NVTETensorParam param,
                               const void *buf,
                               size_t size_in_bytes);
@@ -616,20 +616,20 @@ class TensorWrapper {
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseData, &data, sizeof(data));
     NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
                             amax_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
+    nvte_set_tensor_param_v2(tensor_, kNVTEAmax, &amax, sizeof(amax));
     NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
                              scale_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
+    nvte_set_tensor_param_v2(tensor_, kNVTEScale, &scale, sizeof(scale));
     if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
         scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
       // Scale-inv pointer has not been provided and shape matches default
       scale_inv_shape = emptyShape;
     }
     NVTEBasicTensor scale_inv = {scale_inv_dptr, kNVTEFloat32, scale_inv_shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseScaleInv, &scale_inv);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseScaleInv, &scale_inv, sizeof(scale_inv));
   }
 
   /*! \brief Constructs new TensorWrapper.
@@ -699,7 +699,7 @@ class TensorWrapper {
                                const ShapeType &shape) noexcept {
     NVTEShape nvte_shape = this->convertShape(shape);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
-    nvte_set_tensor_param(&tensor_, param, &data);
+    nvte_set_tensor_param_v2(tensor_, param, &data, sizeof(data));
     return *this;
   }
 
@@ -741,7 +741,10 @@ class TensorWrapper {
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
-    return nvte_get_tensor_param(tensor_, param);
+    NVTEBasicTensor ret;
+    size_t size_written;
+    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), &size_written);
+    return ret;
   }
 
   NVTEBasicTensor get_rowwise_data() const noexcept { return get_parameter(kNVTERowwiseData); }

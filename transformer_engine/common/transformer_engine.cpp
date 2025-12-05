@@ -809,13 +809,13 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
   }
 }
 
-void nvte_set_tensor_param_v2(NVTETensor *tensor, NVTETensorParam param, const void *buf,
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
                                size_t size_in_bytes) {
   // Check attribute and buffer
   NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
              ")");
   NVTE_CHECK(tensor != nullptr, "Tensor pointer can't be NULL.");
-  auto &t = *transformer_engine::convertNVTETensorCheck(*tensor);
+  auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   const auto &attr_size = transformer_engine::Tensor::attr_sizes[param];
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for tensor parameter "
@@ -871,12 +871,15 @@ void nvte_set_tensor_param_v2(NVTETensor *tensor, NVTETensorParam param, const v
 
 void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
                                size_t size_in_bytes, size_t *size_written) {
-  // Write attribute size
+  // Check param
   NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
              ")");
-  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
+
+  // Write attribute size if provided
   const auto &attr_size = transformer_engine::Tensor::attr_sizes[param];
-  *size_written = attr_size;
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
 
   // Return immediately if buffer is not provided
   if (buf == nullptr) {
