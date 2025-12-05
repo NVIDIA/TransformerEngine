@@ -901,15 +901,15 @@ class TestBasicOps:
                 dtype=dtype,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
+            forward = te_ops.Sequential(
+                te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
+                op,
+                te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
+            )
         with torch.no_grad():
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
-        forward = te_ops.Sequential(
-            te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
-            op,
-            te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
-        )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)

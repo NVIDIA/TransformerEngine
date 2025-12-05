@@ -307,18 +307,18 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    rowwise_data: torch.Tensor
+    rowwise_data : torch.Tensor
           FP8 data in a uint8 tensor matching shape of dequantized tensor.
-    rowwise_scale_inv: torch.Tensor
+    rowwise_scale_inv : torch.Tensor
           FP32 dequantization scales in GEMM format for dequantizing rowwise_data.
-    columnwise_data: Optional[torch.Tensor]
+    columnwise_data : Optional[torch.Tensor]
           FP8 data in a uint8 tensor matching shape of dequantized tensor transpose.
-    columnwise_scale_inv: Optional[torch.Tensor]
+    columnwise_scale_inv : Optional[torch.Tensor]
           FP32 dequantization scales in GEMM format for dequantizing columnwise_data.
 
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
+    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
-    quantizer: Quantizer - the Float8BlockQuantizer that quantized this tensor and
+    quantizer : Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
     """
 

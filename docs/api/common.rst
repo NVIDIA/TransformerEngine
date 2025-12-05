@@ -17,3 +17,5 @@ Common API
 .. autoapiclass:: transformer_engine.common.recipe.Float8CurrentScaling(fp8_format=Format.HYBRID)
 
 .. autoapiclass:: transformer_engine.common.recipe.Float8BlockScaling(fp8_format=Format.E4M3)
+
+.. autoapiclass:: transformer_engine.common.recipe.CustomRecipe(qfactory, fp8_dpa=False, fp8_mha=False)
