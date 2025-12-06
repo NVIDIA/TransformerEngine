@@ -55,8 +55,9 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
 TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer) {
   auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
 
-  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
-  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
 
@@ -77,6 +78,12 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
     ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
                                  getTensorShape(scale_inv));
   }
+
+  // Scale layout
+  nvte_set_tensor_param_v2(ret.data(),
+                           NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales,
+                           sizeof(with_gemm_swizzled_scales));
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);

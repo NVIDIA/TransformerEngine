@@ -290,6 +290,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
+  m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
+        "Convert tensor scaling factors into layout expeted by GEMM");
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,

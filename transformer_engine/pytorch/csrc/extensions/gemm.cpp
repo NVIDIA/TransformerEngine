@@ -240,9 +240,12 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
     // Optionally swizzle the scaling factors
-    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
-    swizzled_scale_inverses_list.emplace_back(
-        std::move(swizzle_scaling_factors(B_tensor, !transb)));
+    auto [A_row_scales, A_col_scales] = swizzle_scales_for_gemm(A_tensor, transa, !transa);
+    auto [B_row_scales, B_col_scales] = swizzle_scales_for_gemm(B_tensor, !transb, transb);
+    swizzled_scale_inverses_list.emplace_back(std::move(A_row_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(A_col_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(B_row_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(B_col_scales));
 
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
@@ -501,9 +504,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   // Optionally swizzle the scaling factors
   swizzled_scale_inverses_list.emplace_back(
-      multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa));
+    multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
   swizzled_scale_inverses_list.emplace_back(
-      multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb));
+    multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
 
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt
