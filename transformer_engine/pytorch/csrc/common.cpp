@@ -248,11 +248,14 @@ std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape) {
 }
 
 at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_engine::DType type,
-                         bool init_to_zeros) {
+                         bool init_to_zeros, bool init_to_minus_inf) {
   std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   c10::IntArrayRef ar_shape(shape_int64);
   if (init_to_zeros) {
     return at::zeros(ar_shape, at::CUDA(GetATenDType(type)));
+  } else if (init_to_minus_inf) {
+    return at::full(ar_shape, -std::numeric_limits<float>::infinity(),
+                    at::CUDA(GetATenDType(type)));
   } else {
     return at::empty(ar_shape, at::CUDA(GetATenDType(type)));
   }
