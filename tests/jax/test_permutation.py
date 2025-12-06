@@ -91,7 +91,7 @@ def reference_make_row_id_map(
     return row_id_map
 
 
-def reference_permute_with_mask_map(
+def _reference_permute_impl(
     inp: jnp.ndarray,
     row_id_map: jnp.ndarray,
     probs: jnp.ndarray,
@@ -101,7 +101,7 @@ def reference_permute_with_mask_map(
     hidden_size: int,
 ) -> tuple:
     """
-    Reference implementation of permute_with_mask_map using JAX primitives.
+    Internal helper for reference permutation implementation.
 
     Parameters
     ----------
@@ -156,7 +156,7 @@ def reference_permute_with_mask_map(
     return output, permuted_probs
 
 
-def reference_unpermute_with_mask_map(
+def _reference_unpermute_impl(
     inp: jnp.ndarray,
     row_id_map: jnp.ndarray,
     merging_probs: jnp.ndarray,
@@ -166,7 +166,7 @@ def reference_unpermute_with_mask_map(
     hidden_size: int,
 ) -> tuple:
     """
-    Reference implementation of unpermute_with_mask_map using JAX primitives.
+    Internal helper for reference unpermutation implementation.
 
     Parameters
     ----------
@@ -217,6 +217,114 @@ def reference_unpermute_with_mask_map(
                 )
 
     return output, unpermuted_probs
+
+
+def reference_token_dispatch(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    num_out_tokens: int,
+) -> tuple:
+    """
+    Reference implementation of token_dispatch using JAX primitives.
+
+    Parameters
+    ----------
+    inp : jnp.ndarray
+        Input tensor of shape [num_tokens, hidden_size].
+    routing_map : jnp.ndarray
+        Routing mask of shape [num_tokens, num_experts].
+    num_out_tokens : int
+        Number of tokens in the permuted tensor.
+
+    Returns
+    -------
+    output : jnp.ndarray
+        Permuted output tensor of shape [num_out_tokens, hidden_size].
+    row_id_map : jnp.ndarray
+        The row_id_map for the permutation.
+    """
+    num_tokens, num_experts = routing_map.shape
+    hidden_size = inp.shape[1]
+
+    row_id_map = reference_make_row_id_map(routing_map, num_tokens, num_experts)
+    output, _ = _reference_permute_impl(
+        inp, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
+    )
+
+    return output, row_id_map
+
+
+def reference_token_dispatch_with_probs(
+    inp: jnp.ndarray,
+    routing_map: jnp.ndarray,
+    probs: jnp.ndarray,
+    num_out_tokens: int,
+) -> tuple:
+    """
+    Reference implementation of token_dispatch_with_probs using JAX primitives.
+
+    Parameters
+    ----------
+    inp : jnp.ndarray
+        Input tensor of shape [num_tokens, hidden_size].
+    routing_map : jnp.ndarray
+        Routing mask of shape [num_tokens, num_experts].
+    probs : jnp.ndarray
+        The probabilities of shape [num_tokens, num_experts].
+    num_out_tokens : int
+        Number of tokens in the permuted tensor.
+
+    Returns
+    -------
+    output : jnp.ndarray
+        Permuted output tensor of shape [num_out_tokens, hidden_size].
+    permuted_probs : jnp.ndarray
+        Permuted probabilities of shape [num_out_tokens].
+    row_id_map : jnp.ndarray
+        The row_id_map for the permutation.
+    """
+    num_tokens, num_experts = routing_map.shape
+    hidden_size = inp.shape[1]
+
+    row_id_map = reference_make_row_id_map(routing_map, num_tokens, num_experts)
+    output, permuted_probs = _reference_permute_impl(
+        inp, row_id_map, probs, num_tokens, num_experts, num_out_tokens, hidden_size
+    )
+
+    return output, permuted_probs, row_id_map
+
+
+def reference_token_combine(
+    inp: jnp.ndarray,
+    row_id_map: jnp.ndarray,
+    merging_probs: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Reference implementation of token_combine using JAX primitives.
+
+    Parameters
+    ----------
+    inp : jnp.ndarray
+        Input tensor of shape [num_out_tokens, hidden_size].
+    row_id_map : jnp.ndarray
+        The token to expert mapping tensor of shape [num_tokens, num_experts * 2 + 1].
+    merging_probs : jnp.ndarray
+        The merging probabilities for weighted reduction.
+
+    Returns
+    -------
+    output : jnp.ndarray
+        Unpermuted output tensor of shape [num_tokens, hidden_size].
+    """
+    num_tokens = row_id_map.shape[0]
+    num_experts = (row_id_map.shape[1] - 1) // 2
+    hidden_size = inp.shape[1]
+
+    output, _ = _reference_unpermute_impl(
+        inp, row_id_map, merging_probs, None, num_tokens, num_experts, hidden_size
+    )
+
+    return output
 
 
 def reference_make_chunk_sort_map(
@@ -473,7 +581,7 @@ class TestPermutation:
             inp, row_id_map, probs, num_tokens, num_experts, num_out_tokens, hidden_size
         )
 
-        ref_output, ref_probs = reference_permute_with_mask_map(
+        ref_output, ref_probs = _reference_permute_impl(
             inp, row_id_map, probs, num_tokens, num_experts, num_out_tokens, hidden_size
         )
 
@@ -543,7 +651,7 @@ class TestPermutation:
             inp, row_id_map, merging_probs, permuted_probs, num_tokens, num_experts, hidden_size
         )
 
-        ref_output, ref_unprobs = reference_unpermute_with_mask_map(
+        ref_output, ref_unprobs = _reference_unpermute_impl(
             inp, row_id_map, merging_probs, permuted_probs, num_tokens, num_experts, hidden_size
         )
 
@@ -774,44 +882,10 @@ class TestHighLevelPermutationAPI:
         ],
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    def test_token_dispatch_forward(
+    def test_token_dispatch(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
     ):
-        """Test token_dispatch forward pass against reference implementation"""
-        key = jax.random.PRNGKey(42)
-
-        # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        num_out_tokens = int(jnp.sum(routing_map))
-
-        # Generate input data
-        key, inp_key = jax.random.split(key)
-        inp = jax.random.uniform(
-            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
-        )
-
-        # Call high-level API (new signature)
-        output, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
-
-        # Compare against reference
-        ref_output, _ = reference_permute_with_mask_map(
-            inp, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
-        )
-
-        tols = dtype_tols(dtype)
-        assert_allclose(output, ref_output, **tols)
-
-    @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert",
-        [
-            (32, 8, 256, 2),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [jnp.float32])
-    def test_token_dispatch_vjp(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
-    ):
-        """Test token_dispatch VJP (backward pass) using value_and_grad"""
+        """Test token_dispatch forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
@@ -832,23 +906,31 @@ class TestHighLevelPermutationAPI:
         # Compute value and gradient using JAX value_and_grad
         loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
+        # Get actual output for direct comparison
+        output, _ = token_dispatch(inp, routing_map, num_out_tokens)
+
+        # Compute reference output from reference implementation
+        ref_output, row_id_map = reference_token_dispatch(inp, routing_map, num_out_tokens)
+
+        # Compare forward outputs
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+
+        # Compare loss values
+        expected_loss = jnp.sum(ref_output**2)
+        assert_allclose(loss_val, expected_loss, **tols)
+
         # Compute reference gradient manually:
         # d_loss/d_inp = unpermute(d_loss/d_output)
-        # where d_loss/d_output = 2 * output
-        output, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
-        output_grad = 2 * output
-
-        # Verify loss value
-        expected_loss = jnp.sum(output**2)
-        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
+        # where d_loss/d_output = 2 * ref_output
+        output_grad = 2 * ref_output
 
         # Reference backward: unpermute the gradient
-        ref_grad, _ = reference_unpermute_with_mask_map(
-            output_grad, row_id_map, None, None, num_tokens, num_experts, hidden_size
-        )
+        ref_grad = reference_token_combine(output_grad, row_id_map, None)
 
-        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
-        assert_allclose(computed_grad, ref_grad, **tols)
+        # Use more relaxed tolerance for gradient comparison due to compounding numerical differences
+        grad_tols = dtype_tols(dtype, rtol=tols["rtol"] * 10, atol=tols["atol"] * 10)
+        assert_allclose(computed_grad, ref_grad, **grad_tols)
 
     # =========================================================================
     # token_dispatch_with_probs tests
@@ -862,50 +944,10 @@ class TestHighLevelPermutationAPI:
         ],
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    def test_token_dispatch_with_probs_forward(
+    def test_token_dispatch_with_probs(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
     ):
-        """Test token_dispatch_with_probs forward pass against reference"""
-        key = jax.random.PRNGKey(42)
-
-        # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        num_out_tokens = int(jnp.sum(routing_map))
-
-        # Generate input data and probs
-        key, inp_key, prob_key = jax.random.split(key, 3)
-        inp = jax.random.uniform(
-            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
-        )
-        probs = jax.random.uniform(
-            prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
-        )
-
-        # Call high-level API (new signature)
-        output, permuted_probs, row_id_map = token_dispatch_with_probs(
-            inp, routing_map, probs, num_out_tokens
-        )
-
-        # Compare against reference
-        ref_output, ref_probs = reference_permute_with_mask_map(
-            inp, row_id_map, probs, num_tokens, num_experts, num_out_tokens, hidden_size
-        )
-
-        tols = dtype_tols(dtype)
-        assert_allclose(output, ref_output, **tols)
-        assert_allclose(permuted_probs, ref_probs, **tols)
-
-    @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert",
-        [
-            (32, 8, 256, 2),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [jnp.float32])
-    def test_token_dispatch_with_probs_vjp(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
-    ):
-        """Test token_dispatch_with_probs VJP using value_and_grad"""
+        """Test token_dispatch_with_probs forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
@@ -930,12 +972,24 @@ class TestHighLevelPermutationAPI:
         # Compute value and gradient using JAX value_and_grad
         loss_val, (inp_grad, probs_grad) = jax.value_and_grad(loss_fn, argnums=(0, 1))(inp, probs)
 
-        # Verify the loss value
+        # Get actual outputs for direct comparison
         output, permuted_probs, _ = token_dispatch_with_probs(
             inp, routing_map, probs, num_out_tokens
         )
-        expected_loss = jnp.sum(output**2) + jnp.sum(permuted_probs**2)
-        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
+
+        # Compute reference outputs from reference implementation
+        ref_output, ref_permuted_probs, _ = reference_token_dispatch_with_probs(
+            inp, routing_map, probs, num_out_tokens
+        )
+
+        # Compare forward outputs
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+        assert_allclose(permuted_probs, ref_permuted_probs, **tols)
+
+        # Compare loss values
+        expected_loss = jnp.sum(ref_output**2) + jnp.sum(ref_permuted_probs**2)
+        assert_allclose(loss_val, expected_loss, **tols)
 
         # Verify gradients are computed (non-zero for non-trivial inputs)
         assert inp_grad.shape == inp.shape
@@ -954,22 +1008,22 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
     @pytest.mark.parametrize("with_merging_probs", [True, False])
-    def test_token_combine_forward(
+    def test_token_combine(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype, with_merging_probs
     ):
-        """Test token_combine forward pass against reference implementation"""
+        """Test token_combine forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
         routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
-        # Get row_id_map from token_dispatch (which computes it internally)
+        # Get row_id_map from reference_token_dispatch
         key, dummy_key = jax.random.split(key)
         dummy_inp = jax.random.uniform(
             dummy_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
-        _, row_id_map = token_dispatch(dummy_inp, routing_map, num_out_tokens)
+        _, row_id_map = reference_token_dispatch(dummy_inp, routing_map, num_out_tokens)
 
         # Generate input data (from expert outputs)
         key, inp_key, merge_key = jax.random.split(key, 3)
@@ -986,73 +1040,42 @@ class TestHighLevelPermutationAPI:
         else:
             merging_probs = None
 
-        # Call high-level API
-        output = token_combine(inp, row_id_map, merging_probs)
-
-        # Compare against reference
-        ref_output, _ = reference_unpermute_with_mask_map(
-            inp, row_id_map, merging_probs, None, num_tokens, num_experts, hidden_size
-        )
-
-        tols = dtype_tols(dtype)
-        relaxed_tols = dtype_tols(dtype, rtol=tols["rtol"] * 5, atol=tols["atol"] * 5)
-        assert_allclose(output, ref_output, **relaxed_tols)
-
-    @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert",
-        [
-            (32, 8, 256, 2),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [jnp.float32])
-    def test_token_combine_vjp(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
-    ):
-        """Test token_combine VJP using value_and_grad"""
-        key = jax.random.PRNGKey(42)
-
-        # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        num_out_tokens = int(jnp.sum(routing_map))
-
-        # Get row_id_map from token_dispatch (which computes it internally)
-        key, dummy_key = jax.random.split(key)
-        dummy_inp = jax.random.uniform(
-            dummy_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
-        )
-        _, row_id_map = token_dispatch(dummy_inp, routing_map, num_out_tokens)
-
-        # Generate input data for token_combine
-        key, inp_key = jax.random.split(key)
-        inp = jax.random.uniform(
-            inp_key, (num_out_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
-        )
-
-        # Define loss function that uses token_combine (no merging probs)
+        # Define loss function that uses token_combine
         def loss_fn(x):
-            output = token_combine(x, row_id_map, None)
+            output = token_combine(x, row_id_map, merging_probs)
             return jnp.sum(output**2)
 
         # Compute value and gradient using JAX value_and_grad
         loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
+        # Get actual output for direct comparison
+        output = token_combine(inp, row_id_map, merging_probs)
+
+        # Compute reference output from reference implementation
+        ref_output = reference_token_combine(inp, row_id_map, merging_probs)
+
+        # Compare forward outputs
+        tols = dtype_tols(dtype)
+        relaxed_tols = dtype_tols(dtype, rtol=tols["rtol"] * 5, atol=tols["atol"] * 5)
+        assert_allclose(output, ref_output, **relaxed_tols)
+
+        # Compare loss values
+        expected_loss = jnp.sum(ref_output**2)
+        assert_allclose(loss_val, expected_loss, **relaxed_tols)
+
         # Compute reference gradient manually:
         # d_loss/d_inp = permute(d_loss/d_output)
-        # where d_loss/d_output = 2 * output
-        output = token_combine(inp, row_id_map, None)
-        output_grad = 2 * output
-
-        # Verify loss value
-        expected_loss = jnp.sum(output**2)
-        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
+        # where d_loss/d_output = 2 * ref_output
+        output_grad = 2 * ref_output
 
         # Reference backward: permute the gradient
-        ref_grad, _ = reference_permute_with_mask_map(
+        ref_grad, _ = _reference_permute_impl(
             output_grad, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
         )
 
-        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
-        assert_allclose(computed_grad, ref_grad, **tols)
+        # Use more relaxed tolerance for gradient comparison due to compounding numerical differences
+        grad_tols = dtype_tols(dtype, rtol=tols["rtol"] * 10, atol=tols["atol"] * 10)
+        assert_allclose(computed_grad, ref_grad, **grad_tols)
 
     # =========================================================================
     # sort_chunks_by_index tests
@@ -1066,45 +1089,8 @@ class TestHighLevelPermutationAPI:
         ],
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    def test_sort_chunks_by_index_forward(self, num_splits, total_tokens, hidden_size, dtype):
-        """Test sort_chunks_by_index forward pass against reference"""
-        key = jax.random.PRNGKey(42)
-
-        # Generate random split sizes
-        key, size_key = jax.random.split(key)
-        split_sizes = jax.random.randint(size_key, (num_splits,), 10, total_tokens // num_splits)
-        split_sizes = split_sizes.at[-1].set(total_tokens - jnp.sum(split_sizes[:-1]))
-
-        # Generate sorted indices
-        key, sort_key = jax.random.split(key)
-        sorted_indices = jax.random.permutation(sort_key, num_splits)
-
-        # Generate input data
-        key, inp_key = jax.random.split(key)
-        inp = jax.random.uniform(
-            inp_key, (total_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
-        )
-
-        # Call high-level API (new signature)
-        output, row_id_map = sort_chunks_by_index(inp, split_sizes, sorted_indices)
-
-        # Compare against reference
-        ref_output, _ = reference_sort_chunks_by_map(
-            inp, row_id_map, None, total_tokens, hidden_size, is_forward=True
-        )
-
-        tols = dtype_tols(dtype)
-        assert_allclose(output, ref_output, **tols)
-
-    @pytest.mark.parametrize(
-        "num_splits,total_tokens,hidden_size",
-        [
-            (4, 128, 256),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [jnp.float32])
-    def test_sort_chunks_by_index_vjp(self, num_splits, total_tokens, hidden_size, dtype):
-        """Test sort_chunks_by_index VJP using value_and_grad"""
+    def test_sort_chunks_by_index(self, num_splits, total_tokens, hidden_size, dtype):
+        """Test sort_chunks_by_index forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
         # Generate random split sizes
@@ -1123,6 +1109,7 @@ class TestHighLevelPermutationAPI:
         )
 
         # Define loss function
+        # Define loss function that uses sort_chunks_by_index
         def loss_fn(x):
             output, _ = sort_chunks_by_index(x, split_sizes, sorted_indices)
             return jnp.sum(output**2)
@@ -1130,23 +1117,40 @@ class TestHighLevelPermutationAPI:
         # Compute value and gradient using JAX value_and_grad
         loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
 
+        # Get actual output for direct comparison
+        output, _ = sort_chunks_by_index(inp, split_sizes, sorted_indices)
+
+        # Compute row_id_map for reference implementation
+        row_id_map = reference_make_chunk_sort_map(
+            split_sizes, sorted_indices, total_tokens, num_splits
+        )
+
+        # Compute reference output from reference implementation
+        ref_output, _ = reference_sort_chunks_by_map(
+            inp, row_id_map, None, total_tokens, hidden_size, is_forward=True
+        )
+
+        # Compare forward outputs
+        tols = dtype_tols(dtype)
+        assert_allclose(output, ref_output, **tols)
+
+        # Compare loss values
+        expected_loss = jnp.sum(ref_output**2)
+        assert_allclose(loss_val, expected_loss, **tols)
+
         # Compute reference gradient manually:
         # d_loss/d_inp = reverse_sort(d_loss/d_output)
-        # Get row_id_map from sort_chunks_by_index output
-        output, row_id_map = sort_chunks_by_index(inp, split_sizes, sorted_indices)
-        output_grad = 2 * output
-
-        # Verify loss value
-        expected_loss = jnp.sum(output**2)
-        assert_allclose(loss_val, expected_loss, rtol=1e-5, atol=1e-5)
+        # where d_loss/d_output = 2 * ref_output
+        output_grad = 2 * ref_output
 
         # Reference backward: reverse sort (is_forward=False)
         ref_grad, _ = reference_sort_chunks_by_map(
             output_grad, row_id_map, None, total_tokens, hidden_size, is_forward=False
         )
 
-        tols = dtype_tols(dtype, rtol=1e-4, atol=1e-4)
-        assert_allclose(computed_grad, ref_grad, **tols)
+        # Use more relaxed tolerance for gradient comparison due to compounding numerical differences
+        grad_tols = dtype_tols(dtype, rtol=tols["rtol"] * 10, atol=tols["atol"] * 10)
+        assert_allclose(computed_grad, ref_grad, **grad_tols)
 
     # =========================================================================
     # Round-trip tests (token_dispatch -> expert processing -> token_combine)

@@ -120,8 +120,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(_row_id_map_aval, _workspace_aval, *, num_tokens, num_experts, block_size):
+    def abstract(row_id_map_aval, workspace_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 2 (in-place operation)."""
+        del row_id_map_aval, workspace_aval  # Input shapes not needed for output inference
         del block_size  # Only affects computation
 
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
@@ -187,8 +188,9 @@ class RowIdMapPass3Primitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(_row_id_map_aval, *, num_tokens, num_experts):
+    def abstract(row_id_map_aval, *, num_tokens, num_experts):
         """Shape/dtype inference for pass 3 (in-place operation)."""
+        del row_id_map_aval  # Input shape not needed for output inference
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         return jax.core.ShapedArray(row_id_map_shape, jnp.int32)
 
@@ -256,14 +258,15 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         scale_aval,  # dummy, same shape as inp
         permuted_scale_aval,  # dummy, same shape as inp
         *,
-        _num_tokens,
-        _num_experts,
+        num_tokens,
+        num_experts,
         num_out_tokens,
         hidden_size,
         with_probs,
     ):
         """Shape/dtype inference for permute."""
         del row_id_map_aval, scale_aval, permuted_scale_aval  # Not needed for output shape
+        del num_tokens, num_experts  # Inferred from input shapes, kept for API consistency
 
         output_shape = (num_out_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -314,11 +317,12 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         *,
         num_tokens,
         num_experts,
-        _num_out_tokens,
+        num_out_tokens,
         hidden_size,
         with_probs,
     ):
         """MLIR lowering using triton_call_lowering."""
+        del num_out_tokens  # Output shape determined by kernel, not needed here
         # Compute strides
         inp_stride_token = hidden_size
         inp_stride_hidden = 1
