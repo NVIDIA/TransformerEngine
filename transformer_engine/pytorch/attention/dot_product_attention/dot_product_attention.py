@@ -1166,6 +1166,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert "padding" in attn_mask_type, "KV caching requires padding mask!"
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
+                    # since attention mask is changed, set `bottom_right_diagonal` to True
+                    bottom_right_diagonal = True
 
                 self.attention_type = "cross"
                 self.flash_attention.attention_type = self.attention_type
