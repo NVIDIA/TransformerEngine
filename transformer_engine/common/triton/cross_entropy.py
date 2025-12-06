@@ -18,6 +18,8 @@ def online_softmax_kernel(
     m_d_X_y_stride,
     rank,
     n_cols,
+    ignore_idx,
+    n_non_ignore,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -32,6 +34,8 @@ def online_softmax_kernel(
     m_d_X_y_stride (int): The stride of the m/d/X_y tensor.
     rank (int): The rank of this device in the TP group.
     n_cols (int): The number of columns in the input tensor.
+    ignore_idx (int): The index to ignore for loss calculation.
+    n_non_ignore: The number of non-ignored elements in the batch.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
 
@@ -43,6 +47,9 @@ def online_softmax_kernel(
     # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
+
+    if y != ignore_idx:
+        tl.atomic_add(n_non_ignore, 1)
 
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols

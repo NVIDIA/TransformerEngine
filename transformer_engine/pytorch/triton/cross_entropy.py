@@ -36,9 +36,6 @@ def cross_entropy_forward(
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
-    n_non_ignore = (target.view(-1) != ignore_idx).sum().to(torch.int64)
-    n_non_ignore = torch.clamp(n_non_ignore, min=1)
-
     assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
@@ -48,6 +45,8 @@ def cross_entropy_forward(
 
     # tensor to hold this rank's m/d/X_y values
     m_d_X_y = torch.zeros(n_rows * 3, dtype=torch.float32, device=_input.device)
+
+    n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device)
 
     # ensure _input and target are contiguous in the last dimension
     if _input.stride(-1) != 1:
@@ -66,9 +65,13 @@ def cross_entropy_forward(
         m_d_X_y_stride=m_d_X_y.stride(-1),
         rank=rank,
         n_cols=V,
+        ignore_idx=ignore_idx,
+        n_non_ignore_ptr=n_non_ignore,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
+
+    n_non_ignore = torch.clamp(n_non_ignore, min=1)
 
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
 
