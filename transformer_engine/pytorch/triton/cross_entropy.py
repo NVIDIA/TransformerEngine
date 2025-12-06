@@ -36,9 +36,8 @@ def cross_entropy_forward(
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
-    n_non_ignore = (target.view(-1) != ignore_idx).sum().item()
-    if n_non_ignore == 0:
-        n_non_ignore = 1
+    n_non_ignore = (target.view(-1) != ignore_idx).sum().to(torch.int64)
+    n_non_ignore = torch.clamp(n_non_ignore, min=1)
 
     assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
@@ -94,6 +93,7 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
+        n_rows=n_rows,
         n_non_ignore=n_non_ignore,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,

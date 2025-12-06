@@ -89,6 +89,7 @@ def cross_entropy_kernel(
     world_size,
     ignore_idx,
     n_cols,
+    n_rows,
     n_non_ignore,
     reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
@@ -110,12 +111,14 @@ def cross_entropy_kernel(
     world_size (int): The size of world involved in this distributed loss calculation.
     ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
     n_cols (int): The number of columns in the input tensor.
-    n_non_ignore (int): The number of non-ignored elements in the batch.
+    n_rows (int): The number of rows in the batch (B * SQ), used for buffer indexing.
+    n_non_ignore: The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
 
     program_id = tl.program_id(0).to(tl.int64)
+    n_non_ignore = tl.load(n_non_ignore)
 
     # locate the start index
     X_ptr += program_id * X_stride
@@ -140,7 +143,7 @@ def cross_entropy_kernel(
     ori_X_y = tl.load(m_d_X_y_ptr + (2 * m_d_X_y_stride))
 
     for i in range(1, world_size):
-        offset = i * 3 * n_non_ignore * m_d_X_y_stride
+        offset = i * 3 * n_rows * m_d_X_y_stride
         access_ptr = m_d_X_y_ptr + offset
         m_new = tl.load(access_ptr)
         d_new = tl.load(access_ptr + m_d_X_y_stride)
