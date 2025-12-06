@@ -882,9 +882,7 @@ class TestHighLevelPermutationAPI:
         ],
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    def test_token_dispatch(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
-    ):
+    def test_token_dispatch(self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype):
         """Test token_dispatch forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
