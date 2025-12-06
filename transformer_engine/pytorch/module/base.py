@@ -591,6 +591,7 @@ def fill_userbuffers_buffer_for_all_gather(
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
+            with_gemm_swizzled_scales=False,
         )
         return global_tensor, local_tensor
 

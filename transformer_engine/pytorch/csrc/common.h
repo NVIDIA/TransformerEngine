@@ -120,6 +120,7 @@ class Quantizer {
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;
+  bool optimize_for_gemm = false;
   py::handle quantizer;
 
  protected:
@@ -358,11 +359,12 @@ inline size_t typeToNumBits(transformer_engine::DType t) {
     case transformer_engine::DType::kByte:
     case transformer_engine::DType::kFloat8E4M3:
     case transformer_engine::DType::kFloat8E5M2:
+    case transformer_engine::DType::kFloat8E8M0:
       return 8;
     case transformer_engine::DType::kFloat4E2M1:
       return 4;
     default:
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 
@@ -386,8 +388,10 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
       return at::kFloat8_e4m3fn;
     case transformer_engine::DType::kFloat8E5M2:
       return at::kFloat8_e5m2;
+    case transformer_engine::DType::kFloat8E8M0:
+      return at::kByte;
     default:
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 
@@ -414,8 +418,7 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
     case torch::kInt64:
       return transformer_engine::DType::kInt64;
     default:
-      std::cout << "Type: " << static_cast<int>(t) << std::endl;
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 

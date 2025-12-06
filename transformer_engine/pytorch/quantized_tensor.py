@@ -204,10 +204,21 @@ class Quantizer(abc.ABC):
     """
     internal: bool
 
+    """Whether to solely optimize for matrix multiplication
+
+    The resulting quantized tensors are not guaranteed to support any
+    operation other than matrix multiplication. Use with care since
+    this is likely to break communication, checkpointing, and many
+    other features.
+
+    """
+    optimize_for_gemm: bool
+
     def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
         self.rowwise_usage = rowwise
         self.columnwise_usage = columnwise
         self.internal = False
+        self.optimize_for_gemm = False
 
     def __repr__(self):
         return (

@@ -60,13 +60,14 @@ struct NVTEBasicTensor {
  *  \brief Indicates the kind of the tensor parameter to set/get.
  */
 enum NVTETensorParam {
-  kNVTERowwiseData = 0,        /*!< Data usable in rowwise manner */
-  kNVTEColumnwiseData = 1,     /*!< Data usable in columnwise manner */
-  kNVTEScale = 2,              /*!< Scale tensor */
-  kNVTEAmax = 3,               /*!< Amax tensor */
-  kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
-  kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
-  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTERowwiseData = 0,            /*!< Data usable in rowwise manner */
+  kNVTEColumnwiseData = 1,         /*!< Data usable in columnwise manner */
+  kNVTEScale = 2,                  /*!< Scale tensor */
+  kNVTEAmax = 3,                   /*!< Amax tensor */
+  kNVTERowwiseScaleInv = 4,        /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
+  kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumTensorParams
 };
 
@@ -265,6 +266,9 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
 /*! \brief Set a parameter of the tensor.
  *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_set_tensor_param_v2 for other parameter types.
+ *
  *  \param[in/out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  *  \param[in] param The value to be set.
@@ -274,10 +278,37 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 /*! \brief Get a value of the parameter of the tensor.
  *
+ *  This only supports tensor parameters of type NVTEBasicTensor. Use
+ *  nvte_get_tensor_param_v2 for other parameter types.
+ *
  *  \param[in] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  */
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
+
+/*! \brief Set a parameter of a tensor.
+ *
+ *  \param[in/out] tensor        Tensor.
+ *  \param[in]     param         Tensor parameter type.
+ *  \param[in]     buf           Memory address to read parameter value.
+ *  \param[in]     size_in_bytes Size of buf.
+ */
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
+                              size_t size_in_bytes);
+
+/*! \brief Query an option in quantization config.
+ *
+ *  \param[in]  tensor        Tensor.
+ *  \param[in]  param         Tensor parameter type.
+ *  \param[out] buf           Memory address to write parameter value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
+ */
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Get the granularity of scaling of this tensor.
  *
@@ -347,14 +378,14 @@ NVTEQuantizationConfig nvte_create_quantization_config();
 
 /*! \brief Query an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Quantization config.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
@@ -362,10 +393,10 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Quantization config.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,
@@ -580,20 +611,20 @@ class TensorWrapper {
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseData, &data, sizeof(data));
     NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
                             amax_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
+    nvte_set_tensor_param_v2(tensor_, kNVTEAmax, &amax, sizeof(amax));
     NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
                              scale_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
+    nvte_set_tensor_param_v2(tensor_, kNVTEScale, &scale, sizeof(scale));
     if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
         scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
       // Scale-inv pointer has not been provided and shape matches default
       scale_inv_shape = emptyShape;
     }
     NVTEBasicTensor scale_inv = {scale_inv_dptr, kNVTEFloat32, scale_inv_shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseScaleInv, &scale_inv);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseScaleInv, &scale_inv, sizeof(scale_inv));
   }
 
   /*! \brief Constructs new TensorWrapper.
@@ -663,7 +694,7 @@ class TensorWrapper {
                                const ShapeType &shape) noexcept {
     NVTEShape nvte_shape = this->convertShape(shape);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
-    nvte_set_tensor_param(&tensor_, param, &data);
+    nvte_set_tensor_param_v2(tensor_, param, &data, sizeof(data));
     return *this;
   }
 
@@ -705,7 +736,10 @@ class TensorWrapper {
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
-    return nvte_get_tensor_param(tensor_, param);
+    NVTEBasicTensor ret;
+    size_t size_written;
+    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), &size_written);
+    return ret;
   }
 
   NVTEBasicTensor get_rowwise_data() const noexcept { return get_parameter(kNVTERowwiseData); }
