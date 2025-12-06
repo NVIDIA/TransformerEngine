@@ -120,7 +120,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(row_id_map_aval, workspace_aval, *, num_tokens, num_experts, block_size):
+    def abstract(_row_id_map_aval, _workspace_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 2 (in-place operation)."""
         del block_size  # Only affects computation
 
@@ -187,7 +187,7 @@ class RowIdMapPass3Primitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(row_id_map_aval, *, num_tokens, num_experts):
+    def abstract(_row_id_map_aval, *, num_tokens, num_experts):
         """Shape/dtype inference for pass 3 (in-place operation)."""
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         return jax.core.ShapedArray(row_id_map_shape, jnp.int32)
@@ -256,8 +256,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         scale_aval,  # dummy, same shape as inp
         permuted_scale_aval,  # dummy, same shape as inp
         *,
-        num_tokens,
-        num_experts,
+        _num_tokens,
+        _num_experts,
         num_out_tokens,
         hidden_size,
         with_probs,
@@ -314,7 +314,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         *,
         num_tokens,
         num_experts,
-        num_out_tokens,
+        _num_out_tokens,
         hidden_size,
         with_probs,
     ):

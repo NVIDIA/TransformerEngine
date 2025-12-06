@@ -123,8 +123,8 @@ def _token_dispatch_fwd_rule(
 
 
 def _token_dispatch_bwd_rule(
-    routing_map: jnp.ndarray,
-    num_out_tokens: int,
+    _routing_map: jnp.ndarray,
+    _num_out_tokens: int,
     residuals: Tuple[jnp.ndarray, int, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray],
 ) -> Tuple[jnp.ndarray]:
@@ -245,8 +245,8 @@ def _token_dispatch_with_probs_fwd_rule(
 
 
 def _token_dispatch_with_probs_bwd_rule(
-    routing_map: jnp.ndarray,
-    num_out_tokens: int,
+    _routing_map: jnp.ndarray,
+    _num_out_tokens: int,
     residuals: Tuple[jnp.ndarray, int, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -369,7 +369,7 @@ def _token_combine_bwd_rule(
             num_out_tokens,
             hidden_size,
         )
-        # TODO: Compute gradient for merging_probs with specialized kernel
+        # TODO: Compute gradient for merging_probs with specialized kernel  # pylint: disable=fixme
         merging_probs_grad = None
     else:
         # Simple case: just permute gradients back
@@ -461,8 +461,8 @@ def _sort_chunks_by_index_fwd_rule(
 
 
 def _sort_chunks_by_index_bwd_rule(
-    split_sizes: jnp.ndarray,
-    sorted_indices: jnp.ndarray,
+    _split_sizes: jnp.ndarray,
+    _sorted_indices: jnp.ndarray,
     residuals: Tuple[jnp.ndarray, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray],
 ) -> Tuple[jnp.ndarray]:
