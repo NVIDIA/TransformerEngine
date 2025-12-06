@@ -4,17 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
-#include "util.h"
-
 #include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "common.h"
-#include "pybind.h"
 #include "common/common.h"
+#include "extensions.h"
+#include "pybind.h"
+#include "util.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -23,25 +22,18 @@ namespace {
 
 void set_with_gemm_swizzled_scales(transformer_engine::TensorWrapper &tensor,
                                    bool with_gemm_swizzled_scales) {
-  nvte_set_tensor_param_v2(tensor.data(),
-                           NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales,
-                           sizeof(with_gemm_swizzled_scales));
+  nvte_set_tensor_param_v2(tensor.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
 }
 
 bool get_with_gemm_swizzled_scales(transformer_engine::TensorWrapper &tensor) {
   bool with_gemm_swizzled_scales = false;
-  nvte_get_tensor_param_v2(tensor.data(),
-                           NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales,
-                           sizeof(with_gemm_swizzled_scales),
-                           nullptr);
+  nvte_get_tensor_param_v2(tensor.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales), nullptr);
   return with_gemm_swizzled_scales;
 }
 
-void reset_tensor_data(transformer_engine::TensorWrapper &tensor,
-                       bool rowwise,
-                       bool columnwise) {
+void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, bool columnwise) {
   NVTEShape shape;
   shape.ndim = 1;
   shape.data[0] = 0;
@@ -58,25 +50,23 @@ void reset_tensor_data(transformer_engine::TensorWrapper &tensor,
 
 }  // namespace
 
-std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>>
-swizzle_scales_for_gemm(transformer_engine::TensorWrapper& tensor,
-                        bool rowwise_usage,
-                        bool columnwise_usage) {
+std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_for_gemm(
+    transformer_engine::TensorWrapper &tensor, bool rowwise_usage, bool columnwise_usage) {
   // Return early if scale swizzling is not required
   const auto scaling_mode = tensor.scaling_mode();
   switch (scaling_mode) {
-  case NVTE_MXFP8_1D_SCALING:
-  case NVTE_NVFP4_1D_SCALING:
-    // Tensor format requires scale swizzling
-    break;
-  case NVTE_BLOCK_SCALING_1D:
-  case NVTE_BLOCK_SCALING_2D:
-    NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
-  case NVTE_INVALID_SCALING:
-    NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
-  default:
-    // Tensor format does not require scale swizzling for GEMM
-    return {std::nullopt, std::nullopt};
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_NVFP4_1D_SCALING:
+      // Tensor format requires scale swizzling
+      break;
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
+      NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
+    case NVTE_INVALID_SCALING:
+      NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
+    default:
+      // Tensor format does not require scale swizzling for GEMM
+      return {std::nullopt, std::nullopt};
   }
 
   // Return early if scales are already swizzled
@@ -117,9 +107,8 @@ swizzle_scales_for_gemm(transformer_engine::TensorWrapper& tensor,
     output_nvte.set_rowwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
 
     // Launch kernel
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream);
-    });
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream); });
 
     // Update tensor with swizzled scales
     tensor.set_rowwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
@@ -150,9 +139,8 @@ swizzle_scales_for_gemm(transformer_engine::TensorWrapper& tensor,
     output_nvte.set_columnwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
 
     // Launch kernel
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream);
-    });
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream); });
 
     // Update tensor with swizzled scales
     tensor.set_columnwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
@@ -166,8 +154,7 @@ swizzle_scales_for_gemm(transformer_engine::TensorWrapper& tensor,
 }
 
 std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
-    std::vector<transformer_engine::TensorWrapper>& tensors,
-    bool rowwise_usage,
+    std::vector<transformer_engine::TensorWrapper> &tensors, bool rowwise_usage,
     bool columnwise_usage) {
   // Checks and trivial cases
   NVTE_CHECK(rowwise_usage != columnwise_usage,
@@ -177,30 +164,29 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
     return std::nullopt;
   }
   const auto scaling_mode = tensors.front().scaling_mode();
-  for (const auto &tensor: tensors) {
-    NVTE_CHECK(tensor.scaling_mode() == scaling_mode,
-               "Tensors have different scaling modes");
+  for (const auto &tensor : tensors) {
+    NVTE_CHECK(tensor.scaling_mode() == scaling_mode, "Tensors have different scaling modes");
   }
 
   // Return early if scale swizzling is not required
   switch (scaling_mode) {
-  case NVTE_MXFP8_1D_SCALING:
-  case NVTE_NVFP4_1D_SCALING:
-    // Tensor format requires scale swizzling
-    break;
-  case NVTE_BLOCK_SCALING_1D:
-  case NVTE_BLOCK_SCALING_2D:
-    NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
-  case NVTE_INVALID_SCALING:
-    NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
-  default:
-    // Tensor format does not require scale swizzling for GEMM
-    return std::nullopt;
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_NVFP4_1D_SCALING:
+      // Tensor format requires scale swizzling
+      break;
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
+      NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
+    case NVTE_INVALID_SCALING:
+      NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
+    default:
+      // Tensor format does not require scale swizzling for GEMM
+      return std::nullopt;
   }
 
   // Filter out tensors that already have swizzled scales
   std::vector<TensorWrapper *> tensors_needing_swizzle;
-  for (auto &tensor: tensors) {
+  for (auto &tensor : tensors) {
     if (!get_with_gemm_swizzled_scales(tensor)) {
       tensors_needing_swizzle.push_back(&tensor);
     }
@@ -212,10 +198,9 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   // Determine buffer size needed for swizzled scales
   std::vector<size_t> output_scales_offsets;
   size_t output_scales_bytes = 0;
-  for (auto &tensor: tensors_needing_swizzle) {
-    const auto scales_nvte = (rowwise_usage
-                              ? tensor->get_rowwise_scale_inv()
-                              : tensor->get_columnwise_scale_inv());
+  for (auto &tensor : tensors_needing_swizzle) {
+    const auto scales_nvte =
+        (rowwise_usage ? tensor->get_rowwise_scale_inv() : tensor->get_columnwise_scale_inv());
     const auto &shape = scales_nvte.shape;
     const auto dtype = static_cast<DType>(scales_nvte.dtype);
     const auto dtype_bits = transformer_engine::pytorch::typeToNumBits(dtype);
@@ -227,8 +212,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
 
   // Allocate buffer for swizzled scales
   auto output_scales_pyt = allocateSpace(std::vector<size_t>{output_scales_bytes},
-                                         transformer_engine::DType::kByte,
-                                         false);
+                                         transformer_engine::DType::kByte, false);
   uint8_t *output_scales_dptr = reinterpret_cast<uint8_t *>(getDataPtr(output_scales_pyt));
 
   // Construct TE tensors with only scales
@@ -246,19 +230,17 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
       input_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_rowwise_scale_inv(scales_nvte.data_ptr, scales_dtype,
-                                       scales_nvte.shape);
+      input_nvte.set_rowwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
       output_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      output_nvte.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
-                                        scales_dtype, scales_nvte.shape);
+      output_nvte.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
+                                        scales_nvte.shape);
     } else {
       const auto data_nvte = tensor.get_columnwise_data();
       const auto scales_nvte = tensor.get_columnwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
       input_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_columnwise_scale_inv(scales_nvte.data_ptr, scales_dtype,
-                                          scales_nvte.shape);
+      input_nvte.set_columnwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
       output_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
       output_nvte.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
                                            scales_dtype, scales_nvte.shape);
@@ -289,29 +271,28 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
     if (rowwise_usage) {
       auto scales_nvte = outputs_nvte[i].get_rowwise_scale_inv();
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
-                                   scales_dtype, scales_nvte.shape);
+      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
+                                   scales_nvte.shape);
     } else {
       auto scales_nvte = outputs_nvte[i].get_columnwise_scale_inv();
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
-                                      scales_dtype, scales_nvte.shape);
+      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
+                                      scales_nvte.shape);
     }
   }
 
   return std::move(output_scales_pyt);
 }
 
-at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper& input,
+at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise) {
   // Check input tensor
   const NVTEScalingMode scaling_mode = input.scaling_mode();
   NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
              "Input tensor must be a block scaling tensor");
   bool input_is_swizzled = false;
-  nvte_get_tensor_param_v2(input.data(), kNVTEWithGEMMSwizzledScales,
-                           &input_is_swizzled, sizeof(input_is_swizzled),
-                           nullptr);
+  nvte_get_tensor_param_v2(input.data(), kNVTEWithGEMMSwizzledScales, &input_is_swizzled,
+                           sizeof(input_is_swizzled), nullptr);
   NVTE_CHECK(input_is_swizzled, "Input tensor must have swizzled scales");
 
   // Get tensor data
@@ -351,12 +332,11 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   const size_t swizzled_scale_inv_first_dim = DIVUP<size_t>(data_flat_first_dim, 128) * 128;
   const size_t swizzled_scale_inv_last_dim = DIVUP<size_t>(data_flat_last_dim, 128) * 4;
   // Allocate memory for swizzled mxfp8 scaling factors
-  at::Tensor swizzled_scale_inv
-    = allocateSpace(std::vector<size_t>{swizzled_scale_inv_first_dim, swizzled_scale_inv_last_dim},
-                    transformer_engine::DType::kByte,
-                    false);
+  at::Tensor swizzled_scale_inv =
+      allocateSpace(std::vector<size_t>{swizzled_scale_inv_first_dim, swizzled_scale_inv_last_dim},
+                    transformer_engine::DType::kByte, false);
   // Set rowwise scaling factors on output
-  void* const swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
+  void *const swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
   NVTEShape swizzled_scale_inv_shape{};
   swizzled_scale_inv_shape.data[0] = swizzled_scale_inv_first_dim;
   swizzled_scale_inv_shape.data[1] = swizzled_scale_inv_last_dim;
@@ -384,17 +364,17 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   // Return early if scale swizzling is not required
   const auto scaling_mode = tensor_nvte.scaling_mode();
   switch (scaling_mode) {
-  case NVTE_MXFP8_1D_SCALING:
-  case NVTE_NVFP4_1D_SCALING:
-  case NVTE_BLOCK_SCALING_1D:
-  case NVTE_BLOCK_SCALING_2D:
-    // Tensor format requires scale swizzling
-    break;
-  case NVTE_INVALID_SCALING:
-    NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
-  default:
-    // Tensor format does not require scale swizzling for GEMM
-    return;
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_NVFP4_1D_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
+      // Tensor format requires scale swizzling
+      break;
+    case NVTE_INVALID_SCALING:
+      NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
+    default:
+      // Tensor format does not require scale swizzling for GEMM
+      return;
   }
 
   // Return early if scales are already swizzled
@@ -403,34 +383,33 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   }
 
   // Check what scaling factors the tensor contains
-  auto is_empty = [] (const NVTEBasicTensor &t) -> bool {
+  auto is_empty = [](const NVTEBasicTensor &t) -> bool {
     return t.shape.ndim == 1 && t.shape.data[0] == 0;
   };
   const bool has_rowwise_scales = !is_empty(tensor_nvte.get_rowwise_scale_inv());
   const bool has_columnwise_scales = !is_empty(tensor_nvte.get_columnwise_scale_inv());
 
   // Swizzle scaling factors
-  auto [rowwise_scales, columnwise_scales] = swizzle_scales_for_gemm(tensor_nvte,
-                                                                     has_rowwise_scales,
-                                                                     has_columnwise_scales);
+  auto [rowwise_scales, columnwise_scales] =
+      swizzle_scales_for_gemm(tensor_nvte, has_rowwise_scales, has_columnwise_scales);
 
   // Update Python tensor with swizzled scales
   switch (scaling_mode) {
-  case NVTE_MXFP8_1D_SCALING:
-    if (has_rowwise_scales) {
-      tensor.attr("_rowwise_scale_inv") = rowwise_scales;
-    }
-    if (has_columnwise_scales) {
-      tensor.attr("_columnwise_scale_inv") = columnwise_scales;
-    }
-    tensor.attr("_with_gemm_swizzled_scales") = true;
-    break;
-  case NVTE_NVFP4_1D_SCALING:
-  case NVTE_BLOCK_SCALING_1D:
-  case NVTE_BLOCK_SCALING_2D:
-    NVTE_ERROR("Swizzling is not yet implemented");  /// TODO Remove
-  default:
-    NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
+    case NVTE_MXFP8_1D_SCALING:
+      if (has_rowwise_scales) {
+        tensor.attr("_rowwise_scale_inv") = rowwise_scales;
+      }
+      if (has_columnwise_scales) {
+        tensor.attr("_columnwise_scale_inv") = columnwise_scales;
+      }
+      tensor.attr("_with_gemm_swizzled_scales") = true;
+      break;
+    case NVTE_NVFP4_1D_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
+      NVTE_ERROR("Swizzling is not yet implemented");  /// TODO Remove
+    default:
+      NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
   }
 }
 

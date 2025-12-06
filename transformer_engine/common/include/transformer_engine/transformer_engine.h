@@ -60,13 +60,13 @@ struct NVTEBasicTensor {
  *  \brief Indicates the kind of the tensor parameter to set/get.
  */
 enum NVTETensorParam {
-  kNVTERowwiseData = 0,        /*!< Data usable in rowwise manner */
-  kNVTEColumnwiseData = 1,     /*!< Data usable in columnwise manner */
-  kNVTEScale = 2,              /*!< Scale tensor */
-  kNVTEAmax = 3,               /*!< Amax tensor */
-  kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
-  kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
-  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTERowwiseData = 0,            /*!< Data usable in rowwise manner */
+  kNVTEColumnwiseData = 1,         /*!< Data usable in columnwise manner */
+  kNVTEScale = 2,                  /*!< Scale tensor */
+  kNVTEAmax = 3,                   /*!< Amax tensor */
+  kNVTERowwiseScaleInv = 4,        /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumTensorParams
 };
@@ -293,9 +293,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
  */
-void nvte_set_tensor_param_v2(NVTETensor tensor,
-                              NVTETensorParam param,
-                              const void *buf,
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
                               size_t size_in_bytes);
 
 /*! \brief Query an option in quantization config.
@@ -309,11 +307,8 @@ void nvte_set_tensor_param_v2(NVTETensor tensor,
  *                            buf. If buf is NULL, then the number of
  *                            bytes that would have been written.
  */
-void nvte_get_tensor_param_v2(const NVTETensor tensor,
-                              NVTETensorParam param,
-                              void *buf,
-                              size_t size_in_bytes,
-                              size_t *size_written);
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Get the granularity of scaling of this tensor.
  *

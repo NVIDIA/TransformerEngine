@@ -7,11 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 
+#include <torch/extension.h>
+
 #include <optional>
 #include <tuple>
 #include <vector>
-
-#include <torch/extension.h>
 
 #include "transformer_engine/transformer_engine.h"
 
@@ -22,19 +22,16 @@ namespace pytorch {
  *
  *  The returned swizzled scales should be kept alive during the GEMM.
  */
-std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>>
-    swizzle_scales_for_gemm(TensorWrapper& tensor,
-                            bool rowwise_usage,
-                            bool columnwise_usage);
+std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_for_gemm(
+    TensorWrapper& tensor, bool rowwise_usage, bool columnwise_usage);
 
 /*! \brief Convert multiple tensor block scales into GEMM swizzled format.
  *
  *  The returned swizzled scales should be kept alive during the GEMMs.
  */
-std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
-    std::vector<TensorWrapper>& tensors,
-    bool rowwise_usage,
-    bool columnwise_usage);
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<TensorWrapper>& tensors,
+                                                               bool rowwise_usage,
+                                                               bool columnwise_usage);
 
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
@@ -48,8 +45,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
  *  The returned swizzled scaling factor tensor should be kept alive
  *  during the GEMM.
  */
-at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper &input,
-                                                 bool rowwise);
+at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
 
 }  // namespace pytorch
 }  // namespace transformer_engine

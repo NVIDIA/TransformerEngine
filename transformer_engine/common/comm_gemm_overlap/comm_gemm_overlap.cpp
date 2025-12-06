@@ -174,17 +174,13 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
                                                 const std::vector<size_t> &chunk_shape) {
   // Check tensor format
   const auto scaling_mode = source.scaling_mode();
-  NVTE_CHECK(scaling_mode == NVTE_DELAYED_TENSOR_SCALING
-             || scaling_mode == NVTE_MXFP8_1D_SCALING,
+  NVTE_CHECK(scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Unsupported tensor format (", to_string(scaling_mode), ").");
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
     bool has_swizzled_scales = false;
-    nvte_get_tensor_param_v2(source.data(),
-                             NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                             &has_swizzled_scales, sizeof(has_swizzled_scales),
-                             nullptr);
-    NVTE_CHECK(has_swizzled_scales,
-               "Expected MFP8 tensor with scales in GEMM swizzled format.");
+    nvte_get_tensor_param_v2(source.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                             &has_swizzled_scales, sizeof(has_swizzled_scales), nullptr);
+    NVTE_CHECK(has_swizzled_scales, "Expected MFP8 tensor with scales in GEMM swizzled format.");
   }
 
   // Tensor dimensions

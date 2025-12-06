@@ -504,9 +504,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   // Optionally swizzle the scaling factors
   swizzled_scale_inverses_list.emplace_back(
-    multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
+      multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
   swizzled_scale_inverses_list.emplace_back(
-    multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
+      multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
 
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt

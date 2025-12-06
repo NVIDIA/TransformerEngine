@@ -810,7 +810,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
 }
 
 void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
-                               size_t size_in_bytes) {
+                              size_t size_in_bytes) {
   // Check attribute and buffer
   NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
              ")");
@@ -820,8 +820,8 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for tensor parameter "
              "(parameter ",
-             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
-             " bytes)");
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
   // Read from buffer
@@ -870,7 +870,7 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
 }
 
 void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
-                               size_t size_in_bytes, size_t *size_written) {
+                              size_t size_in_bytes, size_t *size_written) {
   // Check param
   NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
              ")");
@@ -890,8 +890,8 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for tensor parameter "
              "(parameter ",
-             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
-             " bytes)");
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
 
   // Write to buffer
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
