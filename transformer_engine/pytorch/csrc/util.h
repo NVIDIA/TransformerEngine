@@ -18,7 +18,7 @@
 namespace transformer_engine {
 namespace pytorch {
 
-/*! \brief Convert tensor scaling factors into a layout expected by GEMM.
+/*! \brief Convert tensor block scales into GEMM swizzled format.
  *
  *  The returned swizzled scales should be kept alive during the GEMM.
  */
@@ -27,7 +27,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>>
                             bool rowwise_usage,
                             bool columnwise_usage);
 
-/*! \brief Convert multiple tensor scaling factors into a layout expected by GEMM.
+/*! \brief Convert multiple tensor block scales into GEMM swizzled format.
  *
  *  The returned swizzled scales should be kept alive during the GEMMs.
  */

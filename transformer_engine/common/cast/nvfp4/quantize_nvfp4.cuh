@@ -559,7 +559,7 @@ inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cu
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   NVTE_CHECK(!output->with_gemm_swizzled_scales,
-             "Output must have scales in compact layout.");
+             "Output must have scales in compact format.");
 
   bool use_colwise_scaling = output->has_columnwise_data();
   if (use_colwise_scaling) {

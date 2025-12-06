@@ -240,7 +240,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
     NVTE_CHECK(is_fp8_dtype(input.columnwise_data.dtype), "Input must have FP8 type.");
   }
 
-  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact layout.");
+  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 

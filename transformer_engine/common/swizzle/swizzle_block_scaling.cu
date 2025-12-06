@@ -262,9 +262,9 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
              "Output must have E8M0 scaling factors");
 
   NVTE_CHECK(input->with_gemm_swizzled_scales,
-             "Expected input tensor with scales in swizzled layout for GEMM.");
+             "Expected input tensor with scales in GEMM swizzled format.");
   NVTE_CHECK(output->with_gemm_swizzled_scales,
-             "Expected output tensor with scales in swizzled layout for GEMM.");
+             "Expected output tensor with scales in GEMM swizzled format.");
 
   NVTE_CHECK(input->data.dptr != nullptr, "Input must have rowwise data");
   NVTE_CHECK(output->data.dptr == input->data.dptr, "Output must share data with input");

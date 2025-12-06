@@ -551,7 +551,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales,
-             "Output must have scales in compact layout.");
+             "Output must have scales in compact format.");
   if (use_rowwise_scaling) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   }

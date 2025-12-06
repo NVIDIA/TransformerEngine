@@ -70,7 +70,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
     _quantizer: Optional[Quantizer]
     # FP8 data type
     _fp8_dtype: TE_DType
-    # Whether scaling factors are in the swizzled layout expected by
+    # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
 

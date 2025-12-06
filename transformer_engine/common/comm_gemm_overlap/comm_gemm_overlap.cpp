@@ -184,7 +184,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
                              &has_swizzled_scales, sizeof(has_swizzled_scales),
                              nullptr);
     NVTE_CHECK(has_swizzled_scales,
-               "Expected MFP8 tensor with scales in GEMM swizzled layout.");
+               "Expected MFP8 tensor with scales in GEMM swizzled format.");
   }
 
   // Tensor dimensions

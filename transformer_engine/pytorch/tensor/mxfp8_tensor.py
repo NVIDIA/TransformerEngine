@@ -193,7 +193,7 @@ class MXFP8Quantizer(Quantizer):
     def onnx_dequantize(self, tensor: Union[MXFP8TensorStorage, MXFP8Tensor]) -> torch.Tensor:
         if tensor._with_gemm_swizzled_scales:
             raise NotImplementedError(
-                "ONNX MXFP8 dequantization is only supported with scales in compact layout."
+                "ONNX MXFP8 dequantization is only supported with scales in compact format."
             )
         return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
 
