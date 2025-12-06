@@ -406,8 +406,8 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   auto is_empty = [] (const NVTEBasicTensor &t) -> bool {
     return t.shape.ndim == 1 && t.shape.data[0] == 0;
   };
-  const bool has_rowwise_scales = is_empty(tensor_nvte.get_rowwise_scale_inv());
-  const bool has_columnwise_scales = is_empty(tensor_nvte.get_columnwise_scale_inv());
+  const bool has_rowwise_scales = !is_empty(tensor_nvte.get_rowwise_scale_inv());
+  const bool has_columnwise_scales = !is_empty(tensor_nvte.get_columnwise_scale_inv());
 
   // Swizzle scaling factors
   auto [rowwise_scales, columnwise_scales] = swizzle_scales_for_gemm(tensor_nvte,
