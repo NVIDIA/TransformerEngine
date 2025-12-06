@@ -18,6 +18,8 @@ def online_softmax_kernel(
     m_d_X_y_stride,
     rank,
     n_cols,
+    ignore_idx,
+    n_non_ignore,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -32,6 +34,8 @@ def online_softmax_kernel(
     m_d_X_y_stride (int): The stride of the m/d/X_y tensor.
     rank (int): The rank of this device in the TP group.
     n_cols (int): The number of columns in the input tensor.
+    ignore_idx (int): The index to ignore for loss calculation.
+    n_non_ignore: The number of non-ignored elements in the batch.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
 
@@ -43,6 +47,9 @@ def online_softmax_kernel(
     # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
+
+    if y != ignore_idx:
+        tl.atomic_add(n_non_ignore, 1)
 
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
@@ -89,6 +96,7 @@ def cross_entropy_kernel(
     world_size,
     ignore_idx,
     n_cols,
+    n_rows,
     n_non_ignore,
     reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
@@ -110,12 +118,14 @@ def cross_entropy_kernel(
     world_size (int): The size of world involved in this distributed loss calculation.
     ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
     n_cols (int): The number of columns in the input tensor.
-    n_non_ignore (int): The number of non-ignored elements in the batch.
+    n_rows (int): The number of rows in the batch (B * SQ), used for buffer indexing.
+    n_non_ignore: The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
 
     program_id = tl.program_id(0).to(tl.int64)
+    n_non_ignore = tl.load(n_non_ignore)
 
     # locate the start index
     X_ptr += program_id * X_stride
@@ -140,7 +150,7 @@ def cross_entropy_kernel(
     ori_X_y = tl.load(m_d_X_y_ptr + (2 * m_d_X_y_stride))
 
     for i in range(1, world_size):
-        offset = i * 3 * n_non_ignore * m_d_X_y_stride
+        offset = i * 3 * n_rows * m_d_X_y_stride
         access_ptr = m_d_X_y_ptr + offset
         m_new = tl.load(access_ptr)
         d_new = tl.load(access_ptr + m_d_X_y_stride)
