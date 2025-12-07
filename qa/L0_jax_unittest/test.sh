@@ -18,6 +18,8 @@ function test_fail() {
 RET=0
 FAILED_CASES=""
 
+export NVTE_JAX_TEST_TIMING=1
+
 pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 

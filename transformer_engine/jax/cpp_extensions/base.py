@@ -176,6 +176,9 @@ _primitive_registry = {}
 def register_primitive(cls, outer_only=False):
     """
     Register a JAX primitive and add it to the internal registry.
+    Inner primitive - single device, no sharding awareness, eager mode fallback
+    Outer primitive - multi device, sharding aware, partition() distributes work,
+                      used when there's a dev mesh context
     """
     _primitive_registry[cls.__name__] = cls
 
@@ -190,14 +193,17 @@ def register_primitive(cls, outer_only=False):
         inner_p = core.Primitive(cls.name)
         dispatch.prim_requires_devices_during_lowering.add(inner_p)
         inner_p.multiple_results = cls.multiple_results
+        # Define eager execution implementation (by invoking it's MLIR lowering)
         inner_p.def_impl(partial(xla.apply_primitive, inner_p))
         inner_p.def_abstract_eval(cls.abstract)
         mlir.register_lowering(inner_p, cls.lowering, platform="cuda")
         cls.inner_primitive = inner_p
 
+    # Create the outer primitive for distributed execution
     outer_p = core.Primitive(name_of_wrapper_p())
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
     outer_p.multiple_results = cls.multiple_results
+    # Define the eager execution implementation
     outer_p.def_impl(cls.outer_impl)
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
