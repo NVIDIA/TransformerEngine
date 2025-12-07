@@ -502,7 +502,7 @@ class TestAllQuantizedTensors:
                 fp8_dtype=tex.DType.kFloat8E4M3,
             )
         elif quantization == "mxfp8":
-            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, dtype=dtype)
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         elif quantization == "fp8_blockwise":
             quantizer = Float8BlockQuantizer(
                 fp8_dtype=tex.DType.kFloat8E4M3,
