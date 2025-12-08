@@ -13,7 +13,7 @@ assert torch.cuda.get_device_capability()[0] >= 9 or (
 
 import torch
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 recipe = DelayedScaling()
 layer = te.Linear(1024, 1024)
@@ -31,8 +31,8 @@ loss.backward()
 
 # START_AUTOCAST_SEQUENTIAL
 
-encoder_recipe = DelayedScaling(fp8_format="E4M3")
-decoder_recipe = DelayedScaling(fp8_format="HYBRID")
+encoder_recipe = DelayedScaling(fp8_format=Format.E4M3)
+decoder_recipe = DelayedScaling(fp8_format=Format.HYBRID)
 
 encoder = te.Linear(1024, 1024)
 decoder = te.Linear(1024, 1024)
@@ -48,8 +48,8 @@ with te.autocast(enabled=True, recipe=decoder_recipe):
 
 # START_AUTOCAST_NESTED
 
-outer_recipe = DelayedScaling(fp8_format="E4M3")
-inner_recipe = DelayedScaling(fp8_format="HYBRID")
+outer_recipe = DelayedScaling(fp8_format=Format.E4M3)
+inner_recipe = DelayedScaling(fp8_format=Format.HYBRID)
 
 layer1 = te.Linear(1024, 1024)
 layer2 = te.Linear(1024, 1024)

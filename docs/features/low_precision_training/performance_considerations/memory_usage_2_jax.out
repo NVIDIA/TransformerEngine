@@ -1,3 +1,8 @@
 # START_MEMORY_USAGE_2
-Memory after forward pass: 8.00 MB
-# END_MEMORY_USAGE_2
+Traceback (most recent call last):
+  File "/home/pgadzinski/docs/recipe_docs/TransformerEngine/docs/features/low_precision_training/performance_considerations//memory_usage_2_jax.py", line 44, in <module>
+    measure_memory()
+  File "/home/pgadzinski/docs/recipe_docs/TransformerEngine/docs/features/low_precision_training/performance_considerations//memory_usage_2_jax.py", line 35, in measure_memory
+    with te.autocast(enabled=True, recipe=recipe):
+         ^^^^^^^^^^^
+AttributeError: module 'transformer_engine.jax' has no attribute 'autocast'

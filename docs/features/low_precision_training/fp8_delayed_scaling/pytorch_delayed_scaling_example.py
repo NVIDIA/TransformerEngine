@@ -22,11 +22,10 @@ recipe = DelayedScaling(
     amax_compute_algo="max",  # How to compute amax from history (default: "max")
 )
 
-# Create a linear layer
-layer = te.Linear(1024, 1024)
-optimizer = torch.optim.AdamW(layer.parameters(), lr=1e-4)
+# Create a linear layer with bfloat16 parameters
+layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
 
-# Training with FP8 Delayed Scaling
+# Forward and backward pass
 inp = torch.randn(32, 128, 1024, dtype=torch.bfloat16, device="cuda")
 
 with te.autocast(enabled=True, recipe=recipe):
@@ -34,6 +33,5 @@ with te.autocast(enabled=True, recipe=recipe):
     loss = output.sum()
 
 loss.backward()
-optimizer.step()
 
 # END_DELAYED_SCALING_EXAMPLE

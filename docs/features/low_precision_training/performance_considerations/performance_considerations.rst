@@ -372,38 +372,15 @@ and columnwise tensors require separate memory layouts.
             :start-after: # START_MEMORY_USAGE_2
             :end-before: # END_MEMORY_USAGE_2
       
-      Total memory usage is ``2 MB (weight) + 1 MB (weight in FP8) + 2 MB (input) + 1 MB (input in FP8) + 2 MB (output) = 8 MB``.
+      In JAX, unlike PyTorch, FP8 weights are not cached between forward passes.
+      Weights are stored in BF16 and quantized to FP8 on-the-fly during each forward pass.
+      This means the memory usage is similar to the baseline.
       
-      **3. FP8 weights without master weights**
-
-      When master weights are not needed, weights can be stored directly in FP8 using ``fp8_autocast`` during initialization.
-
-      .. raw:: html
-
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
-            Needs to be run on SM89 (Ada) or SM90 (Hopper)
-         </div>
-
-      .. literalinclude:: memory_usage_3_jax.py
-         :language: python
-         :start-after: # START_MEMORY_USAGE_3
-         :end-before: # END_MEMORY_USAGE_3
-
-      .. raw:: html
-
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
-            Output:
-         </div>
-      
-      .. container:: program-output
-      
-         .. literalinclude:: memory_usage_3_jax.out
-            :language: text
-            :start-after: # START_MEMORY_USAGE_3
-            :end-before: # END_MEMORY_USAGE_3
-
-      Total memory usage is ``1 MB (weight in FP8) + 2 MB (input) + 1 MB (input in FP8) + 2 MB (output) = 6 MB``.
-      This approach reduces memory footprint by storing weights directly in FP8 format.
+      .. note::
+         
+         JAX does not currently support storing model weights directly in FP8 format
+         like PyTorch's ``quantized_model_init``. Weights are always stored in high precision
+         (BF16/FP32) and quantized to FP8 during computation.
 
 Fused layers
 ------------

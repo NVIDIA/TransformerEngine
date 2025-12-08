@@ -19,7 +19,6 @@ def run_forward_backward(params_dtype, autocast_precision, grad_scaler_enabled):
         num_attention_heads=16,
         params_dtype=params_dtype,
     )
-    optimizer = torch.optim.SGD(layer.parameters(), lr=0.01)
     x = torch.randn(32, 128, 1024, dtype=params_dtype, device="cuda")
 
     autocast_ctx = (
@@ -35,11 +34,8 @@ def run_forward_backward(params_dtype, autocast_precision, grad_scaler_enabled):
         loss = output.sum()
     if grad_scaler_enabled:
         grad_scaler.scale(loss).backward()
-        grad_scaler.step(optimizer)
-        grad_scaler.update()
     else:
         loss.backward()
-        optimizer.step()
 
 
 run_forward_backward(torch.float32, torch.float32, False)  # high precision training

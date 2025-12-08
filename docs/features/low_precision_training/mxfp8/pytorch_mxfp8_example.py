@@ -2,6 +2,12 @@
 #
 # See LICENSE for license information.
 
+import torch
+
+# Check for Blackwell or newer GPU
+major, minor = torch.cuda.get_device_capability()
+assert major >= 10, f"MXFP8 requires SM100 (Blackwell) or later, got SM{major}{minor}"
+
 # START_MXFP8_EXAMPLE
 
 import torch
@@ -13,11 +19,10 @@ recipe = MXFP8BlockScaling(
     fp8_format=Format.E4M3,  # E4M3 (default) or HYBRID; pure E5M2 not supported
 )
 
-# Create a linear layer
-layer = te.Linear(1024, 1024)
-optimizer = torch.optim.AdamW(layer.parameters(), lr=1e-4)
+# Create a linear layer with bfloat16 parameters
+layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
 
-# Training with MXFP8
+# Forward and backward pass
 inp = torch.randn(32, 128, 1024, dtype=torch.bfloat16, device="cuda")
 
 with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
@@ -25,6 +30,5 @@ with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
     loss = output.sum()
 
 loss.backward()
-optimizer.step()
 
 # END_MXFP8_EXAMPLE

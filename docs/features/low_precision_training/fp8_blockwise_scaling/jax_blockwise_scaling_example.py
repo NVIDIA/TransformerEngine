@@ -2,15 +2,7 @@
 #
 # See LICENSE for license information.
 
-# START_BLOCKWISE_SCALING_EXAMPLE
-
 import jax
-import jax.numpy as jnp
-import optax
-import transformer_engine.jax as te
-from transformer_engine.jax.flax import DenseGeneral
-from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-from transformer_engine.common.recipe import Float8BlockScaling
 
 # Check for Hopper or newer GPU
 gpu = jax.devices("gpu")[0]
@@ -18,6 +10,14 @@ major, minor = gpu.compute_capability.split(".")
 assert (
     int(major) >= 9
 ), f"FP8 Blockwise Scaling requires SM90 (Hopper) or later, got SM{major}{minor}"
+
+# START_BLOCKWISE_SCALING_EXAMPLE
+
+import jax
+import jax.numpy as jnp
+import transformer_engine.jax as te
+from transformer_engine.jax.flax import DenseGeneral
+from transformer_engine.common.recipe import Float8BlockScaling
 
 # Create FP8 Blockwise Scaling recipe
 recipe = Float8BlockScaling(
@@ -27,25 +27,18 @@ recipe = Float8BlockScaling(
     grad_block_scaling_dim=1,  # 1D scaling for gradients (default: 1)
 )
 
-with global_shard_guard(MeshResource()):
-    with te.fp8_autocast(enabled=True, recipe=recipe, mesh_resource=MeshResource()):
-        # Initialize layer and data
-        layer = DenseGeneral(features=1024)
-        key = jax.random.PRNGKey(0)
-        x = jax.random.normal(key, (32, 128, 1024), dtype=jnp.bfloat16)
-        params = layer.init(key, x)
+with te.autocast(enabled=True, recipe=recipe):
+    # Initialize layer and data
+    layer = DenseGeneral(features=1024)
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (32, 128, 1024), dtype=jnp.bfloat16)
+    params = layer.init(key, x)
 
-        # Training with FP8 Blockwise Scaling
-        def loss_fn(params):
-            output = layer.apply(params, x)
-            return output.sum()
+    # Forward and backward pass
+    def loss_fn(params):
+        output = layer.apply(params, x)
+        return output.sum()
 
-        loss, grads = jax.value_and_grad(loss_fn)(params)
-
-        # Update parameters
-        optimizer = optax.adamw(learning_rate=1e-4)
-        opt_state = optimizer.init(params)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
+    loss, grads = jax.value_and_grad(loss_fn)(params)
 
 # END_BLOCKWISE_SCALING_EXAMPLE
