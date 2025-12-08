@@ -5,6 +5,7 @@
 """Helper functions for using fp8/nvfp4 tensors as weights"""
 
 from typing import Optional, Union, List
+import math
 import torch
 
 import transformer_engine_torch as tex
@@ -162,7 +163,6 @@ def cast_master_weights_to_nvfp4(
     """Helper to cast master weights to NVFP4 primary weights."""
 
     nvfp4_params = []
-
     if fsdp_shard_model_weights is None:
         use_fsdp_shard_model_weights = False
         fsdp_shard_model_weights = [None] * len(model_weights)
@@ -187,7 +187,6 @@ def cast_master_weights_to_nvfp4(
             raise ValueError(
                 f"cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got {type(model_weight)}"
             )
-
     if len(nvfp4_params) > 0:
         _cast_master_weights_to_nvfp4_2d(
             nvfp4_params, group, use_fsdp_shard_model_weights=use_fsdp_shard_model_weights
@@ -490,7 +489,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         params, scales
     ):
         if not manual_post_all_gather_processing:
-            # Clear columnwise data for all model weights.
+            # Reset transpose cache for all model weights.
             # We cannot create columnwise data here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated at this moment.
@@ -525,47 +524,53 @@ def _cast_master_weights_to_nvfp4_2d(
              group.
     use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
-
+    
     device = params[0][0].device
     block_len = NVFP4_BLOCK_SCALING_SIZE
 
     dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=device)
 
     cu_amax_sizes = [0]
-    scale_shapes: List[tuple[int, int]] = []
+    tile_shapes: List[tuple[int, int]] = []
+    row_sizes: List[int] = []
+    tile_widths: List[int] = []
+    scale_targets: List[torch.Tensor] = []
+    amax_targets: List[Optional[torch.Tensor]] = []
     for model_weight, _, _, _ in params:
         quantizer = model_weight._get_quantizer()
         assert isinstance(quantizer, NVFP4Quantizer)
         assert quantizer.with_2d_quantization, "NVFP4 2D quantization must be enabled."
-        scale_shape = quantizer.get_scale_shape(model_weight.shape, columnwise=False)
-        scale_shapes.append(scale_shape)
-        num_amaxes = scale_shape[0] * scale_shape[1]
+        assert len(model_weight.shape) == 2
+        h, w = model_weight.shape
+        tile_h = (h + block_len - 1) // block_len
+        tile_w = (w + block_len - 1) // block_len
+        tile_shapes.append((tile_h, tile_w))
+        row_sizes.append(h)
+        tile_widths.append(tile_w)
+        scale_targets.append(model_weight._rowwise_scale_inv)
+        amax_targets.append(model_weight._amax_rowwise)
+        num_amaxes = tile_h * tile_w
         cu_amax_sizes.append(cu_amax_sizes[-1] + num_amaxes)
 
     packed_amaxes = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
 
     amaxes: List[torch.Tensor] = []
     scales: List[torch.Tensor] = []
-    scale_inv_tmp: List[torch.Tensor] = []
-    fp8_scale_targets: List[torch.Tensor] = []
     global_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
     global_amax_views: List[torch.Tensor] = [
         global_amaxes[i : i + 1] for i in range(len(params))
     ]
 
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
-        scale_shape = scale_shapes[i]
+        scale_shape = tile_shapes[i]
         amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
         scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
-        inv_tmp = torch.empty_like(scale)
         global_amax_view = global_amax_views[i]
 
         assert model_weight._rowwise_scale_inv is not None
 
         amaxes.append(amax)
         scales.append(scale)
-        scale_inv_tmp.append(inv_tmp)
-        fp8_scale_targets.append(model_weight._rowwise_scale_inv)
 
         if master_weight is not None and master_weight.numel() > 0:
             assert len(model_weight.shape) == 2
@@ -580,6 +585,10 @@ def _cast_master_weights_to_nvfp4_2d(
 
     if global_amaxes.numel() > 0:
         torch.distributed.all_reduce(global_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+        print(
+            "[NVFP4 partial cast] global_amaxes:",
+            [(idx, float(val)) for idx, val in enumerate(global_amaxes.tolist())],
+        )
 
     global_scale_tensor = global_amaxes.clone()
     if len(amaxes) > 0:
@@ -594,34 +603,51 @@ def _cast_master_weights_to_nvfp4_2d(
             global_amaxes > 0, global_encode_scales, torch.ones_like(global_encode_scales)
         )
         global_scale_tensor.copy_(global_encode_scales)
+        print(
+            "[NVFP4 partial cast] global_encode_scales:",
+            [(idx, float(val)) for idx, val in enumerate(global_encode_scales.tolist())],
+        )
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-        for amax_tensor, scale_tensor, inv_tmp_tensor, global_scale in zip(
-            amaxes, scales, scale_inv_tmp, global_scale_views
+        for amax_tensor, scale_tensor, global_scale in zip(
+            amaxes, scales, global_scale_views
         ):
             per_block_decode_scale = torch.clamp(
                 (amax_tensor / fp4_max) * global_scale, max=finfo.max
             )
             scale_tensor.copy_(per_block_decode_scale)
-            inv_tmp_tensor.copy_(per_block_decode_scale)
-        # Update _rowwise_scale_inv with reduced per-block decode scales.
-        for inv_tmp, target in zip(scale_inv_tmp, fp8_scale_targets):
-            fp8_view = inv_tmp.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
-            target.copy_(fp8_view)
     else:
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-    for (
+    zipped_meta = zip(
+        tile_shapes,
+        row_sizes,
+        tile_widths,
+        scale_targets,
+        amax_targets,
+        params,
+        scales,
+        global_scale_views,
+    )
+    for idx, (
+        tile_shape,
+        rows,
+        tile_col_cnt,
+        target_scale,
+        target_amax,
         (model_weight, master_weight, start_offset, model_weight_fragment),
         per_block_decode_scale,
         global_scale,
-    ) in zip(params, scales, global_scale_views):
+    ) in enumerate(zipped_meta):
         if master_weight is None or master_weight.numel() == 0:
             continue
 
         end_offset = start_offset + master_weight.numel()
         if not use_fsdp_shard_model_weights:
-            model_weight_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
+            rowwise_bytes = model_weight._rowwise_data.view(-1)
+            byte_start = start_offset // 2
+            byte_end = (end_offset + 1) // 2
+            model_weight_fragment = rowwise_bytes[byte_start:byte_end]
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
         tex.nvfp4_2d_partial_cast(
@@ -634,6 +660,52 @@ def _cast_master_weights_to_nvfp4_2d(
             start_offset,
             block_len,
         )
+        tile_rows = tile_shape[0]
+        expanded_scale = torch.zeros_like(target_scale, dtype=torch.float32)
+        chunk = block_len
+        for tile_row_idx in range(tile_rows):
+            base_row = tile_row_idx * chunk
+            row_end = min(base_row + chunk, rows)
+            if base_row >= target_scale.shape[0]:
+                break
+            expanded_scale[base_row:row_end, :tile_col_cnt] = per_block_decode_scale[
+                tile_row_idx
+            ]
+        fp8_view = expanded_scale.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
+        target_scale.copy_(fp8_view)
+        if target_amax is not None:
+            target_amax.copy_(global_amaxes[idx : idx + 1])
+
+        if (
+            master_weight is not None
+            and not use_fsdp_shard_model_weights
+            and isinstance(model_weight, NVFP4Tensor)
+        ):
+            quantizer = model_weight._get_quantizer()
+            reference_tensor = quantizer(
+                master_weight.detach()
+                .view(model_weight.shape)
+                .to(dtype=model_weight.dtype)
+            )
+            ref_data = reference_tensor._rowwise_data
+            ref_scale = reference_tensor._rowwise_scale_inv
+            data_diff = (model_weight._rowwise_data != ref_data).nonzero(as_tuple=False)
+            scale_diff = (
+                model_weight._rowwise_scale_inv != ref_scale
+            ).nonzero(as_tuple=False)
+            # print("model_weight._rowwise_scale_inv", model_weight._rowwise_scale_inv)
+            # print("ref_scale", ref_scale)
+            # print("scale_diff", scale_diff)
+            # if data_diff.numel() > 0:
+            #     print(
+            #         f"[NVFP4 partial cast][debug] data mismatch idx {idx}, first entries:",
+            #         data_diff[:5].tolist(),
+            #     )
+            # if scale_diff.numel() > 0:
+            #     print(
+            #         f"[NVFP4 partial cast][debug] scale mismatch idx {idx}, first entries:",
+            #         scale_diff[:5].tolist(),
+            #     )
 
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
