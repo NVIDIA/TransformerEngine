@@ -94,7 +94,6 @@ def _make_graphed_callables(
     _reuse_graph_input_output_buffers: bool = False,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
-    init_chunk_handler: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -487,8 +486,6 @@ def _make_graphed_callables(
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
-                if init_chunk_handler is not None:
-                    init_chunk_handler(vp_stage=c_id-1)
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
                     func = callables[_prefix_num_layers[m_chunk] + l_no]
@@ -950,7 +947,6 @@ def make_graphed_callables(
     _reuse_graph_input_output_buffers: bool = False,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
-    init_chunk_handler: Optional[Callable] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -1177,7 +1173,6 @@ def make_graphed_callables(
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
         pre_warmup_hook=pre_warmup_hook,
         post_warmup_hook=post_warmup_hook,
-        init_chunk_handler=init_chunk_handler,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
