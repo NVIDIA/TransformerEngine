@@ -14,11 +14,10 @@ from transformer_engine.common.recipe import Float8CurrentScaling, Format
 #   - Format.E4M3 -- E4M3 for both forward and backward pass
 recipe = Float8CurrentScaling(fp8_format=Format.HYBRID)
 
-# Create a simple linear layer
-layer = te.Linear(1024, 1024)
-optimizer = torch.optim.SGD(layer.parameters(), lr=0.01)
+# Create a simple linear layer with bfloat16 parameters
+layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
 
-# Training with FP8 Current Scaling
+# Forward and backward pass
 inp = torch.randn(32, 128, 1024, dtype=torch.bfloat16, device="cuda")
 
 with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
@@ -26,6 +25,5 @@ with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
     loss = output.sum()
 
 loss.backward()
-optimizer.step()
 
 # END_CURRENT_SCALING_EXAMPLE

@@ -2,15 +2,17 @@
 #
 # See LICENSE for license information.
 
+import torch
+
+# Check for Hopper or newer GPU
+major, minor = torch.cuda.get_device_capability()
+assert major >= 9, f"FP8 Blockwise Scaling requires SM90 (Hopper) or later, got SM{major}{minor}"
+
 # START_BLOCKWISE_SCALING_EXAMPLE
 
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
-
-# Check for Hopper or newer GPU
-major, minor = torch.cuda.get_device_capability()
-assert major >= 9, f"FP8 Blockwise Scaling requires SM90 (Hopper) or later, got SM{major}{minor}"
 
 # Create FP8 Blockwise Scaling recipe
 recipe = Float8BlockScaling(
@@ -20,11 +22,10 @@ recipe = Float8BlockScaling(
     grad_block_scaling_dim=1,  # 1D scaling for gradients (default: 1)
 )
 
-# Create a linear layer
-layer = te.Linear(1024, 1024)
-optimizer = torch.optim.AdamW(layer.parameters(), lr=1e-4)
+# Create a linear layer with bfloat16 parameters
+layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
 
-# Training with FP8 Blockwise Scaling
+# Forward and backward pass
 inp = torch.randn(32, 128, 1024, dtype=torch.bfloat16, device="cuda")
 
 with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
@@ -32,6 +33,5 @@ with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
     loss = output.sum()
 
 loss.backward()
-optimizer.step()
 
 # END_BLOCKWISE_SCALING_EXAMPLE

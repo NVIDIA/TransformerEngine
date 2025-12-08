@@ -5,40 +5,42 @@
 # Requires Ada (SM89) or Hopper (SM90), different results on Blackwell+
 
 print("# START_MEMORY_USAGE_1")
-# START_MEMORY_USAGE_1
 
 import jax
 import jax.numpy as jnp
 from transformer_engine.jax.flax import DenseGeneral
-from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
+
+def get_gpu_memory_mb():
+    """Get current GPU memory usage in MB."""
+    jax.effects_barrier()
+    stats = jax.local_devices()[0].memory_stats()
+    return stats["bytes_in_use"] / (1024**2) if stats else 0.0
 
 
 def measure_memory():
     key = jax.random.PRNGKey(0)
+    jax.clear_caches()
 
-    with global_shard_guard(MeshResource()):
-        # Initialize a dense layer with high precision parameters
-        layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
-        x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
-        params = layer.init(key, x)
+    init_memory = get_gpu_memory_mb()
 
-        # Calculate layer size (1024 * 1024 * 2 bytes for BF16)
-        param_count = 1024 * 1024
-        layer_size = param_count * 2 / (1024**2)
+    # Initialize layer with BF16 parameters
+    layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
+    x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
+    params = layer.init(key, x)
 
-        # Forward pass
-        output = layer.apply(params, x)
+    # Forward pass in high precision
+    output = layer.apply(params, x)
 
-    # Memory after forward: weight (2 MB) + input (2 MB) + output (2 MB) = 6 MB
-    return layer_size, 6.00
+    mem_after_forward = get_gpu_memory_mb() - init_memory
+    return mem_after_forward
 
 
 # Warmup run
 measure_memory()
 
 # Actual measurement
-layer_size, mem_after_forward = measure_memory()
-print(f"Layer size: {layer_size:.2f} MB")
+mem_after_forward = measure_memory()
 print(f"Memory usage after forward pass: {mem_after_forward:.2f} MB")
-# END_MEMORY_USAGE_1
+
 print("# END_MEMORY_USAGE_1")
