@@ -122,7 +122,6 @@ constexpr bool is_supported_arch() {
                          ptx::FamilySpecific<120>)
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
-#define ARCH_HAS_REDUX_F32 NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
@@ -1737,8 +1736,8 @@ __device__ __forceinline__ bf16x2 ld_shared_b32(const bf16x2 *__restrict__ src_s
 }
 
 // Loads 8x BF16 values from shared memory state space
-__device__ __forceinline__ void ld_shared_b128(uint64_t &elts03, uint64_t &elts47,
-                                               const bf16 *__restrict__ src_smem) {
+__device__ __forceinline__ __uint128_t ld_shared_b128(const bf16 *__restrict__ src_smem) {
+  uint64_t elts03, elts47;
   const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
   asm volatile(
       "{\n\t"
@@ -1748,6 +1747,7 @@ __device__ __forceinline__ void ld_shared_b128(uint64_t &elts03, uint64_t &elts4
       "}\n"
       : "=l"(elts03), "=l"(elts47)
       : "r"(src_smem_ptr));
+  return (static_cast<__uint128_t>(elts47) << 64) | static_cast<__uint128_t>(elts03);
 }
 
 #if FP4_TYPE_SUPPORTED
