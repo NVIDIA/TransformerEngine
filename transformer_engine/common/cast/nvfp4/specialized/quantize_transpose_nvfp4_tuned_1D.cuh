@@ -600,7 +600,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
         // number of scales in Y dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / SCALE_DIM);
 
-        for (size_t row_tr = threadIdx.x; row_tr < TunableConfig::CHUNK_DIM_X; row_tr += THREADS_NUM) {
+        for (size_t row_tr = threadIdx.x; row_tr < TunableConfig::CHUNK_DIM_X;
+             row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
             ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
@@ -633,8 +634,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantize_transpose_tuned_kernel
 
-inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
-                                        Tensor *output, const QuantizationConfig *quant_config,
+inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop, Tensor *output,
+                                        const QuantizationConfig *quant_config,
                                         cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_tuned_kernel;
