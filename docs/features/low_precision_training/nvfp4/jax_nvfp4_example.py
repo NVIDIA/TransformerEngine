@@ -7,9 +7,7 @@ import jax
 # Check for Blackwell or newer GPU
 gpu = jax.devices("gpu")[0]
 major, minor = gpu.compute_capability.split(".")
-assert (
-    int(major) >= 10
-), f"NVFP4 requires SM100 (Blackwell) or later, got SM{major}{minor}"
+assert int(major) >= 10, f"NVFP4 requires SM100 (Blackwell) or later, got SM{major}{minor}"
 
 # START_NVFP4_EXAMPLE
 
