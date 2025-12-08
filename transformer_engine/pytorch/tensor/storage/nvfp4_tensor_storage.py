@@ -318,3 +318,32 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_data = None
             self._columnwise_scale_inv = None
             self._amax_columnwise = None
+    
+    def _create_columnwise(self):
+        """
+        Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
+        """
+        rowwise_data = self._rowwise_data
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+        self._columnwise_data = tex.fp8_transpose(
+            rowwise_data, self._fp8_dtype, out=self._columnwise_data
+        )
+        if self._columnwise_scale_inv is None:
+            assert self._quantizer is not None, (
+                "._quantizer of Float8BlockwiseQTensor cannot be None because all the blockwise "
+                "quantized tensors are supposed to be generated from the quantizer."
+            )
+            columnwise_scale_inv_shape = self._quantizer.get_scale_shape(rowwise_data.shape, True)
+            self._columnwise_scale_inv = torch.empty(
+                columnwise_scale_inv_shape,
+                dtype=self._rowwise_scale_inv.dtype,
+                device=self._rowwise_scale_inv.device,
+            )
+        assert len(self._rowwise_scale_inv.shape) == 2
+        assert len(self._columnwise_scale_inv.shape) == 2
+        rowwise_scale_inv = self._rowwise_scale_inv
+        columnwise_scale_inv = rowwise_scale_inv.transpose(-2, -1)
+        h = min(self._columnwise_scale_inv.shape[0], columnwise_scale_inv.shape[0])
+        w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
+        self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
