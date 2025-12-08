@@ -16,6 +16,8 @@ function test_fail() {
 RET=0
 FAILED_CASES=""
 
+export NVTE_JAX_TEST_TIMING=1
+
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"

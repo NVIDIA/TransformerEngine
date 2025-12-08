@@ -53,7 +53,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
     Parameters
     ----------
-    cache_quantized_input: bool, default = False
+    cache_quantized_input : bool, default = False
         Quantize input tensor when caching for use in the backward
         pass. This will typically reduce memory usage but require
         extra compute and increase numerical error. This feature is
@@ -408,11 +408,11 @@ class ClampedSwiGLU(_ActivationOperation):
 
     Parameters
     ----------
-    limit: float
+    limit : float
         The clamp limit.
-    alpha: float
+    alpha : float
         The scaling factor for the sigmoid function used in the activation.
-    cache_quantized_input: bool, default = False
+    cache_quantized_input : bool, default = False
         Quantize input tensor when caching for use in the backward pass.
     """
 

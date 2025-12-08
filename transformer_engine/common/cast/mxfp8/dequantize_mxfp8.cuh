@@ -227,8 +227,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);
 
-  const auto &input_shape = input.data.shape;
-  NVTE_CHECK(input_shape.size() >= 2, "Input must have at least 2 dimensions.");
+  NVTE_CHECK(input.dim() >= 2, "Input must have at least 2 dimensions.");
 
   if (use_rowwise_scaling) {
     NVTE_CHECK(input.has_data(), "Cannot dequantize tensor without rowwise data.");
@@ -241,7 +240,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   }
 
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+  NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
 
   // TODO: Make more general
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;

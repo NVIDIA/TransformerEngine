@@ -363,6 +363,28 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
     TEDebugState._reset()
 
 
+def test_log_grouped_gemm(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    log_all_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(all_stats))
+    with debug_session(log_all_stats_config, feature_dirs) as log_dir:
+        model = te.GroupedLinear(3, 128, 128, name="linear1", params_dtype=torch.bfloat16)
+        inp = torch.randn((1, 128, 128), dtype=torch.bfloat16).cuda()
+        m_splits = [64, 32, 32]
+        with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
+            output = model(inp, m_splits=m_splits)
+        loss = output.sum()
+        loss.backward()
+        debug_api.step()
+
+        output = read_log(log_dir)
+
+    assert "gemm_0" in output, "gemm0 not found in output"
+    assert "gemm_1" in output, "gemm1 not found in output"
+    assert "gemm_2" in output, "gemm2 not found in output"
+
+
 def test_compute_max_blockwise_dynamic_range_direct():
     """Direct unit test for compute_max_blockwise_dynamic_range function.
 

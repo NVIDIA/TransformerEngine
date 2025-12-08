@@ -552,7 +552,7 @@ class BaseTester:
         """Test forward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
         with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-            self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+            self.runner(attrs).test_forward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
@@ -560,7 +560,7 @@ class BaseTester:
         """Test backward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
         with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-            self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+            self.runner(attrs).test_backward(data_shape, dtype)
 
 
 class TestEncoderLayer(BaseTester):

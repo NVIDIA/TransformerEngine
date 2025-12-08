@@ -12,8 +12,8 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
-from . import torch_version
 from .quantized_tensor import Quantizer
+from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -601,7 +601,7 @@ def get_nvtx_range_context(msg: str):
 
     Parameters
     ----------
-    msg: str
+    msg : str
         Message to associate with profiling context.
 
     """
@@ -619,7 +619,7 @@ def nvtx_range_push(msg: str) -> None:
 
     Parameters
     ----------
-    msg: str
+    msg : str
         Message to associate with range
 
     """
@@ -637,7 +637,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
 
     Parameters
     ----------
-    msg: str, optional
+    msg : str, optional
         Message associated with range
 
     """

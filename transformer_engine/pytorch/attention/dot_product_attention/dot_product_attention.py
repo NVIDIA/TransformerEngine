@@ -152,25 +152,25 @@ __all__ = ["DotProductAttention"]
 
 
 class DotProductAttention(TransformerEngineBaseModule):
-    """Allows the model to jointly attend to information from different
+    r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
     .. note::
 
-        Argument :attr:`attention_mask` in the `forward` call is only used when
-        :attr:`attn_mask_type` includes '"padding"' or `"arbitrary"`.
+        Argument :attr:`attention_mask` in the ``forward`` call is only used when
+        :attr:`attn_mask_type` includes '"padding"' or ``"arbitrary"``.
 
     .. warning::
 
         FlashAttention uses a non-deterministic algorithm for optimal performance. To observe
-        deterministic behavior at the cost of performance, use FlashAttention version >= `2.4.1`
+        deterministic behavior at the cost of performance, use FlashAttention version >= ``2.4.1``
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
-        to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
+        to disable ``flash-attn`` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
     .. note::
 
-        Transformer Engine stores the FP8 metadata under a `._extra_state` key when checkpointing.
+        Transformer Engine stores the FP8 metadata under a ``._extra_state`` key when checkpointing.
         As the FP8 attention support expands from one backend to multiple backends, the location
         of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
 
@@ -182,118 +182,137 @@ class DotProductAttention(TransformerEngineBaseModule):
     kv_channels : Union[int, Tuple[int, int]]
                 the head size in key and value tensors. If the same, :attr:`kv_channels` can be
                 an integer; if not, :attr:`kv_channels` should be a tuple of two integers.
-    num_gqa_groups : Optional[int] = None
+    num_gqa_groups : Optional[int], default = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
                     `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
                     This only affects the keys and values, not the queries.
                     GQA-1 is equivalent to Multi-Query Attention
                     (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
-                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
-    attention_dropout: float, default = 0.0
+                    is equivalent to MHA, i.e. ``num_gqa_groups = num_attention_heads``.
+    attention_dropout : float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: str, default = `causal`
-                   type of attention mask passed into softmax operation, options are "`no_mask`",
-                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`",
-                   "`padding_causal`", "`causal_bottom_right`", "`padding_causal_bottom_right`", and
-                   "`arbitrary`", where "`padding,causal`", "`causal,padding`" and "`padding_causal`"
+    attn_mask_type : str, default = "causal"
+                   type of attention mask passed into softmax operation, options are ``"no_mask"``,
+                   ``"padding"``, ``"causal"``, ``"padding,causal"``, ``"causal,padding"``,
+                   ``"padding_causal"``, ``"causal_bottom_right"``, ``"padding_causal_bottom_right"``, and
+                   ``"arbitrary"``, where ``"padding,causal"``, ``"causal,padding"`` and ``"padding_causal"``
                    are equivalent. This arg can be overridden by :attr:`attn_mask_type` in the
-                   `forward` method. It is useful for cases involving compilation/tracing, e.g.
+                   :meth:`forward` method. It is useful for cases involving compilation/tracing, e.g.
                    ONNX export, and the forward arg is useful for dynamically changing mask types,
                    e.g. a different mask for training and inference.
-                   1. For "`no_mask`", no attention mask is applied.
-                   2. For "`causal`", "`causal_bottom_right`", or the causal mask in
-                   "`padding_causal`" and "`padding_causal_bottom_right`", Transformer Engine
-                   calculates and applies an upper triangular mask to the softmax input.
-                   No user input is needed. Causal masks without the "`bottom_right`" appendix align
-                   the diagonal line to the top left corner of the softmax matrix. With
-                   "`bottom_right`", the causal mask is aligned to the bottom right corner, which is
-                   often used in inference/KV caching.
-                   3. For "`padding`", or the padding mask in "`padding_causal`" and
-                   "`padding_causal_bottom_right`", users need to provide the locations of padded
-                   tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both in shape
-                   [batch_size + 1]), or via :attr:`attention_mask` (one tensor for self-attention
-                   in shape [batch_size, 1, 1, max_seqlen_q], or two tensors in a tuple for
-                   cross-attention in shapes [batch_size, 1, 1, max_seqlen_q] and
-                   [batch_size, 1, 1, max_seqlen_kv]).
-                   4. For "`arbitrary`", users need to provide a mask that is broadcastable to
-                   the shape of softmax input [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
-    window_size: Optional[Tuple[int, int]], default = `None`
+
+                   1. For ``"no_mask"``, no attention mask is applied.
+                   2. For ``"causal"``, ``"causal_bottom_right"``, or the causal mask in
+                      ``"padding_causal"`` and ``"padding_causal_bottom_right"``, Transformer Engine
+                      calculates and applies an upper triangular mask to the softmax input.
+                      No user input is needed. Causal masks without the ``"bottom_right"`` appendix align
+                      the diagonal line to the top left corner of the softmax matrix. With
+                      ``"bottom_right"``, the causal mask is aligned to the bottom right corner, which is
+                      often used in inference/KV caching.
+                   3. For ``"padding"``, or the padding mask in ``"padding_causal"`` and
+                      ``"padding_causal_bottom_right"``, users need to provide the locations of padded
+                      tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both of shape
+                      ``[batch_size + 1]``), or via :attr:`attention_mask` (one tensor for self-attention
+                      of shape ``[batch_size, 1, 1, max_seqlen_q]``, or two tensors in a tuple for
+                      cross-attention of shapes ``[batch_size, 1, 1, max_seqlen_q]`` and
+                      ``[batch_size, 1, 1, max_seqlen_kv]``).
+                   4. For ``"arbitrary"``, users need to provide a mask that is broadcastable to
+                      the shape of softmax input ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``.
+
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention, where query at position i attends to keys
-                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
-                be overridden by :attr:`window_size` in `forward` as well.
-    attention_type: str, default = `self`
-                   type of attention, either "`self`" and "`cross`".
-    layer_number: int, default = `None`
-                 layer number of the current `DotProductAttention` when multiple such modules
+                in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean no sliding
+                window and causal mask specifically. Both ``causal`` and ``causal_bottom_right`` masks
+                map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
+                ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
+                be overridden by :attr:`window_size` in ``forward`` as well.
+    attention_type : str, default = "self"
+                   type of attention, either ``"self"`` and ``"cross"``.
+    layer_number : int, default = None
+                 layer number of the current ``DotProductAttention`` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
-    qkv_format: str, default = `sbhd`
-               dimension format for `query_layer`, `key_layer` and `value_layer`,
-               {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
-               `h` the number of heads, `d` head size, and `t` the total number of tokens
-               in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
+    qkv_format : str, default = "sbhd"
+               dimension format for ``query_layer``, ``key_layer`` and ``value_layer``,
+               {``"sbhd"``, ``"bshd"``, ``"thd"``}. ``s`` stands for the sequence length, ``b`` batch size,
+               ``h`` the number of heads, ``d`` head size, and ``t`` the total number of tokens
+               in a batch, with ``t = sum(s_i), for i = 0...b-1``. ``"sbhd"`` and ``"bshd"`` formats
                are used for when sequences in a batch are of equal length or padded to
-               equal length, and the `thd` format is used for when sequences in a batch
+               equal length, and the ``"thd"`` format is used for when sequences in a batch
                have different lengths. Please note that these formats do not reflect how
-               tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-               For that, please use `get_qkv_layout` to gain the layout information.
-    softmax_scale: Optional[float], default = `None`
-                softmax scale for the attention scores. If `None`, defaults to
-                `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 softmax type as described in this paper:
+               tensors ``query_layer``, ``key_layer``, ``value_layer`` are laid out in memory.
+               For that, please use ``get_qkv_layout`` to gain the layout information.
+    softmax_scale : Optional[float], default = None
+                softmax scale for the attention scores. If ``None``, defaults to
+                ``1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])``.
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
-                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
-                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
-                 where alpha is a learnable parameter in shape [h].
-                 'off-by-one' and 'learnable' softmax types are also called sink attention
-                 ('zero sink' and 'learnable sink').
-    return_max_logit: Optional[bool], default = `False`
+
+                 For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+                 * ``'vanilla'``:
+
+                   .. math::
+                      Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'off-by-one'``:
+
+                   .. math::
+                      Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'learnable'``:
+
+                   .. math::
+                      Softmax(S)_{:,h,:,i} = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+                   where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+                 ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+                 (``'zero sink'`` and ``'learnable sink'``).
+
+    return_max_logit : Optional[bool], default = False
                      If true, returns the maximum attention score that can be used in a Muon optimizer to
                      rescale the Q and K projection weights (see `Muon is Scalable for LLM Training
                      <https://arxiv.org/pdf/2502.16982>`_).
-                     max_logit = max(S), where S = mask(Q*K^T*softmax_scale + bias) in shape [b, h, s_q, s_kv],
-                     and max_logit is in shape [h].
+                     :math:`\text{max_logit} = \max(S)`, where :math:`S = \text{mask}(Q \cdot K^T \cdot \text{softmax_scale} + \text{bias})` of shape ``[b, h, s_q, s_kv]``,
+                     and :math:`\text{max_logit}` is of shape ``[h]``.
 
     Parallelism parameters
     ----------------------
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
     tp_size : int, default = 1
              tensor parallel world size.
-    tp_group : ProcessGroup, default = `None`
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
-    cp_group : Union[ProcessGroup, List[ProcessGroup]], default = `None`
+    cp_group : Union[ProcessGroup, List[ProcessGroup]], default = None
               context parallel process group.
-              ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
-              List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
-              and cp_group[1] are for a2a and p2p communications respectively.
-    cp_global_ranks : list of global rank IDs, default = `None`
-                     global rank IDs of GPUs that are in cp_group.
-    cp_stream : CUDA stream, default = `None`
+              ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
+              ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
+              and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
+    cp_global_ranks : list of global rank IDs, default = None
+                     global rank IDs of GPUs that are in ``cp_group``.
+    cp_stream : CUDA stream, default = None
                context parallelism splits flash attention into multiple steps for
                compute and communication overlapping. To address the wave quantization
                issue of each split step, we add an additional CUDA stream so that we
                can overlap two flash attention kernels.
-    cp_comm_type : str, default = `p2p`
+    cp_comm_type : str, default = "p2p"
                   inter-gpu communication type for context parallelism.
-                  Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                  "p2p": Exchange KV chunks with P2P communications in ring topology.
-                         P2P is async and can be overlapped with attention compute.
-                  "all_gather": All-gather to get full sequence of KV before attention.
-                                The all-gather is not async, and cannot be overlapped.
-                  "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                         group, and gather to get full sequence of QKV.
-                  "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                  across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                  p2p between sub-groups (e.g., via IBLink).
+                  Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                  - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                    P2P is async and can be overlapped with attention compute.
+                  - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                    The all-gather is not async, and cannot be overlapped.
+                  - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                    group, and gather to get full sequence of QKV.
+                  - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                    across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                    p2p between sub-groups (e.g., via IBLink).
     """
 
     def __init__(
@@ -468,8 +487,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     ):
         """
         This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
-        metadata is stored under the `core_attention.fused_attention._extra_state` key and not the
-        `core_attention._extra_state` key. Please see `FP8 checkpoint compatibility
+        metadata is stored under the ``core_attention.fused_attention._extra_state`` key and not the
+        ``core_attention._extra_state`` key. Please see `FP8 checkpoint compatibility
         <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
         """
         fused_attn_key = False
@@ -522,25 +541,26 @@ class DotProductAttention(TransformerEngineBaseModule):
         ----------
         cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
-                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
-                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
-                  and cp_group[1] are for a2a and p2p communications respectively.
+                  ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
+                  ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
+                  and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : str, default = `p2p`
+        cp_comm_type : str, default = "p2p"
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                      "p2p": Exchange KV chunks with P2P communications in ring topology.
-                             P2P is async and can be overlapped with attention compute.
-                      "all_gather": All-gather to get full sequence of KV before attention.
-                                    The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                             group, and gather to get full sequence of QKV.
-                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                      p2p between sub-groups (e.g., via IBLink).
+                      Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                      - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                        P2P is async and can be overlapped with attention compute.
+                      - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                        The all-gather is not async, and cannot be overlapped.
+                      - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                        group, and gather to get full sequence of QKV.
+                      - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                        across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                        p2p between sub-groups (e.g., via IBLink).
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
@@ -801,13 +821,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_output: Optional[bool] = False,
         num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
-        """
+        r"""
         Dot Product Attention Layer.
 
         .. note::
 
             Argument :attr:`attention_mask` is only used when :attr:`attn_mask_type`
-            includes '"padding"' or `"arbitrary"`.
+            includes ``"padding"`` or ``"arbitrary"``.
 
         .. note::
 
@@ -846,24 +866,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`
                (which will be converted to :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`), to provide
                the real sequence length information. For example, a batch of 3 sequences
-               [a a a b b c c c c] can be padded to [a a a PAD b b PAD PAD c c c c], and the cumulative
+               ``[a a a b b c c c c]`` can be padded to ``[a a a PAD b b PAD PAD c c c c]``, and the cumulative
                sequence length tensors would be
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]`` for self-attention.
 
             2. Do not perform padding on training data. Use :attr:`qkv_format` = "thd" and
                :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
                Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`,
-               as in option 1. For example, a batch of 3 sequences [a a a b b c c c c] can be processed
+               as in option 1. For example, a batch of 3 sequences ``[a a a b b c c c c]`` can be processed
                without any padding, and the sequence length tensors would be
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]`` for self-attention.
 
                In certain use cases, a varying number of identifier tokens are inserted between
                sequences. These tokens do not participate in the attention calculation.
                :attr:`cu_seqlens_q_padded` and :attr:`cu_seqlens_kv_padded` must be specified
                in such cases to correctly identify the start and end of each sequence in a batch.
-               For example, a batch of 3 sequences [a a a 1 b b 2 2 c c c c 3] would have
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9], and
-               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = [0, 4, 8, 13]
+               For example, a batch of 3 sequences ``[a a a 1 b b 2 2 c c c c 3]`` would have
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]``, and
+               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = ``[0, 4, 8, 13]``
                for self-attention.
 
         .. note::
@@ -898,81 +918,81 @@ class DotProductAttention(TransformerEngineBaseModule):
         value_layer : torch.Tensor
                      Value tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
-             default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
-             a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
-             two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable
-             to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
-             the corresponding position is masked out and a `False` means that position
+             default = None. Boolean tensor(s) used to mask out attention softmax input.
+             It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
+             a single tensor of ``[batch_size, 1, 1, seqlen_q]`` for self-attention, and a tuple of
+             two tensors of shapes ``[batch_size, 1, 1, seqlen_q]`` and ``[batch_size, 1, 1, seqlen_kv]``
+             for cross-attention. For ``"arbitrary"`` mask, it should be of a shape broadcastable
+             to ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``. A ``True`` value means
+             the corresponding position is masked out and a ``False`` means that position
              is allowed to participate in attention.
-        qkv_format: str, default = `None`
+        qkv_format: str, default = None
                    If provided, overrides :attr:`qkv_format` from initialization.
-        cu_seqlens_q: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
+        cu_seqlens_q: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``query_layer``,
                    with shape [batch_size + 1] and dtype torch.int32.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape [batch_size + 1] and dtype torch.int32.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = None
                    Cumulative sum of sequence lengths (with offset) in a batch for
-                   `query_layer`, with shape [batch_size + 1] and dtype torch.int32.
+                   ``query_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_q_padded = cu_seqlens_q`.
+                   :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_q`.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (with offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_kv_padded = cu_seqlens_kv`.
+                   :attr:`cu_seqlens_kv_padded` = :attr:`cu_seqlens_kv`.
                    See :ref:`note<cu_seqlens note>` for more details.
-        max_seqlen_q: Optional[int], default = `None`
-                      Maximum sequence length in `query_layer`.
+        max_seqlen_q: Optional[int], default = None
+                      Maximum sequence length in ``query_layer``.
                       See :ref:`note<max_seqlen note>` for more details.
-        max_seqlen_kv: Optional[int], default = `None`
-                       Maximum sequence length in `key_layer` and `value_layer`.
+        max_seqlen_kv: Optional[int], default = None
+                       Maximum sequence length in ``key_layer`` and ``value_layer``.
                        See :ref:`note<max_seqlen note>` for more details.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
-                       'arbitrary'}, default = `None`. Type of attention mask passed into
+                       'arbitrary'}, default = None. Type of attention mask passed into
                        softmax operation. 'padding,causal', 'causal,padding' and 'padding_causal'
                        are equivalent. By default, causal masks are aligned to the top left corner
-                       of the softmax matrix. When "`bottom_right`" is specified in the mask type,
+                       of the softmax matrix. When ``"bottom_right"`` is specified in the mask type,
                        causal masks are aligned to the bottom right corner.
-        window_size: Optional[Tuple[int, int]], default = `None`
+        window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
-        checkpoint_core_attention : bool, default = `False`
+        checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
                                    otherwise be occupied to store the forward activations until
                                    backprop.
-        core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
-        core_attention_bias: Optional[torch.Tensor], default = `None`
-                    Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
-                    It should be 'None' for 'no_bias' and 'alibi' bias types.
-        alibi_slopes: Optional[torch.Tensor], default = `None`
-                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+        core_attention_bias_type: str, default = "no_bias"
+                    Bias type, {``"no_bias"``, ``"pre_scale_bias"``, ``"post_scale_bias"``, ``"alibi"``}
+        core_attention_bias: Optional[torch.Tensor], default = None
+                    Bias tensor for :math:`Q \cdot K^T`, shape ``[1, num_head, max_seqlen_q, max_seqlen_kv]``.
+                    It should be ``None`` for ``"no_bias"`` and ``"alibi"`` bias types.
+        alibi_slopes: Optional[torch.Tensor], default = None
+                     ALiBi slopes in FP32 and shape ``[nheads]`` or ``[batch_size, nheads]``.
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
-        fast_zero_fill: bool, default = `True`
+        fast_zero_fill: bool, default = True
                     Whether to use the fast path to set output tensors to 0 or not.
-        inference_params: Optional[InferenceParams], default = `None`
+        inference_params: Optional[InferenceParams], default = None
             Optimizes execution performance during inference by caching Keys and Values of the
             current decoding iteration. These cached values are appended to the K and V values
             computed in previous iterations, eliminating the need to recalculate them for the
             entire sequence.
-            Initialization of `inference_params` is required prior to use to ensure sufficient
+            Initialization of ``inference_params`` is required prior to use to ensure sufficient
             memory allocation.
             Adjustments of the sequence_len_offset should be done after a complete forward pass.
             If rotary positional embeddings (RoPE) are utilized, they must be prepared beforehand.
             Supports "sbhd" and "bshd" layouts, with the "sbhd" layout being more efficient.
-        pad_between_seqs: Optional[bool], default = `None`
-            If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
-            If true, there are padding tokens between individual sequences in a packed batch.
-        fp8_output: Optional[bool], default = `False`
+        pad_between_seqs: Optional[bool], default = None
+            If ``None``, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
+            If ``True``, there are padding tokens between individual sequences in a packed batch.
+        fp8_output: Optional[bool], default = False
             Whether to enforce output to be in FP8 or not.
         num_splits: Optional[int], default = 1
             Optional split control for FlashAttention-3 only. When set, this value is forwarded

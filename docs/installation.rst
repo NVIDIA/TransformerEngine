@@ -28,7 +28,7 @@ on `NVIDIA GPU Cloud <https://ngc.nvidia.com>`_.
 
 
 pip - from PyPI
------------------------
+---------------
 
 Transformer Engine can be directly installed from `our PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
 
@@ -47,7 +47,7 @@ The core package from Transformer Engine (without any framework extensions) can 
 By default, this will install the core library compiled for CUDA 12. The cuda major version can be specified by modified the extra dependency to `core_cu12` or `core_cu13`.
 
 pip - from GitHub
------------------------
+-----------------
 
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^

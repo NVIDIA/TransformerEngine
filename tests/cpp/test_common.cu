@@ -278,52 +278,33 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode) {
-  name_ = name;
+               const NVTEScalingMode &scaling_mode)
+  : tensor_(scaling_mode), rowwise_{rowwise}, columnwise_{columnwise}, name_{name} {
+  // Initialize RNG
   const size_t seed = create_seed_from_tensor_name(name);
   gen_.seed(seed);
-  rowwise_ = rowwise;
-  columnwise_ = columnwise;
-  size_t total_size = bytes(shape, type);
-  void *dptr_rowwise = nullptr;
-  void *dptr_columnwise = nullptr;
-  cpu_data_rowwise_ = nullptr;
-  cpu_data_columnwise_ = nullptr;
-  amax_cpu_data_ = nullptr;
-  scale_cpu_data_ = nullptr;
-  rowwise_scale_inv_cpu_data_ = nullptr;
-  columnwise_scale_inv_cpu_data_ = nullptr;
-  float *amax = nullptr, *scale = nullptr;
-  float *rowwise_scale_inv = nullptr, *columnwise_scale_inv = nullptr;
+
+  // Make sure shape is valid
   if (columnwise) {
     NVTE_CHECK(shape.ndim >= 2);
   }
-  std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
-                                            shape.data[shape.ndim - 1]};
-  NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape = {};
 
-  std::vector<size_t> columnwise_shape_vec;
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING
-      || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
-    // Transpose when tensor scaling
-    columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
-    for (size_t i = 0; i < shape.ndim - 1; ++i) {
-      columnwise_shape_vec.emplace_back(shape.data[i]);
+  // Shape after flattening to 2D
+  NVTEShape flattened_shape;
+  {
+    std::vector<size_t> flattened_shape_vec;
+    if (shape.ndim > 0) {
+      flattened_shape_vec.push_back(product(shape, 0, shape.ndim - 1));
+      flattened_shape_vec.push_back(shape.data[shape.ndim - 1]);
+    } else {
+      flattened_shape_vec.resize(2, 1);
     }
-  } else {
-    // Same shape for MX and NVFP4
-    for (size_t i = 0; i < shape.ndim; ++i) {
-      columnwise_shape_vec.emplace_back(shape.data[i]);
-    }
+    flattened_shape = convertShape(flattened_shape_vec);
   }
 
-  if (columnwise) {
-    columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
-  }
-
-  tensor_ = TensorWrapper(scaling_mode);
-
+  // Allocate and initialize data
+  void *dptr_rowwise = nullptr, *dptr_columnwise = nullptr;
+  const size_t total_size = bytes(shape, type);
   if (total_size != 0) {
     if (rowwise) {
       cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
@@ -339,11 +320,51 @@ Tensor::Tensor(const std::string& name,
     }
   }
 
-  const DType rowwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
-  const DType colwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
-  tensor_.set_rowwise_data(dptr_rowwise, rowwise_type, shape);
-  tensor_.set_columnwise_data(dptr_columnwise, colwise_type, columnwise_shape);
+  // Set tensor row-wise data
+  if (rowwise) {
+    const DType rowwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+    tensor_.set_rowwise_data(dptr_rowwise, rowwise_type, shape);
+  }
 
+  // Set tensor column-wise data
+  if (columnwise) {
+    // Determine shape of column-wise data
+    std::vector<size_t> columnwise_shape_vec;
+    switch (scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      // Column-wise data shape is transposed
+      if (shape.ndim > 0) {
+        columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
+        for (size_t i = 0; i < shape.ndim - 1; ++i) {
+          columnwise_shape_vec.emplace_back(shape.data[i]);
+        }
+      }
+      break;
+    }
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_NVFP4_1D_SCALING: {
+      // Column-wise data matches shape
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        columnwise_shape_vec.emplace_back(shape.data[i]);
+      }
+      break;
+    }
+    default:
+      NVTE_ERROR("Unrecognized scaling mode (", (size_t)scaling_mode, ").");
+    }
+    const auto columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(),
+                                                  columnwise_shape_vec.size());
+
+    // Set column-wise data buffer
+    const DType colwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+    tensor_.set_columnwise_data(dptr_columnwise, colwise_type, columnwise_shape);
+  }
+
+  // Configure scales, amaxes, and other tensor buffers
+  float *amax = nullptr, *scale = nullptr;
+  float *rowwise_scale_inv = nullptr, *columnwise_scale_inv = nullptr;
   if (isFp8Type(type) || isFp4Type(type)) {
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
@@ -375,7 +396,7 @@ Tensor::Tensor(const std::string& name,
         scale_cpu_data_ = std::make_shared<float>(0);
         tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
       }
-      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape, tensor_.scaling_mode());
+      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
       auto rowwise_scale_size = rowwise_scale_meta.bytes();
       auto columnwise_scale_size = colwise_scale_meta.bytes();
       auto scale_shape = rowwise_scale_meta.shape;

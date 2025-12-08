@@ -8,7 +8,11 @@ from typing import Optional, Union, List
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
+from transformer_engine_torch import (
+    multi_tensor_scale,
+    multi_tensor_compute_scale_and_scale_inv,
+    multi_tensor_compute_scale_inv_e8m0,
+)
 
 from ..quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
@@ -74,7 +78,7 @@ def cast_master_weights_to_fp8(
     fsdp_shard_model_weights : list of FSDP shard model weights. If None, it means that the model weights are
                              not sharded. Otherwise, it means that the model weights are sharded and we get
                              target model weights data storage using the FSDP shard model weights.
-    manual_post_all_gather_processing: bool, default = `False`.
+    manual_post_all_gather_processing : bool, default = `False`.
                      If False, post processing will be automatically triggered during next forward.
                      If True, the timing of calling post_all_gather_processing is left to the user.
                      Note that users must call `post_all_gather_processing` if it's set to True,
@@ -85,6 +89,7 @@ def cast_master_weights_to_fp8(
     delayed_scaling_params = []
     current_scaling_params = []
     blockwise_scaling_params = []
+    mxfp8_scaling_params = []
 
     if fsdp_shard_model_weights is None:
         use_fsdp_shard_model_weights = False
@@ -131,8 +136,8 @@ def cast_master_weights_to_fp8(
                 (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
             )
         elif isinstance(quantizer, MXFP8Quantizer):
-            raise NotImplementedError(
-                "cast_master_weights_to_fp8 for MXFP8BlockScaling is not supported yet"
+            mxfp8_scaling_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
             )
         else:
             raise ValueError(
@@ -146,6 +151,8 @@ def cast_master_weights_to_fp8(
         _cast_master_weights_to_fp8_current_scaling(current_scaling_params, *extra_args)
     if len(blockwise_scaling_params) > 0:
         _cast_master_weights_to_fp8_blockwise_scaling(blockwise_scaling_params, *extra_args)
+    if len(mxfp8_scaling_params) > 0:
+        _cast_master_weights_to_fp8_mxfp8_scaling(mxfp8_scaling_params, *extra_args)
 
 
 def _cast_master_weights_to_fp8_delayed_scaling(
@@ -467,6 +474,131 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         )
 
 
+def _cast_master_weights_to_fp8_mxfp8_scaling(
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
+):  # pylint: disable=unused-argument
+    r"""Helper function to cast master weights to FP8 primary weights for mxfp8 scaling.
+
+    Parameters
+    ----------
+    params : List of tuple, each tuple contains a model weight, a master weight, and an offset
+             indicating the starting index of the master weight in the model weight.
+    group  : The distributed group to do amax reduction. Typically it's the data parallel
+             group.
+    use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
+    """
+
+    # Parameter attributes
+    device = params[0][0].device
+    for _, master_weight, _, _ in params:
+        if master_weight is not None:
+            master_weight_dtype = master_weight.dtype
+            break
+
+    # Get the total number of amax elements in all the model weights.
+    cu_rowwise_amax_sizes = [0]
+    cu_colwise_amax_sizes = [0]
+    for model_weight, _, _, _ in params:
+        rowwise_shape = model_weight._rowwise_scale_inv.shape
+        assert len(rowwise_shape) == 2
+        colwise_shape = model_weight._columnwise_scale_inv.shape
+        assert len(colwise_shape) == 2
+        cu_rowwise_amax_sizes.append(
+            cu_rowwise_amax_sizes[-1] + rowwise_shape[0] * rowwise_shape[1]
+        )
+        cu_colwise_amax_sizes.append(
+            cu_colwise_amax_sizes[-1] + colwise_shape[0] * colwise_shape[1]
+        )
+
+    # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
+    # NCCL kernels at once.
+    packed_amaxes = torch.zeros(
+        cu_rowwise_amax_sizes[-1] + cu_colwise_amax_sizes[-1],
+        dtype=master_weight_dtype,
+        device=device,
+    )
+
+    # ---------------------------------------------------------------------------------------------
+    # Step 1: Iterate through all the none empty master weights and compute amax of them. Store the
+    #         amaxes in a contiguous buffer. If a block of a master weight is empty, the
+    #         corresponding amax will be set to 0.
+    # ---------------------------------------------------------------------------------------------
+    amaxes_rowwise, scale_invs_rowwise = [], []
+    amaxes_colwise, scale_invs_colwise = [], []
+    for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
+        rowwise_shape = model_weight._rowwise_scale_inv.shape
+        colwise_shape = model_weight._columnwise_scale_inv.shape
+        rowwise_start = cu_rowwise_amax_sizes[i]
+        rowwise_end = cu_rowwise_amax_sizes[i + 1]
+        colwise_start = cu_rowwise_amax_sizes[-1] + cu_colwise_amax_sizes[i]
+        colwise_end = cu_rowwise_amax_sizes[-1] + cu_colwise_amax_sizes[i + 1]
+        amax_rowwise = packed_amaxes[rowwise_start:rowwise_end].reshape(rowwise_shape)
+        amax_colwise = packed_amaxes[colwise_start:colwise_end].reshape(colwise_shape)
+        amaxes_rowwise.append(amax_rowwise)
+        amaxes_colwise.append(amax_colwise)
+        scale_invs_rowwise.append(model_weight._rowwise_scale_inv)
+        scale_invs_colwise.append(model_weight._columnwise_scale_inv)
+
+        # Compute amax of the master weight and store it in packed_amaxes.
+        if master_weight is not None:
+            assert len(model_weight.shape) == 2
+            h, w = model_weight.shape
+            tex.mxfp8_scaling_compute_partial_amax(
+                master_weight, amax_rowwise, amax_colwise, h, w, start_offset
+            )
+
+    # ---------------------------------------------------------------------------------------------
+    # Step 2: Perform all-reduce on packed_amaxes to get the global amax.
+    # ---------------------------------------------------------------------------------------------
+    torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    # ---------------------------------------------------------------------------------------------
+    # Step 3: Update scales and scale_invs.
+    # ---------------------------------------------------------------------------------------------
+    multi_tensor_applier(
+        multi_tensor_compute_scale_inv_e8m0,
+        None,  # dummy_overflow_buf
+        [
+            amaxes_rowwise + amaxes_colwise,
+            scale_invs_rowwise + scale_invs_colwise,
+        ],
+    )
+
+    # ---------------------------------------------------------------------------------------------
+    # Step 4: Cast master weights to FP8.
+    # ---------------------------------------------------------------------------------------------
+    for (
+        (model_weight, master_weight, start_offset, model_weight_fragment),
+        scale_inv_rowwise,
+        scale_inv_colwise,
+    ) in zip(params, scale_invs_rowwise, scale_invs_colwise):
+        # If master weight is None, it means that the master weight of the current model weight
+        # is in other DP ranks.
+        if master_weight is None:
+            continue
+
+        # Cast master weight to FP8
+        end_offset = start_offset + master_weight.numel()
+        if use_fsdp_shard_model_weights:
+            rowwise_fragment = model_weight_fragment[0]
+            colwise_fragment = model_weight_fragment[1]
+        else:
+            rowwise_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
+            colwise_fragment = model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
+        assert len(model_weight.shape) == 2
+        h, w = model_weight.shape
+        tex.mxfp8_scaling_partial_cast(
+            master_weight,
+            rowwise_fragment,
+            colwise_fragment,
+            scale_inv_rowwise,
+            scale_inv_colwise,
+            h,
+            w,
+            start_offset,
+        )
+
+
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
     Post-processing after all-gather for weights in distributed optimizer.
@@ -485,6 +617,9 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         elif isinstance(model_weight, Float8BlockwiseQTensor):
             # Blockwise scaling: create column-wise storage.
             model_weight._create_columnwise()
+        elif isinstance(model_weight, MXFP8Tensor):
+            # MXFP8 scaling: no need to do anything.
+            pass
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 

@@ -386,23 +386,57 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
+def reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
+):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP striped reordering {stripe_size=}. stripe_size must be a"
+                " positive integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, False, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
 def inverse_reorder_causal_load_balancing(
-    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+                " integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, True, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -988,7 +1022,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1008,6 +1042,7 @@ def _fused_attn(
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
+    stripe_size: int | None = None,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1028,6 +1063,7 @@ def _fused_attn(
         context_parallel_causal_load_balanced,
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
     )
     return output
 
@@ -1051,6 +1087,7 @@ def _fused_attn_fwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_size,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -1070,6 +1107,7 @@ def _fused_attn_fwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1099,6 +1137,7 @@ def _fused_attn_bwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_size,
     ctx,
     dz,
 ):
@@ -1133,6 +1172,7 @@ def _fused_attn_bwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
@@ -1169,6 +1209,7 @@ def fused_attn(
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
     softmax_offset: Optional[jnp.ndarray] = None,
+    stripe_size: int | None = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1206,6 +1247,11 @@ def fused_attn(
         softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
             [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
             If provided, this parameter will receive gradients during backpropagation.
+        stripe_size (int |  None):
+            Indicates the striping size to be used when using ReorderStrategy.Striped.
+            Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
+            is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
+            None indicates no striping strategy
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1283,5 +1329,6 @@ def fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
     )
     return output

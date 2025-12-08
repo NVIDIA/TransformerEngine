@@ -92,24 +92,24 @@ def fused_topk_with_score_function(
     Fused topk with score function router.
     Parameters
     ----------
-    logits: torch.Tensor
-    topk: int
-    use_pre_softmax: bool
+    logits : torch.Tensor
+    topk : int
+    use_pre_softmax : bool
         if enabled, the computation order: softmax -> topk
-    num_groups: int
+    num_groups : int
         used in the group topk
-    group_topk: int
+    group_topk : int
         used in the group topk
-    scaling_factor: float
-    score_function: str
+    scaling_factor : float
+    score_function : str
         currently only support softmax and sigmoid
-    expert_bias: torch.Tensor
+    expert_bias : torch.Tensor
         could be used in the sigmoid
 
     Returns
     -------
-    probs: torch.Tensor
-    routing_map: torch.Tensor
+    probs : torch.Tensor
+    routing_map : torch.Tensor
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type")
@@ -186,15 +186,15 @@ def fused_compute_score_for_moe_aux_loss(
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
     Parameters
     ----------
-    logits: torch.Tensor
-    topk: int
-    score_function: str
+    logits : torch.Tensor
+    topk : int
+    score_function : str
         currently only support softmax and sigmoid
 
     Returns
     -------
-    routing_map: torch.Tensor
-    scores: torch.Tensor
+    routing_map : torch.Tensor
+    scores : torch.Tensor
     """
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function)
 
@@ -258,18 +258,18 @@ def fused_moe_aux_loss(
     Fused MoE aux loss.
     Parameters
     ----------
-    probs: torch.Tensor
-    tokens_per_expert: torch.Tensor
+    probs : torch.Tensor
+    tokens_per_expert : torch.Tensor
         the number of tokens per expert
-    total_num_tokens: int
+    total_num_tokens : int
         the total number of tokens, involved in the aux loss calculation
-    num_experts: int
-    topk: int
-    coeff: float
+    num_experts : int
+    topk : int
+    coeff : float
         the coefficient of the aux loss
 
     Returns
     -------
-    aux_loss: torch.scalar
+    aux_loss : torch.scalar
     """
     return FusedAuxLoss.apply(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff)

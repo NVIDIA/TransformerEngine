@@ -50,8 +50,8 @@ class MultiheadAttention(torch.nn.Module):
 
     .. note::
 
-        Argument :attr:`attention_mask` in the `forward` call is only used when
-        :attr:`attn_mask_type` includes '"padding"' or `"arbitrary"`.
+        Argument :attr:`attention_mask` in the :meth:`forward() <MultiheadAttention.forward>` method is only used when
+        :attr:`attn_mask_type` includes ``"padding"`` or ``"arbitrary"``.
 
     Parameters
     ----------
@@ -59,57 +59,56 @@ class MultiheadAttention(torch.nn.Module):
                  size of each input sample.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    kv_channels: int, default = `None`
+    kv_channels : int, default = None
                 number of key-value channels. defaults to
-                :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    attention_dropout: float, default = 0.1
+                :attr:`hidden_size` / :attr:`num_attention_heads` if ``None``.
+    attention_dropout : float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
                        for numerical stability.
-    init_method : Callable, default = `None`
+    init_method : Callable, default = None
                  used for initializing weights of QKV and FC1 weights in the following way:
-                 `init_method(weight)`. When set to `None`, defaults to
-                 `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    output_layer_init_method : Callable, default = `None`
+                 ``init_method(weight)``. When set to ``None``, defaults to
+                 ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    output_layer_init_method : Callable, default = None
                               used for initializing weights of PROJ and FC2 in the following way:
-                              `output_layer_init_method(weight)`. When set to `None`, defaults to
-                              `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    layer_number: int, default = `None`
-                 layer number of the current `TransformerLayer` when multiple such modules are
+                              ``output_layer_init_method(weight)``. When set to ``None``, defaults to
+                              ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    layer_number : int, default = None
+                 layer number of the current ``TransformerLayer`` when multiple such modules are
                  concatenated to form a transformer block.
-    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+    attn_mask_type : {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
                    'padding_causal_bottom_right','arbitrary'},
-                   default = `causal`
+                   default = "causal"
                    type of attention mask passed into softmax operation. Overridden by
-                   :attr:`attn_mask_type` in the `forward` method. The forward
+                   :attr:`attn_mask_type` in the :meth:`forward` method. The :meth:`forward`
                    arg is useful for dynamically changing mask types, e.g. a different
-                   mask for training and inference. The init arg is useful for cases
+                   mask for training and inference. The :meth:`__init__` arg is useful for cases
                    involving compilation/tracing, e.g. ONNX export.
-    window_size: Optional[Tuple[int, int]], default = `None`
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention, where query at position i attends to keys
-                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
-                be overridden by :attr:`window_size` in `forward` as well.
-    num_gqa_groups : int, default = `None`
+                in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]]`` inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean no sliding
+                window and causal mask specifically. Both ``"causal"`` and ``"causal_bottom_right"`` masks
+                map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
+                ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
+                be overridden by :attr:`window_size` in :meth:`forward` as well.
+    num_gqa_groups : int, default = None
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
                          `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
                          This only affects the keys and values, not the querys.
                          GQA-1 is equivalent to Multi-Query Attention
                          (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
-                         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
-    return_layernorm_output : bool, default = `False`
-                             if set to `True`, output of layernorm is returned from the forward
+                         is equivalent to MHA, i.e. ``num_gqa_groups = num_attention_heads``.
+    return_layernorm_output : bool, default = False
+                             if set to ``True``, output of layernorm is returned from the :meth:`forward` method
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    input_layernorm: bool, default = `False`
-                     if set to `True`, layer normalization to the input is applied.
-    attention_type: { 'self', 'cross' }, default = 'self'
+    input_layernorm : bool, default = False
+                     if set to ``True``, layer normalization to the input is applied.
+    attention_type : { 'self', 'cross' }, default = 'self'
                    type of attention applied.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
@@ -120,103 +119,118 @@ class MultiheadAttention(torch.nn.Module):
                             (1 + \gamma) + \beta
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
                    type of normalization applied.
-    qkv_weight_interleaved : bool, default = `True`
-                            if set to `False`, the QKV weight is interpreted as a concatenation of
-                            query, key, and value weights along the `0th` dimension. The default
-                            interpretation is that the individual `q`, `k`, and `v` weights for each
-                            attention head are interleaved. This parameter is set to `False` when
+    qkv_weight_interleaved : bool, default = True
+                            if set to ``False``, the QKV weight is interpreted as a concatenation of
+                            query, key, and value weights along the ``0th`` dimension. The default
+                            interpretation is that the individual ``q``, ``k``, and ``v`` weights for each
+                            attention head are interleaved. This parameter is set to ``False`` when
                             using :attr:`fuse_qkv_params=False`.
-    rotary_pos_interleaved : bool, default = `False`
+    rotary_pos_interleaved : bool, default = False
                             whether to use interleaved rotary position embeddings.
-    bias : bool, default = `True`
-          if set to `False`, the transformer layer will not learn any additive biases.
+    bias : bool, default = True
+          if set to ``False``, the transformer layer will not learn any additive biases.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    qkv_format: str, default = `sbhd`
-            dimension format for `query_layer`, `key_layer` and `value_layer`,
-            {`sbhd`, `bshd`}. `s` stands for the sequence length, `b` batch size,
-            `h` the number of heads and `d` head size. `sbhd` and `bshd` formats
+    qkv_format : str, default = "sbhd"
+            dimension format for ``query_layer``, ``key_layer`` and ``value_layer``,
+            {``"sbhd"``, ``"bshd"``}. ``s`` stands for the sequence length, ``b`` batch size,
+            ``h`` the number of heads and ``d`` head size. ``"sbhd"`` and ``"bshd"`` formats
             are used for when sequences in a batch are of equal length or padded to
             equal length. Please note that these formats do not reflect how
-            tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-            For that, please use `get_qkv_layout` to gain the layout information.
-    name: str, default = `None`
+            tensors ``query_layer``, ``key_layer``, ``value_layer`` are laid out in memory.
+            For that, please use ``get_qkv_layout`` to gain the layout information.
+    name : str, default = None
         name of the module, currently used for debugging purposes.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 softmax type as described in this paper:
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
-                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
-                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
-                 where alpha is a learnable parameter in shape [h].
-                 'off-by-one' and 'learnable' softmax types are also called sink attention
-                 ('zero sink' and 'learnable sink').
+
+                 For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+                 * ``'vanilla'``:
+
+                   .. math::
+                      S_{:,:,:,i} =  = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'off-by-one'``:
+
+                   .. math::
+                      S_{:,:,:,i} =  = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'learnable'``:
+
+                   .. math::
+                      S_{:,:,:,i} =  = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+                   where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+                 ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+                 (``'zero sink'`` and ``'learnable sink'``).
 
     Parallelism parameters
     ----------------------
-    set_parallel_mode : bool, default = `False`
-                      if set to `True`, QKV and FC1 layers are used as Column Parallel
+    set_parallel_mode : bool, default = False
+                      if set to ``True``, QKV and FC1 layers are used as Column Parallel
                       whereas PROJ and FC2 is used as Row Parallel as described
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
-    tp_group : ProcessGroup, default = `None`
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
     tp_size : int, default = 1
              used as TP (tensor parallel) world size when TP groups are not formed during
              initialization. In this case, users must call the
-             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
 
     Optimization parameters
     -----------------------
     fuse_wgrad_accumulation : bool, default = 'False'
-                             if set to `True`, enables fusing of creation and accumulation of
+                             if set to ``True``, enables fusing of creation and accumulation of
                              the weight gradient. When enabled, it is assumed that the weights
-                             have an additional `main_grad` attribute (used instead of the
-                             regular `grad`) which is a pre-allocated buffer of the correct
+                             have an additional ``main_grad`` attribute (used instead of the
+                             regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+    params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias itself, but
-                 instead return the bias value during the forward pass together with the
+    return_bias : bool, default = False
+                 when set to ``True``, this module will not apply the additive bias itself, but
+                 instead return the bias value during the :meth:`forward` method together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    fuse_qkv_params: bool, default = 'False'
-                    if set to `True`, `TransformerLayer` module exposes a single fused
+    fuse_qkv_params : bool, default = 'False'
+                    if set to ``True``, ``TransformerLayer`` module exposes a single fused
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
-                    `fuse_wgrad_accumulation`.
-    qk_norm_type: Optional[str], default = None
+                    ``fuse_wgrad_accumulation``.
+    qk_norm_type : Optional[str], default = None
                     type of normalization to apply to query and key tensors.
-                    Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'. When None, no normalization is applied.
-                    When 'L2Normalization', L2 normalization is applied to query and key tensors.
-                    When 'RMSNorm', RMS normalization is applied to query and key tensors.
-                    When 'LayerNorm', layer normalization is applied to query and key tensors.
+                    Options: ``None``, ``'L2Normalization'``, ``'RMSNorm'``, ``'LayerNorm'``. When ``None``, no normalization is applied.
+                    When ``'L2Normalization'``, L2 normalization is applied to query and key tensors.
+                    When ``'RMSNorm'``, RMS normalization is applied to query and key tensors.
+                    When ``'LayerNorm'``, layer normalization is applied to query and key tensors.
                     Normalization is applied after RoPE (if applicable) but before attention computation
-                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach
+                    when ``qk_norm_before_rope`` is ``False``. This follows the e.g. Llama4 approach
                     for QK normalization to improve training stability and model performance.
-    qk_norm_eps: float, default = 1e-6
+    qk_norm_eps : float, default = 1e-6
                     epsilon value for normalization of query and key tensors.
-                    Only used when `qk_norm_type` is not None.
-    qk_norm_before_rope: bool, default = `False`
-                    if set to `True`, query and key normalization is applied before rotary position
-                    embedding. When `False` (default), normalization is applied after RoPE.
+                    Only used when ``qk_norm_type`` is not ``None``.
+    qk_norm_before_rope : bool, default = False
+                    if set to ``True``, query and key normalization is applied before rotary position
+                    embedding. When ``False`` (default), normalization is applied after RoPE.
                     This parameter allows supporting different architectural variants that apply
                     QK normalization at different points.
-    seq_length: Optional[int], default = `None`
+    seq_length : Optional[int], default = None
                     sequence length of input samples. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are used for
                     forward propagation and activation recompute phase.
-    micro_batch_size: Optional[int], default = `None`
+    micro_batch_size : Optional[int], default = None
                     batch size per training step. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are
                     used for forward propagation and activation recompute phase.
@@ -535,7 +549,7 @@ class MultiheadAttention(torch.nn.Module):
 
         Parameters
         ----------
-        tp_group : ProcessGroup, default = `None`
+        tp_group : ProcessGroup, default = None
                   tensor parallel process group.
         """
         self.tp_group = tp_group
@@ -555,25 +569,26 @@ class MultiheadAttention(torch.nn.Module):
         ----------
         cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
-                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
-                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
-                  and cp_group[1] are for a2a and p2p communications respectively.
+                  ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
+                  ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
+                  and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : str, default = `p2p`
+        cp_comm_type : str, default = "p2p"
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a", "a2a+p2p".
-                      "p2p": Exchange KV chunks with P2P communications in ring topology.
-                             P2P is async and can be overlapped with attention compute.
-                      "all_gather": All-gather to get full sequence of KV before attention.
-                                    The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                             group, and gather to get full sequence of QKV.
-                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                      p2p between sub-groups (e.g., via IBLink).
+                      Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                      - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                        P2P is async and can be overlapped with attention compute.
+                      - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                        The all-gather is not async, and cannot be overlapped.
+                      - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                        group, and gather to get full sequence of QKV.
+                      - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                        across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                        p2p between sub-groups (e.g., via IBLink).
         """
         if isinstance(cp_group, dist_group_type):
             self.cp_size = get_distributed_world_size(cp_group)
@@ -622,39 +637,39 @@ class MultiheadAttention(torch.nn.Module):
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        """
+        r"""
         Forward propagation for MultiheadAttention layer.
 
         .. note::
 
             Argument :attr:`attention_mask` is only used when :attr:`attn_mask_type`
-            includes `"padding"` or `"arbitrary"`.
+            includes ``"padding"`` or ``"arbitrary"``.
 
         Parameters
         ----------
         hidden_states : torch.Tensor
              Input tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
-             default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
-             a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
-             two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable to
-             [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
-             the corresponding position is masked out and a `False` means that position
+             default = None. Boolean tensor(s) used to mask out attention softmax input.
+             It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
+             a single tensor of ``[batch_size, 1, 1, seqlen_q]`` for self-attention, and a tuple of
+             two tensors of shapes ``[batch_size, 1, 1, seqlen_q]`` and ``[batch_size, 1, 1, seqlen_kv]``
+             for cross-attention. For ``"arbitrary"`` mask, it should be of a shape broadcastable to
+             ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``. A ``True`` value means
+             the corresponding position is masked out and a ``False`` means that position
              is allowed to participate in attention.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
                        'padding_causal_bottom_right','arbitrary'},
-                       default = `None`
+                       default = None
                        type of attention mask passed into softmax operation. By default,
                        causal masks are aligned to the top left corner of the softmax matrix.
-                       When "`bottom_right`" is specified in the mask type, causal masks are
+                       When ``"bottom_right"`` is specified in the mask type, causal masks are
                        aligned to the bottom right corner.
-        window_size: Optional[Tuple[int, int]], default = `None`
+        window_size: Optional[Tuple[int, int]], default = None
                     sliding window size for local attention.
-        encoder_output : Optional[torch.Tensor], default = `None`
+        encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
-             `layer_type="decoder"`.
+             ``layer_type="decoder"``.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -668,46 +683,46 @@ class MultiheadAttention(torch.nn.Module):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-        checkpoint_core_attention: bool, default = `False`
-                                  If true, forward activations for core attention are recomputed
+        checkpoint_core_attention: bool, default = False
+                                  If ``True``, forward activations for core attention are recomputed
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
-        rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+        rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = None
                        Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
-        core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`, `alibi`}
-        core_attention_bias: Optional[torch.Tensor], default = `None`
-                    Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
-                    It should be 'None' for 'no_bias' and 'alibi' bias types.
-        alibi_slopes: Optional[torch.Tensor], default = `None`
-                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
-                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
+        core_attention_bias_type: str, default = "no_bias"
+                    Bias type, {``"no_bias"``, ``"pre_scale_bias"``, ``"post_scale_bias"``, ``"alibi"``}
+        core_attention_bias: Optional[torch.Tensor], default = None
+                    Bias tensor for :math:`Q \cdot K^T`, shape ``[1, num_head, max_seqlen_q, max_seqlen_kv]``.
+                    It should be ``None`` for ``"no_bias"`` and ``"alibi"`` bias types.
+        alibi_slopes: Optional[torch.Tensor], default = None
+                     ALiBi slopes in FP32 and shape ``[nheads]`` or ``[batch_size, nheads]``.
+                     It adds a bias of ``(-alibi_slope * (i + seqlen_k - seqlen_q - j))``
                      to the attention score of query i and key j.
-        cu_seqlens_q: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
-                   with shape [batch_size + 1] and dtype torch.int32.
-        cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
-        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
-                   with shape [batch_size + 1] and dtype torch.int32.
-        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
-        max_seqlen_q: Optional[int], default = `None`
-                      Maximum sequence length in `query_layer`.
-                      Calculated from `cu_seqlens_q` if not provided.
-        max_seqlen_kv: Optional[int], default = `None`
-                       Maximum sequence length in `key_layer` and `value_layer`.
-                       Calculated from `cu_seqlens_kv` if not provided.
-        fast_zero_fill: bool, default = `True`
+        cu_seqlens_q: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``query_layer``,
+                   with shape ``[batch_size + 1]`` and dtype torch.int32.
+        cu_seqlens_kv: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (with offset) in a batch for ``query_layer``,
+                   with shape ``[batch_size + 1]`` and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (with offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
+        max_seqlen_q: Optional[int], default = None
+                      Maximum sequence length in ``query_layer``.
+                      Calculated from ``cu_seqlens_q`` if not provided.
+        max_seqlen_kv: Optional[int], default = None
+                       Maximum sequence length in ``key_layer`` and ``value_layer``.
+                       Calculated from ``cu_seqlens_kv`` if not provided.
+        fast_zero_fill: bool, default = True
                     Whether to set output tensors to 0 or not before use.
-        pad_between_seqs: Optional[bool], default = `None`
-            If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
-            If true, there are padding tokens between individual sequences in a packed batch.
+        pad_between_seqs: Optional[bool], default = None
+            If ``None``, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
+            If ``True``, there are padding tokens between individual sequences in a packed batch.
         """
         # hidden_states: [sq, b, h]
 

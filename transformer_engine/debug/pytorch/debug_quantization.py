@@ -9,7 +9,7 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+from typing import Optional, Tuple, Iterable, Union, List
 import torch
 
 import transformer_engine_torch as tex
@@ -556,6 +556,23 @@ class DebugQuantizer(Quantizer):
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
 
+    @classmethod
+    def multi_tensor_quantize(
+        cls,
+        tensor: torch.Tensor,
+        quantizers: List[Quantizer],
+        m_splits: List[int],
+        activation_dtype: torch.dtype,
+    ) -> List[DebugQuantizedTensor]:
+        """
+        Splits a tensor into a list of tensors and quantizes each tensor using a list of quantizers.
+        """
+        tensors = torch.split(tensor, m_splits)
+        output = []
+        for tensor, quantizer in zip(tensors, quantizers):
+            output.append(quantizer.quantize(tensor, dtype=activation_dtype))
+        return output
+
 
 class DebugQuantizedTensor(QuantizedTensorStorage):
     """
@@ -623,9 +640,9 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
         """Is used in the python gemm() to get tensor or transpose of the tensor."""
         return self.rowwise_gemm_tensor if not transpose else self.columnwise_gemm_tensor
 
-    def size(self):
+    def size(self, *args):
         """Size of the tensor."""
-        return self.rowwise_gemm_tensor.size()
+        return self.rowwise_gemm_tensor.size(*args)
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""

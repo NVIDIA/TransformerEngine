@@ -39,7 +39,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
              "RSigma must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
-  if (!workspace->data.shape.empty()) {
+  if (workspace->data.numel() != 0) {
     CheckInputTensor(x, "x");
     CheckInputTensor(gamma, "gamma");
 
@@ -79,7 +79,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
       gamma_in_weight_dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (workspace->data.numel() == 0) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
@@ -125,7 +125,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
   NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
 
-  if (!workspace->data.shape.empty()) {
+  if (workspace->data.numel() != 0) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(rsigma, "rsigma");
@@ -156,7 +156,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (workspace->data.numel() == 0) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
@@ -191,7 +191,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
   NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
 
-  if (!workspace->data.shape.empty()) {
+  if (workspace->data.numel() != 0) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(add, "add");
@@ -222,7 +222,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (workspace->data.numel() == 0) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;

@@ -327,9 +327,9 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
 ]
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
-    # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
-    pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
-    pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
+    # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
+    pytest.param([2, 128, 8, 128], id="2-128xCPx2-8-128"),
+    pytest.param([4, 256, 16, 64], id="4-256xCPx2-16-64"),
 ]
 
 
@@ -351,12 +351,14 @@ class TestDistributedContextParallelSelfAttn:
         use_shardy,
         use_scan_ring=False,
         window_size=None,
+        stripe_size=None,
+        num_segments_per_seq=None,
     ):
         if qkv_layout.is_thd():
-            if cp_strategy == CPStrategy.ALL_GATHER:
-                pytest.skip("THD doesn't support all gather context parallelism.")
-            if not load_balanced and cp_strategy == CPStrategy.RING:
-                pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+            if not load_balanced and (
+                cp_strategy == CPStrategy.RING or cp_strategy == CPStrategy.ALL_GATHER
+            ):
+                pytest.skip(f"THD + {cp_strategy=} doesn't support unbalanced context parallelism.")
 
         assert not use_scan_ring or cp_strategy == CPStrategy.RING
 
@@ -382,7 +384,6 @@ class TestDistributedContextParallelSelfAttn:
         data_shape = batch, seqlen, num_head, hidden
 
         num_kv_heads = num_head // kv_groups
-
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -401,6 +402,8 @@ class TestDistributedContextParallelSelfAttn:
             bias_shape,
             window_size,
             SeqDescFormat.SegmentIDs,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
@@ -453,7 +456,7 @@ class TestDistributedContextParallelSelfAttn:
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
-    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
         "qkv_layout, attn_mask_type",
@@ -470,6 +473,8 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
     ):
+        if qkv_layout.is_thd():
+            pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
         kv_groups = 8
         self.impl_test_context_parallel_attn(
             device_count,
@@ -484,6 +489,72 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced=True,
             cp_strategy=CPStrategy.ALL_GATHER,
             use_shardy=True,
+        )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED")],
+    )
+    @pytest.mark.parametrize(
+        "stripe_size",
+        [pytest.param(64, id="STRIPE-64"), pytest.param(128, id="STRIPE-128")],
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="window_size(-1, -1)"),
+            pytest.param((5, 0), id="window_size(8, 0)"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "num_segments_per_seq",
+        [pytest.param(5, id="SEG-5")],
+    )
+    def test_context_parallel_allgather_striped_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+        load_balanced,
+        window_size,
+        stripe_size,
+        num_segments_per_seq,
+    ):
+        if not qkv_layout.is_thd():
+            pytest.skip("Only THD layout is supported for CP + AG + Striped attention")
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced,
+            CPStrategy.ALL_GATHER,
+            use_shardy=False,
+            window_size=window_size,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
         )
 
     @pytest_parametrize_wrapper(
@@ -514,6 +585,8 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
+        if qkv_layout.is_thd():
+            pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -577,6 +650,8 @@ class TestDistributedContextParallelSelfAttn:
                 "When context parallelism and sliding window attention are used, "
                 "scanloop is not supported"
             )
+        # Set the stripe size to 1 (ring attention only support stripe_size=1)
+        stripe_size = 1 if qkv_layout.is_thd() else None
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -592,6 +667,7 @@ class TestDistributedContextParallelSelfAttn:
             use_shardy=False,
             use_scan_ring=use_scan,
             window_size=window_size,
+            stripe_size=stripe_size,
         )
 
     @pytest_parametrize_wrapper(
@@ -616,6 +692,8 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
     ):
         kv_groups = 8
+        # Set the stripe size to 1 (ring attention only support stripe_size=1)
+        stripe_size = 1 if qkv_layout.is_thd() else None
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -630,6 +708,7 @@ class TestDistributedContextParallelSelfAttn:
             cp_strategy=CPStrategy.RING,
             use_shardy=False,
             use_scan_ring=True,
+            stripe_size=stripe_size,
         )
 
 
@@ -639,31 +718,39 @@ REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
 
+REORDER_STRATEGY = [
+    pytest.param(ReorderStrategy.DualChunkSwap, None, id="DualChunkSwap"),
+    pytest.param(ReorderStrategy.Striped, 1, id="Striped-1"),
+    pytest.param(ReorderStrategy.Striped, 4, id="Striped-4"),
+]
+
 
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
     @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
-    @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
+    @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD, QKVFormat.THD])
     @pytest.mark.parametrize(
-        "reorder_strategy",
-        [
-            pytest.param(ReorderStrategy.DualChunkSwap, id="DualChunkSwap"),
-            pytest.param(ReorderStrategy.Striped, id="Striped"),
-        ],
+        "reorder_strategy, stripe_size",
+        REORDER_STRATEGY,
     )
-    def test(self, cp_size, shape, qkv_format, reorder_strategy):
+    def test(self, cp_size, shape, qkv_format, reorder_strategy, stripe_size):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
         seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
             tensor = tensor.swapaxes(0, 1)
             seq_dim = 0
 
+        if reorder_strategy == ReorderStrategy.Striped:
+            seq_lens = shape[seq_dim]
+            if seq_lens < (cp_size * stripe_size):
+                pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_size=}")
+
         ref = tensor.copy()
 
-        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3])
-        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3])
+        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
+        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3, 4])
 
-        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim)
-        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim, stripe_size)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_size)
 
         assert jnp.array_equal(inversed, ref)
