@@ -1,0 +1,11 @@
+# START_MEMORY_USAGE_1
+Layer size: 2.00 MB
+Memory usage after forward pass: 5.88 MB
+# END_MEMORY_USAGE_1
+# START_MEMORY_USAGE_2
+Memory after forward pass: 7.90 MB
+# END_MEMORY_USAGE_2
+# START_MEMORY_USAGE_3
+Layer size: 0.92 MB
+Memory after forward pass: 5.92 MB
+# END_MEMORY_USAGE_3

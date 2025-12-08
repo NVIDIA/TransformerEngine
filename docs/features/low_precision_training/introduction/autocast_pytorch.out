@@ -1,0 +1,169 @@
+Unable to find image 'gitlab-master.nvidia.com/dl/transformerengine/transformerengine:main-pytorch-py3-devel-amd64' locally
+main-pytorch-py3-devel-amd64: Pulling from dl/transformerengine/transformerengine
+20043066d3d5: Already exists
+4f4fb700ef54: Already exists
+4f4fb700ef54: Already exists
+7bc71055093c: Already exists
+4f4fb700ef54: Already exists
+47fcffaf4b29: Already exists
+5902106683aa: Pulling fs layer
+db47045b8288: Pulling fs layer
+9855dcfd20f2: Pulling fs layer
+c83aec52d35b: Pulling fs layer
+d6f0613e9d23: Pulling fs layer
+529adbe755d6: Pulling fs layer
+3f8bbd50cf66: Pulling fs layer
+c94f3e870fb7: Pulling fs layer
+6ccfc98c93d6: Pulling fs layer
+2a8fb579ec89: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+2c0943abc3bf: Pulling fs layer
+cb24635428c8: Pulling fs layer
+d6f0613e9d23: Download complete
+ba77ee389c59: Pulling fs layer
+6ccfc98c93d6: Waiting
+3f8bbd50cf66: Waiting
+c94f3e870fb7: Waiting
+ad1c4e5a24bd: Pulling fs layer
+acfa23b3071b: Pulling fs layer
+cb24635428c8: Waiting
+2a8fb579ec89: Waiting
+4f4fb700ef54: Waiting
+2c0943abc3bf: Waiting
+12a8dc7da30c: Pulling fs layer
+9855dcfd20f2: Download complete
+acfa23b3071b: Waiting
+f68a05f961eb: Pulling fs layer
+259a1e61421c: Pulling fs layer
+ad1c4e5a24bd: Waiting
+c83aec52d35b: Download complete
+496617e13811: Pulling fs layer
+ba77ee389c59: Waiting
+36dae3e8aaeb: Pulling fs layer
+78e6cfd97c1c: Pulling fs layer
+7a8b8bb12118: Pulling fs layer
+12a8dc7da30c: Waiting
+259a1e61421c: Waiting
+36dae3e8aaeb: Waiting
+c0b18b287c3d: Pulling fs layer
+496617e13811: Waiting
+78e6cfd97c1c: Waiting
+f68a05f961eb: Waiting
+8fc3280b9592: Pulling fs layer
+4c588b2f3c52: Pulling fs layer
+7a8b8bb12118: Waiting
+c0b18b287c3d: Waiting
+6e7f98fc3c3c: Pulling fs layer
+8fc3280b9592: Waiting
+0f001d24ab08: Pulling fs layer
+4c588b2f3c52: Waiting
+6e7f98fc3c3c: Waiting
+18bdb2124ba5: Pulling fs layer
+5a43bd85a755: Pulling fs layer
+ccca37fde2d4: Pulling fs layer
+c323ae58d542: Pulling fs layer
+6a80de74105c: Pulling fs layer
+c0d657038960: Pulling fs layer
+28e6bb2a8d6d: Pulling fs layer
+db82ef3237fe: Pulling fs layer
+718c6dc45196: Pulling fs layer
+ccca37fde2d4: Waiting
+6bf0db70bffe: Pulling fs layer
+0f001d24ab08: Waiting
+bb83b415f5fc: Pulling fs layer
+18bdb2124ba5: Waiting
+5a43bd85a755: Waiting
+a234eb967d7b: Pulling fs layer
+823b5e9533dd: Pulling fs layer
+ce1c4844bbf7: Pulling fs layer
+6bf0db70bffe: Waiting
+db82ef3237fe: Waiting
+6a80de74105c: Waiting
+c323ae58d542: Waiting
+c0d657038960: Waiting
+28e6bb2a8d6d: Waiting
+718c6dc45196: Waiting
+dc542a35ca52: Pulling fs layer
+a234eb967d7b: Waiting
+823b5e9533dd: Waiting
+bb83b415f5fc: Waiting
+b81e63854d41: Pulling fs layer
+ce1c4844bbf7: Waiting
+00b137cd0089: Pulling fs layer
+dc542a35ca52: Waiting
+b81e63854d41: Waiting
+6d1d3d590ba6: Pulling fs layer
+00b137cd0089: Waiting
+209019d349ee: Pulling fs layer
+6d1d3d590ba6: Waiting
+7211da8909df: Pulling fs layer
+209019d349ee: Waiting
+a800c1f8f343: Pulling fs layer
+7211da8909df: Waiting
+e095a56006a5: Pulling fs layer
+486b98f2a656: Pulling fs layer
+6bde50c38090: Pulling fs layer
+7123d5ebcb9e: Pulling fs layer
+f91b660c4ada: Pulling fs layer
+a7cb07079fab: Pulling fs layer
+a723cd062f34: Pulling fs layer
+efb3be4092e8: Pulling fs layer
+6bde50c38090: Waiting
+a800c1f8f343: Waiting
+e095a56006a5: Waiting
+a7cb07079fab: Waiting
+486b98f2a656: Waiting
+7123d5ebcb9e: Waiting
+106c538e709b: Pulling fs layer
+f91b660c4ada: Waiting
+a723cd062f34: Waiting
+5b4c2606e98b: Pulling fs layer
+758a682b26b3: Pulling fs layer
+efb3be4092e8: Waiting
+5927a8134b70: Pulling fs layer
+106c538e709b: Waiting
+3d1ac6bc51b7: Pulling fs layer
+36c124538e84: Pulling fs layer
+0476e9be89d3: Pulling fs layer
+060c73eb2484: Pulling fs layer
+5927a8134b70: Waiting
+5b4c2606e98b: Waiting
+8fe7027986a1: Pulling fs layer
+758a682b26b3: Waiting
+3d1ac6bc51b7: Waiting
+36c124538e84: Waiting
+73fe3721f250: Pulling fs layer
+0476e9be89d3: Waiting
+060c73eb2484: Waiting
+9d30292775f7: Pulling fs layer
+8fe7027986a1: Waiting
+baf28902c8a0: Pulling fs layer
+73fe3721f250: Waiting
+15d08917e116: Pulling fs layer
+9d30292775f7: Waiting
+baf28902c8a0: Waiting
+3c7144ccae05: Pulling fs layer
+a70caf50e821: Pulling fs layer
+f951e5dc5f2b: Pulling fs layer
+b3643561a28a: Pulling fs layer
+1cd3e02ec777: Pulling fs layer
+df8ec6edfaf5: Pulling fs layer
+b3f94cb1b75a: Pulling fs layer
+a70caf50e821: Waiting
+804ebcc046d9: Pulling fs layer
+15d08917e116: Waiting
+1cd3e02ec777: Waiting
+df8ec6edfaf5: Waiting
+f951e5dc5f2b: Waiting
+3c7144ccae05: Waiting
+cf879fce3464: Pulling fs layer
+b3643561a28a: Waiting
+c0926ef31a8b: Pulling fs layer
+804ebcc046d9: Waiting
+b3f94cb1b75a: Waiting
+cf879fce3464: Waiting
+23cf35bcd6b8: Pulling fs layer
+c0926ef31a8b: Waiting
+acda416aa112: Pulling fs layer
+acda416aa112: Waiting
+23cf35bcd6b8: Waiting
