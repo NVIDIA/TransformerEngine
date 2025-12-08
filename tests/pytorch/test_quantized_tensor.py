@@ -474,7 +474,7 @@ class TestAllQuantizedTensors:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-    @pytest.mark.parametrize("quantization", [ "fp8", "mxfp8", "nvfp4", "fp8_blockwise"])
+    @pytest.mark.parametrize("quantization", ["fp8", "mxfp8", "nvfp4", "fp8_blockwise"])
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
         self,
