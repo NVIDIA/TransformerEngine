@@ -317,9 +317,7 @@ __device__ __forceinline__ void mbarrier_wait_parity_relaxed_cta_shared_cta(uint
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-__device__ __forceinline__ void
-clusterlaunchcontrol_try_cancel_async_shared_cta_mbarrier_complete_tx_bytes(
-    uint64_t *mbar, __uint128_t *response_data_ptr) {
+__device__ __forceinline__ void try_cancel_cta(uint64_t *mbar, __uint128_t *response_data_ptr) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
     uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
@@ -336,7 +334,7 @@ clusterlaunchcontrol_try_cancel_async_shared_cta_mbarrier_complete_tx_bytes(
   }
 }
 
-__device__ __forceinline__ void get_cancelled_cta_2D_id(__uint128_t *response_data_ptr,
+__device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_data_ptr,
                                                         int32_t &ctaid_X, int32_t &ctaid_Y) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {

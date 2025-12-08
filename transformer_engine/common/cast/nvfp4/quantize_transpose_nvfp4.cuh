@@ -21,7 +21,7 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
-#include "specialized/quantize_transpose_nvfp4_persistent_1D.cuh"
+#include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -1169,7 +1169,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   bool return_transpose = output->has_columnwise_data();
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16) && return_transpose) {
-    quantize_transpose_persistent_1D(input, noop, output, quant_config, stream);
+    quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
     return;
   }
 
