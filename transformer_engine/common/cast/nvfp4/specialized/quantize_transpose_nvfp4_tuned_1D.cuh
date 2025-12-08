@@ -4,12 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file quantize_transpose_nvfp4_persistent_1D.cuh
- *  \brief Persistent kernel to cast to NVFP4 and transpose.
+/*! \file quantize_transpose_nvfp4_tuned_1D.cuh
+ *  \brief Tuned kernel to cast to NVFP4 and transpose.
  */
 
-#ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_PERSISTENT_1D_CUH_
-#define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_PERSISTENT_1D_CUH_
+#ifndef TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_TUNED_1D_CUH_
+#define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_TUNED_1D_CUH_
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
@@ -26,7 +26,7 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-namespace quantize_transpose_persistent_kernel {
+namespace quantize_transpose_tuned_kernel {
 
 using namespace quantization_and_transposition_SF;
 using namespace core;
@@ -34,27 +34,27 @@ using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
-constexpr int SCALE_DIM = 16;  // NVFP4 block (x16 elts)
-static_assert(SCALE_DIM == 16 && "NVFP4 block size is 16\0");
+struct TunableConfig {
+  static constexpr int CHUNK_DIM_Y = 128;
+  static constexpr int CHUNK_DIM_X = 128;
+  static constexpr int PREFETCH_STAGES = 1;
+  static constexpr bool PERSISTENT = true;
+};
 
+constexpr int SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 constexpr int THREADS_NUM = 128;
 constexpr int ELTS_PER_THREAD = 16;
-constexpr int CHUNK_DIM_Y = 128;
-constexpr int CHUNK_DIM_X = 128;
 constexpr int TILE_DIM_Y = 64;
 constexpr int TILE_DIM_X = 64;
 
-static_assert(THREADS_NUM == 128 && "Hardcoded and fixed parameter\0");
 static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter\0");
-static_assert(TILE_DIM_Y == 64 && "Hardcoded and fixed parameter\0");
-static_assert(TILE_DIM_X == 64 && "Hardcoded and fixed parameter\0");
 
 static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X) &&
               "Unbalanced threads workload\0");
 
-static_assert((CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
+static_assert((TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
               "Chunk size Y must be evenly divisible by the tile size Y\0");
-static_assert((CHUNK_DIM_X % TILE_DIM_X == 0) &&
+static_assert((TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0) &&
               "Chunk size X must be evenly divisible by the tile size X\0");
 
 static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
@@ -62,13 +62,13 @@ static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
 static_assert((TILE_DIM_X % SCALE_DIM == 0) &&
               "Tile size X must be evenly divisible by the scale dim\0");
 
-constexpr int TILES_Y = CHUNK_DIM_Y / TILE_DIM_Y;
-constexpr int TILES_X = CHUNK_DIM_X / TILE_DIM_X;
+constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
+constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
 
 constexpr int THREADS_PER_SCALE_ROWWISE = SCALE_DIM / ELTS_PER_THREAD;
 
-constexpr int SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / SCALE_DIM;
-constexpr int SCALES_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM;
+constexpr int SCALES_PER_CHUNK_Y = TunableConfig::CHUNK_DIM_Y / SCALE_DIM;
+constexpr int SCALES_PER_CHUNK_X = TunableConfig::CHUNK_DIM_X / SCALE_DIM;
 
 constexpr int SCALES_PER_TILE_Y = TILE_DIM_Y / SCALE_DIM;
 constexpr int SCALES_PER_TILE_X = TILE_DIM_X / SCALE_DIM;
@@ -77,8 +77,7 @@ constexpr int STAGES_Y = TILES_Y;
 constexpr int STAGES_X = TILES_X;
 constexpr int STAGES = STAGES_Y * STAGES_X;
 
-constexpr int PREFETCH_STAGES = 1;
-constexpr int BUFFS_NUM = PREFETCH_STAGES + 1;
+constexpr int BUFFS_NUM = TunableConfig::PREFETCH_STAGES + 1;
 constexpr int BUFFS_NUM_IN = BUFFS_NUM;
 constexpr int BUFFS_NUM_OUT = BUFFS_NUM;
 constexpr int BUFFS_NUM_OUT_TR = 2;
@@ -105,7 +104,6 @@ constexpr int BUFF_OUT_T_SIZE = BUFF_OUT_T_DIM_Y * BUFF_OUT_T_DIM_X;
 
 // Manual swizzling parameters to reduce SHMEM bank conflicts
 constexpr int PACK_SIZE = 8;
-static_assert(PACK_SIZE == 8 && "Pack size is fixed to 8\0");
 constexpr int WAVES = ELTS_PER_THREAD / PACK_SIZE;
 
 constexpr int THREADS_X_ROWWISE = TILE_DIM_X / ELTS_PER_THREAD;
@@ -125,7 +123,7 @@ constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_T_DIM_X / ITERATIONS_TRANSPOSE / STA
 static_assert(BUFF_DIM_Y >= SCALE_DIM &&
               "Number of buffer rows must be greater or equal to the size of the columwise "
               "scaling block\0");
-static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y);
+static_assert(TunableConfig::CHUNK_DIM_Y >= BUFF_DIM_Y);
 static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
               "Number of buffer rows must be greater or equal to the number of rowwise "
               "processing threads in Y dimension\0");
@@ -142,12 +140,12 @@ using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
 using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
 using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
 using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_T_DIM_Y][BUFF_OUT_T_DIM_X];
-using ScalesType2D = nvfp4_scale_t[CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
-using ScalesTypeTr2D = nvfp4_scale_t[CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
+using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
+using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
 
-__device__ __forceinline__ float get_amax_of_pair(const IType2 xormax_pair) {
-  return static_cast<float>(__hmax(__habs(xormax_pair.x), __habs(xormax_pair.y)));
+__device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
+  return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
 // Compute "correct" per-block encoding scaling factor
@@ -313,7 +311,7 @@ __device__ __forceinline__ void rowwise_scaling(
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
-__global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persistent_kernel(
+__global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
     const __grid_constant__ CUtensorMap tensor_map_output_t, nvfp4_scale_t *const scales_ptr,
@@ -352,7 +350,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
   constexpr int out_mem_rowwise_data = buff_size_aligned_out;
   constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
   constexpr int out_mem_rowwise_scales = DIVUP_TO_MULTIPLE(
-      CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   extern __shared__ unsigned char dynamic_shmem[];
@@ -422,7 +420,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
 // Prefetch input data only when processing the first chunk,
 // which enables the one-iteration overlap throughout the entire kernel life
 #pragma unroll
-  for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
+  for (int stage = 0; stage < TunableConfig::PREFETCH_STAGES; ++stage) {
     const int buff_in = stage;
     const int stage_Y = stage / STAGES_X;
     const int stage_X = stage % STAGES_X;
@@ -430,8 +428,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
     const int stage_offset_Y = stage_Y * TILE_DIM_Y;
     const int stage_offset_X = stage_X * TILE_DIM_X;
 
-    const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
-    const int block_offset_X = ctaid_X * CHUNK_DIM_X;
+    const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+    const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
 
     const int global_offset_Y = block_offset_Y + stage_offset_Y;
     const int global_offset_X = block_offset_X + stage_offset_X;
@@ -451,24 +449,25 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
   }
 
   while (!job_finished) {
-    const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
-    const int block_offset_X = ctaid_X * CHUNK_DIM_X;
+    const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+    const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
 
-    const int block_offset_Y_tr = ctaid_X * CHUNK_DIM_X;
-    const int block_offset_X_tr = ctaid_Y * CHUNK_DIM_Y;
+    const int block_offset_Y_tr = ctaid_X * TunableConfig::CHUNK_DIM_X;
+    const int block_offset_X_tr = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
 
     const int chunk_rows = rows - block_offset_Y;
     const int chunk_cols = cols - block_offset_X;
 
-    const int scales_block_offset_Y_rowwise = ctaid_Y * CHUNK_DIM_Y;
+    const int scales_block_offset_Y_rowwise = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
     const int scales_block_offset_X_rowwise = ctaid_X * SCALES_PER_CHUNK_X;
-    const int scales_block_offset_Y_tr = ctaid_X * CHUNK_DIM_X;
+    const int scales_block_offset_Y_tr = ctaid_X * TunableConfig::CHUNK_DIM_X;
     const int scales_block_offset_X_tr = ctaid_Y * SCALES_PER_CHUNK_Y;
 
-    if (leading_thread) {
-      ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
-      ptx::clusterlaunchcontrol_try_cancel_async_shared_cta_mbarrier_complete_tx_bytes(
-          &workID_mbar, &workID_response);
+    if constexpr (TunableConfig::PERSISTENT) {
+      if (leading_thread) {
+        ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
+        ptx::try_cancel_cta(&workID_mbar, &workID_response);
+      }
     }
 
 #pragma unroll
@@ -479,19 +478,24 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
       const int stage_offset_Y = stage_Y * TILE_DIM_Y;
       const int stage_offset_X = stage_X * TILE_DIM_X;
 
-      if (stage == STAGES - PREFETCH_STAGES) {
-        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
-        ptx::get_cancelled_cta_2D_id(&workID_response, ctaid_X, ctaid_Y);
+      if (stage == STAGES - TunableConfig::PREFETCH_STAGES) {
+        if constexpr (TunableConfig::PERSISTENT) {
+          ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
+          ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
+          ctaid_parity ^= 1;
+        } else {
+          ctaid_X = -1;
+          ctaid_Y = -1;
+        }
         if (ctaid_X == -1 && ctaid_Y == -1) {
           job_finished = true;
         }
-        ctaid_parity ^= 1;
       }
 
       // Prefetch next stage Input data
-      if (!job_finished || (stage < STAGES - PREFETCH_STAGES)) {
-        const int next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
-        const int next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
+      if (!job_finished || (stage < STAGES - TunableConfig::PREFETCH_STAGES)) {
+        const int next_prefetch_buff = (buff_in + TunableConfig::PREFETCH_STAGES) % BUFFS_NUM;
+        const int next_prefetch_stage = (stage + TunableConfig::PREFETCH_STAGES) % STAGES;
         const int next_prefetch_stage_Y = next_prefetch_stage / STAGES_X;
         const int next_prefetch_stage_X = next_prefetch_stage % STAGES_X;
 
@@ -499,8 +503,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
         const int next_prefetch_stage_offset_X = next_prefetch_stage_X * TILE_DIM_X;
 
         // Offsets change, because coordinates of the next "to-be-prefetched" CTA do also chage
-        const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
-        const int block_offset_X = ctaid_X * CHUNK_DIM_X;
+        const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+        const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
 
         const int global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
         const int global_offset_X = block_offset_X + next_prefetch_stage_offset_X;
@@ -527,7 +531,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
 
       // Wait for TMA transfer to have finished reading shared memory
       // I.e. the OUT buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
 
       // NVFP4 Quantization
       rowwise_scaling<USE_STOCHASTIC_ROUNDING>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise,
@@ -579,7 +583,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
         // number of scales in X dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
 
-        for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_NUM) {
+        for (size_t row = threadIdx.x; row < TunableConfig::CHUNK_DIM_Y; row += THREADS_NUM) {
           const size_t row_global = scales_block_offset_Y_rowwise + row;
           if (row_global < rows) {
             ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
@@ -596,7 +600,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
         // number of scales in Y dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / SCALE_DIM);
 
-        for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X; row_tr += THREADS_NUM) {
+        for (size_t row_tr = threadIdx.x; row_tr < TunableConfig::CHUNK_DIM_X; row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
             ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
@@ -627,13 +631,13 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_persiste
 }
 
 #endif  // FP4_TYPE_SUPPORTED
-}  // namespace quantize_transpose_persistent_kernel
+}  // namespace quantize_transpose_tuned_kernel
 
-inline void quantize_transpose_persistent_1D(const Tensor &input, const Tensor *noop,
-                                             Tensor *output, const QuantizationConfig *quant_config,
-                                             cudaStream_t stream) {
+inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
+                                        Tensor *output, const QuantizationConfig *quant_config,
+                                        cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
-  using namespace quantize_transpose_persistent_kernel;
+  using namespace quantize_transpose_tuned_kernel;
   using namespace ptx;
 
   const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
@@ -666,8 +670,8 @@ inline void quantize_transpose_persistent_1D(const Tensor &input, const Tensor *
   NVTE_CHECK(cols % 32 == 0,
              "Number of tensor cols must be a multiple of 32");  // 16B alignment for TMA
 
-  const int blocks_Y = DIVUP(rows, static_cast<size_t>(CHUNK_DIM_Y));
-  const int blocks_X = DIVUP(cols, static_cast<size_t>(CHUNK_DIM_X));
+  const int blocks_Y = DIVUP(rows, static_cast<size_t>(TunableConfig::CHUNK_DIM_Y));
+  const int blocks_X = DIVUP(cols, static_cast<size_t>(TunableConfig::CHUNK_DIM_X));
   const dim3 grid(blocks_X, blocks_Y);
   const int block_size = THREADS_NUM;
 
@@ -719,9 +723,9 @@ inline void quantize_transpose_persistent_1D(const Tensor &input, const Tensor *
       DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_T_SIZE, TMA_SHMEM_ALIGNMENT);
 
   constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
-      CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
   constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
-      CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   const int in_mem = buff_size_aligned_in;
 
@@ -739,7 +743,7 @@ inline void quantize_transpose_persistent_1D(const Tensor &input, const Tensor *
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
         auto kernel =
-            quantize_transpose_nvfp4_persistent_kernel<USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+            quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
 
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
         kernel<<<grid, block_size, dshmem_size, stream>>>(
@@ -756,4 +760,4 @@ inline void quantize_transpose_persistent_1D(const Tensor &input, const Tensor *
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_PERSISTENT_1D_CUH_
+#endif  // TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_TUNED_1D_CUH_
