@@ -356,7 +356,9 @@ def onnx_layernorm(
     )
 
     if normalization == "RMSNorm":
-        ln_out = torch.nn.functional.rms_norm(inp, inp.shape[-1:], ln_weight, eps)
+        variance = inp.pow(2).mean(-1, keepdim=True)
+        ln_out = inp * torch.rsqrt(variance + eps)
+        ln_out = ln_out * ln_weight
     else:
         ln_out = torch.nn.functional.layer_norm(
             inp, inp.shape[-1:], ln_weight, layer_norm_bias, eps

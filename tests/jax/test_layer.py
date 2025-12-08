@@ -83,6 +83,7 @@ _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
 _KEY_OF_WINDOW_SIZE = "window_size"
+_KEY_OF_SOFTMAX_TYPE = "softmax_type"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -276,6 +277,14 @@ ATTRS = [
         _KEY_OF_RELATIVE_EMBEDDING: True,
         _KEY_OF_SELF_ATTN_BIAS_TYPE: "post_scale_bias",
     },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "off_by_one",
+    },
+    # attrs31
+    {
+        _KEY_OF_SOFTMAX_TYPE: "learnable",
+    },
 ]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -418,6 +427,9 @@ class EncoderRunner(BaseRunner):
         "attention/qkv/ln_bias": "pre_attention_layer_norm/ln_bias",
         "attention/query/scale": "pre_attention_layer_norm/scale",
         "attention/query/ln_bias": "pre_attention_layer_norm/ln_bias",
+        "attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "attention/DotProductAttention_0/softmax_offset"
+        ),
         "mlp/wi_kernel": "mlp/wi/kernel",
         "mlp/wi_bias": "mlp/wi/bias",
         "mlp/wo_kernel": "mlp/wo/kernel",
@@ -463,10 +475,16 @@ class DecoderRunner(BaseRunner):
         "encoder_decoder_attention/qkv/ln_bias": "pre_cross_attention_layer_norm/ln_bias",
         "encoder_decoder_attention/query/scale": "pre_cross_attention_layer_norm/scale",
         "encoder_decoder_attention/query/ln_bias": "pre_cross_attention_layer_norm/ln_bias",
+        "encoder_decoder_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "encoder_decoder_attention/DotProductAttention_0/softmax_offset"
+        ),
         "self_attention/qkv/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/qkv/ln_bias": "pre_self_attention_layer_norm/ln_bias",
         "self_attention/query/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/query/ln_bias": "pre_self_attention_layer_norm/ln_bias",
+        "self_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "self_attention/DotProductAttention_0/softmax_offset"
+        ),
         "mlp/wi_kernel": "mlp/wi/kernel",
         "mlp/wi_bias": "mlp/wi/bias",
         "mlp/wo_kernel": "mlp/wo/kernel",
@@ -534,7 +552,7 @@ class BaseTester:
         """Test forward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
         with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-            self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+            self.runner(attrs).test_forward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
@@ -542,7 +560,7 @@ class BaseTester:
         """Test backward with fp8 enabled"""
         # Empty MeshResource is used as we are running on a single device
         with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-            self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
+            self.runner(attrs).test_backward(data_shape, dtype)
 
 
 class TestEncoderLayer(BaseTester):

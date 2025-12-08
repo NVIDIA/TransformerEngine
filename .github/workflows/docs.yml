@@ -22,10 +22,10 @@ jobs:
           sudo apt-get install -y pandoc graphviz doxygen
           export GIT_SHA=$(git show-ref --hash HEAD)
       - name: 'Build docs'
-        run: |
+        run: | # SPHINXOPTS="-W" errors out on warnings
           doxygen docs/Doxyfile
           cd docs
-          make html
+          make html SPHINXOPTS="-W"
       - name: 'Upload docs'
         uses: actions/upload-artifact@v4
         with:
