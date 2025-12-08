@@ -270,7 +270,7 @@ __device__ __forceinline__ void rowwise_scaling(
       const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
 
       // Load elements
-      __uint128_t& elts_8x = *reinterpret_cast<__uint128_t *>(&rIn[w]); 
+      __uint128_t &elts_8x = *reinterpret_cast<__uint128_t *>(&rIn[w]);
       elts_8x = ptx::ld_shared_b128(&sIn[buff_in][it_offset_Y_rowwise][swizzled_thread_idx]);
 #pragma unroll
       for (int e = 0; e < PACK_SIZE / 2; ++e) {
