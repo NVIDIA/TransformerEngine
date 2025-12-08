@@ -474,7 +474,7 @@ class TestAllQuantizedTensors:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-    @pytest.mark.parametrize("quantization", ["fp8", "mxfp8", "fp8_blockwise", "nvfp4"])
+    @pytest.mark.parametrize("quantization", [ "fp8", "mxfp8", "nvfp4", "fp8_blockwise"])
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
         self,
@@ -482,7 +482,7 @@ class TestAllQuantizedTensors:
         dim: int,
         shape: Iterable[int] = (128, 128),
         chunks: int = 2,
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
     ) -> None:
         # Skip invalid configs
@@ -538,7 +538,14 @@ class TestAllQuantizedTensors:
             # Check that splits are quantized when expected
             if quantization == "fp8":
                 assert isinstance(quantized_split, Float8Tensor)
-            if quantization == "mxfp8" and dim == 0:
+                expected_value = quantized_split.dequantize()
+            elif quantization == "mxfp8" and dim == 0:
                 assert isinstance(quantized_split, MXFP8Tensor)
+                expected_value = quantized_split.dequantize()
+            else:
+                # Otherwise torch dispatch would default to base implementation
+                # dequantize and computing output and hence output from torch chunk
+                # is already dequantized.
+                expected_value = quantized_split
             # Check values
-            torch.testing.assert_close(quantized_split.dequantize(), ref_split)
+            torch.testing.assert_close(expected_value, ref_split)
