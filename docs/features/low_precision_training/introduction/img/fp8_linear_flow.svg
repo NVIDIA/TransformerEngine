@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 780" width="850" height="780">
   <defs>
     <style>
-      @import url("diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
     </style>
     <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
       <polygon points="0 0, 6 2, 0 4" fill="#616161" />

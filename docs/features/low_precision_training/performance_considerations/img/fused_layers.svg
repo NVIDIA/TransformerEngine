@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 640" width="850" height="640">
   <defs>
     <style>
-      @import url("diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       /* Diagram-specific overrides */
       .hp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
       .gemm { fill: #ffe8cc; stroke: #f57c00; stroke-width: 3; }
