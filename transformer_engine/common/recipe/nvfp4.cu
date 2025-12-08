@@ -87,30 +87,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                          const size_t h, const size_t w, const size_t start_offset,
                                          const size_t len) {
   constexpr int kThreadsPerWarp = 32;
-  constexpr int kLoopsPerRow = (kTileDim + kThreadsPerWarp - 1) / kThreadsPerWarp;
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
-  constexpr int kLoopsPerCol = (kTileDim + kNumWarps - 1) / kNumWarps;
+  static_assert(kTileDim * kTileDim == kThreadsPerBlock);
 
-  const int tile_col = blockIdx.x;
-  const int tile_row = blockIdx.y;
+  const size_t tile_col = blockIdx.x;
+  const size_t tile_row = blockIdx.y;
   const size_t end_offset = start_offset + len;
   const IType *input_minus_offset = input - start_offset;
 
   __shared__ float smem[kNumWarps];
   float amax = 0.0f;
 
-  for (int loop_col = 0; loop_col < kLoopsPerCol; ++loop_col) {
-    size_t r = tile_row * kTileDim + loop_col * kNumWarps + threadIdx.x / kThreadsPerWarp;
-    for (int loop_row = 0; loop_row < kLoopsPerRow; ++loop_row) {
-      size_t c = tile_col * kTileDim + loop_row * kThreadsPerWarp + (threadIdx.x % kThreadsPerWarp);
-      size_t idx = r * w + c;
-      if (r < h && c < w && idx >= start_offset && idx < end_offset) {
-        float other_amax = fabs(static_cast<float>(input_minus_offset[idx]));
-        __builtin_assume(amax >= 0);
-        __builtin_assume(other_amax >= 0);
-        amax = fmaxf(amax, other_amax);
-      }
-    }
+  size_t r = tile_row * kTileDim + threadIdx.x / kTileDim;
+  size_t c = tile_col * kTileDim + threadIdx.x % kTileDim;
+  size_t idx = r * w + c;
+  if (r < h && c < w && idx >= start_offset && idx < end_offset) {
+    amax = fabs(static_cast<float>(input_minus_offset[idx]));
   }
 
   for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2) {

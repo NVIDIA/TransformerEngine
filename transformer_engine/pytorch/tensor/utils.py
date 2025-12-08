@@ -639,6 +639,15 @@ def _cast_master_weights_to_nvfp4_2d(
         per_block_decode_scale,
         global_scale,
     ) in enumerate(zipped_meta):
+
+        # TODO: Add `manual_post_all_gather_processing` flag to control whether to reset transpose
+        # cache.
+        # Reset transpose cache for all model weights.
+        # We cannot create transpose cache here because users (like megatron) may want to
+        # overlap the all-gather of model weights and forward process, so the model weight is
+        # not updated currently.
+        model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+
         if master_weight is None or master_weight.numel() == 0:
             continue
 
