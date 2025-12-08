@@ -554,6 +554,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Returns `self` if data is already in correct memory format.
 
         """
+        # requires_grad remains unaltered when calling contiguous on 
+        # torch tensor and so should be the case for our custom float8 tensor
+        # as well.
         return Float8Tensor.make_like(
             tensor=self,
             data=self._data.contiguous(memory_format=memory_format),
@@ -562,6 +565,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 if self._transpose is not None
                 else None
             ),
+            requires_grad=self.requires_grad
         )
 
         # raise ValueError("Float8Tensor does not support different memory formats!")
