@@ -266,12 +266,12 @@ __device__ __forceinline__ void rowwise_scaling(
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
-      uint64_t &elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][0]);
-      uint64_t &elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][2]);
       const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
       const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+
       // Load elements
-      ptx::ld_shared_b128(elts03, elts47, &sIn[buff_in][it_offset_Y_rowwise][swizzled_thread_idx]);
+      __uint128_t& elts_8x = *reinterpret_cast<__uint128_t *>(&rIn[w]); 
+      elts_8x = ptx::ld_shared_b128(&sIn[buff_in][it_offset_Y_rowwise][swizzled_thread_idx]);
 #pragma unroll
       for (int e = 0; e < PACK_SIZE / 2; ++e) {
         ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rIn[w][e]);
