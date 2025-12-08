@@ -633,7 +633,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     def _assert_dtypes(self, query: Array, key: Array, value: Array, qkv_layout: QKVLayout):
         """Asserts that the dtypes of query, key, and value dtypes are consistent."""
         if qkv_layout.is_qkvpacked():
-            pass # No need to check dtypes for key and value since it is packed
+            pass  # No need to check dtypes for key and value since it is packed
         elif qkv_layout.is_kvpacked():
             assert (
                 key.dtype == query.dtype
