@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1150 400" width="100%" style="max-width: 900px;">
   <defs>
     <style>
-      @import url("../../../_static/css/diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       
       /* Diagram-specific styles */
       .input-box { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }

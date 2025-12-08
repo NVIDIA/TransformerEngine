@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 210">
   <defs>
     <style>
-      @import url("diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       .sign-bit { fill: #9db4d0; stroke: #333; stroke-width: 1; }
       .exponent-bit { fill: #d9a066; stroke: #333; stroke-width: 1; }
       .mantissa-bit { fill: #a8d99c; stroke: #333; stroke-width: 1; }

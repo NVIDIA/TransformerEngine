@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 220">
   <defs>
     <style>
-      @import url("diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       .arrow {
         stroke: #616161;
         stroke-width: 2;

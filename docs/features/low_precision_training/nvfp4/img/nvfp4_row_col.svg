@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 650 520" width="100%" style="max-width: 650px;">
   <defs>
     <style>
-      @import url("../../../_static/css/diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       .title { font: bold 18px sans-serif; fill: #333; text-anchor: middle; }
       .small-text { font: 12px sans-serif; fill: #555; text-anchor: middle; }
       .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }

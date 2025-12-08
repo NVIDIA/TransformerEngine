@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340">
   <defs>
     <style>
-      @import url("../../../_static/css/diagram-colors.css");
+      @import url("../_static/css/diagram-colors.css");
       
       /* Diagram-specific styles */
       .input { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
