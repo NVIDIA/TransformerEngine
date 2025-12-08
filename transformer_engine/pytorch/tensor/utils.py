@@ -158,7 +158,8 @@ def cast_master_weights_to_fp8(
 
 
 def cast_master_weights_to_nvfp4(
-    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None,
+    manual_post_all_gather_processing=False
 ):
     """Helper to cast master weights to NVFP4 primary weights."""
 
@@ -189,7 +190,8 @@ def cast_master_weights_to_nvfp4(
             )
     if len(nvfp4_params) > 0:
         _cast_master_weights_to_nvfp4_2d(
-            nvfp4_params, group, use_fsdp_shard_model_weights=use_fsdp_shard_model_weights
+            nvfp4_params, group, use_fsdp_shard_model_weights=use_fsdp_shard_model_weights,
+            manual_post_all_gather_processing=manual_post_all_gather_processing
         )
 
 def _cast_master_weights_to_fp8_delayed_scaling(
@@ -512,7 +514,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 
 # revisit this later
 def _cast_master_weights_to_nvfp4_2d(
-    params, group, use_fsdp_shard_model_weights=False
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
     r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
 
