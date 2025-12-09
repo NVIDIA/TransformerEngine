@@ -1025,7 +1025,7 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     )
     layout_matched_reference.zero_()
     quantizer.update_quantized(
-        master_weight.to(torch.bfloat16).view(1, -1),
+        master_weight.to(torch.bfloat16),
         layout_matched_reference,
     )
     layout_reference_data = layout_matched_reference._rowwise_data.detach().clone()
@@ -1051,13 +1051,14 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     print("partial cast nvfp4_tensor.dequantize(dtype=torch.bfloat16)", nvfp4_tensor.dequantize(dtype=torch.bfloat16))
     print("reference_dequant", reference_dequant)
     print("partial cast nvfp4_tensor._amax_rowwise", nvfp4_tensor._amax_rowwise)
-    torch.testing.assert_close(nvfp4_tensor._amax_rowwise, layout_reference_rowwise_amax)
+    torch.testing.assert_close(nvfp4_tensor._amax_rowwise, layout_reference_rowwise_amax, atol=0, rtol=0)
     # torch.testing.assert_close(
     #     nvfp4_tensor.dequantize(dtype=torch.bfloat16), reference_dequant
     # )
     # torch.testing.assert_close(nvfp4_tensor._rowwise_data, layout_reference_data)
-    torch.testing.assert_close(nvfp4_tensor._rowwise_scale_inv, reference_scale)
+    torch.testing.assert_close(nvfp4_tensor._rowwise_scale_inv, reference_scale, atol=0, rtol=0)
     # torch.testing.assert_close(nvfp4_tensor._amax_rowwise, layout_reference_global_amax)
+    torch.testing.assert_close(nvfp4_tensor._rowwise_data, layout_reference_data, atol=0, rtol=0)
 
 
 if __name__ == "__main__":
