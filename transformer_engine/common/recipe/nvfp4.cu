@@ -393,8 +393,8 @@ void nvfp4_transpose(const Tensor input, Tensor output, cudaStream_t stream) {
   NVTE_CHECK(output.dtype() == DType::kByte, "NVFP4 transpose output must be uint8.");
 
   // Get dimensions from packed storage
-  // input.shape = [M, K/2], so M = shape[0], K = shape[1] * 2
-  const auto &in_shape = input.shape;
+  // input.shape() = [M, K/2], so M = shape[0], K = shape[1] * 2
+  const auto in_shape = input.shape();
   NVTE_CHECK(in_shape.size() == 2, "NVFP4 transpose expects 2D input (packed), got ", in_shape.size(), "D.");
   const size_t M = in_shape[0];
   const size_t K_packed = in_shape[1];
@@ -404,7 +404,7 @@ void nvfp4_transpose(const Tensor input, Tensor output, cudaStream_t stream) {
   const size_t M_packed = M / 2;
   NVTE_CHECK(M % 2 == 0, "NVFP4 transpose requires M (", M, ") to be even.");
 
-  const auto &out_shape = output.shape;
+  const auto out_shape = output.shape();
   NVTE_CHECK(out_shape.size() == 2, "NVFP4 transpose expects 2D output.");
   NVTE_CHECK(out_shape[0] == K && out_shape[1] == M_packed,
              "NVFP4 transpose output shape mismatch. Expected [", K, ", ", M_packed,

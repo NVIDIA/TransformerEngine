@@ -278,6 +278,15 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
 
+        # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
+        if rowwise_usage and columnwise_usage:
+            assert (
+                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+            ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                self._create_columnwise()
+                return
+
         # Update row-scaled data
         if rowwise_usage:
             if self._rowwise_data is None:
@@ -318,13 +327,6 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_data = None
             self._columnwise_scale_inv = None
             self._amax_columnwise = None
-        
-        if rowwise_usage and columnwise_usage:
-            assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
-            ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
-            if self._columnwise_data is None or self._columnwise_scale_inv is None:
-                self._create_columnwise()
     
     def _create_columnwise(self):
         """

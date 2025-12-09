@@ -966,9 +966,64 @@ def main() -> None:
 
 
 @pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="NVFP4 transpose test requires CUDA."
+)
+def test_nvfp4_transpose_kernel() -> None:
+    """Test that nvfp4_transpose kernel produces bitwise identical results to reference."""
+    available, reason = is_nvfp4_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    torch.manual_seed(1234)
+    device = torch.device("cuda")
+    shape = (2048, 64)
+    master_weight = torch.randn(shape, dtype=torch.float32, device=device)
+
+    print("\n=== Testing NVFP4 transpose kernel ===")
+
+    # Create reference with both rowwise and columnwise data
+    quantizer_with_colwise = NVFP4Quantizer(
+        rowwise=True, columnwise=True, with_2d_quantization=True
+    )
+    reference_tensor = quantizer_with_colwise(master_weight.to(torch.bfloat16))
+    assert reference_tensor._columnwise_data is not None, "Reference should have columnwise data"
+    reference_columnwise_data = reference_tensor._columnwise_data.detach().clone()
+    print(
+        "reference columnwise_data shape:",
+        reference_columnwise_data.shape,
+    )
+
+    # Create tensor with only rowwise data, then call _create_columnwise()
+    quantizer_rowwise_only = NVFP4Quantizer(
+        rowwise=True, columnwise=False, with_2d_quantization=True
+    )
+    test_tensor = quantizer_rowwise_only(master_weight.to(torch.bfloat16))
+    assert test_tensor._columnwise_data is None, "Test tensor should not have columnwise data yet"
+
+    # Now call _create_columnwise() which uses our nvfp4_transpose kernel
+    test_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
+    assert test_tensor._columnwise_data is not None, "Test tensor should have columnwise data after _create_columnwise()"
+    print(
+        "test_tensor columnwise_data shape after transpose:",
+        test_tensor._columnwise_data.shape,
+    )
+
+    # Compare columnwise data - should be bitwise identical
+    torch.testing.assert_close(
+        test_tensor._columnwise_data,
+        reference_columnwise_data,
+        atol=0,
+        rtol=0,
+        msg="NVFP4 transpose kernel produced different columnwise data than reference!",
+    )
+    print("NVFP4 transpose kernel test PASSED!")
+
+
+@pytest.mark.skipif(
     not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA."
 )
 def test_nvfp4_partial_cast_matches_full() -> None:
+    """Test multi-GPU partial cast: split master weight, partial cast on each rank, all-gather, compare."""
     WORLD_RANK = int(os.getenv("RANK", "0"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
     LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
@@ -994,73 +1049,99 @@ def test_nvfp4_partial_cast_matches_full() -> None:
 
     torch.manual_seed(1234)
     device = torch.device("cuda")
-    shape = (2048, 64)
-    master_weight = torch.randn(shape, dtype=torch.float32, device=device)
+    # Shape must be divisible by WORLD_SIZE for even splitting
+    # Also ensure dimensions are multiples of 16 for NVFP4 tiles
+    shape = (2048, 512)
+    total_elements = shape[0] * shape[1]
+    assert total_elements % WORLD_SIZE == 0, "Total elements must be divisible by WORLD_SIZE"
 
+    # Full master weight (same on all ranks due to same seed)
+    full_master_weight = torch.randn(shape, dtype=torch.float32, device=device)
+
+    # Create reference using full quantization
     quantizer = NVFP4Quantizer(rowwise=True, columnwise=False, with_2d_quantization=True)
-    nvfp4_tensor = quantizer(master_weight.to(torch.bfloat16))
-    print(
-        "reference nvfp4_tensor._rowwise_data and shape",
-        nvfp4_tensor._rowwise_data,
-        nvfp4_tensor._rowwise_data.shape,
-    )
-    print(
-        "reference nvfp4_tensor._rowwise_scale_inv and shape",
-        nvfp4_tensor._rowwise_scale_inv,
-        nvfp4_tensor._rowwise_scale_inv.shape,
-    )
-    assert isinstance(nvfp4_tensor, NVFP4Tensor)
+    reference_tensor = quantizer(full_master_weight.to(torch.bfloat16))
+    reference_data = reference_tensor._rowwise_data.detach().clone()
+    reference_scale = reference_tensor._rowwise_scale_inv.detach().clone()
+    reference_amax = reference_tensor._amax_rowwise.detach().clone()
+    print(f"[Rank {WORLD_RANK}] reference_data shape: {reference_data.shape}")
+    print(f"[Rank {WORLD_RANK}] reference_scale shape: {reference_scale.shape}")
 
-    reference_data = nvfp4_tensor._rowwise_data.detach().clone()
-    reference_scale = nvfp4_tensor._rowwise_scale_inv.detach().clone()
-    reference_dequant = nvfp4_tensor.dequantize(dtype=torch.bfloat16).detach().clone()
-    print(
-        "reference_scale first rows",
-        reference_scale[:16, :4].tolist(),
-    )
+    # Split master weight evenly across ranks
+    shard_size = total_elements // WORLD_SIZE
+    start_offset = WORLD_RANK * shard_size
+    end_offset = start_offset + shard_size
+    master_weight_shard = full_master_weight.view(-1)[start_offset:end_offset].clone()
+    print(f"[Rank {WORLD_RANK}] shard: start_offset={start_offset}, end_offset={end_offset}, shard_size={shard_size}")
 
-    # Build a layout-matched reference by reusing the quantizer with an explicitly allocated tensor.
-    layout_matched_reference = quantizer.make_empty(
-        shape, dtype=torch.bfloat16, device=device
-    )
-    layout_matched_reference.zero_()
-    quantizer.update_quantized(
-        master_weight.to(torch.bfloat16),
-        layout_matched_reference,
-    )
-    layout_reference_data = layout_matched_reference._rowwise_data.detach().clone()
-    layout_reference_scale = layout_matched_reference._rowwise_scale_inv.detach().clone()
-    layout_reference_rowwise_amax = layout_matched_reference._amax_rowwise.detach().clone()
-    
+    # Create empty NVFP4 tensor for this rank (full shape, but we'll only fill our shard)
+    nvfp4_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
     nvfp4_tensor._rowwise_data.zero_()
     nvfp4_tensor._rowwise_scale_inv.zero_()
     if nvfp4_tensor._amax_rowwise is not None:
-        print("nvfp4_tensor._amax_rowwise", nvfp4_tensor._amax_rowwise)
         nvfp4_tensor._amax_rowwise.zero_()
 
+    # Partial cast on each rank's shard
     cast_master_weights_to_nvfp4(
         [nvfp4_tensor],
-        [master_weight.clone()],
-        [0],
+        [master_weight_shard],
+        [start_offset],
         dp_group,
     )
 
-    print("partial cast nvfp4_tensor", nvfp4_tensor)
-    print("partial cast nvfp4_tensor._rowwise_data and shape", nvfp4_tensor._rowwise_data, nvfp4_tensor._rowwise_data.shape)
-    print("partial cast nvfp4_tensor._rowwise_scale_inv and shape", nvfp4_tensor._rowwise_scale_inv, nvfp4_tensor._rowwise_scale_inv.shape)
-    print("partial cast nvfp4_tensor.dequantize(dtype=torch.bfloat16)", nvfp4_tensor.dequantize(dtype=torch.bfloat16))
-    print("reference_dequant", reference_dequant)
-    print("partial cast nvfp4_tensor._amax_rowwise", nvfp4_tensor._amax_rowwise)
-    torch.testing.assert_close(nvfp4_tensor._amax_rowwise, layout_reference_rowwise_amax, atol=0, rtol=0)
-    # torch.testing.assert_close(
-    #     nvfp4_tensor.dequantize(dtype=torch.bfloat16), reference_dequant
-    # )
-    # torch.testing.assert_close(nvfp4_tensor._rowwise_data, layout_reference_data)
-    torch.testing.assert_close(nvfp4_tensor._rowwise_scale_inv, reference_scale, atol=0, rtol=0)
-    # torch.testing.assert_close(nvfp4_tensor._amax_rowwise, layout_reference_global_amax)
-    torch.testing.assert_close(nvfp4_tensor._rowwise_data, layout_reference_data, atol=0, rtol=0)
+    # All-gather the rowwise data (packed FP4 bytes)
+    # Each rank has the full tensor but only its shard is filled
+    # We need to all-gather the shards
+    rowwise_data_flat = nvfp4_tensor._rowwise_data.view(-1)
+    
+    # For NVFP4, 2 elements are packed per byte, so byte shard size is shard_size // 2
+    byte_shard_size = shard_size // 2
+    byte_start = WORLD_RANK * byte_shard_size
+    byte_end = byte_start + byte_shard_size
+    my_shard_bytes = rowwise_data_flat[byte_start:byte_end].contiguous()
+    
+    # Gather all shards
+    gathered_shards = [torch.empty_like(my_shard_bytes) for _ in range(WORLD_SIZE)]
+    dist.all_gather(gathered_shards, my_shard_bytes, group=dp_group)
+    
+    # Reconstruct the full rowwise data
+    gathered_data = torch.cat(gathered_shards, dim=0).view(reference_data.shape)
+    print(f"[Rank {WORLD_RANK}] gathered_data shape: {gathered_data.shape}")
+
+    # Compare with reference
+    torch.testing.assert_close(
+        gathered_data,
+        reference_data,
+        atol=0,
+        rtol=0,
+        msg=f"[Rank {WORLD_RANK}] Gathered rowwise data does not match reference!",
+    )
+    print(f"[Rank {WORLD_RANK}] rowwise_data matches reference!")
+
+    # Also verify scale matches (scale should be identical on all ranks after all-reduce)
+    torch.testing.assert_close(
+        nvfp4_tensor._rowwise_scale_inv,
+        reference_scale,
+        atol=0,
+        rtol=0,
+        msg=f"[Rank {WORLD_RANK}] Scale does not match reference!",
+    )
+    print(f"[Rank {WORLD_RANK}] scale matches reference!")
+
+    # Verify amax matches
+    torch.testing.assert_close(
+        nvfp4_tensor._amax_rowwise,
+        reference_amax,
+        atol=0,
+        rtol=0,
+        msg=f"[Rank {WORLD_RANK}] Amax does not match reference!",
+    )
+    print(f"[Rank {WORLD_RANK}] amax matches reference!")
+
+    print(f"[Rank {WORLD_RANK}] Multi-GPU NVFP4 partial cast test PASSED!")
 
 
 if __name__ == "__main__":
+    test_nvfp4_transpose_kernel()
     test_nvfp4_partial_cast_matches_full()
     #main()
