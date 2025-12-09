@@ -132,8 +132,8 @@ class RowIdMapPass2Primitive(BasePrimitive):
     @staticmethod
     def abstract(row_id_map_aval, workspace_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 2 (in-place operation)."""
-        del row_id_map_aval, workspace_aval  # Input shapes not needed for output inference
-        del block_size  # Only affects computation
+        del row_id_map_aval, workspace_aval
+        del block_size
 
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         workspace_shape = (num_experts, triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE))
@@ -200,7 +200,7 @@ class RowIdMapPass3Primitive(BasePrimitive):
     @staticmethod
     def abstract(row_id_map_aval, *, num_tokens, num_experts):
         """Shape/dtype inference for pass 3 (in-place operation)."""
-        del row_id_map_aval  # Input shape not needed for output inference
+        del row_id_map_aval
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         return jax.core.ShapedArray(row_id_map_shape, jnp.int32)
 
@@ -275,8 +275,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         with_probs,
     ):
         """Shape/dtype inference for permute."""
-        del row_id_map_aval, scale_aval, permuted_scale_aval  # Not needed for output shape
-        del num_tokens, num_experts  # Inferred from input shapes, kept for API consistency
+        del row_id_map_aval, scale_aval, permuted_scale_aval
+        del num_tokens, num_experts
 
         output_shape = (num_out_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -332,8 +332,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         with_probs,
     ):
         """MLIR lowering using triton_call_lowering."""
-        del num_out_tokens  # Output shape determined by kernel, not needed here
-        # Compute strides
+        del num_out_tokens
         inp_stride_token = hidden_size
         inp_stride_hidden = 1
         output_stride_token = hidden_size
@@ -427,7 +426,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         with_probs,
     ):
         """Shape/dtype inference for unpermute."""
-        del row_id_map_aval, merging_probs_aval, with_merging_probs  # Not needed for output shape
+        del row_id_map_aval, merging_probs_aval, with_merging_probs
 
         output_shape = (num_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -565,7 +564,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         hidden_size,
     ):
         """Shape/dtype inference for unpermute backward with merging probs."""
-        del row_id_map_aval  # Not needed for output shape
+        del fwd_input_aval, row_id_map_aval
 
         # fwd_input_grad has same shape as fwd_input
         fwd_input_grad_shape = (num_out_tokens, hidden_size)
@@ -617,6 +616,8 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         hidden_size,
     ):
         """MLIR lowering using triton_call_lowering."""
+        del num_out_tokens
+
         # Compute strides
         row_id_stride_token = num_experts * 2 + 1
         row_id_stride_expert = 1
@@ -790,7 +791,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
         inp_aval, row_id_map_aval, probs_aval, *, num_tokens, hidden_size, is_forward, with_probs
     ):
         """Shape/dtype inference."""
-        del row_id_map_aval, is_forward  # Not needed
+        del row_id_map_aval, is_forward
 
         output_aval = jax.core.ShapedArray((num_tokens, hidden_size), inp_aval.dtype)
 

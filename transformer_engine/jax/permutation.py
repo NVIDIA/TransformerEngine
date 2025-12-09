@@ -101,6 +101,10 @@ def _token_dispatch_fwd_rule(
     Tuple[jnp.ndarray, int, int, int, bool],
 ]:
     """Forward pass rule for token_dispatch."""
+    # Validate input dimensions
+    assert inp.ndim in [2, 3], f"inp must be 2D or 3D, got {inp.ndim}D"
+    assert routing_map.ndim in [2, 3], f"routing_map must be 2D or 3D, got {routing_map.ndim}D"
+
     # Infer dimensions from input shapes
     num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
     hidden_size = inp.shape[-1]
@@ -347,6 +351,9 @@ def _sort_chunks_by_index_fwd_rule(
     sorted_indices: jnp.ndarray,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int]]:
     """Forward pass rule for sort_chunks_by_index."""
+    # Validate input dimensions
+    assert inp.ndim in [2, 3], f"inp must be 2D or 3D, got {inp.ndim}D"
+
     # Infer dimensions from input shape
     num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
     hidden_size = inp.shape[-1]
