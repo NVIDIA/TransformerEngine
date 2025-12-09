@@ -11,7 +11,6 @@ import pytest
 # High-level API with VJP support
 from transformer_engine.jax.permutation import (
     token_dispatch,
-    token_dispatch_with_probs,
     token_combine,
     sort_chunks_by_index,
 )
@@ -217,6 +216,7 @@ def reference_token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
     num_out_tokens: int,
+    probs: jnp.ndarray = None,
 ) -> tuple:
     """
     Reference implementation of token_dispatch using JAX primitives.
@@ -229,51 +229,15 @@ def reference_token_dispatch(
         Routing mask of shape [num_tokens, num_experts].
     num_out_tokens : int
         Number of tokens in the permuted tensor.
-
-    Returns
-    -------
-    output : jnp.ndarray
-        Permuted output tensor of shape [num_out_tokens, hidden_size].
-    row_id_map : jnp.ndarray
-        The row_id_map for the permutation.
-    """
-    num_tokens, num_experts = routing_map.shape
-    hidden_size = inp.shape[1]
-
-    row_id_map = reference_make_row_id_map(routing_map, num_tokens, num_experts)
-    output, _ = _reference_permute_impl(
-        inp, row_id_map, None, num_tokens, num_experts, num_out_tokens, hidden_size
-    )
-
-    return output, row_id_map
-
-
-def reference_token_dispatch_with_probs(
-    inp: jnp.ndarray,
-    routing_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    num_out_tokens: int,
-) -> tuple:
-    """
-    Reference implementation of token_dispatch_with_probs using JAX primitives.
-
-    Parameters
-    ----------
-    inp : jnp.ndarray
-        Input tensor of shape [num_tokens, hidden_size].
-    routing_map : jnp.ndarray
-        Routing mask of shape [num_tokens, num_experts].
-    probs : jnp.ndarray
+    probs : jnp.ndarray, optional
         The probabilities of shape [num_tokens, num_experts].
-    num_out_tokens : int
-        Number of tokens in the permuted tensor.
 
     Returns
     -------
     output : jnp.ndarray
         Permuted output tensor of shape [num_out_tokens, hidden_size].
-    permuted_probs : jnp.ndarray
-        Permuted probabilities of shape [num_out_tokens].
+    permuted_probs : jnp.ndarray or None
+        Permuted probabilities of shape [num_out_tokens], or None if probs not provided.
     row_id_map : jnp.ndarray
         The row_id_map for the permutation.
     """
@@ -479,19 +443,19 @@ class TestHighLevelPermutationAPI:
 
         # Define loss functions
         def loss_fn(x):
-            output, _ = token_dispatch(x, routing_map, num_out_tokens)
+            output, _, _ = token_dispatch(x, routing_map, num_out_tokens)
             return jnp.sum(output**2)
 
         def ref_loss_fn(x):
-            output, _ = reference_token_dispatch(x, routing_map, num_out_tokens)
+            output, _, _ = reference_token_dispatch(x, routing_map, num_out_tokens)
             return jnp.sum(output**2)
 
         loss_val, computed_grad = jax.value_and_grad(loss_fn)(inp)
         ref_loss_val, ref_grad = jax.value_and_grad(ref_loss_fn)(inp)
 
         # Compare forward outputs
-        output, _ = token_dispatch(inp, routing_map, num_out_tokens)
-        ref_output, _ = reference_token_dispatch(inp, routing_map, num_out_tokens)
+        output, _, _ = token_dispatch(inp, routing_map, num_out_tokens)
+        ref_output, _, _ = reference_token_dispatch(inp, routing_map, num_out_tokens)
         assert_allclose(output, ref_output)
 
         # Compare loss and gradient
@@ -499,7 +463,7 @@ class TestHighLevelPermutationAPI:
         assert_allclose(computed_grad, ref_grad)
 
     # =========================================================================
-    # token_dispatch_with_probs tests
+    # token_dispatch with probs tests
     # =========================================================================
 
     @pytest.mark.parametrize(
@@ -513,7 +477,7 @@ class TestHighLevelPermutationAPI:
     def test_token_dispatch_with_probs(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype
     ):
-        """Test token_dispatch_with_probs forward and backward pass against reference"""
+        """Test token_dispatch with probs forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
@@ -529,33 +493,37 @@ class TestHighLevelPermutationAPI:
             prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
         )
 
-        # Define loss function that uses token_dispatch_with_probs
+        # Define loss function that uses token_dispatch with probs
         # We compute gradients w.r.t. both inp and probs
         def loss_fn(x, p):
-            output, permuted_probs, _ = token_dispatch_with_probs(x, routing_map, p, num_out_tokens)
+            output, permuted_probs, _ = token_dispatch(x, routing_map, num_out_tokens, probs=p)
+            return jnp.sum(output**2) + jnp.sum(permuted_probs**2)
+
+        def ref_loss_fn(x, p):
+            output, permuted_probs, _ = reference_token_dispatch(
+                x, routing_map, num_out_tokens, probs=p
+            )
             return jnp.sum(output**2) + jnp.sum(permuted_probs**2)
 
         loss_val, (inp_grad, probs_grad) = jax.value_and_grad(loss_fn, argnums=(0, 1))(inp, probs)
+        ref_loss_val, (ref_inp_grad, ref_probs_grad) = jax.value_and_grad(
+            ref_loss_fn, argnums=(0, 1)
+        )(inp, probs)
 
-        output, permuted_probs, _ = token_dispatch_with_probs(
-            inp, routing_map, probs, num_out_tokens
-        )
+        output, permuted_probs, _ = token_dispatch(inp, routing_map, num_out_tokens, probs=probs)
 
-        ref_output, ref_permuted_probs, _ = reference_token_dispatch_with_probs(
-            inp, routing_map, probs, num_out_tokens
+        ref_output, ref_permuted_probs, _ = reference_token_dispatch(
+            inp, routing_map, num_out_tokens, probs=probs
         )
 
         # Compare forward outputs
         assert_allclose(output, ref_output)
         assert_allclose(permuted_probs, ref_permuted_probs)
 
-        # Compare loss values
-        expected_loss = jnp.sum(ref_output**2) + jnp.sum(ref_permuted_probs**2)
-        assert_allclose(loss_val, expected_loss)
-
-        # Verify gradients are computed (non-zero for non-trivial inputs)
-        assert inp_grad.shape == inp.shape
-        assert probs_grad.shape == probs.shape
+        # Compare loss and gradients
+        assert_allclose(loss_val, ref_loss_val)
+        assert_allclose(inp_grad, ref_inp_grad)
+        assert_allclose(probs_grad, ref_probs_grad)
 
     # =========================================================================
     # token_combine tests
@@ -585,7 +553,7 @@ class TestHighLevelPermutationAPI:
         dummy_inp = jax.random.uniform(
             dummy_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
-        _, row_id_map = reference_token_dispatch(dummy_inp, routing_map, num_out_tokens)
+        _, _, row_id_map = reference_token_dispatch(dummy_inp, routing_map, num_out_tokens)
 
         # Generate input data (from expert outputs)
         key, inp_key, merge_key = jax.random.split(key, 3)
@@ -716,8 +684,8 @@ class TestHighLevelPermutationAPI:
             jnp.sum(routing_map, axis=1, keepdims=True), 1.0
         )
 
-        # Dispatch tokens to experts (new signature)
-        dispatched, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
+        # Dispatch tokens to experts (returns output, permuted_probs, row_id_map)
+        dispatched, _, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
 
         # Combine tokens back (with uniform merging) (new signature)
         combined = token_combine(dispatched, row_id_map, merging_probs)

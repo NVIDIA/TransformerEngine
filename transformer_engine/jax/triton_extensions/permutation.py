@@ -634,6 +634,9 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         # Grid - one program per token
         grid = (num_tokens,)
 
+        # Get min block size from autotune configs for consistency
+        block_size = _get_min_block_size(_unpermute_bwd_with_merging_probs_kernel)
+
         # Pass inputs in kernel argument order: fwd_output_grad, fwd_input, merging_probs, row_id_map
         return triton_call_lowering(
             ctx,
@@ -659,6 +662,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
                 "num_experts": num_experts,
                 "hidden_size": hidden_size,
                 "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
+                "BLOCK_SIZE": block_size,
             },
         )
 

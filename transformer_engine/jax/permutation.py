@@ -33,7 +33,6 @@ from transformer_engine.jax.triton_extensions.permutation import (
 
 __all__ = [
     "token_dispatch",
-    "token_dispatch_with_probs",
     "token_combine",
     "sort_chunks_by_index",
 ]
@@ -43,7 +42,8 @@ def token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
     num_out_tokens: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    probs: Optional[jnp.ndarray] = None,
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """
     Dispatch tokens to experts based on routing map.
 
@@ -61,33 +61,45 @@ def token_dispatch(
     num_out_tokens : int
         The number of output tokens after permutation. This should equal the sum of
         routing_map and must be provided explicitly for JIT compatibility.
+    probs : Optional[jnp.ndarray]
+        Optional routing probabilities of shape [batch, sequence, num_experts] or
+        [num_tokens, num_experts]. If provided, permuted_probs will be returned.
 
     Returns
     -------
     output : jnp.ndarray
         Permuted output tensor of shape [num_out_tokens, hidden_size].
+    permuted_probs : Optional[jnp.ndarray]
+        Permuted probabilities of shape [num_out_tokens], or None if probs was not provided.
     row_id_map : jnp.ndarray
         Row ID map for use in token_combine (shape [num_tokens, num_experts * 2 + 1]).
     """
-    return _token_dispatch(inp, routing_map, num_out_tokens)
+    return _token_dispatch(inp, routing_map, probs, num_out_tokens)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+@partial(jax.custom_vjp, nondiff_argnums=(1, 3))
 def _token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
+    probs: Optional[jnp.ndarray],
     num_out_tokens: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Internal token_dispatch with custom VJP."""
-    (output, row_id_map), _ = _token_dispatch_fwd_rule(inp, routing_map, num_out_tokens)
-    return output, row_id_map
+    (output, permuted_probs, row_id_map), _ = _token_dispatch_fwd_rule(
+        inp, routing_map, probs, num_out_tokens
+    )
+    return output, permuted_probs, row_id_map
 
 
 def _token_dispatch_fwd_rule(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
+    probs: Optional[jnp.ndarray],
     num_out_tokens: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int, int]]:
+) -> Tuple[
+    Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray],
+    Tuple[jnp.ndarray, int, int, int, bool],
+]:
     """Forward pass rule for token_dispatch."""
     # Infer dimensions from input shapes
     num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
@@ -108,127 +120,7 @@ def _token_dispatch_fwd_rule(
     # Always compute row_id_map internally from routing_map
     row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
 
-    output, _ = permute_with_mask_map(
-        inp,
-        row_id_map,
-        None,  # No probs
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    )
-
-    # Return (primals, residuals)
-    residuals = (row_id_map, num_tokens, num_experts, hidden_size)
-    return (output, row_id_map), residuals
-
-
-def _token_dispatch_bwd_rule(
-    _routing_map: jnp.ndarray,
-    _num_out_tokens: int,
-    residuals: Tuple[jnp.ndarray, int, int, int],
-    g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray]:
-    """Backward pass rule for token_dispatch."""
-    row_id_map, num_tokens, num_experts, hidden_size = residuals
-    output_grad, _ = g  # Ignore row_id_map gradient
-
-    # Backward: unpermute gradients (gather from experts back to tokens)
-    inp_grad, _ = unpermute_with_mask_map(
-        output_grad,
-        row_id_map,
-        None,  # No merging probs
-        None,  # No permuted probs
-        num_tokens,
-        num_experts,
-        hidden_size,
-    )
-
-    return (inp_grad,)
-
-
-_token_dispatch.defvjp(_token_dispatch_fwd_rule, _token_dispatch_bwd_rule)
-
-
-# =============================================================================
-# Token Dispatch with Probs with VJP
-# =============================================================================
-
-
-def token_dispatch_with_probs(
-    inp: jnp.ndarray,
-    routing_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    num_out_tokens: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Dispatch tokens to experts with routing probabilities.
-
-    The row_id_map is computed internally from the routing_map.
-
-    Parameters
-    ----------
-    inp : jnp.ndarray
-        Input tensor of shape [batch, sequence, hidden_size] or [num_tokens, hidden_size].
-    routing_map : jnp.ndarray
-        Routing mask of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
-    probs : jnp.ndarray
-        Routing probabilities of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
-    num_out_tokens : int
-        The number of output tokens after permutation. This should equal the sum of
-        routing_map and must be provided explicitly for JIT compatibility.
-
-    Returns
-    -------
-    output : jnp.ndarray
-        Permuted output tensor of shape [num_out_tokens, hidden_size].
-    permuted_probs : jnp.ndarray
-        Permuted probabilities of shape [num_out_tokens].
-    row_id_map : jnp.ndarray
-        Row ID map for use in token_combine.
-    """
-    return _token_dispatch_with_probs(inp, routing_map, probs, num_out_tokens)
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(1, 3))
-def _token_dispatch_with_probs(
-    inp: jnp.ndarray,
-    routing_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    num_out_tokens: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Internal token_dispatch_with_probs with custom VJP."""
-    (output, permuted_probs, row_id_map), _ = _token_dispatch_with_probs_fwd_rule(
-        inp, routing_map, probs, num_out_tokens
-    )
-    return output, permuted_probs, row_id_map
-
-
-def _token_dispatch_with_probs_fwd_rule(
-    inp: jnp.ndarray,
-    routing_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    num_out_tokens: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int, int]]:
-    """Forward pass rule for token_dispatch_with_probs."""
-    # Infer dimensions from input shapes
-    num_tokens = inp.shape[0] * inp.shape[1] if inp.ndim == 3 else inp.shape[0]
-    hidden_size = inp.shape[-1]
-    num_experts = routing_map.shape[-1]
-
-    # Verify consistency between inp and routing_map
-    routing_num_tokens = (
-        routing_map.shape[0] * routing_map.shape[1]
-        if routing_map.ndim == 3
-        else routing_map.shape[0]
-    )
-    assert num_tokens == routing_num_tokens, (
-        f"Token count mismatch: inp has {num_tokens} tokens, "
-        f"routing_map has {routing_num_tokens} tokens"
-    )
-
-    # Always compute row_id_map internally from routing_map
-    row_id_map = make_row_id_map(routing_map, num_tokens, num_experts)
+    with_probs = probs is not None
 
     output, permuted_probs = permute_with_mask_map(
         inp,
@@ -241,37 +133,36 @@ def _token_dispatch_with_probs_fwd_rule(
     )
 
     # Return (primals, residuals)
-    residuals = (row_id_map, num_tokens, num_experts, hidden_size)
+    # Include with_probs flag to know how to handle backward pass
+    residuals = (row_id_map, num_tokens, num_experts, hidden_size, with_probs)
     return (output, permuted_probs, row_id_map), residuals
 
 
-def _token_dispatch_with_probs_bwd_rule(
+def _token_dispatch_bwd_rule(
     _routing_map: jnp.ndarray,
     _num_out_tokens: int,
-    residuals: Tuple[jnp.ndarray, int, int, int],
-    g: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Backward pass rule for token_dispatch_with_probs."""
-    row_id_map, num_tokens, num_experts, hidden_size = residuals
-    output_grad, permuted_probs_grad, _ = g
+    residuals: Tuple[jnp.ndarray, int, int, int, bool],
+    g: Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray],
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+    """Backward pass rule for token_dispatch."""
+    row_id_map, num_tokens, num_experts, hidden_size, with_probs = residuals
+    output_grad, permuted_probs_grad, _ = g  # Ignore row_id_map gradient
 
-    # Backward: unpermute gradients
+    # Backward: unpermute gradients (gather from experts back to tokens)
     inp_grad, probs_grad = unpermute_with_mask_map(
         output_grad,
         row_id_map,
         None,  # No merging probs
-        permuted_probs_grad,  # Unpermute the probs gradient
+        permuted_probs_grad if with_probs else None,
         num_tokens,
         num_experts,
         hidden_size,
     )
 
-    return inp_grad, probs_grad
+    return inp_grad, probs_grad if with_probs else None
 
 
-_token_dispatch_with_probs.defvjp(
-    _token_dispatch_with_probs_fwd_rule, _token_dispatch_with_probs_bwd_rule
-)
+_token_dispatch.defvjp(_token_dispatch_fwd_rule, _token_dispatch_bwd_rule)
 
 
 # =============================================================================
