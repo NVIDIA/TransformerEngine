@@ -353,7 +353,7 @@ static void FusedAttnForwardImpl(
   NVTE_Mask_Type mask_type =                                                            \
       static_cast<NVTE_Mask_Type>(get_attr_value<int64_t>(attrs, "mask_type"));         \
   NVTE_Softmax_Type softmax_type =                                                      \
-      static_cast<NVTE_Softmax_Type>(get_attr_value<int64_t>(attrs, "softmax_type"));   \
+      static_cast<NVTE_Softmax_Type>(get_attr_value_or_default<int64_t>(attrs, "softmax_type", static_cast<int64_t>(NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)));   \
   NVTE_QKV_Layout qkv_layout =                                                          \
       static_cast<NVTE_QKV_Layout>(get_attr_value<int64_t>(attrs, "qkv_layout"));       \
   bool is_training = get_attr_value<bool>(attrs, "is_training");                        \
