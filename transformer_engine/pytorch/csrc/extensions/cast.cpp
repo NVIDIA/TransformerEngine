@@ -364,6 +364,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
+  const bool with_gemm_swizzled_scales = quantizer_cpp_list[0]->optimize_for_gemm;
+
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 1;
 
@@ -475,7 +477,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     // Construct Python tensor
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, fp8_dtype,
-                                                 quantizer_py_list[i]));
+                                                 quantizer_py_list[i], with_gemm_swizzled_scales));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -487,6 +489,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
+    nvte_set_tensor_param_v2(tensor_cpp_list.back().data(),
+                             NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                             &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+
   }
 
   return retval;

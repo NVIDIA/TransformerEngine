@@ -948,9 +948,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms)
             ]
-            # TODO: use internal after #1638 is merged. # pylint: disable=fixme
             for i in range(self.num_gemms):
-                input_quantizers[i].internal = False
+                input_quantizers[i].internal = True
+                input_quantizers[i].optimize_for_gemm = True
             if torch.is_grad_enabled():
                 grad_output_quantizers = [
                     self.quantizers["scaling_bwd"][
@@ -960,6 +960,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
+                    grad_output_quantizers[i].optimize_for_gemm = True
         return (
             input_quantizers,
             weight_quantizers,

@@ -253,7 +253,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
     inputs_nvte_raw.emplace_back(tensor.data());
   }
   for (auto &tensor : outputs_nvte) {
-    inputs_nvte_raw.emplace_back(tensor.data());
+    outputs_nvte_raw.emplace_back(tensor.data());
   }
 
   // Launch kernel
