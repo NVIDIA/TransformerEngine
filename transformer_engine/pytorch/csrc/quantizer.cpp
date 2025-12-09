@@ -909,7 +909,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   using namespace pybind11::literals;
 
   // Scale layout
-  const bool with_gemm_swizzled_scales = false;  /// TODO Enable when self->optimize_for_gemm
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -993,7 +993,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
   NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "MXFP8Quantizer must output to MXFP8Tensor.");
 
   // Scaling factor format
-  const bool with_gemm_swizzled_scales = false;  /// TODO Enable when self->optimize_for_gemm
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {

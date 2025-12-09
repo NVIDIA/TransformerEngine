@@ -2737,7 +2737,11 @@ class TestCheckpointing:
         # Check that original and loaded model match exactly
         tols = {"rtol": 0, "atol": 0}
         for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
-            torch.testing.assert_close(param_load, param_save, **tols)
+            torch.testing.assert_close(  # Force dequantization by casting to FP64
+                param_load.to(dtype=torch.float64, device="cpu"),
+                param_save.to(dtype=torch.float64, device="cpu"),
+                **tols,
+            )
             torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
         for y_load, y_save in zip(ys_load, ys_save):
             torch.testing.assert_close(y_load, y_save, **tols)

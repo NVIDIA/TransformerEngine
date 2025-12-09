@@ -42,8 +42,9 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
-          bool COLWISE_SCALING, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
+          float (*OP)(float, const ParamOP &), typename IType, typename OType,
+          bool ROWWISE_SCALING, bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
+          size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                           const __grid_constant__ CUtensorMap tensor_map_act_input,
@@ -106,7 +107,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
-  const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+  const bool rowwise_scale_is_within_bounds = SCALE_DIM_X * scales_offset_X_rowwise < cols;
 
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -263,11 +264,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent =
           ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-
       const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const size_t global_scales_offset_X = scales_offset_X_colwise;
-      const size_t scale_idx =
-          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      size_t scale_idx;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        /// TODO (tmoon) Do this more intelligently
+        constexpr size_t SCALE_TILE_DIM_X = 128;
+        constexpr size_t SCALE_TILE_DIM_Y = 4;
+        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+        const size_t num_scale_tiles_Y = DIVUP(rows, SCALE_DIM_Y * SCALE_TILE_DIM_Y);
+        const size_t tile_idx_X = global_scales_offset_X / SCALE_TILE_DIM_X;
+        const size_t tile_idx_Y = global_scales_offset_Y / SCALE_TILE_DIM_Y;
+        const size_t idx_in_tile_X = global_scales_offset_X % SCALE_TILE_DIM_X;
+        const size_t idx_in_tile_Y = global_scales_offset_Y % SCALE_TILE_DIM_Y;
+        scale_idx = (tile_idx_X * num_scale_tiles_Y + tile_idx_Y) * SCALE_TILE_SIZE;
+        scale_idx += (idx_in_tile_X % 32) * 16 + (idx_in_tile_X / 32) * 4 + idx_in_tile_Y;
+      } else {
+        scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      }
       scales_colwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -411,7 +425,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
-      const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+      size_t scale_idx;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        /// TODO (tmoon) Do this more intelligently
+        constexpr size_t SCALE_TILE_DIM_X = 4;
+        constexpr size_t SCALE_TILE_DIM_Y = 128;
+        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+        const size_t num_scale_tiles_X = DIVUP(cols, SCALE_DIM_X * SCALE_TILE_DIM_X);
+        const size_t tile_idx_X = stage_scales_offset_X / SCALE_TILE_DIM_X;
+        const size_t tile_idx_Y = stage_scales_offset_Y / SCALE_TILE_DIM_Y;
+        const size_t idx_in_tile_X = stage_scales_offset_X % SCALE_TILE_DIM_X;
+        const size_t idx_in_tile_Y = stage_scales_offset_Y % SCALE_TILE_DIM_Y;
+        scale_idx = (tile_idx_Y * num_scale_tiles_X + tile_idx_X) * SCALE_TILE_SIZE;
+        scale_idx += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
+      } else {
+        scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+      }
       if (rowwise_scale_is_within_bounds) {
         scales_rowwise[scale_idx] = biased_exponent;
       }
@@ -550,7 +579,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   bool use_colwise_scaling = output->has_columnwise_data();
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
-  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (use_rowwise_scaling) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   }
@@ -560,17 +588,21 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   }
   CheckNoopTensor(*noop, "cast_noop");
 
+  constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
+
+  // Tensor dimensions
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
-  constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
-
+  // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
-  constexpr size_t THREADS_PER_CHUNK = CAST_DBIAS_ONLY ? 128 : 64;
 
+  // CUDA block config
+  constexpr size_t THREADS_PER_CHUNK = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
   constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
+
   constexpr size_t BUFF_DIM_Y = THREADS_Y;
   constexpr size_t BUFF_DIM_X = CHUNK_DIM_X;
 
@@ -578,6 +610,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
+
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
   const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
   const size_t scale_stride_colwise =
@@ -619,8 +653,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
-          if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()) {
+          if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()
+              && !WITH_GEMM_SWIZZLED_SCALES) {
             switch (scaling_type) {
               case ScalingType::ROWWISE: {
                 using traits = specialized::CastTraits<IType, OType, true, false>;
@@ -732,11 +769,33 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
           const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
+          // Zero out swizzled scales if padding is needed
+          /// TODO (tmoon) Handle this within the cast kernel
+          if (with_gemm_swizzled_scales) {
+            constexpr size_t TILE_DIM_X = 128;
+            constexpr size_t TILE_DIM_Y = 128;
+            if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+              if (use_rowwise_scaling) {
+                NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr,
+                                                0,
+                                                output->scale_inv.buffer_size_bytes(),
+                                                stream));
+              }
+              if (use_colwise_scaling) {
+                NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr,
+                                                0,
+                                                output->columnwise_scale_inv.buffer_size_bytes(),
+                                                stream));
+              }
+            }
+          }
+
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
               auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                        true, false, WITH_GEMM_SWIZZLED_SCALES,
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
@@ -749,8 +808,9 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
             }
             case ScalingType::COLWISE: {
               auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
-                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                        false, true, WITH_GEMM_SWIZZLED_SCALES,
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
@@ -763,8 +823,9 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
             }
             case ScalingType::BIDIMENSIONAL: {
               auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                        true, true, WITH_GEMM_SWIZZLED_SCALES,
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
@@ -780,6 +841,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           if constexpr (IS_DBIAS) {
             common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
           });  // NOLINT(*)
+      );       // NOLINT(*)
   );           // NOLINT(*)
 }
 
