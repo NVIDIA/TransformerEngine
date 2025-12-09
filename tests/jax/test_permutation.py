@@ -537,7 +537,6 @@ class TestHighLevelPermutationAPI:
 
         loss_val, (inp_grad, probs_grad) = jax.value_and_grad(loss_fn, argnums=(0, 1))(inp, probs)
 
-
         output, permuted_probs, _ = token_dispatch_with_probs(
             inp, routing_map, probs, num_out_tokens
         )

@@ -35,6 +35,7 @@ __all__ = [
 
 DEFAULT_BLOCK_SIZE = 1024
 
+
 def _get_min_block_size(kernel, default=128):
     if hasattr(kernel, "configs"):
         return min(config.kwargs.get("BLOCK_SIZE", default) for config in kernel.configs)
