@@ -137,6 +137,17 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream);
 
+/*! \brief Transpose NVFP4 packed data.
+ *
+ *  Unlike FP8, NVFP4 packs two 4-bit values per byte. This function correctly
+ *  handles the nibble repacking during transpose.
+ *
+ *  \param[in]  input   Input tensor with packed FP4 data. Shape: [M, K/2] bytes.
+ *  \param[out] output  Output tensor with transposed packed data. Shape: [K, M/2] bytes.
+ *  \param[in]  stream  CUDA stream.
+ */
+void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

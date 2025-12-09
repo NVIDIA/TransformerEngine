@@ -9,6 +9,8 @@
 #include <optional>
 #include <vector>
 
+#include <transformer_engine/recipe.h>
+
 #include "../extensions.h"
 #include "pybind.h"
 
@@ -48,6 +50,51 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, N}, otype);
   auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{N, M}, otype);
   nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return out;
+}
+
+at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
+  init_extension();
+
+  // Input is packed FP4: logical [M, K] stored as [M, K/2] bytes
+  // Output is packed FP4: logical [K, M] stored as [K, M/2] bytes
+  const auto shape = getTensorShape(input);
+  NVTE_CHECK(shape.size() == 2, "NVFP4 transpose expects 2D input (packed storage).");
+
+  const size_t M = shape[0];
+  const size_t K_packed = shape[1];
+  const size_t K = K_packed * 2;  // logical K
+  const size_t M_packed = M / 2;
+
+  NVTE_CHECK(M % 2 == 0, "NVFP4 transpose requires M (", M, ") to be even.");
+
+  // Output shape: [K, M/2]
+  std::vector<int64_t> output_shape = {static_cast<int64_t>(K), static_cast<int64_t>(M_packed)};
+
+  // Output tensor
+  at::Tensor out;
+  if (output.has_value()) {
+    out = *output;
+    NVTE_CHECK(static_cast<size_t>(out.size(0)) == K &&
+                   static_cast<size_t>(out.size(1)) == M_packed,
+               "Output shape mismatch for NVFP4 transpose.");
+  } else {
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    out = at::empty(output_shape, opts);
+  }
+
+  // Return immediately if tensor is empty
+  if (M == 0 || K == 0) {
+    return out;
+  }
+
+  // Call the NVFP4 transpose kernel
+  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, K_packed},
+                                              DType::kByte);
+  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{K, M_packed},
+                                               DType::kByte);
+  nvte_nvfp4_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return out;
 }

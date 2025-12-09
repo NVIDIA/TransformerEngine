@@ -328,8 +328,110 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * NVFP4 TRANSPOSE KERNEL
+ *
+ * Unlike FP8, NVFP4 packs two 4-bit values into each byte. A simple byte-wise
+ * transpose doesn't work because the packing changes:
+ *   - Before transpose: elements [m, 2c] and [m, 2c+1] share a byte
+ *   - After transpose:  elements [k, 2*m_packed] and [k, 2*m_packed+1] share a byte
+ *                       which were originally [2*m_packed, k] and [2*m_packed+1, k]
+ *
+ * So we need to read from two consecutive rows of the input, extract the same
+ * nibble position from each, and pack them into one output byte.
+ * ---------------------------------------------------------------------------
+ */
+
+__global__ void nvfp4_transpose_kernel(const uint8_t *input, uint8_t *output, const size_t M,
+                                       const size_t K) {
+  // Input: [M, K] logical, stored as [M, K/2] bytes
+  // Output: [K, M] logical, stored as [K, M/2] bytes
+
+  const size_t K_packed = K / 2;  // input packed width
+  const size_t M_packed = M / 2;  // output packed width
+
+  const size_t out_row = blockIdx.y * blockDim.y + threadIdx.y;  // k index [0, K)
+  const size_t out_col = blockIdx.x * blockDim.x + threadIdx.x;  // packed m index [0, M/2)
+
+  if (out_row >= K || out_col >= M_packed) return;
+
+  // The two logical M positions this output byte covers
+  const size_t m0 = out_col * 2;      // for low nibble of output
+  const size_t m1 = out_col * 2 + 1;  // for high nibble of output
+  const size_t k = out_row;
+
+  // In the input, both elements are at the same packed column
+  const size_t in_col = k / 2;
+  const int nibble_idx = k & 1;  // 0 = low nibble, 1 = high nibble
+
+  // Read the two input bytes from consecutive rows
+  const uint8_t in_byte_0 = input[m0 * K_packed + in_col];
+  const uint8_t in_byte_1 = input[m1 * K_packed + in_col];
+
+  // Extract the appropriate nibbles
+  uint8_t val0, val1;
+  if (nibble_idx == 0) {
+    val0 = in_byte_0 & 0x0Fu;
+    val1 = in_byte_1 & 0x0Fu;
+  } else {
+    val0 = (in_byte_0 >> 4) & 0x0Fu;
+    val1 = (in_byte_1 >> 4) & 0x0Fu;
+  }
+
+  // Pack: val0 in low nibble, val1 in high nibble
+  const uint8_t out_byte = val0 | static_cast<uint8_t>(val1 << 4);
+
+  output[out_row * M_packed + out_col] = out_byte;
+}
+
+void nvfp4_transpose(const Tensor input, Tensor output, cudaStream_t stream) {
+  // Input has logical shape [M, K], stored as [M, K/2] bytes
+  // Output has logical shape [K, M], stored as [K, M/2] bytes
+
+  NVTE_CHECK(input.dtype() == DType::kByte, "NVFP4 transpose input must be uint8.");
+  NVTE_CHECK(output.dtype() == DType::kByte, "NVFP4 transpose output must be uint8.");
+
+  // Get dimensions from packed storage
+  // input.shape = [M, K/2], so M = shape[0], K = shape[1] * 2
+  const auto &in_shape = input.shape;
+  NVTE_CHECK(in_shape.size() == 2, "NVFP4 transpose expects 2D input (packed), got ", in_shape.size(), "D.");
+  const size_t M = in_shape[0];
+  const size_t K_packed = in_shape[1];
+  const size_t K = K_packed * 2;
+
+  // Output should be [K, M/2]
+  const size_t M_packed = M / 2;
+  NVTE_CHECK(M % 2 == 0, "NVFP4 transpose requires M (", M, ") to be even.");
+
+  const auto &out_shape = output.shape;
+  NVTE_CHECK(out_shape.size() == 2, "NVFP4 transpose expects 2D output.");
+  NVTE_CHECK(out_shape[0] == K && out_shape[1] == M_packed,
+             "NVFP4 transpose output shape mismatch. Expected [", K, ", ", M_packed,
+             "], got [", out_shape[0], ", ", out_shape[1], "].");
+
+  if (M == 0 || K == 0) return;
+
+  // Launch kernel
+  constexpr int kBlockDim = 16;
+  dim3 block(kBlockDim, kBlockDim);
+  dim3 grid((M_packed + kBlockDim - 1) / kBlockDim, (K + kBlockDim - 1) / kBlockDim);
+
+  nvfp4_transpose_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const uint8_t *>(input.data.dptr),
+      reinterpret_cast<uint8_t *>(output.data.dptr), M, K);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 }  // namespace nvfp4_recipe
 }  // namespace transformer_engine
+
+void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_nvfp4_transpose);
+  using namespace transformer_engine;
+  nvfp4_recipe::nvfp4_transpose(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
+                                stream);
+}
 
 void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h,
                                                  size_t w, size_t amax_stride_h,
