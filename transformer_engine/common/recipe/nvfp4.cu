@@ -154,8 +154,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
   const float global_decode_scale = 1.0f / global_encode_scale;
 
-  const float tile_decode_scale =
+  float tile_decode_scale =
       decode_scale_ptr[tile_h * scale_stride_h + tile_w * scale_stride_w];
+  tile_decode_scale = static_cast<float>(static_cast<fp8e4m3>(tile_decode_scale));
   constexpr float kFp32Max = 3.402823466e+38F;
   float tile_encode_val = (tile_decode_scale > 0.f)
                               ? 1.0f / (tile_decode_scale * global_decode_scale)

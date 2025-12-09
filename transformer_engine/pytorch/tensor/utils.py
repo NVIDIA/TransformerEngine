@@ -615,7 +615,7 @@ def _cast_master_weights_to_nvfp4_2d(
             amaxes, scales, global_scale_views
         ):
             per_block_decode_scale = torch.clamp(
-                (amax_tensor / fp4_max) * global_scale, max=finfo.max
+                (amax_tensor * (1.0 / fp4_max)) * global_scale, max=finfo.max
             )
             scale_tensor.copy_(per_block_decode_scale)
     else:
