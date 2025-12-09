@@ -26,6 +26,7 @@ from transformer_engine.jax.triton_extensions.permutation import (
     make_row_id_map,
     permute_with_mask_map,
     unpermute_with_mask_map,
+    unpermute_bwd_with_merging_probs,
     make_chunk_sort_map,
     sort_chunks_by_map,
 )
@@ -323,7 +324,7 @@ def _token_combine_fwd_rule(
     inp: jnp.ndarray,
     row_id_map: jnp.ndarray,
     merging_probs: Optional[jnp.ndarray],
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, int]]:
+) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray], int, int, int, int]]:
     """Forward pass rule for token_combine."""
     # Infer dimensions from row_id_map shape: [num_tokens, num_experts * 2 + 1]
     num_tokens = row_id_map.shape[0]
@@ -343,34 +344,50 @@ def _token_combine_fwd_rule(
     )
 
     # Return (primal, residuals)
-    residuals = (row_id_map, merging_probs, num_tokens, num_experts, hidden_size, num_out_tokens)
+    # Include inp in residuals for backward with merging_probs
+    residuals = (
+        row_id_map,
+        inp,
+        merging_probs,
+        num_tokens,
+        num_experts,
+        hidden_size,
+        num_out_tokens,
+    )
     return output, residuals
 
 
 def _token_combine_bwd_rule(
     row_id_map: jnp.ndarray,
-    residuals: Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, int],
+    residuals: Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray], int, int, int, int],
     g: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """Backward pass rule for token_combine."""
-    row_id_map, merging_probs, num_tokens, num_experts, hidden_size, num_out_tokens = residuals
+    (
+        row_id_map,
+        fwd_input,
+        merging_probs,
+        num_tokens,
+        num_experts,
+        hidden_size,
+        num_out_tokens,
+    ) = residuals
     output_grad = g
 
     with_merging_probs = merging_probs is not None
 
     if with_merging_probs:
-        # Scale output_grad by merging_probs before permuting back
-        inp_grad, _ = permute_with_mask_map(
+        # Use specialized backward kernel that properly scales by merging_probs
+        inp_grad, merging_probs_grad = unpermute_bwd_with_merging_probs(
             output_grad,
             row_id_map,
-            merging_probs,  # Used to scale gradients
+            fwd_input,
+            merging_probs,
             num_tokens,
             num_experts,
             num_out_tokens,
             hidden_size,
         )
-        # TODO: Compute gradient for merging_probs with specialized kernel  # pylint: disable=fixme
-        merging_probs_grad = None
     else:
         # Simple case: just permute gradients back
         inp_grad, _ = permute_with_mask_map(

@@ -17,6 +17,7 @@ from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_3_kernel,
     _permute_kernel,
     _unpermute_kernel,
+    _unpermute_bwd_with_merging_probs_kernel,
     _make_chunk_sort_map_kernel,
     _sort_chunks_by_map_kernel,
 )
@@ -27,9 +28,17 @@ __all__ = [
     "make_row_id_map",
     "permute_with_mask_map",
     "unpermute_with_mask_map",
+    "unpermute_bwd_with_merging_probs",
     "make_chunk_sort_map",
     "sort_chunks_by_map",
 ]
+
+DEFAULT_BLOCK_SIZE = 1024
+
+def _get_min_block_size(kernel, default=128):
+    if hasattr(kernel, "configs"):
+        return min(config.kwargs.get("BLOCK_SIZE", default) for config in kernel.configs)
+    return default
 
 
 class RowIdMapPass1Primitive(BasePrimitive):
@@ -58,8 +67,8 @@ class RowIdMapPass1Primitive(BasePrimitive):
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         workspace_shape = (
             num_experts,
-            triton.cdiv(num_tokens, 1024),
-        )  # Use default block_size for shape
+            triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE),
+        )
 
         return (
             jax.core.ShapedArray(row_id_map_shape, jnp.int32),
@@ -126,7 +135,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
         del block_size  # Only affects computation
 
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
-        workspace_shape = (num_experts, triton.cdiv(num_tokens, 1024))
+        workspace_shape = (num_experts, triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE))
 
         return (
             jax.core.ShapedArray(row_id_map_shape, jnp.int32),
@@ -346,8 +355,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             probs_stride_expert = 0
 
         # Grid function equivalent: (num_tokens, cdiv(hidden_size, BLOCK_SIZE))
-        # For autotuned kernel, we use a fixed reasonable block size for grid calculation
-        block_size = 128
+        # Use minimum BLOCK_SIZE from autotune configs to ensure grid covers all elements
+        block_size = _get_min_block_size(_permute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         return triton_call_lowering(
@@ -492,8 +501,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         unpermuted_probs_stride_token = num_experts
         unpermuted_probs_stride_expert = 1
 
-        # Grid
-        block_size = 128
+        # Grid - use minimum BLOCK_SIZE from autotune configs
+        block_size = _get_min_block_size(_unpermute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         return triton_call_lowering(
@@ -527,6 +536,187 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
 
 
 register_primitive(UnpermuteWithMaskMapPrimitive)
+
+
+class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
+    """
+    Backward pass for unpermute with merging probabilities.
+
+    This kernel computes gradients for both the input and merging_probs.
+    """
+
+    name = "te_unpermute_bwd_with_merging_probs_triton"
+    multiple_results = True
+    impl_static_args = (4, 5, 6, 7)  # num_tokens, num_experts, num_out_tokens, hidden_size
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        fwd_output_grad_aval,
+        fwd_input_aval,
+        merging_probs_aval,
+        row_id_map_aval,
+        *,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+    ):
+        """Shape/dtype inference for unpermute backward with merging probs."""
+        del row_id_map_aval  # Not needed for output shape
+
+        # fwd_input_grad has same shape as fwd_input
+        fwd_input_grad_shape = (num_out_tokens, hidden_size)
+        fwd_input_grad_aval = jax.core.ShapedArray(fwd_input_grad_shape, fwd_output_grad_aval.dtype)
+
+        # merging_probs_grad has same shape as merging_probs
+        merging_probs_grad_shape = (num_tokens, num_experts)
+        merging_probs_grad_aval = jax.core.ShapedArray(
+            merging_probs_grad_shape, merging_probs_aval.dtype
+        )
+
+        return fwd_input_grad_aval, merging_probs_grad_aval
+
+    @staticmethod
+    def impl(
+        fwd_output_grad,
+        fwd_input,
+        merging_probs,
+        row_id_map,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+    ):
+        """Forward to inner primitive."""
+        assert UnpermuteBwdWithMergingProbsPrimitive.inner_primitive is not None
+        return UnpermuteBwdWithMergingProbsPrimitive.inner_primitive.bind(
+            fwd_output_grad,
+            fwd_input,
+            merging_probs,
+            row_id_map,
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            num_out_tokens=num_out_tokens,
+            hidden_size=hidden_size,
+        )
+
+    @staticmethod
+    def lowering(
+        ctx,
+        fwd_output_grad,
+        fwd_input,
+        merging_probs,
+        row_id_map,
+        *,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+    ):
+        """MLIR lowering using triton_call_lowering."""
+        # Compute strides
+        row_id_stride_token = num_experts * 2 + 1
+        row_id_stride_expert = 1
+        fwd_output_grad_stride_token = hidden_size
+        fwd_output_grad_stride_hidden = 1
+        fwd_input_grad_stride_token = hidden_size
+        fwd_input_grad_stride_hidden = 1
+        fwd_input_stride_token = hidden_size
+        fwd_input_stride_hidden = 1
+        merging_probs_stride_token = num_experts
+        merging_probs_stride_expert = 1
+        merging_probs_grad_stride_token = num_experts
+        merging_probs_grad_stride_expert = 1
+
+        # Grid - one program per token
+        grid = (num_tokens,)
+
+        # Pass inputs in kernel argument order: fwd_output_grad, fwd_input, merging_probs, row_id_map
+        return triton_call_lowering(
+            ctx,
+            _unpermute_bwd_with_merging_probs_kernel,
+            fwd_output_grad,
+            fwd_input,
+            merging_probs,
+            row_id_map,
+            grid=grid,
+            constexprs={
+                "stride_row_id_map_token": row_id_stride_token,
+                "stride_row_id_map_expert": row_id_stride_expert,
+                "stride_fwd_output_grad_token": fwd_output_grad_stride_token,
+                "stride_fwd_output_grad_hidden": fwd_output_grad_stride_hidden,
+                "stride_fwd_input_grad_token": fwd_input_grad_stride_token,
+                "stride_fwd_input_grad_hidden": fwd_input_grad_stride_hidden,
+                "stride_fwd_input_token": fwd_input_stride_token,
+                "stride_fwd_input_hidden": fwd_input_stride_hidden,
+                "stride_merging_probs_token": merging_probs_stride_token,
+                "stride_merging_probs_expert": merging_probs_stride_expert,
+                "stride_merging_probs_grad_token": merging_probs_grad_stride_token,
+                "stride_merging_probs_grad_expert": merging_probs_grad_stride_expert,
+                "num_experts": num_experts,
+                "hidden_size": hidden_size,
+                "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
+            },
+        )
+
+
+register_primitive(UnpermuteBwdWithMergingProbsPrimitive)
+
+
+def unpermute_bwd_with_merging_probs(
+    fwd_output_grad: jnp.ndarray,
+    row_id_map: jnp.ndarray,
+    fwd_input: jnp.ndarray,
+    merging_probs: jnp.ndarray,
+    num_tokens: int,
+    num_experts: int,
+    num_out_tokens: int,
+    hidden_size: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Backward pass for unpermute with merging probabilities.
+
+    This computes gradients for both the input tensor and merging_probs.
+
+    Parameters
+    ----------
+    fwd_output_grad : jnp.ndarray
+        Gradient of the forward output of shape `[num_tokens, hidden_size]`.
+    row_id_map : jnp.ndarray
+        The token to expert mapping tensor of shape `[num_tokens, num_experts * 2 + 1]`.
+    fwd_input : jnp.ndarray
+        The input tensor from the forward pass of shape `[num_out_tokens, hidden_size]`.
+    merging_probs : jnp.ndarray
+        The merging probabilities of shape `[num_tokens, num_experts]`.
+    num_tokens : int
+        Number of tokens in the unpermuted tensor.
+    num_experts : int
+        Number of experts.
+    num_out_tokens : int
+        Number of tokens in the permuted tensor.
+    hidden_size : int
+        Hidden size.
+
+    Returns
+    -------
+    fwd_input_grad : jnp.ndarray
+        Gradient w.r.t. the input tensor of shape `[num_out_tokens, hidden_size]`.
+    merging_probs_grad : jnp.ndarray
+        Gradient w.r.t. merging_probs of shape `[num_tokens, num_experts]`.
+    """
+    # Pass arguments in kernel order: fwd_output_grad, fwd_input, merging_probs, row_id_map
+    return UnpermuteBwdWithMergingProbsPrimitive.outer_primitive.bind(
+        fwd_output_grad,
+        fwd_input,
+        merging_probs,
+        row_id_map,
+        num_tokens=num_tokens,
+        num_experts=num_experts,
+        num_out_tokens=num_out_tokens,
+        hidden_size=hidden_size,
+    )
 
 
 class MakeChunkSortMapPrimitive(BasePrimitive):
@@ -631,8 +821,8 @@ class SortChunksByMapPrimitive(BasePrimitive):
         probs_stride_token = 1
         permuted_probs_stride_token = 1
 
-        # Grid
-        block_size = 128
+        # Grid - use minimum BLOCK_SIZE from autotune configs
+        block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         return triton_call_lowering(
@@ -690,7 +880,7 @@ def make_row_id_map(
         The [num_experts, num_experts + n_routed) items are the indices of the experts corresponding
         to the first n_routed row indices above.
     """
-    block_size = 1024
+    block_size = DEFAULT_BLOCK_SIZE
 
     # Pass 1: Block cumsum
     row_id_map_pass1, workspace_tensor = RowIdMapPass1Primitive.outer_primitive.bind(
