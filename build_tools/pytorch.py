@@ -14,7 +14,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx", "nvdlfw-inspect"]
+    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
 
 
 def test_requirements() -> List[str]:

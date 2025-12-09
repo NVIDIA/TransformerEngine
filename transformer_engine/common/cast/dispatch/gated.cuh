@@ -98,8 +98,8 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
 
-  NVTE_CHECK(!is_fp8_dtype(grad.data.dtype), "Grad input must be in higher precision.");
-  NVTE_CHECK(grad.data.dtype == gated_input.data.dtype, "Types of both inputs must match.");
+  NVTE_CHECK(!is_fp8_dtype(grad.dtype()), "Grad input must be in higher precision.");
+  NVTE_CHECK(grad.dtype() == gated_input.dtype(), "Types of both inputs must match.");
 
   NVTE_CHECK(grad.flat_first_dim() == rows,
              "Wrong Grad shape. Expected first dimension (after flattening) [", rows, ", *], got [",
@@ -116,9 +116,9 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
   NVTE_CHECK(output->flat_last_dim() == cols * 2,
              "Wrong output shape. Expected (after flattening) [*, ", cols * 2, "], got [",
              output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
-  NVTE_CHECK(gated_input.data.shape == output->data.shape,
-             "Gated input and output shapes must match. Input shape: ", gated_input.data.shape,
-             ", output shape: ", output->data.shape, ".");
+  NVTE_CHECK(gated_input.shape() == output->shape(),
+             "Gated input and output shapes must match. Input shape: ", gated_input.shape(),
+             ", output shape: ", output->shape(), ".");
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
