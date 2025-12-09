@@ -493,10 +493,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # Convert PyTorch dtype to TE dtype
         if dtype is None:
             dtype = self.dtype
-
+        tensor = self.contiguous()
         if torch.is_grad_enabled():
-            return _FromFloat8Func.apply(self, dtype)
-        return _FromFloat8Func.forward(None, self, dtype)
+            return _FromFloat8Func.apply(tensor, dtype)
+        return _FromFloat8Func.forward(None, tensor, dtype)
 
     def quantize_(
         self,
@@ -554,13 +554,19 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Returns `self` if data is already in correct memory format.
 
         """
-        if self._data is not None and self._data.is_contiguous(memory_format=memory_format):
-            return self
-        if self._transpose is not None and self._transpose.is_contiguous(
-            memory_format=memory_format
-        ):
-            return self
-        return Float8Tensor.make_like(tensor=self, data=self._data.contiguous())
+        # requires_grad remains unaltered when calling contiguous on
+        # torch tensor and so should be the case for our custom float8 tensor
+        # as well.
+        return Float8Tensor.make_like(
+            tensor=self,
+            data=self._data.contiguous(memory_format=memory_format),
+            data_transpose=(
+                self._transpose.contiguous(memory_format=memory_format)
+                if self._transpose is not None
+                else None
+            ),
+            requires_grad=self.requires_grad,
+        )
 
         # raise ValueError("Float8Tensor does not support different memory formats!")
 

@@ -352,6 +352,8 @@ class FusedAttnRunner:
     bias_shape: BiasShape
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
+    stripe_size: int | None = None
+    num_segments_per_seq: int | None = None
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -365,6 +367,14 @@ class FusedAttnRunner:
 
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
+
+    def __post_init__(self):
+        # Reset defaults for num_segments_per_seq if not explicitly passed
+        if self.num_segments_per_seq is None:
+            if self.qkv_layout.is_thd():
+                self.num_segments_per_seq = 2
+            else:
+                self.num_segments_per_seq = 1
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -577,7 +587,6 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -603,7 +612,6 @@ class FusedAttnRunner:
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )
@@ -635,12 +643,14 @@ class FusedAttnRunner:
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
             self.cp_inverse_reorder_fn = partial(
                 inverse_reorder_causal_load_balancing,
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
         else:
             # no-ops for non cp or non load balanced
@@ -771,7 +781,7 @@ class FusedAttnRunner:
 
     def test_forward(self):
         """
-        Test forward without JIT
+        Test forward with JITted primitive and unJITted reference
         """
         self._setup_inputs()
 
@@ -801,6 +811,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         customcall_fused_dpa_jit = jit(
@@ -896,6 +907,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
