@@ -686,37 +686,6 @@ def _cast_master_weights_to_nvfp4_2d(
         if target_amax is not None:
             target_amax.copy_(global_amaxes[idx : idx + 1])
 
-        if (
-            master_weight is not None
-            and not use_fsdp_shard_model_weights
-            and isinstance(model_weight, NVFP4Tensor)
-        ):
-            quantizer = model_weight._get_quantizer()
-            reference_tensor = quantizer(
-                master_weight.detach()
-                .view(model_weight.shape)
-                .to(dtype=model_weight.dtype)
-            )
-            ref_data = reference_tensor._rowwise_data
-            ref_scale = reference_tensor._rowwise_scale_inv
-            data_diff = (model_weight._rowwise_data != ref_data).nonzero(as_tuple=False)
-            scale_diff = (
-                model_weight._rowwise_scale_inv != ref_scale
-            ).nonzero(as_tuple=False)
-            # print("model_weight._rowwise_scale_inv", model_weight._rowwise_scale_inv)
-            # print("ref_scale", ref_scale)
-            # print("scale_diff", scale_diff)
-            # if data_diff.numel() > 0:
-            #     print(
-            #         f"[NVFP4 partial cast][debug] data mismatch idx {idx}, first entries:",
-            #         data_diff[:5].tolist(),
-            #     )
-            # if scale_diff.numel() > 0:
-            #     print(
-            #         f"[NVFP4 partial cast][debug] scale mismatch idx {idx}, first entries:",
-            #         scale_diff[:5].tolist(),
-            #     )
-
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
     Post-processing after all-gather for weights in distributed optimizer.
