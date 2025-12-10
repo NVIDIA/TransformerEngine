@@ -80,6 +80,10 @@ T get_attr_value_or_default(Dictionary& attrs, std::string attr_name, T default_
                             const source_location& loc = source_location::current()) {
   auto attr = attrs.get<T>(attr_name);
   if (attr.has_error()) {
+    NVTE_WARN("Failure in getting attribute value of '", attr_name, "'\n",
+              "Called from: ", loc.file_name(), ":", loc.line(), "\n",
+              "In function: ", loc.function_name(), "\n",
+              "Please ensure the attribute name and datatype match between C++ and Python APIs. Currently falling back to a default value.");
     return default_value;
   }
   return attr.value();
