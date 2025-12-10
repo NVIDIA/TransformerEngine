@@ -1123,18 +1123,17 @@ struct TensorShapeInfo {
     NVTE_CHECK(has_last || t->all_same_last_dim(),
                "GroupedTensor is missing last_dims for varying shapes");
 
-    const int64_t *first_ptr = has_first ? static_cast<const int64_t *>(t->first_dims.dptr) : nullptr;
+    const int64_t *first_ptr =
+        has_first ? static_cast<const int64_t *>(t->first_dims.dptr) : nullptr;
     const int64_t *last_ptr = has_last ? static_cast<const int64_t *>(t->last_dims.dptr) : nullptr;
 
     const int64_t uniform_first = has_first ? 0 : static_cast<int64_t>(t->get_common_first_dim());
     const int64_t uniform_last = has_last ? 0 : static_cast<int64_t>(t->get_common_last_dim());
 
-    return {first_ptr,
-            last_ptr,
+    return {first_ptr, last_ptr,
             t->tensor_offsets.has_data() ? static_cast<const int64_t *>(t->tensor_offsets.dptr)
                                          : nullptr,
-            uniform_first,
-            uniform_last};
+            uniform_first, uniform_last};
   }
 
   // Create for C tensor (uses D's dimensions, only has offsets)
@@ -1153,12 +1152,10 @@ struct TensorShapeInfo {
     const int64_t uniform_first = has_first ? 0 : static_cast<int64_t>(D->get_common_first_dim());
     const int64_t uniform_last = has_last ? 0 : static_cast<int64_t>(D->get_common_last_dim());
 
-    return {first_ptr,
-            last_ptr,
+    return {first_ptr, last_ptr,
             C->tensor_offsets.has_data() ? static_cast<const int64_t *>(C->tensor_offsets.dptr)
                                          : nullptr,
-            uniform_first,
-            uniform_last};
+            uniform_first, uniform_last};
   }
 };
 
@@ -1360,9 +1357,9 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
                                 cublasLtMatrixLayoutOpaque_t &descB,
                                 cublasLtMatrixLayoutOpaque_t &descC,
                                 cublasLtMatrixLayoutOpaque_t &descD,
-                                const GroupedGemmSetupWorkspace &ws,
-                                bool transa, bool transb, bool a_columnwise, bool b_columnwise,
-                                size_t num_tensors, cudaDataType_t A_type, cudaDataType_t B_type,
+                                const GroupedGemmSetupWorkspace &ws, bool transa, bool transb,
+                                bool a_columnwise, bool b_columnwise, size_t num_tensors,
+                                cudaDataType_t A_type, cudaDataType_t B_type,
                                 cudaDataType_t D_type) {
   // For column-major layout: leading dimension is the number of rows in storage.
   // If columnwise data was chosen, storage is already transposed.
@@ -1611,15 +1608,15 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
     // For FP8 grouped GEMM, we need to pass scale_inv pointers
     // The scale_inv arrays contain one float per tensor in the group
     if (is_fp8_a) {
-      void *a_scale_inv = A_sel.use_columnwise ? inputA->columnwise_scale_inv.dptr
-                                               : inputA->scale_inv.dptr;
+      void *a_scale_inv =
+          A_sel.use_columnwise ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
       NVTE_CHECK(a_scale_inv != nullptr, "FP8 grouped GEMM: A scale_inv is required");
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_inv, sizeof(a_scale_inv)));
     }
     if (is_fp8_b) {
-      void *b_scale_inv = B_sel.use_columnwise ? inputB->columnwise_scale_inv.dptr
-                                               : inputB->scale_inv.dptr;
+      void *b_scale_inv =
+          B_sel.use_columnwise ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
       NVTE_CHECK(b_scale_inv != nullptr, "FP8 grouped GEMM: B scale_inv is required");
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_inv, sizeof(b_scale_inv)));
