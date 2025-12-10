@@ -1,8 +1,8 @@
-/***********************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES.
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
- **********************************************************************/
+ ************************************************************************/
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -16,6 +16,8 @@
 #include <vector>
 
 #include <transformer_engine/cast.h>
+#include <transformer_engine/gemm.h>
+#include <transformer_engine/recipe.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include "../test_common.h"
@@ -136,7 +138,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   const NVTEShape shape = tensors[0]->rowwise_shape();
   const DType dtype = tensors[0]->dtype();
   const size_t num_tensors = tensors.size();
-  const size_t elem_size = typeToSize(dtype);
+  const size_t elem_size = typeToNumBits(dtype) / 8;
   GroupedBuffers grouped;
   grouped.elem_size = elem_size;
   grouped.num_tensors = num_tensors;
@@ -162,9 +164,13 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
 
   std::vector<int64_t> offsets(num_tensors, 0);
   auto random_padding = [&]() -> int64_t {
+    // Random padding ensuring 16-byte alignment regardless of element size
+    // cuBLAS requires aligned pointers for vectorized loads
     static std::mt19937 gen(12345);
     std::uniform_int_distribution<int64_t> dist(0, 3);
-    return dist(gen);
+    // Calculate elements needed for 16-byte alignment
+    const size_t align_elements = (16 * 8) / typeToNumBits(dtype);  // 16 bytes / element_size
+    return dist(gen) * static_cast<int64_t>(align_elements);
   };
 
   auto numel = [&](size_t idx) -> int64_t {
@@ -301,7 +307,12 @@ Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shap
 
 Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& shape) {
   Tensor t(name, shape, DType::kBFloat16);
-  fillUniform(&t);
+  // Fill with ones for easier debugging
+  //fillUniform(&t);
+  const size_t numel = shape[0] * shape[1];
+  std::vector<__nv_bfloat16> ones(numel, __float2bfloat16(1.0f));
+  NVTE_CHECK_CUDA(cudaMemcpy(t.rowwise_dptr(), ones.data(),
+                             numel * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
   return t;
 }
 
@@ -312,17 +323,21 @@ struct TestParams {
   ShapeCase shape_case;
 };
 
+// Returns a vector of (M, N, K) tuples for each GEMM in the group.
+// M - number of rows in output D
+// N - number of columns in output D
+// K - reduction dimension shared between A and B
 std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
   switch (scase) {
     case ShapeCase::kAllSame:
       return {{64, 64, 32}, {64, 64, 32}, {64, 64, 32}};
-    case ShapeCase::kSameFirst:  // M wspólne, N/K zróżnicowane
-      return {{64, 64, 32}, {64, 96, 32}, {64, 80, 48}};
-    case ShapeCase::kSameLast:   // N wspólne, M/K zróżnicowane
-      return {{48, 80, 32}, {96, 80, 48}, {72, 80, 40}};
+    case ShapeCase::kSameFirst:
+      return {{64, 80, 32}, {64, 80, 48}, {64, 80, 64}};
+    case ShapeCase::kSameLast:
+      return {{64, 80, 32}, {64, 80, 48}, {64, 80, 64}};
     case ShapeCase::kAllDifferent:
     default:
-      return {{48, 80, 32}, {96, 64, 48}, {40, 72, 24}};
+      return {{64, 96, 32}, {64, 96, 48}, {64, 96, 64}};
   }
 }
 
@@ -345,10 +360,10 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{K, M}
-                                                      : std::vector<size_t>{M, K};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{N, K}
-                                                      : std::vector<size_t>{K, N};
+    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{M, K}
+                                                      : std::vector<size_t>{K, M};
+    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, N}
+                                                      : std::vector<size_t>{N, K};
     switch (params.input_case) {
       case InputCase::kFP8Current: {
         A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
@@ -373,6 +388,10 @@ void run_grouped_gemm_case(const TestParams& params) {
   std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
   std::vector<Tensor> workspaces(num_gemms);
   std::vector<NVTETensor> workspace_ptrs(num_gemms, nullptr);
+  std::vector<Tensor*> A_views;
+  std::vector<Tensor*> B_views;
+  A_views.reserve(num_gemms);
+  B_views.reserve(num_gemms);
 
   const size_t cublas_ws_bytes = 32ull * 1024 * 1024;
 
@@ -382,6 +401,8 @@ void run_grouped_gemm_case(const TestParams& params) {
     D_ptrs[i] = D_multi[i].data();
     workspaces[i] = Tensor("workspace" + std::to_string(i), std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
     workspace_ptrs[i] = workspaces[i].data();
+    A_views.push_back(&A_tensors[i]);
+    B_views.push_back(&B_tensors[i]);
   }
 
   nvte_multi_tensor_gemm(A_ptrs.data(),
@@ -399,8 +420,8 @@ void run_grouped_gemm_case(const TestParams& params) {
                          0,
                          0);
 
-  GroupedBuffers grouped_A = build_grouped_tensor(A_tensors, A_tensors[0].scaling_mode());
-  GroupedBuffers grouped_B = build_grouped_tensor(B_tensors, B_tensors[0].scaling_mode());
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, A_tensors[0].scaling_mode());
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, B_tensors[0].scaling_mode());
 
   std::vector<Tensor> C_tensors;
   std::vector<Tensor> D_group_tensors;

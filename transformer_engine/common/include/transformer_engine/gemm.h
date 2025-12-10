@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_H_
 #define TRANSFORMER_ENGINE_GEMM_H_
 
+#include <cstdint>
+
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
