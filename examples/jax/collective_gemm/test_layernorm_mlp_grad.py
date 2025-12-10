@@ -241,9 +241,15 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
-    def test_te_bf16_layernorm_mlp_grad(self):
-        """Test Collective Dense Gradient with AllGather"""
+    def test_te_bf16_layernorm_mlp_grad_userbuffers(self):
+        """Test LayerNormMLP Gradient with overlapped collectives via Userbuffers"""
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
+
+    def test_te_bf16_layernorm_mlp_grad_cublasmp(self):
+        """Test LayerNormMLP Gradient with overlapped collectives via cuBlasMp"""
+        os.environ["NVTE_WITH_CUBLASMP"] = "1"
+        run_layernorm_mlp_grad_tests(self.args, self.mesh)
+        os.environ.pop("NVTE_WITH_CUBLASMP", None)
 
 
 if __name__ == "__main__":
