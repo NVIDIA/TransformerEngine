@@ -2350,6 +2350,7 @@ class _FusedAttnCPWithP2PHelper:
     @staticmethod
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
+        #TODO(KshitijLakhani): Reset default to 1, once the extra kv permute op issue is resolved
         use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "0")))
         return use_scan
 
