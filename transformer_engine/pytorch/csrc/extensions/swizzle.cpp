@@ -207,7 +207,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
     const auto size = product(shape, 0, shape.ndim);
     output_scales_bytes = roundup(output_scales_bytes, 16);  // align to 16B
     output_scales_offsets.push_back(output_scales_bytes);
-    output_scales_bytes = size * dtype_bits / 8;
+    output_scales_bytes += DIVUP(size * dtype_bits, 8);
   }
 
   // Allocate buffer for swizzled scales
