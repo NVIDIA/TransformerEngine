@@ -521,6 +521,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
+  const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
   constexpr size_t scale_elem_size = 1;
 
   // Helper function to construct tensor view
@@ -681,7 +682,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Construct Python tensor
     tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, amax_rowwise, amax_columnwise,
-                                                 fp4_dtype, quantizer_py_list[i]));
+                                                 fp4_dtype, quantizer_py_list[i],
+                                                 with_gemm_swizzled_scales));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -697,6 +699,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
           rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
+      nvte_set_tensor_param_v2(tensor_wrapper.data(),
+                               NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                               &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
@@ -707,6 +712,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
                                            std::vector<size_t>{1});
       }
+
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
     }
   }

@@ -405,6 +405,14 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
       tensor.attr("_with_gemm_swizzled_scales") = true;
       break;
     case NVTE_NVFP4_1D_SCALING:
+      if (has_rowwise_scales) {
+        tensor.attr("_rowwise_scale_inv") = rowwise_scales;
+      }
+      if (has_columnwise_scales) {
+        tensor.attr("_columnwise_scale_inv") = columnwise_scales;
+      }
+      tensor.attr("_with_gemm_swizzled_scales") = true;
+      break;
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D:
       NVTE_ERROR("Swizzling is not yet implemented");  /// TODO Remove

@@ -908,7 +908,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
                                                                    DType dtype) const {
   using namespace pybind11::literals;
 
-  // Scale layout
+  // Scaling factor format
   const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Tensor dimensions
@@ -1184,6 +1184,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                                    DType dtype) const {
   using namespace pybind11::literals;
 
+  // Scaling factor format
+  const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) self->optimize_for_gemm
+
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   size_t flat_first_dim = 1;
@@ -1246,12 +1249,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   py::object out_py;
   if (internal) {
     py::handle NVFP4TensorClass(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass));
-    out_py = NVFP4TensorClass(
-        "rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
-        "rowwise_scale_inv"_a = rowwise_scale_inv_py,
-        "columnwise_scale_inv"_a = columnwise_scale_inv_py, "amax_rowwise"_a = amax_rowwise_py,
-        "amax_columnwise"_a = amax_columnwise_py, "fp4_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer);
+    out_py = NVFP4TensorClass(rowwise_data_py, rowwise_scale_inv_py, columnwise_data_py,
+                              columnwise_scale_inv_py, amax_rowwise_py, amax_columnwise_py,
+                              this->dtype, this->quantizer, with_gemm_swizzled_scales);
   } else {
     py::handle NVFP4TensorClass(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass));
     out_py = NVFP4TensorClass(
@@ -1260,7 +1260,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
         "rowwise_scale_inv"_a = rowwise_scale_inv_py,
         "columnwise_scale_inv"_a = columnwise_scale_inv_py, "amax_rowwise"_a = amax_rowwise_py,
         "amax_columnwise"_a = amax_columnwise_py, "fp4_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer);
+        "quantizer"_a = this->quantizer, "with_gemm_swizzled_scales"_a = with_gemm_swizzled_scales);
   }
 
   // Construct C++ tensor
@@ -1283,6 +1283,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
                                 std::vector<size_t>{1});
   }
+  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -1311,6 +1313,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_w
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsNVFP4Tensor(tensor.ptr()), "NVFP4Quantizer must output to IsNVFP4Tensor.");
+
+  // Scaling factor format
+  const bool with_gemm_swizzled_scales = false;  // TODO (tmoon) Enable with optimize_for_gemm
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -1449,6 +1454,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
                                 std::vector<size_t>{1});
   }
+  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};
