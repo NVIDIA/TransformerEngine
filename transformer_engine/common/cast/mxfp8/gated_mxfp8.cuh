@@ -51,7 +51,8 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
-          bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t THREADS_PER_CHUNK>
+          bool ROWWISE_SCALING, bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
+          size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_gated_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_grad,
                                 const __grid_constant__ CUtensorMap tensor_map_input_act,
@@ -355,14 +356,26 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent_act =
           ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
-
       const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const size_t global_scales_offset_X = scales_offset_X_colwise;
-      const size_t scale_idx =
-          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      size_t scale_idx;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        /// TODO (tmoon) Do this more intelligently
+        constexpr size_t SCALE_TILE_DIM_X = 128;
+        constexpr size_t SCALE_TILE_DIM_Y = 4;
+        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+        const size_t num_scale_tiles_Y = DIVUP(rows, SCALE_DIM_Y * SCALE_TILE_DIM_Y);
+        const size_t tile_idx_X = global_scales_offset_X / SCALE_TILE_DIM_X;
+        const size_t tile_idx_Y = global_scales_offset_Y / SCALE_TILE_DIM_Y;
+        const size_t idx_in_tile_X = global_scales_offset_X % SCALE_TILE_DIM_X;
+        const size_t idx_in_tile_Y = global_scales_offset_Y % SCALE_TILE_DIM_Y;
+        scale_idx = (tile_idx_X * num_scale_tiles_Y + tile_idx_Y) * SCALE_TILE_SIZE;
+        scale_idx += (idx_in_tile_X % 32) * 16 + (idx_in_tile_X / 32) * 4 + idx_in_tile_Y;
+      } else {
+        scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      }
       const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y) >= rows;
       const bool out_of_bounds_colwise = row_out_of_bounds_colwise || col_out_of_bounds_colwise;
-
       if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
         scales_colwise[scale_idx] = biased_exponent_act;
       }
@@ -374,8 +387,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const e8m0_t biased_exponent_gate =
             ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
 
-        // const size_t scale_idx_gate = scale_idx + scale_stride_colwise / 2;
-        const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
+        size_t scale_idx_gate;
+        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+          /// TODO (tmoon) Do this more intelligently
+          constexpr size_t SCALE_TILE_DIM_X = 128;
+          constexpr size_t SCALE_TILE_DIM_Y = 4;
+          constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+          const size_t num_scale_tiles_Y = DIVUP(rows, SCALE_DIM_Y * SCALE_TILE_DIM_Y);
+          const size_t global_scales_offset_gate_X = (global_scales_offset_X
+                                                      + gate_scale_idx_offset_colwise);
+          const size_t tile_idx_X = global_scales_offset_gate_X / SCALE_TILE_DIM_X;
+          const size_t tile_idx_Y = global_scales_offset_Y / SCALE_TILE_DIM_Y;
+          const size_t idx_in_tile_X = global_scales_offset_gate_X % SCALE_TILE_DIM_X;
+          const size_t idx_in_tile_Y = global_scales_offset_Y % SCALE_TILE_DIM_Y;
+          scale_idx_gate = (tile_idx_X * num_scale_tiles_Y + tile_idx_Y) * SCALE_TILE_SIZE;
+          scale_idx_gate += (idx_in_tile_X % 32) * 16 + (idx_in_tile_X / 32) * 4 + idx_in_tile_Y;
+        } else {
+          scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
+        }
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
           scales_colwise[scale_idx_gate] = biased_exponent_gate;
         }
@@ -557,7 +586,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
       const size_t stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const size_t stage_scales_offset_X = scales_offset_X_rowwise;
-      const size_t scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+      size_t scale_idx;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        /// TODO (tmoon) Do this more intelligently
+        constexpr size_t SCALE_TILE_DIM_X = 4;
+        constexpr size_t SCALE_TILE_DIM_Y = 128;
+        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+        const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+        const size_t num_scale_tiles_X = DIVUP(output_cols, SCALE_DIM_X * SCALE_TILE_DIM_X);
+        const size_t tile_idx_X = stage_scales_offset_X / SCALE_TILE_DIM_X;
+        const size_t tile_idx_Y = stage_scales_offset_Y / SCALE_TILE_DIM_Y;
+        const size_t idx_in_tile_X = stage_scales_offset_X % SCALE_TILE_DIM_X;
+        const size_t idx_in_tile_Y = stage_scales_offset_Y % SCALE_TILE_DIM_Y;
+        scale_idx = (tile_idx_Y * num_scale_tiles_X + tile_idx_X) * SCALE_TILE_SIZE;
+        scale_idx += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
+      } else {
+        scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+      }
       const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y) >= rows;
       const bool out_of_bounds_rowwise = row_out_of_bounds_rowwise || col_out_of_bounds_rowwise;
       if (!out_of_bounds_rowwise) {
@@ -573,7 +618,26 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (IS_BWD) {
         const e8m0_t biased_exponent_gate =
             ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
-        const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
+
+        size_t scale_idx_gate;
+        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+          /// TODO (tmoon) Do this more intelligently
+          constexpr size_t SCALE_TILE_DIM_X = 4;
+          constexpr size_t SCALE_TILE_DIM_Y = 128;
+          constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
+          const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+          const size_t num_scale_tiles_X = DIVUP(output_cols, SCALE_DIM_X * SCALE_TILE_DIM_X);
+          const size_t stage_scales_offset_gate_X = (stage_scales_offset_X
+                                                     + gate_scale_idx_offset_rowwise);
+          const size_t tile_idx_X = stage_scales_offset_gate_X / SCALE_TILE_DIM_X;
+          const size_t tile_idx_Y = stage_scales_offset_Y / SCALE_TILE_DIM_Y;
+          const size_t idx_in_tile_X = stage_scales_offset_gate_X % SCALE_TILE_DIM_X;
+          const size_t idx_in_tile_Y = stage_scales_offset_Y % SCALE_TILE_DIM_Y;
+          scale_idx_gate = (tile_idx_Y * num_scale_tiles_X + tile_idx_X) * SCALE_TILE_SIZE;
+          scale_idx_gate += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
+        } else {
+          scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
+        }
         if (!out_of_bounds_rowwise) {
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
@@ -679,6 +743,7 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
 
   const bool USE_ROWWISE_SCALING = output->has_data();
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
   if (USE_ROWWISE_SCALING) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
@@ -686,7 +751,6 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   if (USE_COLWISE_SCALING) {
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
   }
-  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Scaling tensor must be in compact format.");
 
   ScalingType scaling_type;
   if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {
@@ -723,6 +787,8 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
       gated_input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
           alignas(64) CUtensorMap tensor_map_grad{};
           alignas(64) CUtensorMap tensor_map_input_act{};
@@ -785,11 +851,33 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
 
           const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
+          // Zero out swizzled scales if padding is needed
+          /// TODO (tmoon) Handle this within the cast kernel
+          if (with_gemm_swizzled_scales) {
+            constexpr size_t TILE_DIM_X = 128;
+            constexpr size_t TILE_DIM_Y = 128;
+            if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+              if (USE_ROWWISE_SCALING) {
+                NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr,
+                                                0,
+                                                output->scale_inv.buffer_size_bytes(),
+                                                stream));
+              }
+              if (USE_COLWISE_SCALING) {
+                NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr,
+                                                0,
+                                                output->columnwise_scale_inv.buffer_size_bytes(),
+                                                stream));
+              }
+            }
+          }
+
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
               auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType, true,
-                                              false, THREADS_PER_CHUNK_NON_COLWISE>;
+                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                              true, false, WITH_GEMM_SWIZZLED_SCALES,
+                                              THREADS_PER_CHUNK_NON_COLWISE>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
@@ -802,8 +890,9 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
             }
             case ScalingType::COLWISE: {
               auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType, false,
-                                              true, THREADS_PER_CHUNK_COLWISE>;
+                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                              false, true, WITH_GEMM_SWIZZLED_SCALES,
+                                              THREADS_PER_CHUNK_COLWISE>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
@@ -816,8 +905,9 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
             }
             case ScalingType::BIDIMENSIONAL: {
               auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType, true,
-                                              true, THREADS_PER_CHUNK_NON_COLWISE>;
+                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                              true, true, WITH_GEMM_SWIZZLED_SCALES,
+                                              THREADS_PER_CHUNK_NON_COLWISE>;
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
@@ -829,6 +919,7 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
               break;
             }
           } NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+      );                                            // NOLINT(*)
   );                                                // NOLINT(*)
 }
 
