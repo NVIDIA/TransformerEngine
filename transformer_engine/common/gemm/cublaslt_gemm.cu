@@ -1217,9 +1217,6 @@ struct GroupedGemmSetupWorkspace {
     ws.N = reinterpret_cast<int *>(setup_ws_ptr + offset);
     offset += int_size;
     ws.K = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-
-    offset = ((offset + alignment - 1) / alignment) * alignment;
 
     return ws;
   }
@@ -1363,21 +1360,21 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
                                 cudaDataType_t D_type) {
   // For column-major layout: leading dimension is the number of rows in storage.
   // If columnwise data was chosen, storage is already transposed.
-  const int *rowa = a_columnwise ? ws.M : (transa ? ws.K : ws.M);
-  const int *cola = a_columnwise ? ws.K : (transa ? ws.M : ws.K);
-  const int *lda = rowa;
-  const int *rowb = b_columnwise ? ws.N : (transb ? ws.N : ws.K);
-  const int *colb = b_columnwise ? ws.K : (transb ? ws.K : ws.N);
-  const int *ldb = rowb;
+  int *rowa = a_columnwise ? ws.M : (transa ? ws.K : ws.M);
+  int *cola = a_columnwise ? ws.K : (transa ? ws.M : ws.K);
+  int *lda = rowa;
+  int *rowb = b_columnwise ? ws.N : (transb ? ws.N : ws.K);
+  int *colb = b_columnwise ? ws.K : (transb ? ws.K : ws.N);
+  int *ldb = rowb;
 
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, (void *)rowa,
-                                                    (void *)cola, (void *)lda));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, (void *)rowb,
-                                                    (void *)colb, (void *)ldb));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors, (void *)ws.M,
-                                                    (void *)ws.N, (void *)ws.M));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors, (void *)ws.M,
-                                                    (void *)ws.N, (void *)ws.M));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors,
+                                                    rowa, cola, lda));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors,
+                                                    rowb, colb, ldb));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors,
+                                                    ws.M, ws.N, ws.M));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors,
+                                                    ws.M, ws.N, ws.M));
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
