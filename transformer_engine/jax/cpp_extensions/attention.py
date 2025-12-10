@@ -2396,13 +2396,15 @@ class _FusedAttnCPWithP2PHelper:
                 f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
             )
 
-        # We want to encourage use of scan loop to minimize unrolling and ensure more
-        # predictable scheduling from XLA. The unrolled flavor will be supported but
-        # not the prefered implementation.
-        if not self.use_scanloop():
+        #TODO(KshitijLakhani): Flip the condition to check for disabled scan loop and warn
+        # against using unrolled loops once the scan issue is resolved.
+        # We want to discourage the use of scan loop as additional kv permute op observed.
+        # The scan loop flavor will be supported but not the prefered implementation until
+        # a resolution for the additional kv permute op, which degrades perf, is found.
+        if self.use_scanloop():
             warnings.warn(
-                "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
+                "Scan loop is enabled for fused ring attention. To disable set"
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=0 in your environment"
             )
 
         # If using scanloop, idx in scan_kv_block() will be a traced device value, but
