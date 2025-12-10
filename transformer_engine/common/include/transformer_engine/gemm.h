@@ -257,12 +257,11 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * - Shape compatibility: if transa=false, transb=false:
  *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
  */
-void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha,
-                       const NVTEGroupedTensor A, const NVTEGroupedTensor B,
-                       const NVTETensor beta, const NVTEGroupedTensor C, NVTEGroupedTensor D,
-                       NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       NVTEMatmulConfig config, cudaStream_t stream,
-                       const int64_t* avg_m, const int64_t* avg_n, const int64_t* avg_k);
+void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
+                       const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
+                       NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                       NVTEMatmulConfig config, cudaStream_t stream, const int64_t *avg_m,
+                       const int64_t *avg_n, const int64_t *avg_k);
 
 #ifdef __cplusplus
 }  // extern "C"

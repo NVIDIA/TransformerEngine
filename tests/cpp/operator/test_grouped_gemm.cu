@@ -507,5 +507,3 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest,
                          MakeGroupedGemmTestName);
 
 }  // namespace
-
-
