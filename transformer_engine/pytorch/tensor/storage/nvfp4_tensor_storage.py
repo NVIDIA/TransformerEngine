@@ -342,7 +342,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                 "._quantizer of Float8BlockwiseQTensor cannot be None because all the blockwise "
                 "quantized tensors are supposed to be generated from the quantizer."
             )
-            columnwise_scale_inv_shape = self._quantizer.get_scale_shape(rowwise_data.shape, True)
+            # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
+            # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
+            logical_shape = self.size()
+            columnwise_scale_inv_shape = self._quantizer.get_scale_shape(logical_shape, True)
             self._columnwise_scale_inv = torch.empty(
                 columnwise_scale_inv_shape,
                 dtype=self._rowwise_scale_inv.dtype,
@@ -350,8 +353,50 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             )
         assert len(self._rowwise_scale_inv.shape) == 2
         assert len(self._columnwise_scale_inv.shape) == 2
+        
+        # rowwise_scale_inv has shape [M_padded, K_tiles] where each tile's scale
+        # is repeated 16 times (once per row in the 16x16 tile).
+        # We need to:
+        # 1. Extract tile-level scales (every 16th row)
+        # 2. Transpose
+        # 3. Expand to columnwise padded format (repeat 16 times per tile row)
+        
+        TILE_SIZE = 16
         rowwise_scale_inv = self._rowwise_scale_inv
-        columnwise_scale_inv = rowwise_scale_inv.transpose(-2, -1)
-        h = min(self._columnwise_scale_inv.shape[0], columnwise_scale_inv.shape[0])
-        w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
-        self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
+        
+        # Get logical shape to compute tile counts
+        logical_shape = self.size()
+        M, K = logical_shape[0], logical_shape[-1]
+        M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
+        K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
+        
+        # Extract tile-level scales (take first row of each tile block)
+        # rowwise_scale_inv[0::16, :] gives us [M_tiles, K_tiles] (approximately)
+        tile_scales = rowwise_scale_inv[0:M_tiles * TILE_SIZE:TILE_SIZE, :K_tiles]  # [M_tiles, K_tiles]
+        
+        # Transpose tile scales for columnwise layout
+        transposed_tile_scales = tile_scales.transpose(-2, -1)  # [K_tiles, M_tiles]
+        
+        # Expand to columnwise padded format (repeat each tile row 16 times)
+        # columnwise_scale_inv has shape [K_padded, M_tiles_padded]
+        col_h = self._columnwise_scale_inv.shape[0]
+        col_w = self._columnwise_scale_inv.shape[1]
+        
+        # Zero out the columnwise scale first
+        self._columnwise_scale_inv.zero_()
+        
+        # Fill in the scale values, repeating each tile's scale 16 times
+        for tile_row in range(min(K_tiles, (col_h + TILE_SIZE - 1) // TILE_SIZE)):
+            row_start = tile_row * TILE_SIZE
+            row_end = min(row_start + TILE_SIZE, col_h)
+            cols_to_copy = min(M_tiles, col_w)
+            if row_start < col_h and cols_to_copy > 0:
+                # Repeat the tile row's scales for all 16 rows in this tile
+                self._columnwise_scale_inv[row_start:row_end, :cols_to_copy] = \
+                    transposed_tile_scales[tile_row, :cols_to_copy].unsqueeze(0).expand(row_end - row_start, -1)
+
+        # Also set columnwise amax (same as rowwise since it's just transposed data)
+        if self._amax_columnwise is None and self._amax_rowwise is not None:
+            self._amax_columnwise = self._amax_rowwise.clone()
+        elif self._amax_rowwise is not None:
+            self._amax_columnwise.copy_(self._amax_rowwise)

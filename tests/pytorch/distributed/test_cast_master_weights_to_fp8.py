@@ -332,7 +332,7 @@ class MiniZero_1:
                     )
                 self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
                 continue
-            if isinstance(self.weights[i], QuantizedTensor):
+            elif isinstance(self.weights[i], QuantizedTensor):
                 weight = _get_raw_data(self.weights[i])
             else:
                 weight = self.weights[i]
@@ -856,7 +856,7 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     )
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
-    for _ in range(100):
+    for i in range(100):
         for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
             w_nvfp4.main_grad.zero_()
             w.main_grad.zero_()
@@ -866,6 +866,19 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         ]
         x = inputs[rank]
 
+        # Debug: compare master weights before forward at iteration 8
+        if i == 8 and rank == 0:
+            print(f"\n=== Debug iteration {i} ===")
+            for idx, (w_nvfp4, w) in enumerate(zip(model_nvfp4.parameters(), model.parameters())):
+                # Compare master weights
+                master_nvfp4 = optimizer_nvfp4.master_weights[idx]
+                master_bf16 = optimizer.master_weights[idx]
+                master_match = torch.equal(master_nvfp4, master_bf16)
+                print(f"Layer {idx}: master weights match = {master_match}")
+                if not master_match:
+                    diff = (master_nvfp4 - master_bf16).abs().max().item()
+                    print(f"  max diff = {diff}")
+
         with te.autocast(
             enabled=True,
             recipe=nvfp4_recipe,
@@ -873,7 +886,12 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         ):
             y_nvfp4 = model_nvfp4(x)
 
-        y = model(x)
+        with te.autocast(
+            enabled=True,
+            recipe=nvfp4_recipe,
+            amax_reduction_group=mock_group,
+        ):
+            y = model(x)
 
         targets = [torch.randn_like(y) for _ in range(world_size)]
         target = targets[rank]
@@ -887,6 +905,7 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         optimizer_nvfp4.step()
         
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
+        print("iter:", i, "loss matched")   
 
 
 def run_parallel_tests() -> None:
@@ -987,10 +1006,17 @@ def test_nvfp4_transpose_kernel() -> None:
     )
     reference_tensor = quantizer_with_colwise(master_weight.to(torch.bfloat16))
     assert reference_tensor._columnwise_data is not None, "Reference should have columnwise data"
+    assert reference_tensor._columnwise_scale_inv is not None, "Reference should have columnwise scale_inv"
     reference_columnwise_data = reference_tensor._columnwise_data.detach().clone()
+    reference_columnwise_scale_inv = reference_tensor._columnwise_scale_inv.detach().clone()
+    reference_columnwise_amax = reference_tensor._amax_columnwise.detach().clone() if reference_tensor._amax_columnwise is not None else None
     print(
         "reference columnwise_data shape:",
         reference_columnwise_data.shape,
+    )
+    print(
+        "reference columnwise_scale_inv shape:",
+        reference_columnwise_scale_inv.shape,
     )
 
     # Create tensor with only rowwise data, then call _create_columnwise()
@@ -1003,9 +1029,14 @@ def test_nvfp4_transpose_kernel() -> None:
     # Now call _create_columnwise() which uses our nvfp4_transpose kernel
     test_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
     assert test_tensor._columnwise_data is not None, "Test tensor should have columnwise data after _create_columnwise()"
+    assert test_tensor._columnwise_scale_inv is not None, "Test tensor should have columnwise scale_inv after _create_columnwise()"
     print(
         "test_tensor columnwise_data shape after transpose:",
         test_tensor._columnwise_data.shape,
+    )
+    print(
+        "test_tensor columnwise_scale_inv shape after transpose:",
+        test_tensor._columnwise_scale_inv.shape,
     )
 
     # Compare columnwise data - should be bitwise identical
@@ -1016,6 +1047,43 @@ def test_nvfp4_transpose_kernel() -> None:
         rtol=0,
         msg="NVFP4 transpose kernel produced different columnwise data than reference!",
     )
+    print("columnwise_data matches!")
+
+    # Compare columnwise scale_inv - should be bitwise identical
+    print("reference columnwise_scale_inv:\n", reference_columnwise_scale_inv)
+    print("test columnwise_scale_inv:\n", test_tensor._columnwise_scale_inv)
+    print("reference rowwise_scale_inv shape:", reference_tensor._rowwise_scale_inv.shape)
+    print("test rowwise_scale_inv shape:", test_tensor._rowwise_scale_inv.shape)
+    
+    # Check if they match
+    scale_match = torch.equal(test_tensor._columnwise_scale_inv, reference_columnwise_scale_inv)
+    if not scale_match:
+        diff_mask = test_tensor._columnwise_scale_inv != reference_columnwise_scale_inv
+        print("Number of mismatches:", diff_mask.sum().item())
+        print("Mismatch locations:", diff_mask.nonzero()[:10])
+        print("Test values at mismatch:", test_tensor._columnwise_scale_inv[diff_mask][:10])
+        print("Reference values at mismatch:", reference_columnwise_scale_inv[diff_mask][:10])
+    
+    torch.testing.assert_close(
+        test_tensor._columnwise_scale_inv,
+        reference_columnwise_scale_inv,
+        atol=0,
+        rtol=0,
+        msg="NVFP4 _create_columnwise produced different columnwise scale_inv than reference!",
+    )
+    print("columnwise_scale_inv matches!")
+
+    # Compare columnwise amax if available
+    if reference_columnwise_amax is not None:
+        torch.testing.assert_close(
+            test_tensor._amax_columnwise,
+            reference_columnwise_amax,
+            atol=0,
+            rtol=0,
+            msg="NVFP4 _create_columnwise produced different columnwise amax than reference!",
+        )
+        print("columnwise_amax matches!")
+
     print("NVFP4 transpose kernel test PASSED!")
 
 
@@ -1142,6 +1210,6 @@ def test_nvfp4_partial_cast_matches_full() -> None:
 
 
 if __name__ == "__main__":
-    test_nvfp4_transpose_kernel()
-    test_nvfp4_partial_cast_matches_full()
-    #main()
+    #test_nvfp4_transpose_kernel()
+    #test_nvfp4_partial_cast_matches_full()
+    main()
