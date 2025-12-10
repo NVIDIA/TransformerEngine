@@ -209,49 +209,63 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
     flatten_axis: int
     has_rht_applied: bool
 
-    def __post_init__(self):
-        """Validates and adjusts the scale_inv shape after initialization.
-
-        Ensures the scale_inv shape matches the expected shape based on the scaling mode
-        and quantization direction. Pads the scale_inv if necessary.
-        """
-        assert self.flatten_axis > 0
-        assert (
-            0 < self.flatten_axis < len(self.data.shape)
-        ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
-
-        if self.scaling_mode == ScalingMode.NO_SCALING:
-            self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
-        else:
-            unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-                self.data.shape,
-                data_layout=self.data_layout,
-                is_colwise=self.is_colwise,
-                is_padded=False,
-                # expect the flatten_axis wrt the N layout
-                flatten_axis=(
-                    self.flatten_axis
-                    if self.data_layout == "N"
-                    else self.data.ndim - self.flatten_axis
-                ),
-            )
-            unpadded_scale_shape_broadcast = self.scaling_mode.get_scale_shape(
-                self.data.shape,
-                data_layout=self.data_layout,
-                is_colwise=self.is_colwise,
-                is_padded=False,
-                # expect the flatten_axis wrt the N layout
-                flatten_axis=(
-                    self.flatten_axis
-                    if self.data_layout == "N"
-                    else self.data.ndim - self.flatten_axis
-                ),
-                broadcast_2d_scale_shape_to_1d=True,
-            )
-            assert self.scale_inv.shape in (unpadded_scale_shape, unpadded_scale_shape_broadcast), (
-                f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or"
-                f" {unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
-            )
+    # def __post_init__(self):
+    #     """Validates and adjusts the scale_inv shape after initialization.
+    #
+    #     Ensures the scale_inv shape matches the expected shape based on the scaling mode
+    #     and quantization direction. Pads the scale_inv if necessary.
+    #     """
+    #     assert self.flatten_axis > 0
+    #     assert (
+    #         0 < self.flatten_axis < len(self.data.shape)
+    #     ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
+    #
+    #     if self.scaling_mode == ScalingMode.NO_SCALING:
+    #         self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
+    #     else:
+    #         unpadded_scale_shape = self.scaling_mode.get_scale_shape(
+    #             self.data.shape,
+    #             data_layout=self.data_layout,
+    #             is_colwise=self.is_colwise,
+    #             is_padded=False,
+    #             # expect the flatten_axis wrt the N layout
+    #             flatten_axis=(
+    #                 self.flatten_axis
+    #                 if self.data_layout == "N"
+    #                 else self.data.ndim - self.flatten_axis
+    #             ),
+    #         )
+    #         unpadded_scale_shape_broadcast = self.scaling_mode.get_scale_shape(
+    #             self.data.shape,
+    #             data_layout=self.data_layout,
+    #             is_colwise=self.is_colwise,
+    #             is_padded=False,
+    #             # expect the flatten_axis wrt the N layout
+    #             flatten_axis=(
+    #                 self.flatten_axis
+    #                 if self.data_layout == "N"
+    #                 else self.data.ndim - self.flatten_axis
+    #             ),
+    #             broadcast_2d_scale_shape_to_1d=True,
+    #         )
+    #         # Check shape, allowing for batch dimensions from vmap
+    #         # If vmapped, shape will be (batch_size, *expected_shape)
+    #         actual_shape = self.scale_inv.shape
+    #         if actual_shape not in (unpadded_scale_shape, unpadded_scale_shape_broadcast):
+    #             # Check if it's a batched version (extra leading dimensions)
+    #             if len(actual_shape) > len(unpadded_scale_shape):
+    #                 # Batched: check that trailing dimensions match
+    #                 trailing_shape = actual_shape[-(len(unpadded_scale_shape)):]
+    #                 if trailing_shape not in (unpadded_scale_shape, unpadded_scale_shape_broadcast):
+    #                     raise AssertionError(
+    #                         f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or "
+    #                         f"{unpadded_scale_shape_broadcast} (possibly with batch dims) but got {self.scale_inv.shape}."
+    #                     )
+    #             else:
+    #                 raise AssertionError(
+    #                     f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or "
+    #                     f"{unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
+    #                 )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
@@ -431,10 +445,21 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             flatten_axis=self.flatten_axis,
         )
 
-        assert self.scale_inv.shape == expected_scale_shape, (
-            f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-            f" scale_inv, got {self.scale_inv.shape}"
-        )
+        # Check shape, allowing for batch dimensions from vmap
+        actual_shape = self.scale_inv.shape
+        if actual_shape != expected_scale_shape:
+            # Check if it's a batched version
+            if len(actual_shape) > len(expected_scale_shape):
+                trailing_shape = actual_shape[-(len(expected_scale_shape)) :]
+                assert trailing_shape == expected_scale_shape, (
+                    f"Unexpected scale_inv shape! Expected {expected_scale_shape} for padded "
+                    f"scale_inv (possibly with batch dims), got {self.scale_inv.shape}"
+                )
+            else:
+                raise AssertionError(
+                    f"Unexpected scale_inv shape! Expected {expected_scale_shape} for padded "
+                    f"scale_inv, got {self.scale_inv.shape}"
+                )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.

@@ -160,6 +160,18 @@ class AmaxCalculationPrimitive(BasePrimitive):
         output_spec = (f"{prefix}_amax",)
         return SdyShardingRule((input_spec,), (output_spec,))
 
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, amax_scope, transpose_batch_sequence):
+        """Batcher for amax calculation - returns single amax value."""
+        return AmaxCalculationPrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "amax_scope": amax_scope,
+                "transpose_batch_sequence": transpose_batch_sequence,
+            },
+        )
+
 
 register_primitive(AmaxCalculationPrimitive, outer_only=True)
 
@@ -369,6 +381,30 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         output_amax_spec = (f"{prefix}_amax",)
         output_post_rht_amax_spec = (f"{prefix}_post_rht_amax",)
         return SdyShardingRule((input_spec,), (output_amax_spec, output_post_rht_amax_spec))
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        amax_scope,
+        transpose_batch_sequence,
+        rht_matrix_random_sign_mask_t,
+        produce_regular_amax,
+        flatten_axis,
+    ):
+        """Batcher for RHT amax calculation - returns 2 amax values."""
+        return RHTAmaxCalculationPrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "amax_scope": amax_scope,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "rht_matrix_random_sign_mask_t": rht_matrix_random_sign_mask_t,
+                "produce_regular_amax": produce_regular_amax,
+                "flatten_axis": flatten_axis,
+            },
+        )
 
 
 register_primitive(RHTAmaxCalculationPrimitive)
