@@ -2396,7 +2396,7 @@ class _FusedAttnCPWithP2PHelper:
                 f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
             )
 
-        #TODO(KshitijLakhani): Flip the condition to check for disabled scan loop and warn
+        # TODO(KshitijLakhani): Flip the condition to check for disabled scan loop and warn
         # against using unrolled loops once the scan issue is resolved.
         # We want to discourage the use of scan loop as additional kv permute op observed.
         # The scan loop flavor will be supported but not the prefered implementation until
