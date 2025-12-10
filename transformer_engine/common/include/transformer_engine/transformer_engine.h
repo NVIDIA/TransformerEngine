@@ -142,7 +142,8 @@ void *nvte_tensor_columnwise_data(const NVTETensor tensor);
 
 /*! \brief Construct a shape from an array of dimension sizes.
  *
- *  \param[data] Pointer to start of shape array.
+ *  \param[data] Pointer to start of shape array. If NULL, the shape
+ *               will be filled with zeros.
  *  \param[data] Number of dimensions (must be <= 14)
  *
  *  \return A shape. The shape will own its own copy of the data.
@@ -580,15 +581,22 @@ class TensorWrapper {
    */
   TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype, float *amax_dptr = nullptr,
                 float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr,
-                const NVTEShape scale_inv_shape = defaultShape,
+                NVTEShape scale_inv_shape = defaultShape,
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
     nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
-    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32, defaultShape};
+    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
+                            amax_dptr != nullptr ? defaultShape : emptyShape};
     nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
-    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32, defaultShape};
+    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
+                             scale_dptr != nullptr ? defaultShape : emptyShape};
     nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
+    if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
+        scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
+      // Scale-inv pointer has not been provided and shape matches default
+      scale_inv_shape = emptyShape;
+    }
     NVTEBasicTensor scale_inv = {scale_inv_dptr, kNVTEFloat32, scale_inv_shape};
     nvte_set_tensor_param(&tensor_, kNVTERowwiseScaleInv, &scale_inv);
   }
@@ -739,7 +747,7 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -750,7 +758,7 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
@@ -874,7 +882,7 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
@@ -893,6 +901,7 @@ class TensorWrapper {
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {
       {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
+  static constexpr NVTEShape emptyShape = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
   NVTEShape convertShape(const NVTEShape &s) { return s; }
