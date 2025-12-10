@@ -394,8 +394,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           constexpr size_t SCALE_TILE_DIM_Y = 4;
           constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
           const size_t num_scale_tiles_Y = DIVUP(rows, SCALE_DIM_Y * SCALE_TILE_DIM_Y);
-          const size_t global_scales_offset_gate_X = (global_scales_offset_X
-                                                      + gate_scale_idx_offset_colwise);
+          const size_t global_scales_offset_gate_X =
+              (global_scales_offset_X + gate_scale_idx_offset_colwise);
           const size_t tile_idx_X = global_scales_offset_gate_X / SCALE_TILE_DIM_X;
           const size_t tile_idx_Y = global_scales_offset_Y / SCALE_TILE_DIM_Y;
           const size_t idx_in_tile_X = global_scales_offset_gate_X % SCALE_TILE_DIM_X;
@@ -627,8 +627,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
           const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
           const size_t num_scale_tiles_X = DIVUP(output_cols, SCALE_DIM_X * SCALE_TILE_DIM_X);
-          const size_t stage_scales_offset_gate_X = (stage_scales_offset_X
-                                                     + gate_scale_idx_offset_rowwise);
+          const size_t stage_scales_offset_gate_X =
+              (stage_scales_offset_X + gate_scale_idx_offset_rowwise);
           const size_t tile_idx_X = stage_scales_offset_gate_X / SCALE_TILE_DIM_X;
           const size_t tile_idx_Y = stage_scales_offset_Y / SCALE_TILE_DIM_Y;
           const size_t idx_in_tile_X = stage_scales_offset_gate_X % SCALE_TILE_DIM_X;
@@ -790,137 +790,137 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
-          alignas(64) CUtensorMap tensor_map_grad{};
-          alignas(64) CUtensorMap tensor_map_input_act{};
-          alignas(64) CUtensorMap tensor_map_input_gate{};
-          alignas(64) CUtensorMap tensor_map_output_act_rowwise{};
-          alignas(64) CUtensorMap tensor_map_output_gate_rowwise{};
-          alignas(64) CUtensorMap tensor_map_output_act_colwise{};
-          alignas(64) CUtensorMap tensor_map_output_gate_colwise{};
+              alignas(64) CUtensorMap tensor_map_grad{};
+              alignas(64) CUtensorMap tensor_map_input_act{};
+              alignas(64) CUtensorMap tensor_map_input_gate{};
+              alignas(64) CUtensorMap tensor_map_output_act_rowwise{};
+              alignas(64) CUtensorMap tensor_map_output_gate_rowwise{};
+              alignas(64) CUtensorMap tensor_map_output_act_colwise{};
+              alignas(64) CUtensorMap tensor_map_output_gate_colwise{};
 
-          constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-          constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+              constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+              constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
-          if constexpr (IS_BWD) {
-            create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
-                                 cols, 0, input_type_bit_size);
-          }
+              if constexpr (IS_BWD) {
+                create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
+                                     cols, 0, input_type_bit_size);
+              }
 
-          const uint32_t tensor_stride_elems = output_cols;
-          create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, BUFF_DIM_Y,
-                               BUFF_DIM_X, cols * 2, 0, input_type_bit_size);
-          create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, BUFF_DIM_Y,
-                               BUFF_DIM_X, cols * 2, cols, input_type_bit_size);
+              const uint32_t tensor_stride_elems = output_cols;
+              create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, BUFF_DIM_Y,
+                                   BUFF_DIM_X, cols * 2, 0, input_type_bit_size);
+              create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, BUFF_DIM_Y,
+                                   BUFF_DIM_X, cols * 2, cols, input_type_bit_size);
 
-          if (USE_ROWWISE_SCALING) {
-            create_2D_tensor_map(tensor_map_output_act_rowwise, output->data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0,
-                                 output_type_bit_size);
-            create_2D_tensor_map(tensor_map_output_gate_rowwise, output->data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols,
-                                 output_type_bit_size);
-          }
-
-          if (USE_COLWISE_SCALING) {
-            create_2D_tensor_map(tensor_map_output_act_colwise, output->columnwise_data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0,
-                                 output_type_bit_size);
-            create_2D_tensor_map(tensor_map_output_gate_colwise, output->columnwise_data, rows,
-                                 cols, BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols,
-                                 output_type_bit_size);
-          }
-
-          const size_t buff_elems_total = BUFFS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
-          const size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
-          const size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
-
-          const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
-
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = (IS_BWD ? buff_size_aligned_out : 0);
-          size_t out_mem = out_act_mem + out_gate_mem;
-
-          if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
-
-          const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
-
-          // Zero out swizzled scales if padding is needed
-          /// TODO (tmoon) Handle this within the cast kernel
-          if (with_gemm_swizzled_scales) {
-            constexpr size_t TILE_DIM_X = 128;
-            constexpr size_t TILE_DIM_Y = 128;
-            if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
               if (USE_ROWWISE_SCALING) {
-                NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr,
-                                                0,
-                                                output->scale_inv.buffer_size_bytes(),
-                                                stream));
+                create_2D_tensor_map(tensor_map_output_act_rowwise, output->data, rows, cols,
+                                     BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0,
+                                     output_type_bit_size);
+                create_2D_tensor_map(tensor_map_output_gate_rowwise, output->data, rows, cols,
+                                     BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols,
+                                     output_type_bit_size);
               }
+
               if (USE_COLWISE_SCALING) {
-                NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr,
-                                                0,
-                                                output->columnwise_scale_inv.buffer_size_bytes(),
-                                                stream));
+                create_2D_tensor_map(tensor_map_output_act_colwise, output->columnwise_data, rows,
+                                     cols, BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0,
+                                     output_type_bit_size);
+                create_2D_tensor_map(tensor_map_output_gate_colwise, output->columnwise_data, rows,
+                                     cols, BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols,
+                                     output_type_bit_size);
               }
-            }
-          }
 
-          switch (scaling_type) {
-            case ScalingType::ROWWISE: {
-              auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
-                                              true, false, WITH_GEMM_SWIZZLED_SCALES,
-                                              THREADS_PER_CHUNK_NON_COLWISE>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+              const size_t buff_elems_total = BUFFS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
+              const size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+              const size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
+              const size_t buff_size_aligned_in =
+                  DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+              const size_t buff_size_aligned_out =
+                  DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
-              kernel<<<grid, block_size, shmem_size, stream>>>(
-                  tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
-                  tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
-                  tensor_map_output_act_colwise, tensor_map_output_gate_colwise, scales_rowwise_ptr,
-                  scales_colwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise, p);
-              break;
-            }
-            case ScalingType::COLWISE: {
-              auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
-                                              false, true, WITH_GEMM_SWIZZLED_SCALES,
-                                              THREADS_PER_CHUNK_COLWISE>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+              const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
+              const size_t in_act_mem = buff_size_aligned_in;
+              const size_t in_gate_mem = buff_size_aligned_in;
+              const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
 
-              kernel<<<grid, block_size, shmem_size, stream>>>(
-                  tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
-                  tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
-                  tensor_map_output_act_colwise, tensor_map_output_gate_colwise, scales_rowwise_ptr,
-                  scales_colwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise, p);
-              break;
-            }
-            case ScalingType::BIDIMENSIONAL: {
-              auto kernel =
-                  quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
-                                              true, true, WITH_GEMM_SWIZZLED_SCALES,
-                                              THREADS_PER_CHUNK_NON_COLWISE>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+              const size_t out_act_mem = buff_size_aligned_out;
+              const size_t out_gate_mem = (IS_BWD ? buff_size_aligned_out : 0);
+              size_t out_mem = out_act_mem + out_gate_mem;
 
-              kernel<<<grid, block_size, shmem_size, stream>>>(
-                  tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
-                  tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
-                  tensor_map_output_act_colwise, tensor_map_output_gate_colwise, scales_rowwise_ptr,
-                  scales_colwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise, p);
-              break;
-            }
-          } NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
-      );                                            // NOLINT(*)
-  );                                                // NOLINT(*)
+              if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
+
+              const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
+
+              // Zero out swizzled scales if padding is needed
+              /// TODO (tmoon) Handle this within the cast kernel
+              if (with_gemm_swizzled_scales) {
+                constexpr size_t TILE_DIM_X = 128;
+                constexpr size_t TILE_DIM_Y = 128;
+                if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+                  if (USE_ROWWISE_SCALING) {
+                    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 0,
+                                                    output->scale_inv.buffer_size_bytes(), stream));
+                  }
+                  if (USE_COLWISE_SCALING) {
+                    NVTE_CHECK_CUDA(
+                        cudaMemsetAsync(output->columnwise_scale_inv.dptr, 0,
+                                        output->columnwise_scale_inv.buffer_size_bytes(), stream));
+                  }
+                }
+              }
+
+              switch (scaling_type) {
+                case ScalingType::ROWWISE: {
+                  auto kernel =
+                      quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                                  true, false, WITH_GEMM_SWIZZLED_SCALES,
+                                                  THREADS_PER_CHUNK_NON_COLWISE>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                  kernel<<<grid, block_size, shmem_size, stream>>>(
+                      tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                      tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                      tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                      scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise, p);
+                  break;
+                }
+                case ScalingType::COLWISE: {
+                  auto kernel =
+                      quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                                  false, true, WITH_GEMM_SWIZZLED_SCALES,
+                                                  THREADS_PER_CHUNK_COLWISE>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                  kernel<<<grid, block_size, shmem_size, stream>>>(
+                      tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                      tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                      tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                      scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise, p);
+                  break;
+                }
+                case ScalingType::BIDIMENSIONAL: {
+                  auto kernel =
+                      quantize_gated_mxfp8_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                                  true, true, WITH_GEMM_SWIZZLED_SCALES,
+                                                  THREADS_PER_CHUNK_NON_COLWISE>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                  kernel<<<grid, block_size, shmem_size, stream>>>(
+                      tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                      tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                      tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                      scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise, p);
+                  break;
+                }
+              } NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+      );                                                // NOLINT(*)
+  );                                                    // NOLINT(*)
 }
 
 }  // namespace mxfp8

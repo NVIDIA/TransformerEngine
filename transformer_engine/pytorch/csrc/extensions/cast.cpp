@@ -476,8 +476,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 
     // Construct Python tensor
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
-                                                 columnwise_scale, fp8_dtype,
-                                                 quantizer_py_list[i], with_gemm_swizzled_scales));
+                                                 columnwise_scale, fp8_dtype, quantizer_py_list[i],
+                                                 with_gemm_swizzled_scales));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -492,7 +492,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     nvte_set_tensor_param_v2(tensor_cpp_list.back().data(),
                              NVTETensorParam::kNVTEWithGEMMSwizzledScales,
                              &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
-
   }
 
   return retval;

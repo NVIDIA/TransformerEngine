@@ -42,9 +42,9 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &), typename IType, typename OType,
-          bool ROWWISE_SCALING, bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
-          size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
+          float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
+          bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES, size_t CHUNK_DIM_Y,
+          size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                           const __grid_constant__ CUtensorMap tensor_map_act_input,
@@ -656,193 +656,192 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
-          if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()
-              && !WITH_GEMM_SWIZZLED_SCALES) {
-            switch (scaling_type) {
-              case ScalingType::ROWWISE: {
-                using traits = specialized::CastTraits<IType, OType, true, false>;
-                auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
+              if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
+                  !WITH_GEMM_SWIZZLED_SCALES) {
+                switch (scaling_type) {
+                  case ScalingType::ROWWISE: {
+                    using traits = specialized::CastTraits<IType, OType, true, false>;
+                    auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
-                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     traits::smem);
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         traits::smem);
 
-                dim3 block(traits::threadLayout::num, traits::warpLayout::N, traits::warpLayout::M);
-                dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
-                          (rows + traits::blockDimM - 1) / traits::blockDimM);
-                kernel<<<grid, block, traits::smem, stream>>>(
-                    reinterpret_cast<typename traits::IType *>(input.data.dptr),
-                    reinterpret_cast<typename traits::OType *>(output->data.dptr),
-                    scales_rowwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                    dim3 block(traits::threadLayout::num, traits::warpLayout::N,
+                               traits::warpLayout::M);
+                    dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
+                              (rows + traits::blockDimM - 1) / traits::blockDimM);
+                    kernel<<<grid, block, traits::smem, stream>>>(
+                        reinterpret_cast<typename traits::IType *>(input.data.dptr),
+                        reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                        scales_rowwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
 
-                break;
+                    break;
+                  }
+                  case ScalingType::COLWISE: {
+                    NVTE_WARN("Colwise scaling will fallback to original kernel.");
+                    break;
+                  }
+                  case ScalingType::BIDIMENSIONAL: {
+                    using traits = specialized::CastTraits<IType, OType, true, true>;
+                    auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
+
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         traits::smem);
+                    // TMA for loading, so that we don't need STS for transposing
+                    alignas(64) CUtensorMap tensor_map_input{};
+                    constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+                    create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
+                                         traits::blockIterDim::M, traits::blockIterDim::N,
+                                         /*stride_elems=*/cols,
+                                         /*offset_elems=*/0, input_type_bit_size,
+                                         traits::input_swizzle_pattern);
+
+                    alignas(64) CUtensorMap tensor_map_rowwise_output{};
+                    alignas(64) CUtensorMap tensor_map_colwise_output{};
+                    constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+                    create_2D_tensor_map(tensor_map_rowwise_output, output->data, rows, cols,
+                                         traits::blockIterDim::M, traits::blockIterDim::N,
+                                         /*stride_elems=*/cols,
+                                         /*offset_elems=*/0, output_type_bit_size,
+                                         traits::output_swizzle_pattern);
+                    create_2D_tensor_map(tensor_map_colwise_output, output->columnwise_data, rows,
+                                         cols, traits::blockIterDim::M, traits::blockIterDim::N,
+                                         cols, 0, output_type_bit_size,
+                                         traits::output_swizzle_pattern);
+
+                    dim3 block(traits::rowThreadLayout::num, traits::numWarps);
+                    dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
+                              (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
+                    kernel<<<grid, block, traits::smem, stream>>>(
+                        tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
+                        scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
+
+                    break;
+                  }
+                  default: {
+                    NVTE_ERROR("Invalid scaling type.");
+                  }
+                }
+                return;
               }
-              case ScalingType::COLWISE: {
-                NVTE_WARN("Colwise scaling will fallback to original kernel.");
-                break;
+
+              alignas(64) CUtensorMap tensor_map_input{};
+              alignas(64) CUtensorMap tensor_map_act_input{};
+              alignas(64) CUtensorMap tensor_map_output_rowwise{};
+              alignas(64) CUtensorMap tensor_map_output_colwise{};
+
+              constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+              constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+
+              create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
+                                   cols, 0, input_type_bit_size);
+
+              if constexpr (IS_DACT) {
+                create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, BUFF_DIM_Y,
+                                     BUFF_DIM_X, cols, 0, input_type_bit_size);
               }
-              case ScalingType::BIDIMENSIONAL: {
-                using traits = specialized::CastTraits<IType, OType, true, true>;
-                auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
-                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     traits::smem);
-                // TMA for loading, so that we don't need STS for transposing
-                alignas(64) CUtensorMap tensor_map_input{};
-                constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-                create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
-                                     traits::blockIterDim::M, traits::blockIterDim::N,
-                                     /*stride_elems=*/cols,
-                                     /*offset_elems=*/0, input_type_bit_size,
-                                     traits::input_swizzle_pattern);
-
-                alignas(64) CUtensorMap tensor_map_rowwise_output{};
-                alignas(64) CUtensorMap tensor_map_colwise_output{};
-                constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
-                create_2D_tensor_map(tensor_map_rowwise_output, output->data, rows, cols,
-                                     traits::blockIterDim::M, traits::blockIterDim::N,
-                                     /*stride_elems=*/cols,
-                                     /*offset_elems=*/0, output_type_bit_size,
-                                     traits::output_swizzle_pattern);
-                create_2D_tensor_map(tensor_map_colwise_output, output->columnwise_data, rows, cols,
-                                     traits::blockIterDim::M, traits::blockIterDim::N, cols, 0,
-                                     output_type_bit_size, traits::output_swizzle_pattern);
-
-                dim3 block(traits::rowThreadLayout::num, traits::numWarps);
-                dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
-                          (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
-                kernel<<<grid, block, traits::smem, stream>>>(
-                    tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
-                    scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                    scale_stride_colwise);
-
-                break;
-              }
-              default: {
-                NVTE_ERROR("Invalid scaling type.");
-              }
-            }
-            return;
-          }
-
-          alignas(64) CUtensorMap tensor_map_input{};
-          alignas(64) CUtensorMap tensor_map_act_input{};
-          alignas(64) CUtensorMap tensor_map_output_rowwise{};
-          alignas(64) CUtensorMap tensor_map_output_colwise{};
-
-          constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-          constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
-
-          create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
-                               cols, 0, input_type_bit_size);
-
-          if constexpr (IS_DACT) {
-            create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, BUFF_DIM_Y,
-                                 BUFF_DIM_X, cols, 0, input_type_bit_size);
-          }
-
-          if (use_rowwise_scaling) {
-            create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols, BUFF_DIM_Y,
-                                 BUFF_DIM_X, cols, 0, output_type_bit_size);
-          }
-
-          if (use_colwise_scaling) {
-            create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
-          }
-
-          constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
-          constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
-          constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
-          constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
-          constexpr size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
-          constexpr size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
-
-          constexpr size_t elt_input_mem = buff_size_aligned_in;
-          constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
-          constexpr size_t in_mem = elt_input_mem + act_input_mem;
-
-          const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
-          const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
-          const size_t out_mem = out_rowwise_mem + out_colwise_mem;
-
-          const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
-
-          // Zero out swizzled scales if padding is needed
-          /// TODO (tmoon) Handle this within the cast kernel
-          if (with_gemm_swizzled_scales) {
-            constexpr size_t TILE_DIM_X = 128;
-            constexpr size_t TILE_DIM_Y = 128;
-            if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
               if (use_rowwise_scaling) {
-                NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr,
-                                                0,
-                                                output->scale_inv.buffer_size_bytes(),
-                                                stream));
+                create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
+                                     BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
               }
+
               if (use_colwise_scaling) {
-                NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr,
-                                                0,
-                                                output->columnwise_scale_inv.buffer_size_bytes(),
-                                                stream));
+                create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
+                                     BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
               }
-            }
-          }
 
-          switch (scaling_type) {
-            case ScalingType::ROWWISE: {
-              auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                        true, false, WITH_GEMM_SWIZZLED_SCALES,
-                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+              constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
+              constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+              constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
+              constexpr size_t buff_size_aligned_in =
+                  DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+              constexpr size_t buff_size_aligned_out =
+                  DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
-              kernel<<<grid, block_size, dshmem_size, stream>>>(
-                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            }
-            case ScalingType::COLWISE: {
-              auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                        false, true, WITH_GEMM_SWIZZLED_SCALES,
-                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              constexpr size_t elt_input_mem = buff_size_aligned_in;
+              constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
+              constexpr size_t in_mem = elt_input_mem + act_input_mem;
 
-              kernel<<<grid, block_size, dshmem_size, stream>>>(
-                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            }
-            case ScalingType::BIDIMENSIONAL: {
-              auto kernel =
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                        true, true, WITH_GEMM_SWIZZLED_SCALES,
-                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+              const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
+              const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
+              const size_t out_mem = out_rowwise_mem + out_colwise_mem;
 
-              kernel<<<grid, block_size, dshmem_size, stream>>>(
-                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            }
-          }
+              const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
-          if constexpr (IS_DBIAS) {
-            common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-          });  // NOLINT(*)
-      );       // NOLINT(*)
-  );           // NOLINT(*)
+              // Zero out swizzled scales if padding is needed
+              /// TODO (tmoon) Handle this within the cast kernel
+              if (with_gemm_swizzled_scales) {
+                constexpr size_t TILE_DIM_X = 128;
+                constexpr size_t TILE_DIM_Y = 128;
+                if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+                  if (use_rowwise_scaling) {
+                    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 0,
+                                                    output->scale_inv.buffer_size_bytes(), stream));
+                  }
+                  if (use_colwise_scaling) {
+                    NVTE_CHECK_CUDA(
+                        cudaMemsetAsync(output->columnwise_scale_inv.dptr, 0,
+                                        output->columnwise_scale_inv.buffer_size_bytes(), stream));
+                  }
+                }
+              }
+
+              switch (scaling_type) {
+                case ScalingType::ROWWISE: {
+                  auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+                                                      OType, true, false, WITH_GEMM_SWIZZLED_SCALES,
+                                                      CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+
+                  kernel<<<grid, block_size, dshmem_size, stream>>>(
+                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+                  break;
+                }
+                case ScalingType::COLWISE: {
+                  auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+                                                      OType, false, true, WITH_GEMM_SWIZZLED_SCALES,
+                                                      CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+
+                  kernel<<<grid, block_size, dshmem_size, stream>>>(
+                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+                  break;
+                }
+                case ScalingType::BIDIMENSIONAL: {
+                  auto kernel = quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+                                                      OType, true, true, WITH_GEMM_SWIZZLED_SCALES,
+                                                      CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>;
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+
+                  kernel<<<grid, block_size, dshmem_size, stream>>>(
+                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+                  break;
+                }
+              }
+
+              if constexpr (IS_DBIAS) {
+                common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
+              });  // NOLINT(*)
+      );           // NOLINT(*)
+  );               // NOLINT(*)
 }
 
 }  // namespace mxfp8
