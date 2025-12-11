@@ -254,7 +254,7 @@ class _Linear(torch.autograd.Function):
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
-            if weight_quantizer is not None and not isinstance(weight, QuantizedTensor) or debug:
+            if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
                 columnwise_usage = is_grad_enabled and inp.requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (

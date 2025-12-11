@@ -121,8 +121,9 @@ class _GroupedLinear(torch.autograd.Function):
                     and not in_fp8_activation_recompute_phase()
                 )
             # No need to set the quantizer states if weight is already quantized
-            if weight_quantizers[0] is not None and not isinstance(
-                weights[0], QuantizedTensorStorage
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if weight_quantizers[0] is not None and (
+                not isinstance(weights[0], QuantizedTensorStorage) or debug
             ):
                 for weight_quantizer in weight_quantizers:
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -797,9 +798,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 if self.no_debug_features_active(list(chain(*quantizers))):
                     debug = False
                     quantizers = self._get_quantizers()
-
-                if isinstance(weight_tensors, QuantizedTensorStorage):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
 
             (
                 input_quantizers,
