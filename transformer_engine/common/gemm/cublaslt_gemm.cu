@@ -736,8 +736,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
   NVTE_CHECK(new_workspace_alignment % 256 == 0,
              "cuBLAS workspace pointer must be aligned to 256 bytes, got ",
-             new_workspace_alignment);
-             
+             new_workspace_alignment); 
   const auto status =
       cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
                                      1, &heuristicResult, &returnedResults);

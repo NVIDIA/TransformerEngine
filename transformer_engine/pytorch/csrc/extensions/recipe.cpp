@@ -67,5 +67,3 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reductio
 }
 
 }  // namespace transformer_engine::pytorch
-
-namespace transformer_engine::pytorch {}  // namespace transformer_engine::pytorch

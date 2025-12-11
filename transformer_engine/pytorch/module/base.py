@@ -52,7 +52,6 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -1277,7 +1276,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
-                
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
