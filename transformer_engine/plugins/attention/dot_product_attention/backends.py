@@ -13,11 +13,9 @@ import torch
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
 )
-from transformer_engine.pytorch.utils import (
-    nvtx_range_push,
-    nvtx_range_pop,
-)
-from transformer_engine.pytorch.quantized_tensor import (
+from transformer_engine.pytorch.utils import nvtx_range_push, nvtx_range_pop
+
+from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
@@ -27,16 +25,10 @@ from transformer_engine.pytorch.constants import (
     QKVLayouts,
     dist_group_type,
 )
+
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.cpu_offload import (
-    is_cpu_offload_enabled,
-    start_offload,
-    mark_activation_offload,
-    NVTE_CPU_OFFLOAD_V1,
-)
-from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
@@ -79,10 +71,6 @@ class AttnFuncFL(torch.autograd.Function):
         nvtx_label = "transformer_engine.AttnFuncFL.forward"
         nvtx_range_push(f"{nvtx_label}")
 
-        if is_cpu_offload_enabled():
-            start_offload(q, k, v, offload_base_tensor=True)
-
-
         # input types are inferred from the real data while output types are controlled by fp8_output
         # fp8_output should be set upstream as (DPA.fp8 and DPA.fp8_meta["recipe"].fp8_mha)
         assert isinstance(k, q.__class__) and isinstance(
@@ -112,8 +100,6 @@ class AttnFuncFL(torch.autograd.Function):
         )
         out = out_permuted.permute(2, 0, 1, 3) # [b, n_h, s, h] -> [s, b, n_h, h]
         aux_ctx_tensors = [out_permuted, m]
-        max_logit = None
-
         out_ret = out
         qkvo_tensors = (q_permuted, k_permuted, v_permuted, out_permuted)
 
@@ -123,7 +109,12 @@ class AttnFuncFL(torch.autograd.Function):
         # used when some tensors are base tensors and loose the "dtype" attribute
         ctx.nominal_dtype = out_nominal_dtype
 
-        if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_V1:
+        from transformer_engine.pytorch.cpu_offload import (
+            CPUOffloadEnabled,
+            mark_activation_offload,
+        )
+
+        if CPUOffloadEnabled:
             tensor_list = [q, k, v, out]
 
             mark_activation_offload(*tensor_list)
@@ -146,29 +137,7 @@ class AttnFuncFL(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.is_causal = is_causal
 
-        if NVTE_CPU_OFFLOAD_V1:
-            # If interleaved tensor is offloaded, reloaded tensor will be
-            # non-interleaved, so we need to modify the QKV layout
-            # for backward
-            if is_current_layer_offloaded() and is_cpu_offload_enabled():
-                reload_layout = ""
-                split_list = qkv_layout.split("_")
-                for split in split_list:
-                    temp_layout = ""
-                    rep_count = 1
-                    for s in split:
-                        if s.isalpha():
-                            temp_layout = temp_layout + s
-                        else:
-                            rep_count = int(s)
-                    for _ in range(rep_count):
-                        reload_layout = reload_layout + temp_layout + "_"
-                ctx.qkv_layout = reload_layout[:-1]
-            else:
-                ctx.qkv_layout = qkv_layout
-        else:
-            ctx.qkv_layout = qkv_layout
-
+        ctx.qkv_layout = qkv_layout
         ctx.attn_mask_type = attn_mask_type
         ctx.window_size = window_size
         ctx.deterministic = deterministic

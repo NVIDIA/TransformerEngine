@@ -9,7 +9,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 
-from transformer_engine.pytorch.quantized_tensor import Quantizer
+from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
 
 from ..import_utils import have_flag_gems
 
@@ -34,6 +34,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
 def general_gemm_fl(
     A: torch.Tensor,
     B: torch.Tensor,
+    workspace: torch.Tensor,
     out_dtype: Optional[torch.dtype] = None,
     quantization_params: Optional[Quantizer] = None,
     gelu: bool = False,
