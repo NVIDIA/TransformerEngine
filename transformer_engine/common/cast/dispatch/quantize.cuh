@@ -149,14 +149,12 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
+        const bool rowwise_compact = !output_tensor->with_gemm_swizzled_scales;
         rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
                                          : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
+        const bool columnwise_compact = !output_tensor->with_gemm_swizzled_scales;
         columnwise_option = columnwise_compact
                                 ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
@@ -297,14 +295,12 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
+        const bool rowwise_compact = !output_tensor->with_gemm_swizzled_scales;
         rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
                                          : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
+        const bool columnwise_compact = !output_tensor->with_gemm_swizzled_scales;
         columnwise_option = columnwise_compact
                                 ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;

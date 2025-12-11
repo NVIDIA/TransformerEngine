@@ -56,12 +56,11 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   const auto scaling_mode = tensor.scaling_mode();
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
     case NVTE_NVFP4_1D_SCALING:
       // Tensor format requires scale swizzling
       break;
-    case NVTE_BLOCK_SCALING_1D:
-    case NVTE_BLOCK_SCALING_2D:
-      NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
     case NVTE_INVALID_SCALING:
       NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
     default:
@@ -72,6 +71,12 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   // Return early if scales are already swizzled
   if (get_with_gemm_swizzled_scales(tensor)) {
     return {std::nullopt, std::nullopt};
+  }
+
+  /// TODO Remove
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D
+      || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
   }
 
   // CUDA stream
@@ -171,12 +176,11 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   // Return early if scale swizzling is not required
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D:
     case NVTE_NVFP4_1D_SCALING:
       // Tensor format requires scale swizzling
       break;
-    case NVTE_BLOCK_SCALING_1D:
-    case NVTE_BLOCK_SCALING_2D:
-      NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
     case NVTE_INVALID_SCALING:
       NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
     default:
@@ -193,6 +197,12 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   }
   if (tensors_needing_swizzle.empty()) {
     return std::nullopt;
+  }
+
+  /// TODO Remove
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D
+      || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    NVTE_ERROR("FP8 block scaling assumes scales are manually swizzled externally.");
   }
 
   // Determine buffer size needed for swizzled scales
@@ -290,10 +300,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   const NVTEScalingMode scaling_mode = input.scaling_mode();
   NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
              "Input tensor must be a block scaling tensor");
-  bool input_is_swizzled = false;
-  nvte_get_tensor_param_v2(input.data(), kNVTEWithGEMMSwizzledScales, &input_is_swizzled,
-                           sizeof(input_is_swizzled), nullptr);
-  NVTE_CHECK(input_is_swizzled, "Input tensor must have swizzled scales");
+  NVTE_CHECK(get_with_gemm_swizzled_scales(input),
+             "Input tensor must have swizzled scales");
 
   // Get tensor data
   NVTEBasicTensor data;
@@ -324,6 +332,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
       rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
   input_cu.set_rowwise_scale_inv(
       scale_inv.data_ptr, static_cast<transformer_engine::DType>(scale_inv.dtype), scale_inv.shape);
+  set_with_gemm_swizzled_scales(input_cu, true);
 
   // Create output tensor
   transformer_engine::TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);

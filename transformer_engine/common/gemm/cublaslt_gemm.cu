@@ -537,9 +537,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
-                 "MXFP8 scales are not in format expected by GEMM");
+                 "NVFP4 block scales are not in format expected by GEMM");
       NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-                 "MXFP8 scales are not in format expected by GEMM");
+                 "NVFP4 block scales are not in format expected by GEMM");
 
       // alpha and beta are device pointers to FP32
       const cublasDataType_t scale_type = CUDA_R_32F;
@@ -579,9 +579,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
-                 "MXFP8 scales are not in format expected by GEMM");
+                 "FP8 block scales are not in format expected by GEMM");
       NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-                 "MXFP8 scales are not in format expected by GEMM");
+                 "FP8 block scales are not in format expected by GEMM");
 
       // Configure cuBLAS scales
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);

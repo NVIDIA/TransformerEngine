@@ -215,6 +215,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 4;
+  const bool with_gemm_swizzled_scales = true;
 
   // Helper function to construct tensor view
   // Note: Deleter holds a shared_ptr for the buffer, so the buffer
@@ -340,6 +341,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
+    nvte_set_tensor_param_v2(tensor_cpp_list.back().data(),
+                             NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                             &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   }
 
   return retval;

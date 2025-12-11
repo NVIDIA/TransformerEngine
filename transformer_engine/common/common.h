@@ -404,8 +404,6 @@ struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
-  Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
-      Float8BlockScaleTensorFormat::GEMM_READY;
   NVTETensor rng_state = nullptr;
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
@@ -414,7 +412,7 @@ struct QuantizationConfig {
       sizeof(bool),                          // force_pow_2_scales
       sizeof(float),                         // amax_epsilon
       sizeof(NVTETensor),                    // noop_tensor
-      sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
+      sizeof(Float8BlockScaleTensorFormat),  // (deprecated)
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(bool),                          // nvfp4_2d_quantization
       sizeof(bool)                           // stochastic_rounding

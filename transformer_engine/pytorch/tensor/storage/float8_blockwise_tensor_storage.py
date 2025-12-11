@@ -366,7 +366,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         return (
             "Float8BlockwiseQTensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data}"
+            f"{descriptor}_scaled_data={data}, "
+            f"data_format={self._data_format}"
         )
 
     def update_usage(

@@ -580,6 +580,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   Float8BlockScaleTensorFormat data_format =
       (all_gather_usage ? Float8BlockScaleTensorFormat::COMPACT
                         : Float8BlockScaleTensorFormat::GEMM_READY);
+  const bool with_gemm_swizzled_scales = !all_gather_usage;
 
   if (rowwise_usage) {
     data_rowwise = at::empty(torch_shape, opts);
@@ -627,6 +628,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     tensor.set_columnwise_scale_inv(scale_inv_colwise.data_ptr(), DType::kFloat32,
                                     std::vector<size_t>{sinv0, sinv1});
   }
+  nvte_set_tensor_param_v2(tensor.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   this->set_quantization_params(&tensor);
 
   py::object ret;
@@ -656,6 +659,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
     py::object tensor) const {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
+  const bool with_gemm_swizzled_scales = !all_gather_usage;
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -800,6 +804,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
+  nvte_set_tensor_param_v2(ret.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   set_quantization_params(&ret);
   return {std::move(ret), std::move(tensor)};
 }
@@ -815,9 +821,6 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
-  if (all_gather_usage) {
-    quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
-  }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
