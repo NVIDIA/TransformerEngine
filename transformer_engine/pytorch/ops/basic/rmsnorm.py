@@ -26,6 +26,8 @@ from ...utils import (
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
 
+from transformer_engine.plugins.backend import backend
+
 
 class RMSNorm(BasicOperation):
     r"""Root Mean Square Layer Normalization
@@ -184,7 +186,7 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
-        y, _, rstdevs = rmsnorm_fwd(
+        y, _, rstdevs = backend.rmsnorm_fwd(
             x,
             w,
             self.eps,
@@ -224,14 +226,14 @@ class RMSNorm(BasicOperation):
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
-        # Compute RMSNorm backward pass
-        dx, dw = rmsnorm_bwd(
+        dx, dw = backend.rmsnorm_bwd(
             dy,
             x,
             rstdevs,
             w,
             self._sm_margins["backward"],
             self.zero_centered_gamma,
+            self.eps,
         )
 
         # Clear saved tensors if possible

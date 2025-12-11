@@ -75,6 +75,8 @@ from ..cpp_extensions import (
     general_gemm,
 )
 
+from transformer_engine.plugins.backend import backend
+
 __all__ = ["LayerNormLinear"]
 
 
@@ -205,7 +207,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
-        ln_out, mu, rsigma = apply_normalization(
+        ln_out, mu, rsigma = backend.apply_normalization(
             inputmat,
             None,  # ln_out
             ln_weight,
@@ -341,7 +343,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Note: y = x * w^T
         # ------------------------------------------------------
         nvtx_range_push(f"{nvtx_label}.gemm")
-        gemm_out, *_, reduce_scatter_out = general_gemm(
+        gemm_out, *_, reduce_scatter_out = backend.gemm(
             weightmat,
             ln_out_total,
             get_workspace(),
@@ -507,6 +509,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
+            ctx.eps = eps
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -714,7 +717,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # dgrad GEMM
             # Note: dx = dy * w
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-            gemm_out, *_, reduce_scatter_out = general_gemm(
+            gemm_out, *_, reduce_scatter_out = backend.gemm(
                 weight,
                 grad_output,
                 get_workspace(),
@@ -878,7 +881,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     """
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                    dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
+                    dw, db, *_ = backend.gemm(x, dy, **wgrad_gemm_kwargs)
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
                     return dw, db
 
@@ -963,13 +966,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 dgrad = dgrad.reshape(inputmat.size())
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                dgrad, dgamma = backend.rmsnorm_bwd(
                     dgrad,
                     inputmat,
                     rsigma,
                     ln_weight,
                     ctx.bwd_ln_sm_margin,
                     ctx.zero_centered_gamma,
+                    ctx.eps,
                 )
                 dgrad = dgrad.reshape(inputmat.size())
                 dbeta = None

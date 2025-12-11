@@ -61,6 +61,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FlashAttention,
 )
 
+from transformer_engine.plugins.backend import backend
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -422,7 +423,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             "attention_dropout_ctx": attention_dropout_ctx,
         }
 
-        self.flash_attention = FlashAttention(
+        self.flash_attention = backend.flash_attention(
             softmax_scale,
             attention_type=attention_type,
             layer_number=layer_number,
