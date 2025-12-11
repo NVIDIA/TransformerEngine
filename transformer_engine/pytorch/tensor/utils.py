@@ -6,7 +6,6 @@
 
 from typing import Optional, Union, List
 import math
-import os
 import torch
 
 import transformer_engine_torch as tex
@@ -611,37 +610,17 @@ def _cast_master_weights_to_nvfp4_2d(
             global_amaxes > 0, global_encode_scales, torch.ones_like(global_encode_scales)
         )
         global_scale_tensor.copy_(global_encode_scales)
-        print(
-            "[NVFP4 partial cast] global_encode_scales:",
-            [(idx, float(val)) for idx, val in enumerate(global_encode_scales.tolist())],
-        )
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-        for layer_idx, (amax_tensor, scale_tensor, global_scale) in enumerate(zip(
+        for amax_tensor, scale_tensor, global_scale in zip(
             amaxes, scales, global_scale_views
-        )):
+        ):
             # Use FP32 tensor division to match CUDA kernel exactly.
             # CUDA computes: float S_dec_b = block_amax / fp4_max * S_enc;
             per_block_decode_scale = torch.clamp(
                 (amax_tensor / fp4_max_t) * global_scale, max=finfo.max
             )
             scale_tensor.copy_(per_block_decode_scale)
-            import os
-            # Debug: print specific tile values if env var is set
-            debug_tile_row = os.environ.get("NVFP4_DEBUG_TILE_ROW")
-            debug_tile_col = os.environ.get("NVFP4_DEBUG_TILE_COL")
-            if debug_tile_row is not None and debug_tile_col is not None and layer_idx == 0:
-                tr, tc = int(debug_tile_row), int(debug_tile_col)
-                if tr < amax_tensor.shape[0] and tc < amax_tensor.shape[1]:
-                    print(f"\n[utils.py DEBUG] Tile [{tr},{tc}] computation (using PyTorch FP32 tensors):")
-                    print(f"  amax_tensor[{tr},{tc}] = {amax_tensor[tr,tc].item()}")
-                    print(f"  global_scale = {global_scale.item()}")
-                    print(f"  fp4_max_t = {fp4_max_t.item()}")
-                    intermediate = amax_tensor[tr,tc] / fp4_max_t
-                    print(f"  amax / fp4_max = {intermediate.item()}")
-                    result = intermediate * global_scale
-                    print(f"  (amax / fp4_max) * global_scale = {result.item()}")
-                    print(f"  per_block_decode_scale[{tr},{tc}] = {per_block_decode_scale[tr,tc].item()}")
     else:
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
@@ -689,48 +668,12 @@ def _cast_master_weights_to_nvfp4_2d(
         fp8_view = expanded_scale.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
         target_scale.copy_(fp8_view)
         
-        # Debug: print specific tile values after FP8 conversion
-        import os
-        debug_tile_row = os.environ.get("NVFP4_DEBUG_TILE_ROW")
-        debug_tile_col = os.environ.get("NVFP4_DEBUG_TILE_COL")
-        if debug_tile_row is not None and debug_tile_col is not None and idx == 0:
-            tr, tc = int(debug_tile_row), int(debug_tile_col)
-            # The scale buffer row is tile_row * 16 + offset within tile
-            scale_row = tr * block_len
-            if scale_row < target_scale.shape[0] and tc < target_scale.shape[1]:
-                print(f"\n[utils.py DEBUG] After FP8 conversion for tile [{tr},{tc}]:")
-                print(f"  expanded_scale[{scale_row},{tc}] (FP32) = {expanded_scale[scale_row,tc].item()}")
-                print(f"  fp8_view[{scale_row},{tc}] (uint8) = {fp8_view[scale_row,tc].item()}")
-                print(f"  target_scale[{scale_row},{tc}] (uint8) = {target_scale[scale_row,tc].item()}")
-                # Also show as FP32
-                fp8_as_fp32 = fp8_view[scale_row,tc].view(torch.float8_e4m3fn).to(torch.float32).item()
-                print(f"  fp8_view[{scale_row},{tc}] as FP32 = {fp8_as_fp32}")
-        
         if target_amax is not None:
             target_amax.copy_(global_amaxes[idx : idx + 1])
 
         # Only cast data for layers owned by this rank
         if master_weight is None or master_weight.numel() == 0:
             continue
-
-        # # Debug: compare scales with fresh quantizer for full cast (start_offset=0)
-        # if start_offset == 0 and idx == 2:
-        #     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        #     print(f"[Rank {rank}] Layer {idx} SCALE DEBUG (start_offset=0):")
-        #     print(f"[Rank {rank}]   per_block_decode_scale shape: {per_block_decode_scale.shape}")
-        #     print(f"[Rank {rank}]   target_scale shape: {target_scale.shape}")
-        #     # Compare with fresh quantizer - use inline import to avoid scoping issues
-        #     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer as FreshNVFP4Quantizer
-        #     fresh_q = FreshNVFP4Quantizer(with_2d_quantization=True)
-        #     ref = fresh_q(master_weight.reshape(model_weight.shape))
-        #     print(f"[Rank {rank}]   ref._rowwise_scale_inv shape: {ref._rowwise_scale_inv.shape}")
-        #     # Check if scales match
-        #     scale_match = torch.equal(target_scale, ref._rowwise_scale_inv)
-        #     print(f"[Rank {rank}]   target_scale == ref._rowwise_scale_inv: {scale_match}")
-        #     if not scale_match:
-        #         mismatches = (target_scale != ref._rowwise_scale_inv).sum().item()
-        #         total = target_scale.numel()
-        #         print(f"[Rank {rank}]   mismatches: {mismatches}/{total} ({100*mismatches/total:.2f}%)")
 
         end_offset = start_offset + master_weight.numel()
         if not use_fsdp_shard_model_weights:

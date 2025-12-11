@@ -335,11 +335,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
         // 2. Compute E4M3 scaling factor
-        // Compute tile indices for colwise (transpose direction)
-        const size_t colwise_tile_row = scales_offset_Y_t + stage * ITERATIONS_TRANSPOSE + it;
-        const size_t colwise_tile_col = scales_offset_X_t;
         const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_colwise, static_cast<int>(colwise_tile_row), static_cast<int>(colwise_tile_col));
+            compute_decoding_scaling_factor(block_amax, S_enc_colwise);
 
         // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -511,14 +508,13 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         // 2. Compute E4M3 scaling factor
-        // Compute tile indices first for debug
+        const nvfp4_scale_t S_dec_b_fp8 =
+            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+
+        // Check boundaries
         const size_t scales_offset_Y =
             scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
         const size_t scales_offset_X = scales_offset_X_rowwise;
-        const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_rowwise, static_cast<int>(scales_offset_Y), static_cast<int>(scales_offset_X));
-
-        // Check boundaries
         const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
         // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
@@ -920,11 +916,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         // 2. Compute E4M3 scaling factor
-        // Compute tile indices for colwise (transpose direction) in 2D kernel
-        const size_t colwise_tile_row_2d = scales_offset_Y_t + stage * ITERATIONS_TRANSPOSE + it;
-        const size_t colwise_tile_col_2d = scales_offset_X_t;
         const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_colwise, static_cast<int>(colwise_tile_row_2d), static_cast<int>(colwise_tile_col_2d));
+            compute_decoding_scaling_factor(block_amax, S_enc_colwise);
 
         // // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -1048,15 +1041,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         // 2. Compute E4M3 scaling factor
-        // Compute tile indices first for debug
-        const size_t scales_offset_Y_2d =
-            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-        const size_t scales_offset_X_2d = scales_offset_X_rowwise;
         const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_rowwise, static_cast<int>(scales_offset_Y_2d), static_cast<int>(scales_offset_X_2d));
+            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
 
         // Check boundaries
-        const size_t scale_idx_global = scales_offset_Y_2d * scale_stride + scales_offset_X_2d;
+        const size_t scales_offset_Y =
+            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+        const size_t scales_offset_X = scales_offset_X_rowwise;
+        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
         // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
         const bool rowwise_scale_is_within_bounds_Y =

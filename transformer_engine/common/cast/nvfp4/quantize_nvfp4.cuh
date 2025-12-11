@@ -413,16 +413,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         // 2. Compute E4M3 scaling factor
-        // Compute tile indices for debug
-        const int debug_tile_row = scales_offset_Y_rowwise + stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-        const int debug_tile_col = scales_offset_X_rowwise;
-        const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc, debug_tile_row, debug_tile_col);
+        const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
 
 #if DIRECT_SCALING_FACTORS_STORE
         // Check boundaries
         if (rowwise_scale_is_within_bounds) {
-          const int scales_offset_Y = debug_tile_row;
-          const int scales_offset_X = debug_tile_col;
+          const int scales_offset_Y =
+              scales_offset_Y_rowwise + stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+          const int scales_offset_X = scales_offset_X_rowwise;
           const int scale_idx_global = scales_offset_Y * scale_stride_rowwise + scales_offset_X;
           scales_rowwise_e4m3[scale_idx_global] = S_dec_b_fp8;
         }
