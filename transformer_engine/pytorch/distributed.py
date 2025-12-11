@@ -29,12 +29,14 @@ except ImportError:
 
 import transformer_engine_torch as tex
 
-from . import torch_version
+from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
+from .torch_version import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,
     needs_quantized_gemm,
 )
+
 from .constants import dist_group_type
 from .quantization import FP8GlobalStateManager, autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -46,7 +48,6 @@ from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from .triton.pad import pad_columnwise_scale_inv
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 
@@ -641,18 +642,18 @@ def checkpoint(
 
     Parameters
     ----------
-    function: Callable
+    function : Callable
             pytorch module used to run the forward and backward passes using
             the specified :attr:`args` and :attr:`kwargs`.
-    distribute_saved_activations: bool, default = False
-            if set to `True` and `use_reentrant=True`, first tensor argument is distributed
-            across the specified tensor parallel group (`tp_group`) before saving it for the
-            backward pass. This has no effect when `use_reentrant=False`.
-    get_rng_state_tracker: `Callable`, default = None
-            python callable which returns an instance of :func:`CudaRNGStatesTracker`.
+    distribute_saved_activations : bool, default = False
+            if set to ``True`` and ``use_reentrant=True``, first tensor argument is distributed
+            across the specified tensor parallel group (``tp_group``) before saving it for the
+            backward pass. This has no effect when ``use_reentrant=False``.
+    get_rng_state_tracker : Callable, default = None
+            python callable which returns an instance of :class:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup, default = None
-            tensor parallel process group. Used only when `distribute_saved_activations=True`
-            and `use_reentrant=True`. If `None`, it falls back to the default group.
+            tensor parallel process group. Used only when ``distribute_saved_activations=True``
+            and ``use_reentrant=True``. If ``None``, it falls back to the default group.
     use_reentrant : bool, default = True
             perform checkpointing in reentrant mode.
     args : tuple
@@ -777,8 +778,8 @@ class CudaRNGStatesTracker:
     For model parallelism, multiple RNG states need to simultaneously exist in order
     to execute operations in or out of the model parallel region. This class keeps
     track of the various RNG states and provides utility methods to maintain them and
-    execute parts of the model under a given RNG setting. Using the `add` method, a
-    cuda rng state is initialized based on the input `seed` and is assigned to `name`.
+    execute parts of the model under a given RNG setting. Using the :meth:`add` method, a
+    cuda rng state is initialized based on the input ``seed`` and is assigned to ``name``.
     Later, by forking the rng state, we can perform operations and return to our starting
     cuda state.
     """
@@ -811,7 +812,9 @@ class CudaRNGStatesTracker:
         Set the rng states. For efficiency purposes, we do not
         check the size of seed for compatibility.
 
-        states: Dict[str, torch.Tensor]
+        Parameters
+        ----------
+        states : Dict[str, torch.Tensor]
                A mapping from string names to RNG states.
         """
         self.states_ = states
@@ -820,9 +823,11 @@ class CudaRNGStatesTracker:
         """
         Adds a new RNG state.
 
-        name: str
+        Parameters
+        ----------
+        name : str
              string identifier for the RNG state.
-        seed: int
+        seed : int
              PyTorch seed for the RNG state.
         """
         # Check seed is not already used.
@@ -856,7 +861,9 @@ class CudaRNGStatesTracker:
         Fork the cuda rng state, perform operations, and exit with
         the original state.
 
-        name: str
+        Parameters
+        ----------
+        name : str
              string identifier for the RNG state.
         """
         # Check if we have added the state
@@ -947,7 +954,13 @@ def _all_gather_fp8(
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
+        # Temporarily ensure rowwise usage for output tensor creation
+        # since we're gathering rowwise data, not the transpose
+        init_rowwise_usage = quantizer.rowwise_usage
+        init_columnwise_usage = quantizer.columnwise_usage
+        quantizer.set_usage(rowwise=True, columnwise=init_columnwise_usage)
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+        quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage)
     elif isinstance(inp, Float8Tensor):
         out = inp.make_like(inp, shape=out_shape)
         out._data = torch.empty(
@@ -1885,6 +1898,43 @@ def allreduce(
     return inp, handle
 
 
+def _get_module_fsdp_state(module):
+    """
+    If module is an FSDP module, return its _FSDPState.
+    Otherwise, return the _FSDPState of the closest parent FSDP module
+    in the module hierarchy the module belongs to.
+    """
+
+    if hasattr(module, "_get_fsdp_state"):
+        # this will return correct fsdp state if module itself is an fsdp module
+        fsdp_state = module._get_fsdp_state()
+    elif getattr(module, "_te_cached_parent_fsdp_state", None) is not None:
+        # See if we have cached the parent fsdp state of the module
+        fsdp_state = module._te_cached_parent_fsdp_state
+    else:
+        from torch.distributed._composable_state import _module_state_mapping
+
+        # Otherwise get the fsdp state of lca of module in the module hierarchy
+        min_nodes_in_parent = float("inf")
+        closest_parent_fsdp_mod = None
+        for fsdp_mod in _module_state_mapping.keys():
+            all_submodules = list(fsdp_mod.modules())
+            for submodule in all_submodules:
+                if submodule is module:
+                    if min_nodes_in_parent > len(all_submodules):
+                        closest_parent_fsdp_mod = fsdp_mod
+                        min_nodes_in_parent = len(all_submodules)
+        if closest_parent_fsdp_mod is None:
+            raise RuntimeError(
+                "Module is not FSDP-wrapped and does not have any FSDP-wrapped parent modules."
+            )
+        fsdp_state = closest_parent_fsdp_mod._get_fsdp_state()
+        # Cache the parent fsdp state of the module to avoid recomputing
+        # the closest parent fsdp module.
+        module._te_cached_parent_fsdp_state = fsdp_state
+    return fsdp_state
+
+
 def _fsdp_scatter_tensors(
     fsdp_group: dist_group_type,
     *tensors: torch.Tensor,
@@ -1959,7 +2009,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
 
     Parameters
     ----------
-    fsdp_root: torch.nn.Module
+    fsdp_root : torch.nn.Module
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
     assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."

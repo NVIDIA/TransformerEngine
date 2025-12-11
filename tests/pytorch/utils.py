@@ -8,6 +8,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import Optional, Tuple, Dict, Any, List
+from packaging.version import Version as PkgVersion
 
 import torch
 
@@ -205,10 +206,12 @@ class ModelConfig:
         window_size: Tuple[int, int] = (-1, -1),
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
+        return_max_logit=False,
         total_requests: int = None,
         max_ctx_len: int = None,
         num_layers: int = 1,
         eps: float = 1e-5,
+        num_splits=1,
     ):
         self.batch_size = batch_size
         self.max_seqlen_q = max_seqlen_q
@@ -233,10 +236,12 @@ class ModelConfig:
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
+        self.return_max_logit = return_max_logit
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
         self.num_layers = num_layers
         self.eps = eps
+        self.num_splits = num_splits
 
 
 @contextmanager
@@ -318,6 +323,10 @@ def get_available_attention_backends(
             is_training=is_training,
             inference_params=inference_params,
             softmax_type=config.softmax_type,
+            return_max_logit=config.return_max_logit,
+            # allow all backends to pass so they can be used for testing;
+            # check for FA3 availability later
+            num_splits=1,
         )
         (
             use_flash_attention,
@@ -327,6 +336,10 @@ def get_available_attention_backends(
             use_unfused_attention,
             available_backends,
         ) = get_attention_backend(attention_params)
+        # Check if FA3 is an available backend when num_splits != 1
+        if available_backends[0]:
+            if config.num_splits != 1 and not flash_attention_backend > PkgVersion("3.0.0b"):
+                available_backends[0] = False
         # Set attention.py _attention_backends var using return value
         # from get_attention_backend()
         _attention_backends["use_flash_attention"] = use_flash_attention

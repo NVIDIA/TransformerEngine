@@ -44,9 +44,6 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
 
 def _validate_mesh_resource_configuration(mesh_resource):
     """Validate that the mesh resource configuration is consistent and conflict-free."""
-    is_dp_enabled = (
-        mesh_resource.dp_resource is not None and get_mesh_axis_size(mesh_resource.dp_resource) > 1
-    )
     is_tp_enabled = (
         mesh_resource.tp_resource is not None and get_mesh_axis_size(mesh_resource.tp_resource) > 1
     )
@@ -54,16 +51,7 @@ def _validate_mesh_resource_configuration(mesh_resource):
         mesh_resource.tpsp_resource is not None
         and get_mesh_axis_size(mesh_resource.tpsp_resource) > 1
     )
-    is_fsdp_enabled = (
-        mesh_resource.fsdp_resource is not None
-        and get_mesh_axis_size(mesh_resource.fsdp_resource) > 1
-    )
 
-    assert not (is_dp_enabled and is_fsdp_enabled), (
-        "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
-        f" Got dp_resource={mesh_resource.dp_resource} and"
-        f" fsdp_resource={mesh_resource.fsdp_resource}"
-    )
     assert not (is_tp_enabled and is_tpsp_enabled), (
         "Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time."
         f" Got tp_resource={mesh_resource.tp_resource} and"
@@ -75,6 +63,16 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     Generate a dict to map logical axes to mesh axes.
     """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh is None or mesh.empty:
+        # If no mesh is defined, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
+    abstract_mesh = get_abstract_mesh()
+    if sorted(abstract_mesh.manual_axes) == sorted(mesh.axis_names):
+        # If all mesh axes are manual axes, return an empty dict and do not require a MeshResource context to be present
+        return {}
+
     gsr = global_mesh_resource()
 
     is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1

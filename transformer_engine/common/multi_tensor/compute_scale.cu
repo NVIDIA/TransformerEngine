@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "../recipe/recipe_common.cuh"
+#include "../util/ptx.cuh"
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
 
@@ -55,6 +56,28 @@ struct ComputeScaleAndScaleInvFunctor {
   }
 };
 
+struct ComputeScaleInvE8M0Functor {
+  __device__ __forceinline__ void operator()(int chunk_size, volatile int *unused,
+                                             TensorListMetadata<2> &tl) {
+    int tensor_loc = tl.block_to_tensor[blockIdx.x];
+    int chunk_idx = tl.block_to_chunk[blockIdx.x];
+    int n = tl.sizes[tensor_loc];
+
+    bf16 *amax = reinterpret_cast<bf16 *>(tl.addresses[0][tensor_loc]);
+    amax += chunk_idx * chunk_size;
+
+    e8m0_t *scale_inv = reinterpret_cast<e8m0_t *>(tl.addresses[1][tensor_loc]);
+    scale_inv += chunk_idx * chunk_size;
+
+    n -= chunk_idx * chunk_size;
+
+    for (int i_start = threadIdx.x; i_start < n && i_start < chunk_size; i_start += blockDim.x) {
+      scale_inv[i_start] = ptx::float_to_e8m0(static_cast<float>(amax[i_start]) *
+                                              Quantized_Limits<fp8e4m3>::max_norm_rcp);
+    }
+  }
+};
+
 void multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, Tensor noop_flag,
                                                    std::vector<std::vector<Tensor *>> tensor_lists,
                                                    float max_fp8, bool force_pow_2_scales,
@@ -62,6 +85,19 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, Tensor noop_f
   multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                         ComputeScaleAndScaleInvFunctor(), stream, max_fp8, force_pow_2_scales,
                         epsilon);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size,
+                                              std::vector<std::vector<Tensor *>> tensor_lists,
+                                              cudaStream_t stream) {
+  NVTE_CHECK(tensor_lists[0][0]->data.dtype == DType::kBFloat16, "amax should be bf16");
+  auto scale_inv_dtype = tensor_lists[1][0]->data.dtype;
+  NVTE_CHECK(scale_inv_dtype == DType::kByte || scale_inv_dtype == DType::kFloat8E8M0,
+             "scale_inv should be e8m0/uint8");
+  Tensor dummy;
+  multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, dummy, tensor_lists, ComputeScaleInvE8M0Functor(),
+                        stream);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -81,4 +117,16 @@ void nvte_multi_tensor_compute_scale_and_scale_inv_cuda(int chunk_size, NVTETens
       chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), max_fp8,
       force_pow_2_scales, epsilon, stream);
+}
+
+void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **tensor_lists,
+                                                   const size_t num_tensor_lists,
+                                                   const size_t num_tensors_per_list,
+                                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_compute_scale_inv_e8m0_cuda);
+  using namespace transformer_engine;
+
+  multi_tensor_compute_scale::multi_tensor_compute_scale_inv_e8m0_cuda(
+      chunk_size, convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
+      stream);
 }

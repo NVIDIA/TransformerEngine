@@ -89,40 +89,47 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        q_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_heads,
-            config.head_dim_qk,
-        )
-        k_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_gqa_groups,
-            config.head_dim_qk,
-        )
-        v_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_gqa_groups,
-            config.head_dim_v,
-        )
-        attn_output_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_heads * config.head_dim_v,
-        )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
                 seqlens_q_padded.cumsum(0, dtype=torch.int32),
-                torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
         cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
+
+        # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
+        # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
         if kernel_backend == "FusedAttention":
-            cu_seqlens_q[1:-1] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
-        cu_seqlens_q[-1] = cu_seqlens_q[-2]
+            cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+
+        # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
+        # will not be the same as `cu_seqlens_q` and `cu_seqlens_q_padded` respectively.
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
+
+        total_tokens = cu_seqlens_q_padded[-1]
+
+        q_input_shape = (
+            total_tokens,
+            config.num_heads,
+            config.head_dim_qk,
+        )
+        k_input_shape = (
+            total_tokens,
+            config.num_gqa_groups,
+            config.head_dim_qk,
+        )
+        v_input_shape = (
+            total_tokens,
+            config.num_gqa_groups,
+            config.head_dim_v,
+        )
+        attn_output_shape = (
+            total_tokens,
+            config.num_heads * config.head_dim_v,
+        )
     else:
         assert False, f"{qkv_format=} is not supported!"
 
@@ -248,6 +255,7 @@ def run_dpa_with_cp(
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
         softmax_type=config.softmax_type,
+        return_max_logit=config.return_max_logit,
     ).cuda()
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
@@ -308,6 +316,7 @@ def run_dpa_with_cp(
         fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
+    max_logit = None
     with fp8_context:
         # q, k, v, out in FP8; dout in F16
         out = core_attn(
@@ -322,6 +331,8 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
+        if config.return_max_logit:
+            out, max_logit = out
         if fp8_bwd and fp8_mha:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
@@ -400,6 +411,7 @@ def run_dpa_with_cp(
         fp8_context = nullcontext()
 
     # run attention
+    max_logit_ = None
     with fp8_context:
         # q, k, v, out in FP8; dout in F16
         out_ = core_attn(
@@ -414,6 +426,8 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
+        if config.return_max_logit:
+            out_, max_logit_ = out_
         if fp8_bwd and fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
@@ -495,15 +509,15 @@ def run_dpa_with_cp(
                 )
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
-    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_]
-    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset]
-    names = ["out", "dq", "dk", "dv", "d_softmax_offset"]
+    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_, max_logit_]
+    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset, max_logit]
+    names = ["out", "dq", "dk", "dv", "d_softmax_offset", "max_logit"]
     names_cp = [x + "_cp" for x in names]
     names_no_cp = [x + "_no_cp" for x in names]
     is_fp8 = dtype == "fp8"
     for i, t in enumerate(tensors_no_cp):
         if t is not None:
-            if "softmax_offset" not in names[i]:
+            if "softmax_offset" not in names[i] and "max_logit" not in names[i]:
                 if qkv_format == "bshd":
                     compare_and_assert(
                         t[:, 0],

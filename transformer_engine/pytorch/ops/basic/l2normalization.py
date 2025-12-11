@@ -10,7 +10,7 @@ import os
 
 import torch
 
-from ... import torch_version
+from ...torch_version import torch_version
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
     l2normalization_fused,
@@ -40,11 +40,11 @@ class L2Normalization(BasicOperation):
     ----------
     eps : float, default = 1e-6
         A value added to the denominator for numerical stability
-    seq_length: int, default = None
+    seq_length : int, default = None
         sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
         functions are warmed up before training to ensure same kernels are used for forward
         propagation and activation recompute phase.
-    micro_batch_size: int, default = None
+    micro_batch_size : int, default = None
         batch size per training step. Needed for JIT Warmup, a technique where jit
         fused functions are warmed up before training to ensure same kernels are
         used for forward propagation and activation recompute phase.

@@ -11,6 +11,7 @@ from typing import Optional
 import warnings
 
 import torch
+from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from .multi_tensor_apply import multi_tensor_applier
@@ -372,9 +373,9 @@ class FusedAdam(torch.optim.Optimizer):
         """
         dtype = self.name_to_dtype_map[state_name]
         if store_param_remainders:
-            data = torch.zeros_like(param, dtype=torch.int16)
+            data = torch.zeros(param.shape, dtype=torch.int16, device=param.device)
         else:
-            data = torch.empty_like(param, dtype=dtype)
+            data = torch.empty(param.shape, dtype=dtype, device=param.device)
         if zero_buffer:
             data.zero_()
 
@@ -567,8 +568,10 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
                             state_scales[name].append(self._scales[p][name])
-
-                if isinstance(p, Float8Tensor):
+                if isinstance(p, Float8Tensor) or (
+                    isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
+                ):
+                    p = p._local_tensor if isinstance(p, DTensor) else p
                     out_dtype = p._fp8_dtype
                     p_fp8_model.append(p._data.data)
                     scale, amax, scale_inv = get_fp8_meta(p)

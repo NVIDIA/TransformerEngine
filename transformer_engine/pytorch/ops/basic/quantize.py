@@ -23,9 +23,9 @@ class Quantize(BasicOperation):
 
     Parameters
     ----------
-    forward: bool, default = `True`
+    forward : bool, default = `True`
         Perform quantization in forward pass
-    backward: bool, default = `False`
+    backward : bool, default = `False`
         Perform quantization in backward pass
 
     """

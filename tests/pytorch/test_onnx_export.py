@@ -68,7 +68,7 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 

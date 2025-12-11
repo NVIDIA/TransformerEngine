@@ -43,10 +43,10 @@ bool is_low_precision(const DType type) {
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
                                        const NVTEShape& B_shape, const bool transb) {
   // Flatten outer dims to get 2D matrices
-  const size_t A0 = product(A_shape, 0, A_shape.ndim - 1);
-  const size_t A1 = A_shape.data[A_shape.ndim - 1];
-  const size_t B0 = product(B_shape, 0, B_shape.ndim - 1);
-  const size_t B1 = B_shape.data[B_shape.ndim - 1];
+  const size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
+  const size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
+  const size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
+  const size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
@@ -94,6 +94,11 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
   using namespace transformer_engine::pytorch::detail;
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace.device());
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -351,6 +356,11 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter) {
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace.device());
+
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
   NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
@@ -399,6 +409,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace[0].device());
 
   void* output_data_ptr = nullptr;
   if (single_output) {

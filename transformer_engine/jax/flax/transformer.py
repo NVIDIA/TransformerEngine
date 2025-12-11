@@ -23,11 +23,17 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
+from ..attention import (
+    AttnBiasType,
+    AttnMaskType,
+    AttnSoftmaxType,
+    QKVLayout,
+    SequenceDescriptor,
+)
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
-from ..softmax import SoftmaxType
+from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -118,8 +124,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     dtype: DType = jnp.float32
     float32_logits: bool = False
     scale_factor: Optional[float] = None
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
     def __call__(
@@ -144,6 +151,22 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         assert query.shape[-1] == key.shape[-1], "q, k head_dim must match."
 
         input_dtype = query.dtype
+
+        # Infer number of attention heads from query shape
+        # query shape: [..., h, d] where h is num_attention_heads
+        num_attention_heads = query.shape[-2]
+
+        # Initialize softmax_offset for learnable softmax
+        # Note: OFF_BY_ONE_SOFTMAX is handled internally by the Softmax module
+        softmax_offset = None
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
+            softmax_offset = self.param(
+                "softmax_offset",
+                nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
+                (1, num_attention_heads, 1, 1),
+                jnp.float32,
+            )
 
         if self.scale_factor is None:
             scale_factor = 1.0 / sqrt(query.shape[-1])
@@ -197,6 +220,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             fused_scale_factor = scale_factor
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
+                bias = None
 
         def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""
@@ -212,8 +236,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
-        def convert_to_softmax_type(attn_mask_type, mask):
-            """Convert the attn_mask_type to SoftmaxType"""
+        def convert_to_softmax_fusion_type(attn_mask_type, mask):
+            """Convert the attn_mask_type to SoftmaxFusionType"""
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
@@ -223,21 +247,23 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if mask is not None:
-                return SoftmaxType.SCALED_MASKED, mask
+                return SoftmaxFusionType.SCALED_MASKED, mask
             if attn_mask_type is AttnMaskType.CAUSAL_MASK:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+                return SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type is AttnMaskType.NO_MASK:
-                return SoftmaxType.SCALED, mask
+                return SoftmaxFusionType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
             )
 
-        softmax_type, mask = convert_to_softmax_type(self.attn_mask_type, mask)
+        softmax_fusion_type, mask = convert_to_softmax_fusion_type(self.attn_mask_type, mask)
 
-        attn_weights = Softmax(softmax_type=softmax_type, scale_factor=fused_scale_factor)(
-            attn_weights, mask, bias
-        ).astype(input_dtype)
+        attn_weights = Softmax(
+            softmax_fusion_type=softmax_fusion_type,
+            softmax_type=self.softmax_type,
+            scale_factor=fused_scale_factor,
+        )(attn_weights, mask, bias, softmax_offset=softmax_offset).astype(input_dtype)
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
@@ -278,6 +304,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     context_parallel_axis: str = ""
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT
     context_checkpoint_name: str = "context"
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
     def __call__(
@@ -302,6 +329,17 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             scale_factor = self.scale_factor
         del self.scale_factor
 
+        num_attention_heads = query.shape[-2]
+        softmax_offset = None
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # For learnable softmax, create a learnable parameter with proper sharding and shape (1, h, 1, 1)
+            softmax_offset = self.param(
+                "softmax_offset",
+                nn.with_logical_partitioning(nn.initializers.zeros, (None, HEAD_AXES, None, None)),
+                (1, num_attention_heads, 1, 1),
+                jnp.float32,
+            )
+
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
@@ -319,6 +357,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -328,6 +367,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
@@ -347,6 +387,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -356,6 +397,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
@@ -370,6 +412,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
+                softmax_type=self.softmax_type,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -379,6 +422,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=self.context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_offset=softmax_offset,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -406,10 +450,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Users can select between these two backends via the :attr:`NVTE_FUSED_ATTN` environment
         variable:
 
-        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention (default).
-        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If the required cuDNN fused attention
-          kernel is not available on the system, a warning will be issued, and the module will
-          automatically fall back to the unfused backend.
+        * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention.
+        * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention (default). If the required cuDNN fused
+          attention kernel is not available on the system, a warning will be issued, and the module
+          will automatically fall back to the unfused backend.
 
     .. note::
         The DotProductAttention default setting enables non-deterministic kernels for reduced
@@ -425,7 +469,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         The hidden dimension of each attention head.
     num_attention_heads: int
         The number of attention heads.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -438,32 +482,45 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
-        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        |
 
-        .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
-       attn_mask_type       mask/sequence_descriptor       SWA          softmax type
-       --------------------------------------------------------------------------------------------
-       no_mask              None                           None         SCALED
-       causal               None                           None         SCALED_UPPER_TRIANG_MASKED
-       causal               None                           Yes          SCALED_MASKED
-       padding              Required                       Yes/No       SCALED_MASKED
-       padding_causal       Required                       Yes/No       SCALED_MASKED
+        |
+
+        .. note:: THD format only supports ``'padding'`` or ``'causal_padding'`` mask type.
+
+        |
+
+        .. table::
+            :widths: auto
+
+            ================== ============ ========== ==============================
+            attn_mask_type     mask/sd      SWA        softmax type
+            ================== ============ ========== ==============================
+            no_mask            None         None       SCALED
+            causal             None         None       SCALED_UPPER_TRIANG_MASKED
+            causal             None         Yes        SCALED_MASKED
+            padding            Required     Yes/No     SCALED_MASKED
+            padding_causal     Required     Yes/No     SCALED_MASKED
+            ================== ============ ========== ==============================
+
+        where sd stands for sequence_descriptor.
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
@@ -500,19 +557,49 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Scale factor to apply on query. When :attr:`None` is present, the scale factor is equal
         to :math:`\frac{1}{\sqrt{head\_dim}}`. This is useful for model like T5X, which doesn't
         need to apply scale on query, which is to set :attr:`scale_factor=1.`.
-    transpose_batch_sequence: bool, default = True
+    TODO(KshitijLakhani): Reset this to bool only with default False arg in TransformerEngine v2.12
+    transpose_batch_sequence: bool | None, default = None (however, default is forced to False in post_init)
         Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. The default value is no sliding window.
     max_segments_per_seq: Optional[int], default = 1
         The maximum number of segments per sequence, also used for THD format (sequence packing).
-    context_parallel_causal_load_balanced (bool):
-            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
-    context_parallel_axis (str): The name of the context parallel axis.
-    context_parallel_strategy (CPStrategy): The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
-    context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
+    context_parallel_causal_load_balanced: bool
+        Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+    context_parallel_axis: str
+        The name of the context parallel axis.
+    context_parallel_strategy: CPStrategy
+        The strategy of context parallel. 0: DEFAULT, 1: ALL_GATHER, 2: RING.
+    context_checkpoint_name: str
+        The name of the context checkpoint in the forward pass of fused attention.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        Softmax type as described in the paper
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+
+        For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+        * ``'vanilla'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+        * ``'off-by-one'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+        * ``'learnable'``:
+
+          .. math::
+             Softmax(S)_{:,h,:,i} = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+          where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+        ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+        (``'zero sink'`` and ``'learnable sink'``).
 
     Optimization parameters
     -----------------------
@@ -531,13 +618,25 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool | None = None
     window_size: Optional[Tuple[int, int]] = None
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
     context_parallel_strategy: str = "DEFAULT"
     context_checkpoint_name: str = "context"
+    softmax_type: str = "vanilla"
+
+    def __post_init__(self):
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
+        # None implies that the user is relying on defaults, hence warn the user and set the new defaults
+        if self.transpose_batch_sequence is None:
+            warnings.warn(
+                "transpose_batch_sequence defaults to False in DotProductAttention starting"
+                " TransformerEngine v2.10"
+            )
+            self.transpose_batch_sequence = False
+        super().__post_init__()
 
     @nn.compact
     def __call__(
@@ -563,7 +662,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means to mask out the corresponding values.
-            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift attention softmax input.
         *:
@@ -594,6 +693,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_bias_type = AttnBiasType[self.attn_bias_type.upper()]
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
         qkv_layout = QKVLayout[self.qkv_layout.upper()]
+        softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
         del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
 
         if attn_bias_type == AttnBiasType.NO_BIAS:
@@ -601,7 +701,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         else:
             assert bias is not None
 
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+        # Use fused attn (if kernel check below passes) by default
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         seqlen_q = query.shape[sequence_dim]
@@ -624,6 +725,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             self.attention_dropout,
             self.num_attention_heads,
             self.num_gqa_groups,
@@ -700,6 +802,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 window_size=self.window_size,
+                softmax_type=softmax_type,
             )(
                 query,
                 key,
@@ -724,6 +827,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 context_parallel_axis=self.context_parallel_axis,
                 context_parallel_strategy=context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
+                softmax_type=softmax_type,
             )(
                 query,
                 key,
@@ -745,7 +849,7 @@ def rotary_pos_emb(
 ):
     """
     Rotary Positional Embedding
-    x should be in shape of
+    x should be of shape
     [Batch, Seqlen, ..., Heads, Hidden] if transpose_batch_sequence is False, or
     [Seqlen, Batch, ..., Heads, Hidden] if transpose_batch_sequence is True.
     """
@@ -883,7 +987,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         The hidden dimension of each attention head.
     num_attention_heads: int
         The number of attention heads.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -896,28 +1000,28 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
-        .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        .. note:: :attr:`mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
-        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        Available options: ``{'no_bias', 'pre_scale_bias', 'post_scale_bias'}``.
         When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        Where it is ``'post_scale_bias'`` if there is bias. Otherwise ``'no_bias'`` is used.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
@@ -926,27 +1030,27 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma: bool, default = False
-        If set to `True`, the LayerNorm formula changes to
+        If set to ``True``, the LayerNorm formula changes to
 
         .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} \cdot
             (1 + \gamma) + \beta
 
-        This parameter is only applicable for 'layernorm'.
+        This parameter is only applicable for ``'layernorm'``.
     kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')``
         Used for initializing the QKV and output projection weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     use_bias: bool, default = False
         Indicate whether or not to enable bias shifting for QKV and output projections.
-        If set to False, the layer will not learn additive biases.
-    bias_init: Initializer, default = flax.linen.initializers.zeros
+        If set to ``False``, the layer will not learn additive biases.
+    bias_init: Initializer, default = ``flax.linen.initializers.zeros``
         Used for initializing bias of QKVO projections, only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     input_layernorm: bool, default = True
-        If set to False, layer normalization to the input is not applied.
+        If set to ``False``, layer normalization to the input is not applied.
     return_layernorm_output: bool, default = False
-        If set to True, output of layernorm is returned from the forward together with the output
+        If set to ``True``, output of layernorm is returned from the forward together with the output
         of the linear transformation.
         Example use case: residual connection for transformer module is taken post layernorm.
     enable_rotary_pos_emb: bool, default = False
@@ -956,17 +1060,17 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
         Indicate the method to coupled the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
-        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+        ``['consecutive', 'alternate']``. ``'alternate'`` is to pair index :math:`i` with :math:`i + d/2`
+        , d is the hidden dimension. ``'consecutive'`` pairs index :math:`i` with :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
-        ['none', 'all', 'qkv_proj', 'output_proj', 'exclude_qkv_proj', 'exclude_output_proj']
+        ``['none', 'all', 'qkv_proj', 'output_proj', 'exclude_qkv_proj', 'exclude_output_proj']``
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     num_heads: int, default = None
@@ -986,14 +1090,15 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence: bool, default = True
+    TODO(KshitijLakhani): Reset this to bool only with default False arg in TransformerEngine v2.12
+    transpose_batch_sequence: bool | None, default = None (however, default is forced to False in post_init)
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     scale_attn_logits: bool, default = False
         Indicate whether to scale attention logits.
-        If set to True, :math:`\frac{Q}{\sqrt{head\_dim}*K}`,
-        else :math:`Q*K`
+        If set to True, :math:`\frac{Q \cdot K^T}{\sqrt{head\_dim}}`,
+        else :math:`Q \cdot K^T`
     scaled_query_init: bool, default = True
         Whether to scale WQ on initialization by :math:`\frac{1}{\sqrt{head\_dim}}`
     float32_logits: bool, default = False
@@ -1003,6 +1108,32 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Deprecated. Please refer `fuse_qkv_params`
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        Softmax type as described in the paper
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+
+        For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+        * ``'vanilla'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+        * ``'off-by-one'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+        * ``'learnable'``:
+
+          .. math::
+             Softmax(S)_{:,h,:,i} = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+          where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+        ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+        (``'zero sink'`` and ``'learnable sink'``).
     """
 
     head_dim: int
@@ -1028,12 +1159,13 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool | None = None
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: str = "vanilla"
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -1043,6 +1175,15 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     fuse_qkv: Optional[bool] = None
 
     def __post_init__(self):
+        # Deal with changed defaults in API
+        # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
+        # None implies that the user is relying on defaults, hence warn the user and set the new defaults
+        if self.transpose_batch_sequence is None:
+            warnings.warn(
+                "transpose_batch_sequence defaults to False in MultiHeadAttention starting"
+                " TransformerEngine v2.10"
+            )
+            self.transpose_batch_sequence = False
         # Deal with the deprecated parameters
         if self.num_heads is not None:
             self.num_attention_heads = self.num_heads
@@ -1107,7 +1248,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out the attention softmax input.
             :attr:`True` means mask out the corresponding values.
-            Ignored when :attr:`self.attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         bias: jax.numpy.ndarray, default = None
             A tensor used to shift the attention softmax input.
         *
@@ -1438,6 +1579,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             scale_factor=scale_factor,
             transpose_batch_sequence=self.transpose_batch_sequence,
             window_size=self.window_size,
+            softmax_type=self.softmax_type,
         )(*dpa_args, mask, bias, deterministic=deterministic)
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -1592,7 +1734,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Intermediate size to which input samples are projected.
     num_attention_heads: int, default = 8
         Number of attention heads in the transformer layer.
-    num_gqa_groups: int, default = `None`
+    num_gqa_groups: int, default = None
         Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
         Grouped Query Attention is described in
         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
@@ -1618,7 +1760,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Dimensions that will share the same dropout mask for hidden
     attention_dropout: float, default = 0.1
         Dropout probability for the dropout op during multi-head attention.
-    intermediate_dropout: float, default = 0.1
+    intermediate_dropout: float, default = 0.0
         Dropout probability for the dropout op after FC1 layer.
     intermediate_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden after FC1 layer.
@@ -1626,31 +1768,31 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         The key in given RNGs via flax.linen.Module.apply that for
         generating Dropout masks in the Multi-Head Attention.
     mha_kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')``
         Used for initializing weights of QKV and Output projection weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     mlp_kernel_init: Initializer, default =
-        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        ``flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')``
         Used for initializing weights of FC1 and FC2 layers.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
-    mlp_activations: Sequence[str], default = ('relu', )
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
+    mlp_activations: Sequence[str], default = ('gelu', )
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     mlp_activation_params: dict = None
-         This is only used when ('clamped_silu', 'clamped_linear') is in :attr:`mlp_activations`. At the moment
-        ClampedSwiglu is the only activation that requires parameters.
+         This is only used when ``('clamped_silu', 'clamped_linear')`` is in :attr:`mlp_activations`. At the moment
+        ``ClampedSwiglu`` is the only activation that requires parameters.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
-        If set to False, the layer will not learn additive biases.
-    bias_init: Initializer, default = flax.linen.initializers.zeros
+        If set to ``False``, the layer will not learn additive biases.
+    bias_init: Initializer, default = ``flax.linen.initializers.zeros``
         Used for initializing bias of QKVO projections,
         FC1 and FC2. It is only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     apply_residual_connection_post_layernorm: bool, default = False
-        If set to True, residual connections are taken from the output
+        If set to ``True``, residual connections are taken from the output
         of layer norm (default is taken from input of layer norm)
     output_layernorm: bool, default = False
-        If set to True, layer normalization is applied on the output side,
+        If set to ``True``, layer normalization is applied on the output side,
         after the final dropout-add. default behavior is to apply layer
         normalization on the input side, before the QKV transformation.
     float32_attention_logits: bool, default = False
@@ -1658,43 +1800,43 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         For fused attention backend, the accumulation is always float32 without the perf overhead.
     layer_type: TransformerLayerType, default = TransformerLayerType.ENCODER
         If set to TransformerLayerType.DECODER, an additional cross-attention block
-        is added after self-attention.this can be used for structures like `T5`
+        is added after self-attention.this can be used for structures like T5
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     self_attn_mask_type: str, default = 'causal'
         This parameter specifies the type of attention mask to be applied during the softmax
         operation in the self attention.
-        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}
+        Available options are {'no_mask', 'padding', 'causal', 'causal_padding', 'padding_causal'}.
 
         Each described below:
 
-        * no_mask: No attention mask is applied. This means the self attention will consider the
+        * ``no_mask``: No attention mask is applied. This means the self attention will consider the
           full sequence without any restrictions.
-        * padding: Indicates the presence of padding at the end of each sequence.
-          Users must provide a mask with the shape [batch, 1, max_seqlen_q, max_seqlen_kv] in the
+        * ``padding``: Indicates the presence of padding at the end of each sequence.
+          Users must provide a mask with the shape ``[batch, 1, max_seqlen_q, max_seqlen_kv]`` in the
           :attr:`__call__` method to specify the padding positions.
-        * causal: An upper triangular mask is applied to the softmax inputs,
+        * ``causal``: An upper triangular mask is applied to the softmax inputs,
           ensuring that the prediction for a certain position is only dependent on known outputs
           from positions before it.
-        * causal_padding / padding_causal: A combination of both causal and padding masks.
-          Both 'causal_padding' and 'padding_causal' are acceptable and have the same effect.
+        * ``causal_padding`` / ``padding_causal``: A combination of both causal and padding masks.
+          Both ``'causal_padding'`` and ``'padding_causal'`` are acceptable and have the same effect.
 
-        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
+        .. note:: :attr:`attention_mask` in :attr:`__call__` is ignored for ``'no_mask'`` and ``'causal'``.
 
     self_attn_bias_type: Optional[str], default = None
         Type of the attention bias passed into the self attention.
-        Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
+        Available options: ``{'no_bias', 'pre_scale_bias', 'post_scale_bias'}``.
         When default is present, the type is automatically decided by the MHA's bias parameter.
-        Where it is `post_scale_bias` if there is bias. Otherwise `no_bias` is used.
+        Where it is ``'post_scale_bias'`` if there is bias. Otherwise ``'no_bias'`` is used.
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
         The module for relative embedding execution, only used when
-        :attr:`enable_relative_embedding=True`. Default is None, which will create
+        :attr:`enable_relative_embedding=True`. Default is ``None``, which will create
         an instance of RelativePositionBiases if :attr:`enable_relative_embedding=True`.
-        Default: RelativePositionBiases( num_buckets=32, max_distance=128,
+        Default: ``RelativePositionBiases( num_buckets=32, max_distance=128,
         num_attention_heads=self.num_attention_heads, dtype=self.dtype,
         embedding_init=flax.linen.initializers.variance_scaling(1.0, 'fan_avg', 'uniform'),
-        name='relpos_bias')
+        name='relpos_bias')``
     enable_rotary_pos_emb: bool, default = False
         Whether to enable rotary position embedding to projected query and key in MHA.
     rotary_pos_emb_windows: Tuple[int, int], default = (1, 10000)
@@ -1702,23 +1844,50 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
         Indicate the method to couple the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`,
-        where :math:`d` is the hidden dimension. 'consecutive' pairs index :math:`i` with
+        ``['consecutive', 'alternate']``. ``'alternate'`` is to pair index :math:`i` with :math:`i + d/2`,
+        where :math:`d` is the hidden dimension. ``'consecutive'`` pairs index :math:`i` with
         :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
-        ['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
-        'exclude_output_proj', 'exclude_mlp']
+        ``['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
+        'exclude_output_proj', 'exclude_mlp']``
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. Default value is no sliding window.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+        Softmax type as described in the paper
+        `Efficient Streaming Language Models with Attention Sinks
+        <https://arxiv.org/pdf/2309.17453v3>`_.
+
+        For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+        * ``'vanilla'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+        * ``'off-by-one'``:
+
+          .. math::
+             Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+        * ``'learnable'``:
+
+          .. math::
+             Softmax(S)_{:,h,:,i} = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+          where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+        ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+        (``'zero sink'`` and ``'learnable sink'``).
+        Only supported for fused attention backend.
 
     Optimization parameters
     -----------------------
@@ -1728,19 +1897,19 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         When > 0.0, applies stochastic depth per sample in the main
         path of the residual block.
     fuse_qkv_params: bool, default = True
-        If set to True, `TransformerLayer` module exposes a single fused
+        If set to ``True``, ``TransformerLayer`` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
     transpose_batch_sequence: bool, default = False
         Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
+        and sequence length dimension. if set to ``True``, the input tensors
+        should be in ``(seqlen, batch, hidden)``, otherwise ``(batch, seqlen, hidden)``.
     scale_attn_logits: bool, default = False
         Indicate whether to scale attention logits.
-        if set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
-        else :math:`Q*K`
-    scaled_query_init: bool, default = `True`
-        Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
+        if set to ``True``, :math:`\frac{Q \cdot K^T}{\sqrt{head\_dim}}`,
+        else :math:`Q \cdot K^T`
+    scaled_query_init: bool, default = True
+        Whether to scale WQ on initialization by :math:`\sqrt{head\_dim}`
     """
 
     hidden_size: int = 512
@@ -1753,12 +1922,12 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     dropout_rng_name: str = "dropout"
     mha_kernel_init: Initializer = None
     mlp_kernel_init: Initializer = None
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     mlp_activation_params: dict = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -1784,6 +1953,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    softmax_type: str = "vanilla"
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
@@ -1822,7 +1992,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         attention_mask : jax.numpy.ndarray, default = None
             Boolean tensor used to mask out self-attention softmax input.
             :attr:`True` means mask out the corresponding values.
-            Ignored when :attr:`self.self_attn_mask_type` is either 'no_mask' or 'causal'.
+            Ignored when :attr:`self.self_attn_mask_type` is either ``'no_mask'`` or ``'causal'``.
         encoder_decoder_mask: jax.numpy.ndarray, default = None
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.
@@ -1944,6 +2114,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             bias_init=self.bias_init,
             name=mha_name,
             window_size=self.window_size,
+            softmax_type=self.softmax_type,
         )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
 
         def hidden_dropout(x, deterministic):
@@ -2022,6 +2193,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_init=self.bias_init,
                 name="encoder_decoder_attention",
                 window_size=self.window_size,
+                softmax_type=self.softmax_type,
             )(x, encoded, encoder_decoder_mask, deterministic=deterministic)
 
             y = with_sharding_constraint_by_logical_axes(
