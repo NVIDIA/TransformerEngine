@@ -826,21 +826,39 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     mock_group = mock_groups[rank]
 
     linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
-    nvfp4_recipe = NVFP4BlockScaling()
+    # Disable stochastic rounding for deterministic gradients
+    nvfp4_recipe = NVFP4BlockScaling(disable_stochastic_rounding=True)
 
+    # Original shapes (commented out for debugging padding issues):
+    # with te.quantized_model_init(
+    #     enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
+    # ):
+    #     model_nvfp4 = nn.Sequential(
+    #         te.Linear(128, 256, **linear_kwargs),
+    #         te.Linear(256, 256 * 3, **linear_kwargs),
+    #         te.Linear(256 * 3, 128, **linear_kwargs),
+    #     )
+    # model = nn.Sequential(
+    #     te.Linear(128, 256, **linear_kwargs),
+    #     te.Linear(256, 256 * 3, **linear_kwargs),
+    #     te.Linear(256 * 3, 128, **linear_kwargs),
+    # )
+
+    # Use 2048x2048 weights to avoid NVFP4 scale_inv padding issues
     with te.quantized_model_init(
         enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
     ):
         model_nvfp4 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
-            te.Linear(256 * 3, 128, **linear_kwargs),
+            te.Linear(2048, 2048, **linear_kwargs),
+            te.Linear(2048, 2048, **linear_kwargs),
+            te.Linear(2048, 2048, **linear_kwargs),
         )
 
+    # BF16 model (created outside quantized_model_init)
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
-        te.Linear(256 * 3, 128, **linear_kwargs),
+        te.Linear(2048, 2048, **linear_kwargs),
+        te.Linear(2048, 2048, **linear_kwargs),
+        te.Linear(2048, 2048, **linear_kwargs),
     )
 
     for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
@@ -856,23 +874,43 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     )
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
+    # Add hooks to capture intermediate activations
+    activations_nvfp4 = {}
+    activations_bf16 = {}
+
+    def make_hook(storage, name):
+        def hook(module, input, output):
+            storage[name] = (input[0].clone(), output.clone())
+        return hook
+
+    hooks = []
+    for idx, (layer_nvfp4, layer_bf16) in enumerate(zip(model_nvfp4, model)):
+        hooks.append(layer_nvfp4.register_forward_hook(make_hook(activations_nvfp4, f"layer_{idx}")))
+        hooks.append(layer_bf16.register_forward_hook(make_hook(activations_bf16, f"layer_{idx}")))
+
     for i in range(100):
         for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
             w_nvfp4.main_grad.zero_()
             w.main_grad.zero_()
 
+        # Original input shape: torch.randn(128, 128, ...)
         inputs = [
-            torch.randn(128, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(2048, 2048, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         x = inputs[rank]
 
-        # Debug: compare master weights before forward at iteration 8
-        if i == 8 and rank == 0:
+        # Debug: compare master weights before forward
+        if i in [0, 1, 7, 8] and rank == 0:
             print(f"\n=== Debug iteration {i} ===")
             for idx, (w_nvfp4, w) in enumerate(zip(model_nvfp4.parameters(), model.parameters())):
                 # Compare master weights
                 master_nvfp4 = optimizer_nvfp4.master_weights[idx]
                 master_bf16 = optimizer.master_weights[idx]
+                if master_nvfp4 is None or master_bf16 is None:
+                    print(f"Layer {idx}: master weights = None (nvfp4={master_nvfp4 is not None}, bf16={master_bf16 is not None})")
+                    continue
+                print(f"Layer {idx}: master_nvfp4.dtype={master_nvfp4.dtype}, master_bf16.dtype={master_bf16.dtype}")
+                print(f"Layer {idx}: w_nvfp4.dtype={w_nvfp4.dtype}, w.dtype={w.dtype}")
                 master_match = torch.equal(master_nvfp4, master_bf16)
                 print(f"Layer {idx}: master weights match = {master_match}")
                 if not master_match:
@@ -893,16 +931,182 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         ):
             y = model(x)
 
+        # Debug: compare forward outputs and weight properties
+        if i == 0 and rank == 0:
+            print(f"\n=== Forward outputs iteration {i} ===")
+            print(f"y_nvfp4 shape: {y_nvfp4.shape}, y shape: {y.shape}")
+            y_match = torch.equal(y_nvfp4, y)
+            print(f"Forward outputs match: {y_match}")
+            if not y_match:
+                diff = (y_nvfp4 - y).abs().max().item()
+                print(f"  max diff: {diff}")
+
+            # Compare intermediate activations
+            print("\n=== Intermediate activations ===")
+            for layer_name in activations_nvfp4.keys():
+                inp_nvfp4, out_nvfp4 = activations_nvfp4[layer_name]
+                inp_bf16, out_bf16 = activations_bf16[layer_name]
+                inp_match = torch.equal(inp_nvfp4, inp_bf16)
+                out_match = torch.equal(out_nvfp4, out_bf16)
+                print(f"{layer_name}: input match = {inp_match}, output match = {out_match}")
+                if not inp_match:
+                    diff = (inp_nvfp4 - inp_bf16).abs().max().item()
+                    print(f"  input max diff: {diff}")
+                if not out_match:
+                    diff = (out_nvfp4 - out_bf16).abs().max().item()
+                    print(f"  output max diff: {diff}")
+            
+            # Compare quantizer states
+            print("\n=== Quantizer comparison ===")
+            for idx, (layer_nvfp4, layer_bf16) in enumerate(zip(model_nvfp4, model)):
+                print(f"Layer {idx}:")
+                print(f"  nvfp4.fp8: {layer_nvfp4.fp8}, bf16.fp8: {layer_bf16.fp8}")
+                print(f"  nvfp4.fp8_initialized: {layer_nvfp4.fp8_initialized}, bf16.fp8_initialized: {layer_bf16.fp8_initialized}")
+                if hasattr(layer_nvfp4, 'quantizers') and hasattr(layer_bf16, 'quantizers'):
+                    q_nvfp4 = layer_nvfp4.quantizers.get('scaling_fwd', [])
+                    q_bf16 = layer_bf16.quantizers.get('scaling_fwd', [])
+                    if q_nvfp4:
+                        print(f"  nvfp4 input quantizer type: {type(q_nvfp4[0])}")
+                    if q_bf16:
+                        print(f"  bf16 input quantizer type: {type(q_bf16[0])}")
+            
+            # Compare NVFP4 tensor properties
+            print("\n=== NVFP4 weight properties ===")
+            for idx, (w_nvfp4, w) in enumerate(zip(model_nvfp4.parameters(), model.parameters())):
+                print(f"Layer {idx}:")
+                print(f"  w_nvfp4 type: {type(w_nvfp4).__name__}, w type: {type(w).__name__}")
+                if hasattr(w_nvfp4, '_amax_rowwise') and w_nvfp4._amax_rowwise is not None:
+                    print(f"  w_nvfp4._amax_rowwise: {w_nvfp4._amax_rowwise.item()}")
+                if hasattr(w_nvfp4, '_amax_columnwise') and w_nvfp4._amax_columnwise is not None:
+                    print(f"  w_nvfp4._amax_columnwise: {w_nvfp4._amax_columnwise.item()}")
+                # Compare dequantized values
+                if hasattr(w_nvfp4, 'dequantize'):
+                    w_nvfp4_dequant = w_nvfp4.dequantize(dtype=torch.bfloat16)
+                    dequant_match = torch.equal(w_nvfp4_dequant, w)
+                    print(f"  dequant(w_nvfp4) == w: {dequant_match}")
+                    if not dequant_match:
+                        diff = (w_nvfp4_dequant - w).abs().max().item()
+                        print(f"    max diff: {diff}")
+
         targets = [torch.randn_like(y) for _ in range(world_size)]
         target = targets[rank]
         loss_nvfp4 = nn.MSELoss()(y_nvfp4, target)
         loss = nn.MSELoss()(y, target)
 
+        # Debug: check if losses are identical
+        if i == 0 and rank == 0:
+            print(f"\n=== Loss comparison iteration {i} ===")
+            print(f"loss_nvfp4: {loss_nvfp4.item()}, loss: {loss.item()}")
+            print(f"Losses bitwise equal: {torch.equal(loss_nvfp4, loss)}")
+
         loss_nvfp4.backward()
         loss.backward()
 
+        # Debug: compare gradients before optimizer step
+        if i == 0 and rank == 0:
+            print(f"\n=== Gradients before step iteration {i} ===")
+            for idx, (w_nvfp4, w) in enumerate(zip(model_nvfp4.parameters(), model.parameters())):
+                grad_nvfp4 = w_nvfp4.main_grad
+                grad_bf16 = w.main_grad
+                grad_match = torch.equal(grad_nvfp4, grad_bf16)
+                print(f"Layer {idx}: gradients match = {grad_match}")
+                if not grad_match:
+                    diff = (grad_nvfp4 - grad_bf16).abs().max().item()
+                    print(f"  max diff: {diff}")
+
+            # Test: run same model twice to check for non-determinism
+            print("\n=== Determinism test: run model_nvfp4 twice ===")
+            for w_nvfp4 in model_nvfp4.parameters():
+                w_nvfp4.main_grad.zero_()
+            with te.autocast(enabled=True, recipe=nvfp4_recipe, amax_reduction_group=mock_group):
+                y_test1 = model_nvfp4(x)
+            loss_test1 = nn.MSELoss()(y_test1, target)
+            loss_test1.backward()
+            grads_run1 = [w.main_grad.clone() for w in model_nvfp4.parameters()]
+            
+            for w_nvfp4 in model_nvfp4.parameters():
+                w_nvfp4.main_grad.zero_()
+            with te.autocast(enabled=True, recipe=nvfp4_recipe, amax_reduction_group=mock_group):
+                y_test2 = model_nvfp4(x)
+            loss_test2 = nn.MSELoss()(y_test2, target)
+            loss_test2.backward()
+            grads_run2 = [w.main_grad.clone() for w in model_nvfp4.parameters()]
+            
+            for idx, (g1, g2) in enumerate(zip(grads_run1, grads_run2)):
+                match = torch.equal(g1, g2)
+                print(f"Layer {idx}: same model, 2 runs match = {match}")
+                if not match:
+                    diff = (g1 - g2).abs().max().item()
+                    print(f"  max diff: {diff}")
+
         optimizer.step()
         optimizer_nvfp4.step()
+
+        # Debug: compare weights after optimizer step (on all ranks)
+        if i == 0:
+            print(f"\n=== After optimizer step iteration {i} (rank {rank}) ===")
+            for idx, (w_nvfp4, w) in enumerate(zip(model_nvfp4.parameters(), model.parameters())):
+                # Compare master weights
+                master_nvfp4 = optimizer_nvfp4.master_weights[idx]
+                master_bf16 = optimizer.master_weights[idx]
+                if master_nvfp4 is not None and master_bf16 is not None:
+                    master_match = torch.equal(master_nvfp4, master_bf16)
+                    print(f"Layer {idx}: master weights match = {master_match}")
+                    if not master_match:
+                        diff = (master_nvfp4 - master_bf16).abs().max().item()
+                        print(f"  max diff: {diff}")
+                else:
+                    print(f"Layer {idx}: master weights = None")
+                
+                # Compare model weights: quantize BF16 and compare with NVFP4
+                if hasattr(w_nvfp4, '_rowwise_data') and hasattr(w_nvfp4, '_quantizer'):
+                    # Create a fresh quantizer with same config to avoid state issues
+                    from transformer_engine.pytorch.tensor import NVFP4Quantizer
+                    fresh_quantizer = NVFP4Quantizer(with_2d_quantization=True)
+                    w_bf16_quantized = fresh_quantizer(w)
+                    
+                    # Debug: compare amax for layer 2
+                    if idx == 2 and i == 0:
+                        print(f"[Rank {rank}] Layer {idx} DEBUG:")
+                        # Compare BF16 values: NVFP4 model's master weight vs BF16 model's weight
+                        master_nvfp4 = optimizer_nvfp4.master_weights[idx]
+                        master_bf16 = optimizer.master_weights[idx]
+                        if master_nvfp4 is not None and master_bf16 is not None:
+                            # Both ranks should have the master weight if they own this layer
+                            bf16_from_master_nvfp4 = master_nvfp4.to(w_nvfp4.dtype).view(w.shape)
+                            print(f"[Rank {rank}]   BF16 weight w == master_bf16.to(bf16): {torch.equal(w, master_bf16.to(w.dtype).view(w.shape))}")
+                            print(f"[Rank {rank}]   BF16 weight w == master_nvfp4.to(bf16): {torch.equal(w, bf16_from_master_nvfp4)}")
+                        else:
+                            print(f"[Rank {rank}]   master_nvfp4={master_nvfp4 is not None}, master_bf16={master_bf16 is not None}")
+                        print(f"[Rank {rank}]   w_nvfp4._amax_rowwise: {w_nvfp4._amax_rowwise}")
+                        print(f"[Rank {rank}]   w_bf16_quantized._amax_rowwise: {w_bf16_quantized._amax_rowwise}")
+                        # Sample of scales
+                        print(f"[Rank {rank}]   w_nvfp4._rowwise_scale_inv[0,:8]: {w_nvfp4._rowwise_scale_inv[0,:8].tolist()}")
+                        print(f"[Rank {rank}]   w_bf16_quantized._rowwise_scale_inv[0,:8]: {w_bf16_quantized._rowwise_scale_inv[0,:8].tolist()}")
+                        # Check where scales differ
+                        scale_diff = (w_nvfp4._rowwise_scale_inv != w_bf16_quantized._rowwise_scale_inv)
+                        if scale_diff.any():
+                            diff_indices = torch.nonzero(scale_diff, as_tuple=True)
+                            print(f"[Rank {rank}]   First 5 scale diff positions: {list(zip(diff_indices[0][:5].tolist(), diff_indices[1][:5].tolist()))}")
+                            for r, c in zip(diff_indices[0][:5].tolist(), diff_indices[1][:5].tolist()):
+                                print(f"[Rank {rank}]     [{r},{c}]: nvfp4={w_nvfp4._rowwise_scale_inv[r,c].item()}, ref={w_bf16_quantized._rowwise_scale_inv[r,c].item()}")
+                    
+                    # Compare raw NVFP4 data
+                    data_match = torch.equal(w_nvfp4._rowwise_data, w_bf16_quantized._rowwise_data)
+                    print(f"Layer {idx}: _rowwise_data match = {data_match}")
+                    if not data_match:
+                        # Count mismatches
+                        mismatches = (w_nvfp4._rowwise_data != w_bf16_quantized._rowwise_data).sum().item()
+                        total = w_nvfp4._rowwise_data.numel()
+                        print(f"  mismatches: {mismatches}/{total} ({100*mismatches/total:.2f}%)")
+                    
+                    # Compare scales
+                    scale_match = torch.equal(w_nvfp4._rowwise_scale_inv, w_bf16_quantized._rowwise_scale_inv)
+                    print(f"Layer {idx}: _rowwise_scale_inv match = {scale_match}")
+                    if not scale_match:
+                        mismatches = (w_nvfp4._rowwise_scale_inv != w_bf16_quantized._rowwise_scale_inv).sum().item()
+                        total = w_nvfp4._rowwise_scale_inv.numel()
+                        print(f"  mismatches: {mismatches}/{total} ({100*mismatches/total:.2f}%)")
         
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
         print("iter:", i, "loss matched")   
@@ -932,19 +1136,19 @@ def run_parallel_tests() -> None:
     dp_group = dist.new_group(backend="nccl")
 
     quantizations = []
-    # if is_fp8_available():
-    #     print("fp8 available")
-    #     quantizations.extend(["fp8", "fp8_cs"])
-    # if is_fp8_block_scaling_available():
-    #     quantizations.append("fp8_block")
-    # manual_post_all_gather_processings = [False, True]
-    # print("starting mini optimizer test")
-    # _test_mini_optimizer(dp_group)
-    # print("starting cast master weights to fp8 test")
-    # for quantization in quantizations:
-    #     for post_ag_processing in manual_post_all_gather_processings:
-    #         _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-    #         _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+    if is_fp8_available():
+        print("fp8 available")
+        quantizations.extend(["fp8", "fp8_cs"])
+    if is_fp8_block_scaling_available():
+        quantizations.append("fp8_block")
+    manual_post_all_gather_processings = [False, True]
+    print("starting mini optimizer test")
+    _test_mini_optimizer(dp_group)
+    print("starting cast master weights to fp8 test")
+    for quantization in quantizations:
+        for post_ag_processing in manual_post_all_gather_processings:
+            _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+            _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
     print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
@@ -1119,7 +1323,7 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     device = torch.device("cuda")
     # Shape must be divisible by WORLD_SIZE for even splitting
     # Also ensure dimensions are multiples of 16 for NVFP4 tiles
-    shape = (2048, 512)
+    shape = (4096, 2048)
     total_elements = shape[0] * shape[1]
     assert total_elements % WORLD_SIZE == 0, "Total elements must be divisible by WORLD_SIZE"
 
@@ -1209,7 +1413,235 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     print(f"[Rank {WORLD_RANK}] Multi-GPU NVFP4 partial cast test PASSED!")
 
 
+def test_single_gpu_partial_cast_vs_full():
+    """
+    Single GPU test: compare cast_master_weights_to_nvfp4 (offset=0) vs quantizer().
+    This isolates whether the issue is in our manual Python scale computation or elsewhere.
+    """
+    import math
+    from transformer_engine.pytorch.tensor import NVFP4Quantizer
+    from transformer_engine.pytorch.tensor.utils import cast_master_weights_to_nvfp4
+    import transformer_engine_torch as tex
+    
+    torch.manual_seed(12345)
+    device = torch.device("cuda")
+    
+    # Test with same shape as the optimizer test
+    shape = (2048, 64)
+    
+    # Create BF16 master weight
+    master_weight = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    
+    # === Reference: Use NVFP4Quantizer directly ===
+    quantizer = NVFP4Quantizer(rowwise=True, columnwise=False, with_2d_quantization=True)
+    ref = quantizer(master_weight)
+    ref_data = ref._rowwise_data.clone()
+    ref_scale = ref._rowwise_scale_inv.clone()
+    ref_amax = ref._amax_rowwise.clone()
+    
+    print(f"Reference:")
+    print(f"  data shape: {ref_data.shape}")
+    print(f"  scale shape: {ref_scale.shape}")
+    print(f"  amax: {ref_amax}")
+    
+    # === Test: Use cast_master_weights_to_nvfp4 with offset=0 (full tensor) ===
+    # Create empty NVFP4 tensor
+    test_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
+    test_tensor._rowwise_data.zero_()
+    test_tensor._rowwise_scale_inv.zero_()
+    if test_tensor._amax_rowwise is not None:
+        test_tensor._amax_rowwise.zero_()
+    
+    # Create a mock distributed group for single GPU
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://", rank=0, world_size=1)
+    mock_group = dist.new_group(ranks=[0])
+    
+    # Call cast_master_weights_to_nvfp4 with full tensor (offset=0)
+    cast_master_weights_to_nvfp4(
+        [test_tensor],
+        [master_weight.view(-1)],  # Flatten as expected
+        [0],  # offset=0 means full tensor
+        mock_group,
+    )
+    
+    print(f"\nTest (cast_master_weights_to_nvfp4 with offset=0):")
+    print(f"  data shape: {test_tensor._rowwise_data.shape}")
+    print(f"  scale shape: {test_tensor._rowwise_scale_inv.shape}")
+    print(f"  amax: {test_tensor._amax_rowwise}")
+    
+    # === Compare ===
+    print(f"\nComparison:")
+    
+    # Compare amax
+    amax_match = torch.equal(test_tensor._amax_rowwise, ref_amax)
+    print(f"  Amax match: {amax_match}")
+    if not amax_match:
+        print(f"    test: {test_tensor._amax_rowwise}")
+        print(f"    ref:  {ref_amax}")
+    
+    # Compare scale
+    scale_match = torch.equal(test_tensor._rowwise_scale_inv, ref_scale)
+    print(f"  Scale match: {scale_match}")
+    if not scale_match:
+        mismatches = (test_tensor._rowwise_scale_inv != ref_scale).sum().item()
+        total = ref_scale.numel()
+        print(f"    Mismatches: {mismatches}/{total} ({100*mismatches/total:.4f}%)")
+    
+    # Compare data
+    data_match = torch.equal(test_tensor._rowwise_data, ref_data)
+    print(f"  Data match: {data_match}")
+    if not data_match:
+        mismatches = (test_tensor._rowwise_data != ref_data).sum().item()
+        total = ref_data.numel()
+        print(f"    Mismatches: {mismatches}/{total} ({100*mismatches/total:.4f}%)")
+    
+    if amax_match and scale_match and data_match:
+        print("\nSUCCESS: cast_master_weights_to_nvfp4 (offset=0) matches quantizer!")
+    else:
+        print("\nFAILURE: Results don't match!")
+
+
+def test_scale_computation_matches_quantizer():
+    """
+    Test that our Python scale computation in utils.py matches what NVFP4Quantizer produces.
+    This isolates the scale computation issue outside of the optimizer.
+    """
+    import math
+    from transformer_engine.pytorch.tensor import NVFP4Quantizer
+    from transformer_engine.common.recipe import NVFP4BlockScaling
+    import transformer_engine_torch as tex
+    
+    torch.manual_seed(12345)
+    device = torch.device("cuda")
+    
+    # Test with 2048x2048 like in the optimizer test
+    shape = (2048, 2048)
+    block_len = 16
+    
+    # Create random BF16 tensor (simulating master weight converted to BF16)
+    master_weight = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    
+    # === Reference: Use NVFP4Quantizer ===
+    quantizer = NVFP4Quantizer(with_2d_quantization=True)
+    ref = quantizer(master_weight)
+    ref_scale = ref._rowwise_scale_inv.clone()
+    ref_data = ref._rowwise_data.clone()
+    ref_amax = ref._amax_rowwise.clone()
+    
+    print(f"Reference scale shape: {ref_scale.shape}")
+    print(f"Reference data shape: {ref_data.shape}")
+    print(f"Reference amax: {ref_amax}")
+    
+    # === Our implementation: Replicate utils.py logic ===
+    h, w = shape
+    tile_h = math.ceil(h / block_len)
+    tile_w = math.ceil(w / block_len)
+    tile_shape = (tile_h, tile_w)
+    
+    print(f"Tile shape: {tile_shape}")
+    
+    # Step 1: Compute per-block amax using CUDA kernel
+    amax_tensor = torch.zeros(tile_shape, dtype=torch.float32, device=device)
+    global_amax = torch.zeros(1, dtype=torch.float32, device=device)
+    
+    tex.nvfp4_2d_compute_partial_amax(
+        master_weight.view(-1), amax_tensor, h, w, 0, block_len
+    )
+    tex.compute_amax(master_weight.view(-1), global_amax)
+    
+    print(f"Computed global_amax: {global_amax.item()}")
+    print(f"Reference global_amax: {ref_amax.item()}")
+    print(f"Global amax match: {torch.equal(global_amax, ref_amax)}")
+    
+    # Step 2: Compute scales 
+    fp4_max = 6.0
+    fp8_max = 448.0
+    finfo = torch.finfo(torch.float32)  
+    tiny = finfo.tiny
+    
+    safe_global_amax = torch.clamp(global_amax, min=tiny)
+    global_encode_scale = torch.clamp((fp8_max * fp4_max) / safe_global_amax, max=finfo.max)
+    global_scale = global_encode_scale.item()
+    
+    print(f"global_encode_scale: {global_scale}")
+    
+    # per_block_decode_scale = amax / fp4_max * global_scale
+    # CUDA computes: amax / 6.0 * global_scale (division first, then multiply)
+    # Python was: amax * (1.0 / 6.0) * global_scale (multiply by reciprocal)
+    # Try matching CUDA order:
+    per_block_decode_scale_cuda_order = torch.clamp(
+        (amax_tensor / fp4_max) * global_scale, max=finfo.max
+    )
+    per_block_decode_scale_python_order = torch.clamp(
+        (amax_tensor * (1.0 / fp4_max)) * global_scale, max=finfo.max
+    )
+    print(f"global_scale (should be 2688/5 = 537.6): {global_scale}")
+    print(f"\nComparing CUDA vs Python order:")
+    print(f"  CUDA order [0,:5]: {per_block_decode_scale_cuda_order[0,:5].tolist()}")
+    print(f"  Python order [0,:5]: {per_block_decode_scale_python_order[0,:5].tolist()}")
+    print(f"  Difference: {(per_block_decode_scale_cuda_order - per_block_decode_scale_python_order).abs().max().item()}")
+    
+    # Use CUDA order for the rest of the test
+    per_block_decode_scale = per_block_decode_scale_cuda_order
+    
+    print(f"per_block_decode_scale shape: {per_block_decode_scale.shape}")
+    
+    # Step 3: Expand to target_scale shape (replicate utils.py expansion)
+    # Get the expected scale shape from quantizer (rowwise, not columnwise)
+    target_scale_shape = quantizer.get_scale_shape(shape, columnwise=False)
+    print(f"Expected target_scale shape: {target_scale_shape}")
+    
+    target_scale = torch.zeros(target_scale_shape, dtype=torch.uint8, device=device)
+    expanded_scale = torch.zeros(target_scale_shape, dtype=torch.float32, device=device)
+    
+    tile_rows = tile_h
+    tile_col_cnt = tile_w
+    rows = h
+    chunk = block_len
+    
+    for tile_row_idx in range(tile_rows):
+        base_row = tile_row_idx * chunk
+        row_end = min(base_row + chunk, rows)
+        if base_row >= target_scale.shape[0]:
+            break
+        expanded_scale[base_row:row_end, :tile_col_cnt] = per_block_decode_scale[tile_row_idx]
+    
+    # Convert to FP8 and view as uint8 (this is the suspect operation)
+    fp8_view = expanded_scale.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
+    target_scale.copy_(fp8_view)
+    
+    # === Compare ===
+    print(f"\nComparing scales:")
+    print(f"target_scale shape: {target_scale.shape}")
+    print(f"ref_scale shape: {ref_scale.shape}")
+    
+    # Convert ref_scale back to FP32 to see what values it contains
+    ref_scale_fp32 = ref_scale.view(torch.float8_e4m3fn).to(torch.float32)
+    
+    # Check if our amax matches what the quantizer computed internally
+    # Reverse-engineer the reference amax from ref_scale
+    # ref_scale (FP8) → ref_scale_fp32 → amax = ref_scale_fp32 * 6.0 / global_scale
+    ref_amax_reverse = ref_scale_fp32 * fp4_max / global_scale
+    print(f"\nReverse-engineered ref amax [0,:5]: {ref_amax_reverse[0,:5].tolist()}")
+    print(f"Our computed amax [0,:5]: {amax_tensor[0,:5].tolist()}")
+    
+    # Check if amax values match
+    amax_match = torch.allclose(amax_tensor, ref_amax_reverse[:tile_h, :tile_w], rtol=0.01)
+    print(f"Amax roughly matches: {amax_match}")
+    
+    scale_match = torch.equal(target_scale, ref_scale)
+    print(f"\nScales match exactly: {scale_match}")
+    
+    if not scale_match:
+        mismatches = (target_scale != ref_scale).sum().item()
+        total = target_scale.numel()
+        print(f"Mismatches: {mismatches}/{total} ({100*mismatches/total:.4f}%)")
+
+
 if __name__ == "__main__":
     #test_nvfp4_transpose_kernel()
     #test_nvfp4_partial_cast_matches_full()
-    main()
+    #test_scale_computation_matches_quantizer()
+    test_single_gpu_partial_cast_vs_full()
+    #main()

@@ -577,6 +577,7 @@ def _cast_master_weights_to_nvfp4_2d(
         if master_weight is not None and master_weight.numel() > 0:
             assert len(model_weight.shape) == 2
             h, w = model_weight.shape
+            # master_weight is already converted to model_weight.dtype (BF16) in the caller
             tex.nvfp4_2d_compute_partial_amax(
                 master_weight, amax, h, w, start_offset, block_len
             )
@@ -649,27 +650,8 @@ def _cast_master_weights_to_nvfp4_2d(
             # not updated currently.
             model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
-        if master_weight is None or master_weight.numel() == 0:
-            continue
-
-        end_offset = start_offset + master_weight.numel()
-        if not use_fsdp_shard_model_weights:
-            rowwise_bytes = model_weight._rowwise_data.view(-1)
-            byte_start = start_offset // 2
-            byte_end = (end_offset + 1) // 2
-            model_weight_fragment = rowwise_bytes[byte_start:byte_end]
-        assert len(model_weight.shape) == 2
-        h, w = model_weight.shape
-        tex.nvfp4_2d_partial_cast(
-            master_weight,
-            model_weight_fragment,
-            per_block_decode_scale,
-            global_scale,
-            h,
-            w,
-            start_offset,
-            block_len,
-        )
+        # Always write scales and amax for ALL layers (computed from all-reduced amax).
+        # This ensures scales are correct even for layers not owned by this rank.
         tile_rows = tile_shape[0]
         expanded_scale = torch.zeros_like(target_scale, dtype=torch.float32)
         chunk = block_len
@@ -685,6 +667,49 @@ def _cast_master_weights_to_nvfp4_2d(
         target_scale.copy_(fp8_view)
         if target_amax is not None:
             target_amax.copy_(global_amaxes[idx : idx + 1])
+
+        # Only cast data for layers owned by this rank
+        if master_weight is None or master_weight.numel() == 0:
+            continue
+
+        # Debug: compare scales with fresh quantizer for full cast (start_offset=0)
+        if start_offset == 0 and idx == 2:
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            print(f"[Rank {rank}] Layer {idx} SCALE DEBUG (start_offset=0):")
+            print(f"[Rank {rank}]   per_block_decode_scale shape: {per_block_decode_scale.shape}")
+            print(f"[Rank {rank}]   target_scale shape: {target_scale.shape}")
+            # Compare with fresh quantizer - use inline import to avoid scoping issues
+            from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer as FreshNVFP4Quantizer
+            fresh_q = FreshNVFP4Quantizer(with_2d_quantization=True)
+            ref = fresh_q(master_weight.reshape(model_weight.shape))
+            print(f"[Rank {rank}]   ref._rowwise_scale_inv shape: {ref._rowwise_scale_inv.shape}")
+            # Check if scales match
+            scale_match = torch.equal(target_scale, ref._rowwise_scale_inv)
+            print(f"[Rank {rank}]   target_scale == ref._rowwise_scale_inv: {scale_match}")
+            if not scale_match:
+                mismatches = (target_scale != ref._rowwise_scale_inv).sum().item()
+                total = target_scale.numel()
+                print(f"[Rank {rank}]   mismatches: {mismatches}/{total} ({100*mismatches/total:.2f}%)")
+
+        end_offset = start_offset + master_weight.numel()
+        if not use_fsdp_shard_model_weights:
+            rowwise_bytes = model_weight._rowwise_data.view(-1)
+            byte_start = start_offset // 2
+            byte_end = (end_offset + 1) // 2
+            model_weight_fragment = rowwise_bytes[byte_start:byte_end]
+        assert len(model_weight.shape) == 2
+        h, w = model_weight.shape
+        # master_weight is already converted to model_weight.dtype (BF16) in the caller
+        tex.nvfp4_2d_partial_cast(
+            master_weight,
+            model_weight_fragment,
+            per_block_decode_scale,
+            global_scale,
+            h,
+            w,
+            start_offset,
+            block_len,
+        )
 
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
