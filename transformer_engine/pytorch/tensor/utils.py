@@ -588,10 +588,6 @@ def _cast_master_weights_to_nvfp4_2d(
 
     if global_amaxes.numel() > 0:
         torch.distributed.all_reduce(global_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
-        print(
-            "[NVFP4 partial cast] global_amaxes:",
-            [(idx, float(val)) for idx, val in enumerate(global_amaxes.tolist())],
-        )
 
     global_scale_tensor = global_amaxes.clone()
     if len(amaxes) > 0:
