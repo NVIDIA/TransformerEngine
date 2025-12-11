@@ -680,10 +680,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
-                                                 columnwise_scale, amax_rowwise, amax_columnwise,
-                                                 fp4_dtype, quantizer_py_list[i],
-                                                 with_gemm_swizzled_scales));
+    tensor_py_list.emplace_back(NVFP4TensorClass(
+        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
+        amax_columnwise, fp4_dtype, quantizer_py_list[i], with_gemm_swizzled_scales));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -699,8 +698,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
           rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
-      nvte_set_tensor_param_v2(tensor_wrapper.data(),
-                               NVTETensorParam::kNVTEWithGEMMSwizzledScales,
+      nvte_set_tensor_param_v2(tensor_wrapper.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
                                &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
 
       // Set the amax rowwise and amax columnwise if available
