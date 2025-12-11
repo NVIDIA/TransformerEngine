@@ -1253,12 +1253,14 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
              "Grouped GEMM: A and D must have the same num_tensors");
 
   // Validate alpha/beta have per-matrix values
-  const size_t alpha_numel = alpha_tensor->data.shape.numel();
-  const size_t beta_numel = beta_tensor->data.shape.numel();
-  NVTE_CHECK(alpha_numel == num_tensors, "Grouped GEMM: alpha must have num_tensors (", num_tensors,
-             ") elements, got ", alpha_numel);
-  NVTE_CHECK(beta_numel == num_tensors, "Grouped GEMM: beta must have num_tensors (", num_tensors,
-             ") elements, got ", beta_numel);
+  const size_t alpha_numel = alpha_tensor->data.numel();
+  const size_t beta_numel = beta_tensor->data.numel();
+  NVTE_CHECK(alpha_numel == num_tensors,
+             "Grouped GEMM: alpha must have num_tensors (", num_tensors, ") elements, got ",
+             alpha_numel);
+  NVTE_CHECK(beta_numel == num_tensors,
+             "Grouped GEMM: beta must have num_tensors (", num_tensors, ") elements, got ",
+             beta_numel);
 
   auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
