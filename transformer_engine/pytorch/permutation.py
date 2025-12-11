@@ -548,7 +548,9 @@ def moe_permute(
     if map_type == "index":
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None, None)
+        output, row_id_map, _ = _moe_permute_mask_map.apply(
+            inp, routing_map, num_out_tokens, None, None
+        )
         return output, row_id_map
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
@@ -620,9 +622,7 @@ def moe_permute_and_pad_with_probs(
     ), "tokens_per_expert must be provided to the fused permute padding function."
 
     # Calculate aligned token counts per expert
-    target_tokens_per_expert = (
-        torch.ceil(tokens_per_expert / align_size) * align_size
-    ).long()
+    target_tokens_per_expert = (torch.ceil(tokens_per_expert / align_size) * align_size).long()
 
     if torch.equal(tokens_per_expert, target_tokens_per_expert):
         pad_offsets = None
