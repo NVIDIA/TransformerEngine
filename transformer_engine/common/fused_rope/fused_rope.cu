@@ -14,122 +14,219 @@
 
 namespace transformer_engine {
 
-template <typename scalar_t>
+// Parameters for vectorization
+constexpr int desired_load_store_size = 8;  // bytes
+
+template <typename scalar_t, int nvec, bool aligned>
 __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs, scalar_t *dst,
                                          const bool interleaved, const int s_id,
                                          const int offset_block, const int offset_block_dst,
                                          const int h, const int d, const int d2, const int stride_h,
                                          const int stride_d, const int o_stride_h,
                                          const int o_stride_d) {
-  extern __shared__ float shared_mem_cos_sin[];
-  float *shared_mem_cos = shared_mem_cos_sin;
-  float *shared_mem_sin = shared_mem_cos_sin + d2;
-  int tid = threadIdx.x * blockDim.y + threadIdx.y;
-  for (int i = tid; i < d2; i += blockDim.x * blockDim.y) {
-    sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
-  }
-  __syncthreads();
+  using IVec = Vec<scalar_t, nvec>;
+
+  // Precompute freqs base pointer for this sequence position
+  const float *freqs_row = freqs + s_id * d2;
+
+  if constexpr (aligned) {
+    // Vectorized path - only for non-interleaved, requires stride_d == 1 and o_stride_d == 1
+    // Since d2 % (2 * nvec) == 0, the entire vector is either in first or second half
+    for (int d_id = threadIdx.x * nvec; d_id < d2; d_id += blockDim.x * nvec) {
+      // Determine rotation direction once per d_id (applies to entire vector)
+      const bool first_half = (d_id < d2 / 2);
+      const int rot_offset = first_half ? (d2 / 2) : (-d2 / 2);
+      const float rot_sign = first_half ? -1.0f : 1.0f;
+
+      // Compute cos/sin once per d_id, store in registers
+      float v_cos[nvec], v_sin[nvec];
+#pragma unroll
+      for (int i = 0; i < nvec; i++) {
+        __sincosf(freqs_row[d_id + i], &v_sin[i], &v_cos[i]);
+      }
+
+      // Process all heads with the same cos/sin values
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        IVec v_src, v_src_rotate, v_dst;
+        int offset_src = offset_block + h_id * stride_h + d_id;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id;
+
+        v_src.load_from(&src[offset_src]);
+        v_src_rotate.load_from(&src[offset_src + rot_offset]);
 
 #pragma unroll
-  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-      float v_cos = shared_mem_cos[d_id];
-      float v_sin = shared_mem_sin[d_id];
-      int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
-      int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
-      float v_src = src[offset_src];
-      float v_src_rotate;
-      if (!interleaved) {
-        v_src_rotate = (d_id + d2 / 2 < d2)
-                           ? -static_cast<float>(src[offset_src + (d2 / 2) * stride_d])
-                           : static_cast<float>(src[offset_src + (d2 / 2 - d2) * stride_d]);
-      } else {
-        v_src_rotate = (d_id % 2 == 0)
-                           // d_id + 1
-                           ? -static_cast<float>(src[offset_src + stride_d])
-                           // d_id - 1
-                           : static_cast<float>(src[offset_src - stride_d]);
+        for (int i = 0; i < nvec; i++) {
+          float v_src_val = static_cast<float>(v_src.data.elt[i]);
+          float v_src_rot = rot_sign * static_cast<float>(v_src_rotate.data.elt[i]);
+          v_dst.data.elt[i] = static_cast<scalar_t>(v_src_val * v_cos[i] + v_src_rot * v_sin[i]);
+        }
+        v_dst.store_to(&dst[offset_dst]);
       }
-      dst[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+    }
+  } else {
+    // Non-vectorized path
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+      // Compute cos/sin once per d_id, store in registers
+      float v_sin, v_cos;
+      __sincosf(freqs_row[d_id], &v_sin, &v_cos);
+
+      // Precompute rotation parameters once per d_id
+      int rot_offset_d;
+      float rot_sign;
+      if (!interleaved) {
+        const bool first_half = (d_id < d2 / 2);
+        rot_offset_d = first_half ? (d2 / 2) : (-d2 / 2);
+        rot_sign = first_half ? -1.0f : 1.0f;
+      } else {
+        const bool even = (d_id % 2 == 0);
+        rot_offset_d = even ? 1 : -1;
+        rot_sign = even ? -1.0f : 1.0f;
+      }
+
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+        float v_src = src[offset_src];
+        float v_src_rotate =
+            rot_sign * static_cast<float>(src[offset_src + rot_offset_d * stride_d]);
+        dst[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+      }
     }
   }
 
   // copy the rest
   if (d > d2) {
-#pragma unroll
-    for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-#pragma unroll
-      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
-        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
-        dst[offset_dst] = src[offset_src];
+    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+      if constexpr (aligned) {
+        for (int d_id = d2 + threadIdx.x * nvec; d_id < d; d_id += blockDim.x * nvec) {
+          int offset_src = offset_block + h_id * stride_h + d_id;
+          int offset_dst = offset_block_dst + h_id * o_stride_h + d_id;
+          IVec v_tmp;
+          v_tmp.load_from(&src[offset_src]);
+          v_tmp.store_to(&dst[offset_dst]);
+        }
+      } else {
+        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
+          int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+          int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+          dst[offset_dst] = src[offset_src];
+        }
       }
     }
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int nvec, bool aligned>
 __device__ void fused_rope_block_backward(const scalar_t *src, const float *freqs, scalar_t *dst,
                                           const bool interleaved, const int s_id,
                                           const int offset_block, const int offset_block_dst,
                                           const int h, const int d, const int d2,
                                           const int stride_h, const int stride_d,
                                           const int o_stride_h, const int o_stride_d) {
-  extern __shared__ float shared_mem_cos_sin[];
-  float *shared_mem_cos = shared_mem_cos_sin;
-  float *shared_mem_sin = shared_mem_cos_sin + d2;
+  using IVec = Vec<scalar_t, nvec>;
+
+  // For backward, different threads need sin/cos at different positions:
+  // - Thread at position i needs cos(i) and sin(i + d2/2)
+  // - Thread at position i + d2/2 needs cos(i + d2/2) and sin(i)
+  // Using shared memory avoids redundant freqs loads and enables coalesced access
+  // Layout: [cos(d2)] [padding(1)] [sin(d2)]
+  extern __shared__ float shared_mem[];
+  float *shared_cos = shared_mem;
+  float *shared_sin = shared_mem + d2 + 1;  // +1 padding to avoid bank conflict
+
+  // Cooperatively load and compute sin/cos into shared memory
+  const float *freqs_row = freqs + s_id * d2;
   int tid = threadIdx.x * blockDim.y + threadIdx.y;
   for (int i = tid; i < d2; i += blockDim.x * blockDim.y) {
-    sincosf(freqs[s_id * d2 + i], &shared_mem_sin[i], &shared_mem_cos[i]);
+    __sincosf(freqs_row[i], &shared_sin[i], &shared_cos[i]);
   }
   __syncthreads();
 
+  if constexpr (aligned) {
+    // Vectorized path - only for non-interleaved, requires stride_d == 1 and o_stride_d == 1
+    // Since d2 % (2 * nvec) == 0, the entire vector is either in first or second half
+    for (int d_id = threadIdx.x * nvec; d_id < d2; d_id += blockDim.x * nvec) {
+      // Determine rotation direction once per d_id (applies to entire vector)
+      const bool first_half = (d_id < d2 / 2);
+      const int rot_offset = first_half ? (d2 / 2) : (-d2 / 2);
+      const float sin_sign = first_half ? 1.0f : -1.0f;
+
+      // Load cos/sin from shared memory into registers
+      float v_cos[nvec], v_sin[nvec];
 #pragma unroll
-  for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
-      int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
-      int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
-      float v_src = src[offset_src];
-      float v_cos = shared_mem_cos[d_id];
-      float v_src_rotate, v_sin;
-      if (!interleaved) {
-        if (d_id + d2 / 2 < d2) {
-          v_src_rotate = static_cast<float>(src[offset_src + (d2 / 2) * stride_d]);
-          v_sin = shared_mem_sin[d_id + d2 / 2];
-        } else {
-          v_src_rotate = static_cast<float>(src[offset_src + (d2 / 2 - d2) * stride_d]);
-          v_sin = -shared_mem_sin[d_id + d2 / 2 - d2];
-        }
-      } else {
-        if (d_id % 2 == 0) {
-          v_src_rotate = static_cast<float>(src[offset_src + stride_d]);
-          v_sin = shared_mem_sin[d_id + 1];
-        } else {
-          v_src_rotate = static_cast<float>(src[offset_src - stride_d]);
-          v_sin = -shared_mem_sin[d_id - 1];
-        }
+      for (int i = 0; i < nvec; i++) {
+        v_cos[i] = shared_cos[d_id + i];
+        v_sin[i] = sin_sign * shared_sin[d_id + i + rot_offset];
       }
-      dst[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+
+      // Process all heads with the same cos/sin values
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        IVec v_src, v_src_rotate, v_dst;
+        int offset_src = offset_block + h_id * stride_h + d_id;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id;
+
+        v_src.load_from(&src[offset_src]);
+        v_src_rotate.load_from(&src[offset_src + rot_offset]);
+
+#pragma unroll
+        for (int i = 0; i < nvec; i++) {
+          float v_src_val = static_cast<float>(v_src.data.elt[i]);
+          float v_src_rot = static_cast<float>(v_src_rotate.data.elt[i]);
+          v_dst.data.elt[i] = static_cast<scalar_t>(v_src_val * v_cos[i] + v_src_rot * v_sin[i]);
+        }
+        v_dst.store_to(&dst[offset_dst]);
+      }
+    }
+  } else {
+    // Non-vectorized path
+    for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
+      // Precompute rotation parameters once per d_id
+      float v_cos = shared_cos[d_id];
+      float v_sin;
+      int rot_offset_d;
+      if (!interleaved) {
+        const bool first_half = (d_id < d2 / 2);
+        rot_offset_d = first_half ? (d2 / 2) : (-d2 / 2);
+        v_sin = first_half ? shared_sin[d_id + d2 / 2] : -shared_sin[d_id - d2 / 2];
+      } else {
+        const bool even = (d_id % 2 == 0);
+        rot_offset_d = even ? 1 : -1;
+        v_sin = even ? shared_sin[d_id + 1] : -shared_sin[d_id - 1];
+      }
+
+      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+        float v_src = src[offset_src];
+        float v_src_rotate = static_cast<float>(src[offset_src + rot_offset_d * stride_d]);
+        dst[offset_dst] = v_src * v_cos + v_src_rotate * v_sin;
+      }
     }
   }
 
   // copy the rest
   if (d > d2) {
-#pragma unroll
-    for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-#pragma unroll
-      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-        int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
-        int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
-        dst[offset_dst] = src[offset_src];
+    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+      if constexpr (aligned) {
+        for (int d_id = d2 + threadIdx.x * nvec; d_id < d; d_id += blockDim.x * nvec) {
+          int offset_src = offset_block + h_id * stride_h + d_id;
+          int offset_dst = offset_block_dst + h_id * o_stride_h + d_id;
+          IVec v_tmp;
+          v_tmp.load_from(&src[offset_src]);
+          v_tmp.store_to(&dst[offset_dst]);
+        }
+      } else {
+        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
+          int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
+          int offset_dst = offset_block_dst + h_id * o_stride_h + d_id * o_stride_d;
+          dst[offset_dst] = src[offset_src];
+        }
       }
     }
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int nvec, bool aligned>
 __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seqlens,
                                           const float *freqs, const int *start_positions,
                                           scalar_t *dst, const bool interleaved, const int cp_size,
@@ -169,11 +266,12 @@ __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seq
     }
   }
 
-  fused_rope_block_forward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
-                           offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h, o_stride_d);
+  fused_rope_block_forward<scalar_t, nvec, aligned>(src, freqs, dst, interleaved, s_id_for_freqs,
+                                                    offset_block, offset_block_dst, h, d, d2,
+                                                    stride_h, stride_d, o_stride_h, o_stride_d);
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int nvec, bool aligned>
 __global__ void fused_rope_backward_kernel(
     const scalar_t *src, const int *cu_seqlens, const float *freqs, const int *start_positions,
     scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int s,
@@ -211,8 +309,9 @@ __global__ void fused_rope_backward_kernel(
     }
   }
 
-  fused_rope_block_backward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
-                            offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h, o_stride_d);
+  fused_rope_block_backward<scalar_t, nvec, aligned>(src, freqs, dst, interleaved, s_id_for_freqs,
+                                                     offset_block, offset_block_dst, h, d, d2,
+                                                     stride_h, stride_d, o_stride_h, o_stride_d);
 }
 
 template <typename scalar_t>
@@ -241,11 +340,8 @@ __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *f
   }
   __syncthreads();
 
-#pragma unroll
   for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
     for (int i = 0; i < out_row_length; i += d) {
-#pragma unroll
       for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
         int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
         int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
@@ -272,12 +368,9 @@ __device__ void fused_qkv_rope_block_forward(const scalar_t *src, const float *f
   }
   // copy the rest
   if (d > d2) {
-#pragma unroll
-    for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
-#pragma unroll
-      for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
-        for (int i = 0; i < out_row_length; i += d) {
+    for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
+      for (int i = 0; i < out_row_length; i += d) {
+        for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
           int offset_src = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
           int offset_dst = offset_block_dst + h_id * out_row_length + i + d_id;
           out[offset_dst] = src[offset_src];
@@ -312,11 +405,9 @@ __device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const fl
     }
   }
   __syncthreads();
-#pragma unroll
+
   for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
     for (int i = 0; i < out_row_length; i += d) {
-#pragma unroll
       for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
         int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
         int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
@@ -352,11 +443,8 @@ __device__ void fused_qkv_rope_block_backward(const scalar_t *grad_out, const fl
   }
   // copy the rest
   if (d > d2) {
-#pragma unroll
     for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
-#pragma unroll
       for (int i = 0; i < out_row_length; i += d) {
-#pragma unroll
         for (int d_id = d2 + threadIdx.x; d_id < d; d_id += blockDim.x) {
           int offset_dst = offset_block + h_id * in_row_length + (row_offset + i) + d_id;
           int offset_src = offset_block_dst + h_id * out_row_length + i + d_id;
@@ -471,7 +559,8 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
-  const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
+  // No shared memory needed - cos/sin computed directly in registers
+  const int shared_mem_size = 0;
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     NVTE_CHECK(cu_seqlens != nullptr, "cu_seqlens is required for THD format");
@@ -487,10 +576,27 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
-  fused_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
-      input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, s, h, d, d2,
-      stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
-      o_stride_d);
+  // Determine vectorization parameters
+  constexpr int nvec = desired_load_store_size / sizeof(scalar_t);
+  // Check alignment conditions:
+  // 1. !interleaved (vectorized path only works for non-interleaved mode)
+  // 2. stride_d == 1 and o_stride_d == 1 (contiguous along d dimension)
+  // 3. d2 % (2 * nvec) == 0 (d2/2 must also be aligned for rotated access)
+  // 4. d % nvec == 0 (total dimension divisible by vector size)
+  const bool use_aligned = !interleaved && (stride_d == 1) && (o_stride_d == 1) &&
+                           (d2 % (2 * nvec) == 0) && (d % nvec == 0);
+
+  if (use_aligned) {
+    fused_rope_forward_kernel<scalar_t, nvec, true><<<blocks, threads, shared_mem_size, stream>>>(
+        input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, s, h, d,
+        d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
+        o_stride_d);
+  } else {
+    fused_rope_forward_kernel<scalar_t, nvec, false><<<blocks, threads, shared_mem_size, stream>>>(
+        input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, s, h, d,
+        d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
+        o_stride_d);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -505,7 +611,8 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
-  const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
+  // Shared memory for cos/sin cache: [cos(d2)] [padding(1)] [sin(d2)]
+  const int shared_mem_size = (2 * d2 + 1) * sizeof(float);
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     NVTE_CHECK(cu_seqlens != nullptr, "cu_seqlens is required for THD format");
@@ -521,10 +628,27 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
-  fused_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
-      output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size, cp_rank,
-      s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b,
-      o_stride_h, o_stride_d);
+  // Determine vectorization parameters
+  constexpr int nvec = desired_load_store_size / sizeof(scalar_t);
+  // Check alignment conditions:
+  // 1. !interleaved (vectorized path only works for non-interleaved mode)
+  // 2. stride_d == 1 and o_stride_d == 1 (contiguous along d dimension)
+  // 3. d2 % (2 * nvec) == 0 (d2/2 must also be aligned for rotated access)
+  // 4. d % nvec == 0 (total dimension divisible by vector size)
+  const bool use_aligned = !interleaved && (stride_d == 1) && (o_stride_d == 1) &&
+                           (d2 % (2 * nvec) == 0) && (d % nvec == 0);
+
+  if (use_aligned) {
+    fused_rope_backward_kernel<scalar_t, nvec, true><<<blocks, threads, shared_mem_size, stream>>>(
+        output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size,
+        cp_rank, s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t,
+        o_stride_b, o_stride_h, o_stride_d);
+  } else {
+    fused_rope_backward_kernel<scalar_t, nvec, false><<<blocks, threads, shared_mem_size, stream>>>(
+        output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size,
+        cp_rank, s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t,
+        o_stride_b, o_stride_h, o_stride_d);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
