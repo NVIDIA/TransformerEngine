@@ -278,7 +278,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     row_id_map: torch.Tensor,
     fwd_input: torch.Tensor,
     merging_probs: torch.Tensor,
-    pad_offsets: torch.Tensor,
+    pad_offsets: Union[torch.Tensor, None],
     num_tokens: int,
     num_experts: int,
     num_out_tokens: int,
@@ -341,7 +341,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         num_experts,
         hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
-        FUSION_PAD=pad_offsets is not None,
+        FUSION_UNPAD=pad_offsets is not None,
     )
     return act_grad, merging_probs_grad
 
