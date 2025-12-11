@@ -674,7 +674,8 @@ def _test_permutation_and_padding_mask_map(
 
     print(
         "permutation and padding:"
-        f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} with_probs:{with_merging_probs} align_size:{align_size} {te_dtype}"
+        f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK}"
+        f" with_merging_probs:{with_merging_probs} align_size:{align_size} {te_dtype}"
     )
 
     # Convert TE dtypes to PyTorch dtypes
@@ -1478,6 +1479,7 @@ def test_permutation_mask_map(
 @pytest.mark.parametrize(
     "num_tokens, num_expert, hidden_size, topK",
     [
+        (0, 8, 1280, 2),
         (4096, 64, 1280, 7),
         (4096, 64, 2048, 6),
         (4096, 160, 5120, 6),
