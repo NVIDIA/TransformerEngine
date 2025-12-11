@@ -939,11 +939,7 @@ class TensorWrapper {
 };
 
 /*! \warning Deprecated */
-enum class Float8BlockScaleTensorFormat {
-  GEMM_READY = 0,
-  COMPACT = 1,
-  INVALID
-};
+enum class Float8BlockScaleTensorFormat { GEMM_READY = 0, COMPACT = 1, INVALID };
 
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
