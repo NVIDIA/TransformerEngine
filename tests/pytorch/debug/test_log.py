@@ -482,6 +482,7 @@ def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs):
         # Should have logged MXFP8 MSE stat (what-if scenario)
         assert "mxfp8_mse" in output
 
+
 def test_log_grouped_gemm(feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
