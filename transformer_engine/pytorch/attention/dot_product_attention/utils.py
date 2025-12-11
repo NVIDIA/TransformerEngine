@@ -175,65 +175,65 @@ class AttentionParams:
 
     Parameters
     ----------
-    qkv_type: Union[torch.Tensor, Float8Tensor], default = `torch.Tensor`
+    qkv_type : Union[torch.Tensor, Float8Tensor], default = torch.Tensor
         Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
-    qkv_dtype: torch.dtype, default = `torch.bfloat16`
+    qkv_dtype : torch.dtype, default = torch.bfloat16
         Data type of query/key/value tensors.
-    qkv_layout: str, default = "sbh3d"
+    qkv_layout : str, default = "sbh3d"
         Query/key/value tensor memory layout.
-    batch_size: int, default = 1
+    batch_size : int, default = 1
         Batch size.
-    num_heads: int, default = 16
+    num_heads : int, default = 16
         Number of attention heads in the query tensor.
-    num_gqa_groups: int, default = 16
+    num_gqa_groups : int, default = 16
         Number of attention heads in key and value tensors.
-    max_seqlen_q: int, default = 128
+    max_seqlen_q : int, default = 128
         Maximum sequence length of the query tensor.
-    max_seqlen_kv: int, default = 128
+    max_seqlen_kv : int, default = 128
         Maximum sequence length of the key and value tensors.
-    head_dim_qk: int, default = 64
+    head_dim_qk : int, default = 64
         The size of each attention head in query and key tensors.
-    head_dim_v: int, default = 64
+    head_dim_v : int, default = 64
         The size of each attention head in the value tensor.
-    attn_mask_type: str, default = `no_mask`
+    attn_mask_type : str, default = no_mask
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
-    window_size: Tuple[int, int], default = None
+    window_size : Tuple[int, int], default = None
         Sliding window attention size.
-    alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
+    alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
-    core_attention_bias_type: str, default = `no_bias`
+    core_attention_bias_type : str, default = no_bias
         Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
-    core_attention_bias_shape: str, default = `1hss`
+    core_attention_bias_shape : str, default = 1hss
         Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
-    core_attention_bias_requires_grad: bool, default = `True`
+    core_attention_bias_requires_grad : bool, default = True
         Whether attention bias requires gradient.
-    pad_between_seqs: bool, default = `False`
+    pad_between_seqs : bool, default = False
         Whether there is padding between sequences in a batch.
         This only applies to `qkv_format=thd`.
-    attention_dropout: float, default = 0.0
+    attention_dropout : float, default = 0.0
         Attention dropout.
-    context_parallel: bool, default = `False`
+    context_parallel : bool, default = False
         Whether context parallelism is used or not.
-    cp_comm_type: str, default = "p2p"
+    cp_comm_type : str, default = "p2p"
         The communication type of context parallelism.
-    deterministic: bool, default = `False`
+    deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
-    is_training: bool, default = `True`
+    is_training : bool, default = True
         Whether in training mode (`True`) or inference mode (`False`)
-    fp8: bool, default = `False`
+    fp8 : bool, default = False
         Whether `DotProductAttention` is in an `autocast` region.
-    fp8_meta: Optional[Dict[str Any]], default = `None`
+    fp8_meta : Optional[Dict[str Any]], default = None
         The FP8 metadata tensor of `DotProductAttention`.
-    inference_params: Optional[InferenceParams], default = `None`
+    inference_params : Optional[InferenceParams], default = None
         Inference-related parameters. See InferenceParams for details.
-    softmax_type: str, default = "vanilla"
+    softmax_type : str, default = "vanilla"
         The type of softmax operation. See DotProductAttention for details.
-    return_max_logit: bool, default = `False`
+    return_max_logit : bool, default = False
         Whether to output max_logit.
-    cuda_graph: bool, default = `False`
+    cuda_graph : bool, default = `False`
         Whether support for cuda graph capture is needed or not.
-    num_splits: int, default = 1
+    num_splits : int, default = 1
         The number of kernels to split attention to.
     """
 
@@ -298,15 +298,15 @@ def get_attention_backend(
 
     Returns
     ----------
-    use_flash_attention: bool
+    use_flash_attention : bool
         Whether the `FlashAttention` backend has been selected.
-    use_fused_attention: bool
+    use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
-    use_unfused_attention: bool
+    use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
-    available_backends: List[bool]
+    available_backends : List[bool]
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
     """
@@ -532,9 +532,6 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_logit")
-        if use_fused_attention and qkv_format == "thd":
-            use_fused_attention = False
-            logger.debug("Disabling FusedAttention for max_logit with qkv_format = thd")
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
@@ -677,9 +674,6 @@ def get_attention_backend(
 
     # Filter: QKV layout
     if qkv_format == "thd":
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
-            use_unfused_attention = False
         if pad_between_seqs:
             if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
                 use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
@@ -835,8 +829,8 @@ def get_attention_backend(
     # ----------------------------------------------------------------------------------------
     # no_mask                     | None                                 | All
     # padding                     |                                      | All
-    #     self-attention          | One tensor in shape [b, 1, 1, sq]    |
-    #     cross-attention         | Tuple of two tensors in shapes       |
+    #     self-attention          | One tensor of shape [b, 1, 1, sq]    |
+    #     cross-attention         | Tuple of two tensors of shapes       |
     #                             | [b, 1, 1, sq] and [b, 1, 1, skv]     |
     # causal                      | None                                 |
     #     self-attention          |                                      | All
@@ -846,7 +840,7 @@ def get_attention_backend(
     #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
     # causal_bottom_right         | None                                 | All
     # padding_causal_bottom_right | Same as "padding"                    | All
-    # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
+    # arbitrary                   | One tensor of shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
         if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
@@ -1271,42 +1265,42 @@ def get_full_mask(
 
     Parameters
     ----------
-    max_seqlen_q: int
+    max_seqlen_q : int
         Maximum sequence length for queries.
-    max_seqlen_kv: int
+    max_seqlen_kv : int
         Maximum sequence length for keys and values.
-    attn_mask_type: str, default = `no_mask`
-        Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
-        "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        default = `None`
+    attn_mask_type : str, default = no_mask
+        Attention mask type, {``"no_mask"``, ``"padding"``, ``"causal"``, ``"padding_causal"``,
+        ``"causal_bottom_right"``, ``"padding_causal_bottom_right"``, ``"arbitrary"``}
+    attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        default = None
         Boolean tensor(s) used to mask out attention softmax input. Please see DotProductAttention
         for the requirements of `attention_mask` for different `attn_mask_type`s.
-    window_size: Tuple[int, int], default = `None`
+    window_size : Tuple[int, int], default = None
         Sliding window size for local attention, where query at position i attends to keys
         in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
         + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
         window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
         map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
         `attn_mask_type`.
-    attention_type: str, default = "self"
+    attention_type : str, default = "self"
         Attention type, {"self", "cross"}
-    bottom_right_alignment: bool, default = `True`
+    bottom_right_alignment : bool, default = True
         Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
         or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
         specifies "causal" or "causal_bottom_right".
 
     Returns
     ----------
-    attn_mask_type: str
+    attn_mask_type : str
         For sliding window attention (>=0, >0), "arbitrary"; otherwise, the same as input `attn_mask_type`
-    attention_mask: torch.Tensor
+    attention_mask : torch.Tensor
         The full attention mask based on `attn_mask_type`, `attention_mask` and `window_size`
-    actual_seqlens_q: torch.Tensor
-        For padding masks, the actual sequence lengths for queries, in shape [batch_size].
+    actual_seqlens_q : torch.Tensor
+        For padding masks, the actual sequence lengths for queries, of shape [batch_size].
         For other masks, `None`.
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
+    actual_seqlens_kv : Optional[torch.Tensor], default = None
+        For padding masks, the actual sequence lengths for keys and values, of shape [batch_size].
         For other masks, `None`.
     """
     # perform basic checks
@@ -1392,29 +1386,29 @@ def get_alibi(
     """
     Parameters
     ----------
-    num_heads: int
+    num_heads : int
         Number of heads.
-    max_seqlen_q: int
+    max_seqlen_q : int
         Maximum sequence length for queries.
-    max_seqlen_kv: int
+    max_seqlen_kv : int
         Maximum sequence length for keys and values.
-    actual_seqlens_q: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for queries, in shape [batch_size].
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for keys and values, in shape [batch_size].
-    alibi_slopes: Optional[torch.Tensor], default = `None`
-        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
-    bias_dtype: Optional[torch.dtype], default = `None`
+    actual_seqlens_q : Optional[torch.Tensor], default = None
+        Actual sequence lengths for queries, of shape [batch_size].
+    actual_seqlens_kv : Optional[torch.Tensor], default = None
+        Actual sequence lengths for keys and values, of shape [batch_size].
+    alibi_slopes : Optional[torch.Tensor], default = None
+        Custom ALiBi slopes, FP32, CUDA tensor, of shape [num_heads] or [batch_size, num_heads].
+    bias_dtype : Optional[torch.dtype], default = None
         Dtype of the generated ALiBi bias. If None, use torch.float32.
-    bottom_right_alignment: bool, default = `True`
+    bottom_right_alignment : bool, default = True
         Whether to align the diagonal of the ALiBi bias to the bottom right corner of
         the matrix (`True`) or top left (`False`).
 
     Returns
     ----------
-    alibi_slopes: torch.Tensor
+    alibi_slopes : torch.Tensor
         ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
-    alibi_bias: torch.Tensor
+    alibi_bias : torch.Tensor
         ALiBi bias in FP32 or `bias_dtype`. Its shape is
         (1) [1, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in [num_heads] shape,
         and `actual_seqlens_q` and `actual_seqlens_kv` are `None`; or
@@ -1818,18 +1812,18 @@ def get_qkv_format(
 
     Parameters
     ----------
-    qkv_layout: str
+    qkv_layout : str
        Memory layout of `q`, `k` and `v`. See get_qkv_layout() for more details.
-    inference_params: InferenceParams, default = `None`
+    inference_params : InferenceParams, default = None
         InferenceParams related to KV caching.
 
     Returns
     ----------
-    qkv_format: str, default = `sbhd`
+    qkv_format : str, default = sbhd
         Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}.
-    q_format: str
+    q_format : str
         Format of the `q` tensor, {`bshd`, `sbhd`, `thd`}.
-    kv_format: str
+    kv_format : str
         Format of the `k` and `v` tensors, {`bshd`, `sbhd`, `thd`}.
     """
     splited = qkv_layout.replace("paged_kv_", "").split("_")
@@ -1855,23 +1849,23 @@ def get_qkv_layout(
 
     Parameters
     ----------
-    q: torch.Tensor
+    q : torch.Tensor
         Query tensor.
-    k: torch.Tensor
+    k : torch.Tensor
         Key tensor.
-    v: torch.Tensor
+    v : torch.Tensor
         Value tensor.
-    qkv_format: str, default = `sbhd`
+    qkv_format : str, default = sbhd
         Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
         the sequence length dimension, `b` batch size, `h` the number of attention heads,
         `d` head size, and `t` the total number of tokens in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
-    inference_params: InferenceParams, default = `None`
+    inference_params : InferenceParams, default = None
         InferenceParams related to KV caching.
 
     Returns
     ----------
-    qkv_layout: str
+    qkv_layout : str
        Memory layout of `q`, `k` and `v`. Each `qkv_layout` maps to a pair of `q_format` and
        `kv_format` in {`bshd`, `sbhd`, `thd`}. The `paged_kv_` prefix is used to indicate that
        paged KV caching is in play. A few examples of the layouts are as follows.
@@ -1893,18 +1887,18 @@ def get_qkv_layout(
        `thd_2bshd`: {`thd_bshd_bshd`, `paged_kv_thd_bshd_bshd`}
        `thd_2sbhd`: {`thd_sbhd_sbhd`, `paged_kv_thd_sbhd_sbhd`}
 
-    q: torch.Tensor
+    q : torch.Tensor
         Query tensor. It may be different from input `q` as we try to fit tensors to
         a supported layout.
-    k: torch.Tensor
+    k : torch.Tensor
         Key tensor. It may be different from input `k` as we try to fit tensors to
         a supported layout.
-    v: torch.Tensor
+    v : torch.Tensor
         Value tensor. It may be different from input `v` as we try to fit tensors to
         a supported layout.
-    q_format: str
+    q_format : str
         Format of the query tensor, {`bshd`, `sbhd`, `thd`}.
-    kv_format: str
+    kv_format : str
         Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 

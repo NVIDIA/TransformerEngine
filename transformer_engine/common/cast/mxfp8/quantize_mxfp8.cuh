@@ -21,6 +21,7 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
+#include "specialized/quantize_mxfp8.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -618,6 +619,73 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
+
+          if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()) {
+            switch (scaling_type) {
+              case ScalingType::ROWWISE: {
+                using traits = specialized::CastTraits<IType, OType, true, false>;
+                auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
+
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     traits::smem);
+
+                dim3 block(traits::threadLayout::num, traits::warpLayout::N, traits::warpLayout::M);
+                dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
+                          (rows + traits::blockDimM - 1) / traits::blockDimM);
+                kernel<<<grid, block, traits::smem, stream>>>(
+                    reinterpret_cast<typename traits::IType *>(input.data.dptr),
+                    reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                    scales_rowwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+
+                break;
+              }
+              case ScalingType::COLWISE: {
+                NVTE_WARN("Colwise scaling will fallback to original kernel.");
+                break;
+              }
+              case ScalingType::BIDIMENSIONAL: {
+                using traits = specialized::CastTraits<IType, OType, true, true>;
+                auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
+
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     traits::smem);
+                // TMA for loading, so that we don't need STS for transposing
+                alignas(64) CUtensorMap tensor_map_input{};
+                constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+                create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N,
+                                     /*stride_elems=*/cols,
+                                     /*offset_elems=*/0, input_type_bit_size,
+                                     traits::input_swizzle_pattern);
+
+                alignas(64) CUtensorMap tensor_map_rowwise_output{};
+                alignas(64) CUtensorMap tensor_map_colwise_output{};
+                constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+                create_2D_tensor_map(tensor_map_rowwise_output, output->data, rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N,
+                                     /*stride_elems=*/cols,
+                                     /*offset_elems=*/0, output_type_bit_size,
+                                     traits::output_swizzle_pattern);
+                create_2D_tensor_map(tensor_map_colwise_output, output->columnwise_data, rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N, cols, 0,
+                                     output_type_bit_size, traits::output_swizzle_pattern);
+
+                dim3 block(traits::rowThreadLayout::num, traits::numWarps);
+                dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
+                          (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
+                kernel<<<grid, block, traits::smem, stream>>>(
+                    tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
+                    scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                    scale_stride_colwise);
+
+                break;
+              }
+              default: {
+                NVTE_ERROR("Invalid scaling type.");
+              }
+            }
+            return;
+          }
 
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};

@@ -27,7 +27,7 @@ _quantized_tensor_cpu_supported_ops = (
 
 
 class QuantizedTensorStorage:
-    r"""Base class for all *TensorStorage classes.
+    r"""Base class for all TensorStorage classes.
 
     This class (and its subclasses) are optimization for when
     the full QuantizedTensor is not needed (when it is fully
@@ -54,11 +54,11 @@ class QuantizedTensorStorage:
 
         Parameters
         ----------
-        rowwise_usage : Optional[bool[, default = `None`
+        rowwise_usage : Optional[bool[, default = None
                         Whether to create or keep the data needed for using the tensor
                         in rowwise fashion (e.g. as B argument in TN GEMM). Leaving it as `None`
                         preserves the original value in the tensor.
-        columnwise_usage : Optional[bool], default = `None`
+        columnwise_usage : Optional[bool], default = None
                            Whether to create or keep the data needed for using the tensor
                            in columnwise fashion (e.g. as A argument in TN GEMM). Leaving it as
                            `None` preserves the original value in the tensor.
@@ -128,7 +128,7 @@ def prepare_for_saving(
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal *TensorStorage types too."""
+    the internal TensorStorage types too."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:

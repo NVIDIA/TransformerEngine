@@ -16,7 +16,7 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
@@ -56,6 +56,8 @@ from ..distributed import (
     use_reentrant_activation_recompute,
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
+    _get_cuda_rng_state,
+    _set_cuda_rng_state,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
@@ -165,7 +167,7 @@ class _LayerNormMLP(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def _forward(
         ctx,
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
@@ -226,9 +228,103 @@ class _LayerNormMLP(torch.autograd.Function):
             module,
             skip_fp8_weight_update,
             symmetric_ar_type,
+            checkpoint,
             debug,
+            recompute_for_bwd,
         ) = non_tensor_args
 
+        # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
+        if is_grad_enabled and not recompute_for_bwd:
+            ctx.checkpoint = checkpoint
+            if checkpoint:
+                # save the state of autocast and quantizers for recomputation
+                ctx.autocast_state = (
+                    FP8GlobalStateManager.get_autocast_state()
+                )  # to restore autocast state during recomputation
+                if (
+                    fp8
+                    and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__
+                    == "DelayedScaling"
+                ):  # only applicable for delayed scaling
+                    FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(
+                        module.fp8_meta
+                    )  # to restore quantizers during recomputation
+                # save the rng states
+                ctx.cpu_rng_state = torch.get_rng_state()
+                ctx.cuda_rng_state = _get_cuda_rng_state()
+
+        # whether to save activations regularly, or save inputs for recomputation in bwd
+        save_for_checkpoint = checkpoint and is_grad_enabled and not recompute_for_bwd
+
+        # whether we are in the forward stage, or recomputing in the bwd stage (false if not checkpointing)
+        is_recomputation = checkpoint and is_grad_enabled and recompute_for_bwd
+
+        # save the initial state for recomputation by bwd
+        if save_for_checkpoint:
+
+            # save tensors
+            tensors_to_save, tensor_objects = prepare_for_saving(
+                inp,
+                ln_weight,
+                ln_bias,
+                fc1_weight,
+                fc1_bias,
+                fc2_weight,
+                fc2_bias,
+            )
+            ctx.save_for_backward(*tensors_to_save)
+            ctx.tensor_objects = tensor_objects
+
+            ctx.other_args = {
+                "eps": eps,
+                "is_first_microbatch": is_first_microbatch,
+                "fp8": fp8,
+                "fp8_calibration": fp8_calibration,
+                "wgrad_store": wgrad_store,
+                "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
+                "fc1_input_quantizer": fc1_input_quantizer,
+                "fc1_weight_quantizer": fc1_weight_quantizer,
+                "fc1_output_quantizer": fc1_output_quantizer,
+                "fc1_grad_input_quantizer": fc1_grad_input_quantizer,
+                "fc1_grad_weight_quantizer": fc1_grad_weight_quantizer,
+                "fc1_grad_output_quantizer": fc1_grad_output_quantizer,
+                "fc2_input_quantizer": fc2_input_quantizer,
+                "fc2_weight_quantizer": fc2_weight_quantizer,
+                "fc2_output_quantizer": fc2_output_quantizer,
+                "fc2_grad_input_quantizer": fc2_grad_input_quantizer,
+                "fc2_grad_weight_quantizer": fc2_grad_weight_quantizer,
+                "fc2_grad_output_quantizer": fc2_grad_output_quantizer,
+                "cpu_offloading": cpu_offloading,
+                "tp_group": tp_group,
+                "tp_size": tp_size,
+                "sequence_parallel": sequence_parallel,
+                "tensor_parallel": tensor_parallel,
+                "activation_dtype": activation_dtype,
+                "return_layernorm_output": return_layernorm_output,
+                "return_layernorm_output_gathered": return_layernorm_output_gathered,
+                "bias_gelu_fusion": bias_gelu_fusion,
+                "set_parallel_mode": set_parallel_mode,
+                "is_grad_enabled": is_grad_enabled,
+                "fwd_ln_sm_margin": fwd_ln_sm_margin,
+                "bwd_ln_sm_margin": bwd_ln_sm_margin,
+                "zero_centered_gamma": zero_centered_gamma,
+                "activation": activation,
+                "activation_params": activation_params,
+                "normalization": normalization,
+                "ub_overlap_ag": ub_overlap_ag,
+                "ub_overlap_rs": ub_overlap_rs,
+                "ub_overlap_rs_dgrad": ub_overlap_rs_dgrad,
+                "ub_bulk_wgrad": ub_bulk_wgrad,
+                "ub_bulk_dgrad": ub_bulk_dgrad,
+                "gemm_gelu_fusion": gemm_gelu_fusion,
+                "fsdp_group": fsdp_group,
+                "module": module,
+                "skip_fp8_weight_update": skip_fp8_weight_update,
+                "symmetric_ar_type": symmetric_ar_type,
+                "checkpoint": checkpoint,
+                "debug": debug,
+                "recompute_for_bwd": True,  # set this to true for recomputation phase
+            }
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
         assert inp_shape[-1] == in_features, "GEMM not possible"
@@ -250,7 +346,14 @@ class _LayerNormMLP(torch.autograd.Function):
             start_offload(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
-        backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
+
+        # bwd needs fc1 input when grad is enabled, fc1 needs grad, and either
+        # 1) no checkpointing
+        # or 2) doing the recomputation with checkpointing
+        backwards_needs_fc1_input = fc1_weight.requires_grad and (
+            (is_grad_enabled and not checkpoint) or is_recomputation
+        )
+
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -308,7 +411,9 @@ class _LayerNormMLP(torch.autograd.Function):
             zero_centered_gamma,
         )
         ln_out_return = None
-        if return_layernorm_output or return_layernorm_output_gathered:
+
+        # do not return layernorm output unless 1) no checkpointing or 2) checkpointing but not recomputing
+        if (return_layernorm_output or return_layernorm_output_gathered) and not is_recomputation:
             ln_out_return = ln_out
 
         # Prepare GEMM input
@@ -316,7 +421,9 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_out_total = None
         ub_obj_lnout = None
         if sequence_parallel:
-            if return_layernorm_output_gathered:
+
+            # do not return ln output if checkpointing and in recomputation, not necessary
+            if return_layernorm_output_gathered and not is_recomputation:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
@@ -459,7 +566,12 @@ class _LayerNormMLP(torch.autograd.Function):
         # ------------------------------------------------------
 
         # Deallocate FC1 GEMM input tensor if no longer needed
-        if not is_grad_enabled and (ln_out_total is not ln_out_return):
+        # first part of if statement means that we only clear ln_out_total if
+        # 1) checkpointing and not recomputing (in the forward stage, not bwd recompute stage)
+        # 2) not checkpointing and grad disabled
+        if ((checkpoint and not is_recomputation) or not is_grad_enabled) and (
+            ln_out_total is not ln_out_return
+        ):
             clear_tensor_data(ln_out_total)
 
         # ACTIVATION - sometimes activation is fused with the GEMM above.
@@ -497,89 +609,88 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
                     act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
 
-        if not is_grad_enabled:
-            clear_tensor_data(fc1_out)
-
         if not fp8 and fp8_calibration:
             if fc2_input_quantizer is not None:
                 fc2_input_quantizer.calibrate(act_out)
-            if fc2_weight_quantizer is not None:
-                fc2_weight_quantizer.calibrate(fc2_weight)
 
-        # Configure Userbuffers reduce-scatter if needed
-        ub_obj_fc2out = None
-        reduce_scatter_out = None
-        if ub_overlap_rs:
-            ub_obj_fc2out = get_ub("fc2_fprop", fp8)
-            dim_size = list(act_out.size())
-            dim_size[0] //= tp_world_size
-            dim_size[-1] = fc2_weight.size(0)
-            reduce_scatter_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
+        # we want to skip fc2 computation if we are checkpointing and recomputing,
+        # otherwise we compute fc2
+        if not (is_recomputation and checkpoint):
 
-        # ------------------------------------------------------
-        # FC2 GEMM
-        # ------------------------------------------------------
-        gemm_out, *_, reduce_scatter_out = general_gemm(
-            fc2_weight_final,
-            act_out,
-            out_dtype=activation_dtype,
-            bias=fc2_bias,
-            quantization_params=fc2_output_quantizer,
-            use_split_accumulator=use_split_accumulator,
-            ub=ub_obj_fc2out,
-            ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
-            extra_output=reduce_scatter_out,
-        )
-        # ------------------------------------------------------
-        # Finished FC2 GEMM...
-        # ------------------------------------------------------
+            # if we get to this point, we know this is not bwd recomputation
+            # so we must be in the fwd
+            # now is_grad_enabled can be true or false
+            # if false, can safely delete
+            # if true, we can only delete if checkpoint is true, since we will recompute anyways,
+            # otherwise, checkpoint is false, so cant delete
+            if (
+                checkpoint or not is_grad_enabled
+            ):  # we can safely get rid of these if this is the case
+                clear_tensor_data(fc1_out)
 
-        # Deallocate tensors if no longer needed
-        if not is_grad_enabled:
-            clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
+            if not fp8 and fp8_calibration:
 
-        # Prepare output tensor
-        # Note: Perform tensor-parallel communication if needed
-        fc2_out = None
-        if ub_overlap_rs:
-            fc2_out = reduce_scatter_out
-        elif set_parallel_mode and sequence_parallel:
-            fc2_out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
-        elif set_parallel_mode and tensor_parallel:
-            if symmetric_ar_type is not None:
-                fc2_out, _ = symmetric_all_reduce(
-                    gemm_out, tp_group, all_reduce_type=symmetric_ar_type
-                )
-            else:
-                fc2_out, _ = allreduce(gemm_out, tp_group)
-        else:
-            fc2_out = gemm_out
-        fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
+                if fc2_weight_quantizer is not None:
+                    fc2_weight_quantizer.calibrate(fc2_weight)
 
-        # Cache state for backward pass
-        if is_grad_enabled:
-            if cpu_offloading:
-                mark_activation_offload(
-                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                )
+            # Configure Userbuffers reduce-scatter if needed
+            ub_obj_fc2out = None
+            reduce_scatter_out = None
+            if ub_overlap_rs:
+                ub_obj_fc2out = get_ub("fc2_fprop", fp8)
+                dim_size = list(act_out.size())
+                dim_size[0] //= tp_world_size
+                dim_size[-1] = fc2_weight.size(0)
+                reduce_scatter_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
-            # Scatter intermediate/activation tensors saved for the backward pass
-            # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
-            #       shards/unshards the base weights so we don't do it ourselves
-            ctx.fsdp_group = fsdp_group
-            ctx.fsdp_shapes = _fsdp_scatter_tensors(
-                fsdp_group,
-                mu,
-                rsigma,
-                ln_out,
-                fc1_out_without_bias if bias_gelu_fusion else fc1_out,
+            # ------------------------------------------------------
+            # FC2 GEMM
+            # ------------------------------------------------------
+            gemm_out, *_, reduce_scatter_out = general_gemm(
+                fc2_weight_final,
                 act_out,
-                fc1_weight_final if fp8 and not isinstance(fc1_weight, Float8Tensor) else None,
-                fc2_weight_final if fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
+                out_dtype=activation_dtype,
+                bias=fc2_bias,
+                quantization_params=fc2_output_quantizer,
+                use_split_accumulator=use_split_accumulator,
+                ub=ub_obj_fc2out,
+                ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
+                extra_output=reduce_scatter_out,
             )
+            # ------------------------------------------------------
+            # Finished FC2 GEMM...
+            # ------------------------------------------------------
+
+            # Deallocate tensors if no longer needed, again, can safely deallocate
+            if checkpoint or not is_grad_enabled:  # same logic as last clear_tensor_data block
+                clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
+
+            # Prepare output tensor
+            # Note: Perform tensor-parallel communication if needed
+            fc2_out = None
+            if ub_overlap_rs:
+                fc2_out = reduce_scatter_out
+            elif set_parallel_mode and sequence_parallel:
+                fc2_out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
+            elif set_parallel_mode and tensor_parallel:
+                if symmetric_ar_type is not None:
+                    fc2_out, _ = symmetric_all_reduce(
+                        gemm_out, tp_group, all_reduce_type=symmetric_ar_type
+                    )
+                else:
+                    fc2_out, _ = allreduce(gemm_out, tp_group)
+            else:
+                fc2_out = gemm_out
+            fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
+
+        # now saving stuff for bwd:
+        # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
+        # if we are not checkpointing, then we must save this if grad is enabled
+        if is_grad_enabled and not save_for_checkpoint:
 
             ctx.fc1_weight_quantizer = fc1_weight_quantizer
             ctx.fc2_weight_quantizer = fc2_weight_quantizer
+
             if not fc1_weight.requires_grad:
                 if not return_layernorm_output:
                     clear_tensor_data(ln_out)
@@ -588,34 +699,69 @@ class _LayerNormMLP(torch.autograd.Function):
                 clear_tensor_data(act_out)
                 act_out = None
 
-            if cpu_offloading:
-                mark_not_offload(
+            if not checkpoint:  # regular path, no selective activation checkpointing
+
+                if cpu_offloading:
+                    mark_activation_offload(
+                        inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
+                    )
+
+                # Scatter intermediate/activation tensors saved for the backward pass
+                # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
+                #       shards/unshards the base weights so we don't do it ourselves
+                ctx.fsdp_group = fsdp_group
+
+                ctx.fsdp_shapes = (
+                    _fsdp_scatter_tensors(  # again, ony relevant if we have activations to save
+                        fsdp_group,
+                        mu,
+                        rsigma,
+                        ln_out,
+                        fc1_out_without_bias if bias_gelu_fusion else fc1_out,
+                        act_out,
+                        (
+                            fc1_weight_final
+                            if fp8 and not isinstance(fc1_weight, Float8Tensor)
+                            else None
+                        ),
+                        (
+                            fc2_weight_final
+                            if fp8 and not isinstance(fc2_weight, Float8Tensor)
+                            else None
+                        ),
+                    )
+                )
+
+                if cpu_offloading:
+                    mark_not_offload(
+                        ln_weight,
+                        ln_bias,
+                        fc1_weight_final,
+                        fc1_weight,
+                        fc1_bias,
+                        fc2_weight_final,
+                        fc2_weight,
+                        fc2_bias,
+                    )
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    inputmat,
                     ln_weight,
-                    ln_bias,
+                    ln_out,
                     fc1_weight_final,
                     fc1_weight,
                     fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
                     fc2_weight_final,
                     fc2_weight,
                     fc2_bias,
+                    mu,
+                    rsigma,
                 )
 
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                inputmat,
-                ln_weight,
-                ln_out,
-                fc1_weight_final,
-                fc1_weight,
-                fc1_bias,
-                fc1_out,
-                fc1_out_without_bias,
-                act_out,
-                fc2_weight_final,
-                fc2_weight,
-                fc2_bias,
-                mu,
-                rsigma,
-            )
+                ctx.save_for_backward(*tensors_to_save)
+                ctx.tensor_objects = tensor_objects
 
             if fuse_wgrad_accumulation:
                 # This check is needed to ensure that main_grad is not created
@@ -632,9 +778,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
                     ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
                     ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
-
-            ctx.save_for_backward(*tensors_to_save)
-            ctx.tensor_objects = tensor_objects
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
@@ -690,11 +833,30 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
-                if in_fp8_activation_recompute_phase():
+                if in_fp8_activation_recompute_phase() or is_recomputation:
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
             ctx.wgrad_store = wgrad_store
+            if is_recomputation:  # return the recomputed tensors
+                return (
+                    ctx,
+                    inputmat,
+                    ln_weight,
+                    ln_out,
+                    fc1_weight_final,
+                    fc1_weight,
+                    fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
+                    fc2_weight_final,
+                    fc2_weight,
+                    fc2_bias,
+                    mu,
+                    rsigma,
+                )
 
+        # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
@@ -704,13 +866,100 @@ class _LayerNormMLP(torch.autograd.Function):
         return fc2_out
 
     @staticmethod
+    def forward(
+        ctx,
+        inp: torch.Tensor,
+        ln_weight: torch.Tensor,
+        ln_bias: torch.Tensor,
+        fc1_weight: torch.Tensor,
+        fc1_bias: torch.Tensor,
+        fc2_weight: torch.Tensor,
+        fc2_bias: torch.Tensor,
+        non_tensor_args: Tuple,
+    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+
+        # add recompute_for_bwd
+        non_tensor_args += (False,)
+
+        return _LayerNormMLP._forward(
+            ctx,
+            inp,
+            ln_weight,
+            ln_bias,
+            fc1_weight,
+            fc1_bias,
+            fc2_weight,
+            fc2_bias,
+            non_tensor_args,
+        )
+
+    @staticmethod
+    def _recompute(ctx):
+        # pylint: disable=missing-function-docstring
+
+        saved_tensors = ctx.saved_tensors
+        tensors = restore_from_saved(ctx.tensor_objects, saved_tensors)
+        # Delete the references to tensor objects once they've been consumed
+        # by the `restore_from_saved` method to construct back the actual tensors.
+        ctx.tensor_objects = None
+
+        if ctx.checkpoint:  # do recomputation from the original args
+
+            # backward is not in autocast context, so we set the state here
+            # we also have to set the quantizer states to what they were before the forward pass (only relevant for DelayedScaling recipe)
+            final_autocast_state = (
+                FP8GlobalStateManager.get_autocast_state()
+            )  # get current autocast state
+            FP8GlobalStateManager.set_autocast_state(ctx.autocast_state)  # set old autocast state
+            if (
+                ctx.other_args["fp8"]
+                and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
+            ):  # only applicable for delayed scaling
+                FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(
+                    ctx.other_args["module"].fp8_meta
+                )  # set old quantizer state
+
+            # get current rng state
+            final_cpu_rng_state = torch.get_rng_state()
+            final_cuda_rng_state = _get_cuda_rng_state()
+
+            # set rng state for fwd
+            torch.set_rng_state(ctx.cpu_rng_state)
+            _set_cuda_rng_state(ctx.cuda_rng_state)
+
+            out = _LayerNormMLP._forward(  # recompute
+                ctx,
+                *tensors,
+                tuple(ctx.other_args.values()),
+            )
+
+            FP8GlobalStateManager.set_autocast_state(final_autocast_state)  # restore autocast state
+            if (
+                ctx.other_args["fp8"]
+                and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
+            ):
+                FP8GlobalStateManager.restore_fp8_meta_tensors(
+                    ctx.other_args["module"].fp8_meta
+                )  # restore quantizers
+
+            # set rng state for fwd
+            torch.set_rng_state(final_cpu_rng_state)
+            _set_cuda_rng_state(final_cuda_rng_state)
+
+            return out
+
+        # load from saved (return ctx is just because the other branch does too)
+        return tuple([ctx] + tensors)
+
+    @staticmethod
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_LayerNormMLP_backward"):
-            saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
+                ctx,
                 inputmat,
                 ln_weight,
                 ln_out,
@@ -725,11 +974,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_bias,
                 mu,
                 rsigma,
-            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
+            ) = _LayerNormMLP._recompute(ctx)
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
@@ -1416,38 +1661,38 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      intermediate size to which input samples are projected.
     eps : float, default = 1e-5
          a value added to the denominator of layer normalization for numerical stability.
-    bias : bool, default = `True`
-          if set to `False`, the FC1 and FC2 layers will not learn an additive bias.
+    bias : bool, default = True
+          if set to ``False``, the FC1 and FC2 layers will not learn an additive bias.
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                   'silu', 'swiglu', and 'clamped_swiglu'.
-    activation_params : dict, default = `None`
+          Options: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
+          ``'silu'``, ``'swiglu'``, and ``'clamped_swiglu'``.
+    activation_params : dict, default = None
                         Additional parameters for the activation function.
-                        At the moment, only used for 'clamped_swiglu' activation which
-                        supports 'limit' and 'alpha' parameters.
-    init_method : Callable, default = `None`
-                 used for initializing FC1 weights in the following way: `init_method(weight)`.
-                 When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    output_layer_init_method : Callable, default = `None`
+                        At the moment, only used for ``'clamped_swiglu'`` activation which
+                        supports ``'limit'`` and ``'alpha'`` parameters.
+    init_method : Callable, default = None
+                 used for initializing FC1 weights in the following way: ``init_method(weight)``.
+                 When set to ``None``, defaults to ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    output_layer_init_method : Callable, default = None
                               used for initializing FC2 weights in the following way:
-                              `output_layer_init_method(weight)`. When set to `None`, defaults to
-                              `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    return_layernorm_output : bool, default = `False`
-                             if set to `True`, output of layernorm is returned from the forward
+                              ``output_layer_init_method(weight)``. When set to ``None``, defaults to
+                              ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    return_layernorm_output : bool, default = False
+                             if set to ``True``, output of layernorm is returned from the :meth:`forward` method
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module
                              is taken post layernorm.
-    return_layernorm_output_gathered : bool, default = `False`
-                             if set to `True`, output of layernorm is returned after the all
-                             gather operation. Ignored if return_layernorm_output is False.
+    return_layernorm_output_gathered : bool, default = False
+                             if set to ``True``, output of layernorm is returned after the all
+                             gather operation. Ignored if ``return_layernorm_output`` is False.
                              Example use case: with sequence parallel, input to residual connection
                              for transformer module (e.g. LoRA) will need to be gathered.
                              Returning layernorm output gathered will prevent a redundant gather.
-    zero_centered_gamma : bool, default = 'False'
-                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+    zero_centered_gamma : bool, default = False
+                         if set to ``True``, gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
 
                          .. math::
@@ -1457,61 +1702,65 @@ class LayerNormMLP(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    name: str, default = `None`
+    name : str, default = None
         name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
-    set_parallel_mode : bool, default = `False`
-                      if set to `True`, FC1 is used as Column Parallel and FC2 is used as Row
+    set_parallel_mode : bool, default = False
+                      if set to ``True``, FC1 is used as Column Parallel and FC2 is used as Row
                       Parallel as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
-    tp_group : ProcessGroup, default = `None`
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
     tp_size : int, default = 1
              used as TP (tensor parallel) world size when TP groups are not formed during
              initialization. In this case, users must call the
-             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
 
     Optimization parameters
     -----------------------
-    fuse_wgrad_accumulation : bool, default = 'False'
-                             if set to `True`, enables fusing of creation and accumulation of
+    fuse_wgrad_accumulation : bool, default = False
+                             if set to ``True``, enables fusing of creation and accumulation of
                              the weight gradient. When enabled, it is assumed that the weights
-                             have an additional `main_grad` attribute (used instead of the
-                             regular `grad`) which is a pre-allocated buffer of the correct
+                             have an additional ``main_grad`` attribute (used instead of the
+                             regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in. This argument along with
-                             weight tensor having attribute 'overwrite_main_grad' set to True
-                             will overwrite `main_grad` instead of accumulating.
-    return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias for FC2, but
+                             weight tensor having attribute ``'overwrite_main_grad'`` set to True
+                             will overwrite ``main_grad`` instead of accumulating.
+    return_bias : bool, default = False
+                 when set to ``True``, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+    params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    seq_length: int
+    seq_length : int
                sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
                functions are warmed up before training to ensure same kernels are used for forward
                propogation and activation recompute phase.
-    micro_batch_size: int
+    micro_batch_size : int
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    delay_wgrad_compute : bool, default = `False`
-                         Whether or not to delay weight gradient computation. If set to `True`,
-                         it's the user's responsibility to call `module.backward_dw` to compute
+    delay_wgrad_compute : bool, default = False
+                         Whether or not to delay weight gradient computation. If set to ``True``,
+                         it's the user's responsibility to call :meth:`backward_dw` to compute
                          weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
+    checkpoint : bool, default = False
+                whether to use selective activation checkpointing, where activations are not saved for bwd,
+                and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
+                for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
     """
 
     def __init__(
@@ -1547,6 +1796,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
+        checkpoint: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1567,6 +1817,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
+        self.checkpoint = checkpoint
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
@@ -1896,6 +2147,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.checkpoint,
                 debug,
             )
             out = fwd_fn(
@@ -1983,7 +2235,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self, inp: torch.Tensor, is_grad_enabled: bool
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
-        ONNX-compatible version of the forward function that provides numerical equivalence
+        ONNX-compatible version of the :meth:`forward` method that provides numerical equivalence
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
