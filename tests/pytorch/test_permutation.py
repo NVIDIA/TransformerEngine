@@ -662,18 +662,19 @@ def _test_permutation_and_padding_mask_map(
     hidden_size,
     topK,
     num_out_tokens,
+    with_merging_probs=False,
     align_size=16,
     BENCHMARK=False,
 ):
     if topK > num_expert:
         pytest.skip("topK should be smaller than the number of experts.")
 
-    if num_out_tokens == None:
+    if num_out_tokens is None:
         num_out_tokens = num_tokens * topK
 
     print(
         "permutation and padding:"
-        f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} align_size:{align_size} {te_dtype}"
+        f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} with_probs:{with_merging_probs} align_size:{align_size} {te_dtype}"
     )
 
     # Convert TE dtypes to PyTorch dtypes
@@ -743,8 +744,13 @@ def _test_permutation_and_padding_mask_map(
 
     fp8_unpadding = Fp8Unpadding(num_expert, align_size)
     unpaded_output = fp8_unpadding(unpermute_unpad_fwd_input, tokens_per_expert_list)
+
+    probs_naive = probs
     unpermuted_unpaded_output = te_unpermute(
-        unpaded_output, row_id_map, restore_shape=restore_shape
+        unpaded_output,
+        row_id_map,
+        merging_probs=probs_naive if with_merging_probs else None,
+        restore_shape=restore_shape,
     )
 
     unpermuted_unpaded_output.backward(unpermute_unpad_bwd_input, retain_graph=True)
@@ -757,8 +763,8 @@ def _test_permutation_and_padding_mask_map(
     # fusion permute_and_pad
     fusion_permute_and_pad_fwd_input = permute_pad_fwd_input.detach()
     fusion_permute_and_pad_fwd_input.requires_grad_(True)
-    probs = probs.detach()
-    probs.requires_grad_(True)
+    probs_fusion = probs_naive.detach().clone()
+    probs_fusion.requires_grad_(True)
 
     (
         fusion_permuted_padded_output,
@@ -768,7 +774,7 @@ def _test_permutation_and_padding_mask_map(
         target_tokens_per_expert,
     ) = te_permute_and_pad_with_probs(
         fusion_permute_and_pad_fwd_input,
-        probs,
+        probs_fusion,
         routing_map,
         tokens_per_expert,
         align_size,
@@ -787,6 +793,7 @@ def _test_permutation_and_padding_mask_map(
     fusion_unpermuted_unpaded_output = te_unpermute(
         fusion_unpermute_unpad_fwd_input,
         row_id_map,
+        merging_probs=probs_fusion if with_merging_probs else None,
         restore_shape=restore_shape,
         pad_offsets=pad_offsets,
     )
@@ -848,6 +855,13 @@ def _test_permutation_and_padding_mask_map(
             msg=f"Mismatch in te_permute_and_pad bwd",
             **tols,
         )
+        if with_merging_probs:
+            torch.testing.assert_close(
+                probs_naive.grad.float(),
+                probs_fusion.grad.float(),
+                msg=f"Mismatch in te_unpermute bwd",
+                **tols,
+            )
 
     ###################################################################################################################################
     #
@@ -1492,6 +1506,7 @@ def test_permutation_mask_map(
         (4096, 512, 9216, 8),
     ],
 )
+@pytest.mark.parametrize("with_merging_probs", [True, False])
 def test_permutation_and_padding_mask_map(
     te_dtype,
     num_tokens,
@@ -1499,6 +1514,7 @@ def test_permutation_and_padding_mask_map(
     hidden_size,
     topK,
     num_out_tokens,
+    with_merging_probs,
 ):
     BENCHMARK = False
 
@@ -1509,6 +1525,7 @@ def test_permutation_and_padding_mask_map(
         hidden_size=hidden_size,
         topK=topK,
         num_out_tokens=num_out_tokens,
+        with_merging_probs=with_merging_probs,
         BENCHMARK=BENCHMARK,
     )
 

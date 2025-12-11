@@ -144,8 +144,8 @@ def permute_with_mask_map(
     scale : torch.Tensor
         The scale of the input tensor. If it is not None, it will be permuted.
     pad_offsets : torch.Tensor
-        The padding offsets for FP8 fused padding. If it is not None, it will be allocated output
-        buffers with aligned sizes.
+        Per-expert padding offsets of shape `[num_experts]` for FP8 fused padding.
+        If it is not None, it will be allocated output buffers with aligned sizes.
     num_tokens : int
         Number of tokens in the input tensor.
     num_experts : int
@@ -228,8 +228,8 @@ def unpermute_with_mask_map(
     permuted_probs : torch.Tensor
         The permuted probabilities of the input tensor. If it is not None, it will be unpermuted.
     pad_offsets : torch.Tensor
-        The padding offsets used for FP8 fused unpadding. If it is not None, it will remove the
-        previously fused padding.
+        Per-expert padding offsets of shape `[num_experts]` for FP8 fused unpadding.
+        If it is not None, it will remove the previously fused padding.
     num_tokens : int
         Number of tokens in the permuted tensor.
     num_experts : int
@@ -280,6 +280,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     row_id_map: torch.Tensor,
     fwd_input: torch.Tensor,
     merging_probs: torch.Tensor,
+    pad_offsets: torch.Tensor,
     num_tokens: int,
     num_experts: int,
     num_out_tokens: int,
@@ -298,6 +299,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         The input tensor of the forward pass of shape `[num_out_tokens, hidden_size]`.
     merging_probs : torch.Tensor
         The merging probabilities of the input tensor of shape `[num_tokens, num_experts]`.
+    pad_offsets : torch.Tensor
+        Per-expert padding offsets of shape `[num_experts]` for FP8 fused padding.
+        If it is not None, it will be allocated output buffers with aligned sizes.
     num_tokens : int
         Number of tokens in the permuted tensor.
     num_experts : int
@@ -307,8 +311,14 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     hidden_size : int
         Hidden size of the output tensor.
     """
-    act_grad = torch.empty(
-        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
+    act_grad = (
+        torch.empty(
+            (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
+        )
+        if pad_offsets is None
+        else torch.zeros(
+            (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
+        )
     )
     merging_probs_grad = torch.empty(
         (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
@@ -319,6 +329,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         fwd_input,
         merging_probs,
         row_id_map,
+        pad_offsets,
         row_id_map.stride(0),
         row_id_map.stride(1),
         fwd_output_grad.stride(0),
@@ -336,6 +347,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         num_experts,
         hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
+        FUSION_PAD=pad_offsets is not None,
     )
     return act_grad, merging_probs_grad
 

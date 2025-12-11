@@ -382,7 +382,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         )
 
         if with_probs:
-            ctx.save_for_backward(inp, row_id_map, merging_probs)
+            ctx.save_for_backward(inp, row_id_map, merging_probs, pad_offsets)
         else:
             ctx.save_for_backward(row_id_map, pad_offsets)
         ctx.num_experts = num_experts
@@ -402,7 +402,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         probs_grad = None
         if ctx.needs_input_grad[0]:
             if ctx.with_probs:
-                fwd_input, row_id_map, merging_probs = ctx.saved_tensors
+                fwd_input, row_id_map, merging_probs, pad_offsets = ctx.saved_tensors
             else:
                 row_id_map, pad_offsets = ctx.saved_tensors
 
@@ -450,6 +450,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         row_id_map,
                         fwd_input,
                         merging_probs,
+                        pad_offsets,
                         ctx.num_tokens,
                         ctx.num_experts,
                         ctx.num_permuted_tokens,

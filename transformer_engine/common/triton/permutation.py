@@ -427,6 +427,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     fwd_input_ptr,
     merging_probs_ptr,
     row_id_map_ptr,
+    pad_offsets_ptr,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -447,6 +448,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
     PROBS_LOAD_WIDTH: tl.constexpr,
+    FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = fwd_output_grad_ptr.dtype.element_ty
@@ -470,6 +472,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
             + pid * stride_row_id_map_token
             + (num_experts + idx) * stride_row_id_map_expert
         )
+        if FUSION_PAD:
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            dst_row = dst_row + pad_off
         prob_grad_accum = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
         current_start = 0
         while current_start < hidden_size:
