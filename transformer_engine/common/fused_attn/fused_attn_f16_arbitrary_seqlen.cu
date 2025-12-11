@@ -263,7 +263,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         sdpa_options.set_diagonal_band_left_bound(window_size_left + 1);
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
-        // (remove comment when reviewed) Should it be `window_size_right + 1` instead?
         sdpa_options.set_diagonal_band_right_bound(window_size_right);
       }
 
@@ -801,7 +800,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         sdpa_backward_options.set_diagonal_band_left_bound(window_size_left + 1);
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
-        // (remove comment when reviewed) Should it be `window_size_right + 1` instead?
         sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
       }
 
