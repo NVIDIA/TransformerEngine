@@ -241,10 +241,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *
  *  \param[in]  transa           Whether to transpose A matrices.
  *  \param[in]  transb           Whether to transpose B matrices.
- *  \param[in]  alpha            Scale multiplier for A @ B (single element NVTETensor).
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
  *  \param[in]  A                Input grouped tensor A.
  *  \param[in]  B                Input grouped tensor B.
- *  \param[in]  beta             Scale multiplier for C (single element NVTETensor).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
  *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
  *  \param[out] D                Output grouped tensor D.
  *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.

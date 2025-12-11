@@ -1237,7 +1237,9 @@ struct GroupedGemmSetupWorkspace {
 inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor *inputA,
                                          const transformer_engine::GroupedTensor *inputB,
                                          const transformer_engine::GroupedTensor *inputC,
-                                         const transformer_engine::GroupedTensor *outputD) {
+                                         const transformer_engine::GroupedTensor *outputD,
+                                         const transformer_engine::Tensor *alpha_tensor,
+                                         const transformer_engine::Tensor *beta_tensor) {
   const size_t num_tensors = inputA->num_tensors;
   NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: num_tensors must be at least 1");
   NVTE_CHECK(inputB->num_tensors == num_tensors,
@@ -1249,6 +1251,16 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
   }
   NVTE_CHECK(outputD->num_tensors == num_tensors,
              "Grouped GEMM: A and D must have the same num_tensors");
+
+  // Validate alpha/beta have per-matrix values
+  const size_t alpha_numel = alpha_tensor->data.shape.numel();
+  const size_t beta_numel = beta_tensor->data.shape.numel();
+  NVTE_CHECK(alpha_numel == num_tensors,
+             "Grouped GEMM: alpha must have num_tensors (", num_tensors, ") elements, got ",
+             alpha_numel);
+  NVTE_CHECK(beta_numel == num_tensors,
+             "Grouped GEMM: beta must have num_tensors (", num_tensors, ") elements, got ",
+             beta_numel);
 
   auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
@@ -1481,7 +1493,7 @@ __global__ void setup_grouped_gemm_kernel(
     TensorShapeInfo A_meta, TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta,
     // Element sizes
     size_t a_elem_size, size_t b_elem_size, size_t c_elem_size, size_t d_elem_size,
-    // Alpha/beta pointers (same for all groups)
+    // Alpha/beta pointers (per-matrix arrays)
     float *alpha_ptr, float *beta_ptr,
     // Transpose flags
     bool transa, bool transb,
@@ -1519,9 +1531,9 @@ __global__ void setup_grouped_gemm_kernel(
   K[idx] = static_cast<int>(transa ? a_last : a_first);
   N[idx] = static_cast<int>(transb ? b_last : b_first);
 
-  // Fill alpha/beta pointers (same for all groups)
-  alpha_ptrs[idx] = alpha_ptr;
-  beta_ptrs[idx] = beta_ptr;
+  // Fill alpha/beta pointers (per-matrix)
+  alpha_ptrs[idx] = alpha_ptr + idx;
+  beta_ptrs[idx] = beta_ptr + idx;
 }
 
 // Launch the setup kernel to populate workspace arrays
@@ -1578,7 +1590,7 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   Tensor *wspace_cublas = convertNVTETensor(workspace_cublas);
 
   // Validate inputs and num_tensors
-  validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD);
+  validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
   const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;

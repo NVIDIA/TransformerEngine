@@ -427,12 +427,15 @@ void run_grouped_gemm_case(const TestParams& params) {
   }
   GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
 
-  Tensor alpha_tensor("alpha", std::vector<size_t>{1}, DType::kFloat32);
-  Tensor beta_tensor("beta", std::vector<size_t>{1}, DType::kFloat32);
-  const float alpha_val = 1.f;
-  const float beta_val = 0.f;
-  NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), &alpha_val, sizeof(float), cudaMemcpyHostToDevice));
-  NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), &beta_val, sizeof(float), cudaMemcpyHostToDevice));
+  // Per-matrix alpha/beta (all 1.0 and 0.0 respectively)
+  Tensor alpha_tensor("alpha", std::vector<size_t>{num_gemms}, DType::kFloat32);
+  Tensor beta_tensor("beta", std::vector<size_t>{num_gemms}, DType::kFloat32);
+  std::vector<float> alpha_vals(num_gemms, 1.f);
+  std::vector<float> beta_vals(num_gemms, 0.f);
+  NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), alpha_vals.data(),
+                             num_gemms * sizeof(float), cudaMemcpyHostToDevice));
+  NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
+                             num_gemms * sizeof(float), cudaMemcpyHostToDevice));
 
   const size_t setup_ws_bytes = grouped_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
