@@ -685,18 +685,18 @@ def get_cpu_offload_context(
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled : bool, default = `False`
              When set to True, CPU Offloading functionality is enabled.
-    num_layers: int, default = 1
+    num_layers : int, default = 1
                 Determines the number of transformer layers
                 you want to offload activations/weights for.
-    model_layers: int, default = 1
+    model_layers : int, default = 1
                   Number of layers in the model that will be used under this context.
-    offload_activations: bool, default = `True`
+    offload_activations : bool, default = `True`
                          When set to `True`, offloads the activations for the TE layer.
-    offload_weights: bool, default = `True`
+    offload_weights : bool, default = `True`
                      When set to `True`, offloads the weights for the TE layer.
-    double_buffering: bool, default = `False`
+    double_buffering : bool, default = `False`
                       When set to `True`, uses double buffering for offloading.
 
     """

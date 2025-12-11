@@ -453,23 +453,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    shape: int or iterable of int
+    shape : int or iterable of int
         Tensor dimensions.
-    dtype: torch.dtype
+    dtype : torch.dtype
         Nominal tensor datatype.
-    requires_grad: bool, optional = False
+    requires_grad : bool, optional = False
         Whether to compute gradients for this tensor.
-    data: torch.Tensor
+    data : torch.Tensor
         Raw FP8 data in a uint8 tensor
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype: transformer_engine_torch.DType
+    fp8_dtype : transformer_engine_torch.DType
         FP8 format.
-    data_transpose: torch.Tensor, optional
+    data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
-    quantizer: Float8Quantizer, Float8CurrentScalingQuantizer, optional
+    quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
         Builder class for FP8 tensors
 
     """
@@ -493,10 +493,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # Convert PyTorch dtype to TE dtype
         if dtype is None:
             dtype = self.dtype
-
+        tensor = self.contiguous()
         if torch.is_grad_enabled():
-            return _FromFloat8Func.apply(self, dtype)
-        return _FromFloat8Func.forward(None, self, dtype)
+            return _FromFloat8Func.apply(tensor, dtype)
+        return _FromFloat8Func.forward(None, tensor, dtype)
 
     def quantize_(
         self,
@@ -554,13 +554,19 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Returns `self` if data is already in correct memory format.
 
         """
-        if self._data is not None and self._data.is_contiguous(memory_format=memory_format):
-            return self
-        if self._transpose is not None and self._transpose.is_contiguous(
-            memory_format=memory_format
-        ):
-            return self
-        return Float8Tensor.make_like(tensor=self, data=self._data.contiguous())
+        # requires_grad remains unaltered when calling contiguous on
+        # torch tensor and so should be the case for our custom float8 tensor
+        # as well.
+        return Float8Tensor.make_like(
+            tensor=self,
+            data=self._data.contiguous(memory_format=memory_format),
+            data_transpose=(
+                self._transpose.contiguous(memory_format=memory_format)
+                if self._transpose is not None
+                else None
+            ),
+            requires_grad=self.requires_grad,
+        )
 
         # raise ValueError("Float8Tensor does not support different memory formats!")
 

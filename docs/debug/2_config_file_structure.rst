@@ -4,13 +4,14 @@
     See LICENSE for license information.
 
 Config File Structure
-====================
+=====================
 
 To enable debug features, create a configuration YAML file to specify the desired behavior, such as determining which GEMMs (General Matrix Multiply operations) should run in higher precision rather than FP8 and defining which statistics to log. 
 Below, we outline how to structure the configuration YAML file.
 
 General Format
--------------
+--------------
+
 
 A config file can have one or more sections, each containing settings for specific layers and features:
 
@@ -55,7 +56,8 @@ Sections may have any name and must contain:
 3. Additional fields describing features for those layers.
 
 Layer Specification
-------------------
+-------------------
+
 
 Debug layers can be identified by a ``name`` parameter:
 
@@ -89,7 +91,8 @@ Examples:
         (...)
 
 Names in Transformer Layers
---------------------------
+---------------------------
+
 
 There are three ways to assign a name to a layer in the Transformer Engine:
 
@@ -156,7 +159,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
 
 
 Structured Configuration for GEMMs and Tensors
----------------------------------------------
+----------------------------------------------
 
 Sometimes a feature is parameterized by a list of tensors or by a list of GEMMs.
 There are multiple ways of describing this parameterization.
@@ -218,7 +221,7 @@ We can use both structs for tensors and GEMMs. The tensors_struct should be nest
           gemm_feature_param1: value
 
 Enabling or Disabling Sections and Features
-------------------------------------------
+-------------------------------------------
 
 Debug features can be enabled or disabled with the ``enabled`` keyword:
 

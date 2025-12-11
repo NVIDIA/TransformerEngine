@@ -28,7 +28,7 @@ def onnx_export(enabled: bool = False) -> Generator[None, None, None]:
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled : bool, default = False
              whether or not to enable export
     """
 

@@ -32,9 +32,9 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_a
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
+    QuantizeLayout,
 )
 
 

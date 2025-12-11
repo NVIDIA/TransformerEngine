@@ -334,12 +334,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp8_dtype, nullptr,
         nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
   }
 
   return retval;
@@ -481,12 +481,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp8_dtype, nullptr,
         nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
   }
 
   return retval;
@@ -685,13 +685,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       auto tensor_wrapper = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp4_dtype,
+          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp4_dtype,
           /*amax_ptr=*/nullptr,
           /*scale_ptr=*/nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode);
+          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {

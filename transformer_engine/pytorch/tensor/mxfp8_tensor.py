@@ -204,16 +204,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    data: torch.Tensor
+    data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
+    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
                    be applied when casting from FP8 to higher
                    precision.
-    dtype: torch.dtype, default = torch.float32
+    dtype : torch.dtype, default = torch.float32
            Nominal tensor datatype.
 
     """
@@ -434,13 +434,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     if scale_inv is not None
                     else None
                 )
+                scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
                 # Pad scale_inv_out to be a multiple of pad_multiple
                 if scale_inv_out is not None:
-                    current_shape = scale_inv_out.shape
-                    pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
-                    if pad_dim0 > 0:
-                        scale_inv_out = torch.nn.functional.pad(scale_inv_out, (0, 0, 0, pad_dim0))
-
+                    for idx, split_scale_inv_out in enumerate(scale_inv_out):
+                        current_shape = split_scale_inv_out.shape
+                        pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
+                        if pad_dim0 > 0:
+                            scale_inv_out[idx] = torch.nn.functional.pad(
+                                split_scale_inv_out, (0, 0, 0, pad_dim0)
+                            )
                 out_data.append(scale_inv_out)
             return [
                 MXFP8Tensor(
