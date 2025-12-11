@@ -1190,8 +1190,7 @@ struct GroupedGemmSetupWorkspace {
 
   // Initialize from workspace buffer
   // Layout: all pointer arrays first (8-byte aligned), then int arrays (4-byte aligned)
-  static GroupedGemmSetupWorkspace from_buffers(char *setup_ws_ptr, size_t num_tensors,
-                                                size_t alignment) {
+  static GroupedGemmSetupWorkspace from_buffers(char *setup_ws_ptr, size_t num_tensors) {
     GroupedGemmSetupWorkspace ws;
     size_t offset = 0;
     const size_t ptr_size = num_tensors * sizeof(void *);
@@ -1243,8 +1242,11 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
   NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: num_tensors must be at least 1");
   NVTE_CHECK(inputB->num_tensors == num_tensors,
              "Grouped GEMM: A and B must have the same num_tensors");
-  NVTE_CHECK(inputC->num_tensors == num_tensors,
-             "Grouped GEMM: A and C must have the same num_tensors");
+  // C can be NULL (will use D as C when beta=0)
+  if (inputC != nullptr) {
+    NVTE_CHECK(inputC->num_tensors == num_tensors,
+               "Grouped GEMM: A and C must have the same num_tensors");
+  }
   NVTE_CHECK(outputD->num_tensors == num_tensors,
              "Grouped GEMM: A and D must have the same num_tensors");
 
@@ -1261,8 +1263,13 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
   };
   NVTE_CHECK(is_fp8_or_16bit(inputA->dtype()) && is_fp8_or_16bit(inputB->dtype()),
              "Grouped GEMM inputs must be FP8, BF16, or FP16.");
-  NVTE_CHECK(is_output_dtype(inputC->dtype()) && is_output_dtype(outputD->dtype()),
-             "Grouped GEMM outputs must be BF16, FP16, or FP32.");
+  // Only check C dtype if C is provided
+  if (inputC != nullptr) {
+    NVTE_CHECK(is_output_dtype(inputC->dtype()),
+               "Grouped GEMM: C must be BF16, FP16, or FP32.");
+  }
+  NVTE_CHECK(is_output_dtype(outputD->dtype()),
+             "Grouped GEMM: D must be BF16, FP16, or FP32.");
   NVTE_CHECK(inputA->has_data() || inputA->has_columnwise_data(),
              "Grouped GEMM: A tensor is missing both row-wise and column-wise data");
   NVTE_CHECK(inputB->has_data() || inputB->has_columnwise_data(),
@@ -1273,6 +1280,7 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
 // Mirrors the non-grouped GEMM logic for FP8 layout handling (TN-only on Hopper) and
 // fallback to column-wise data when row-wise is absent.
 struct GroupedOperandSelection {
+  const transformer_engine::GroupedTensor *tensor = nullptr;
   const char *base = nullptr;
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
   bool trans = false;
@@ -1296,6 +1304,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   const DType row_dtype = t->data.dtype;
   const DType col_dtype = t->columnwise_data.dtype;
   GroupedOperandSelection sel;
+  sel.tensor = t;
   sel.trans = trans;
 
   const DType rep_dtype = has_row ? row_dtype : col_dtype;
@@ -1327,6 +1336,9 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
 
   // If only column-wise data is available, mirror the transpose flag (pre-transposed storage).
   if (!has_row && has_col) {
+    // On Hopper FP8, this would break TN requirement - should have been handled above
+    NVTE_CHECK(!is_fp8 || non_tn_fp8_ok,
+               "Grouped GEMM: FP8 on Hopper requires row-wise data for this transpose configuration");
     sel.base = static_cast<const char *>(t->columnwise_data.dptr);
     sel.dtype = col_dtype;
     sel.trans = !sel.trans;
@@ -1334,10 +1346,10 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     return sel;
   }
 
-  // Default: use row-wise data (or column-wise if row-wise absent, covered above).
-  sel.base = static_cast<const char *>(has_row ? t->data.dptr : t->columnwise_data.dptr);
-  sel.dtype = has_row ? row_dtype : col_dtype;
-  sel.use_columnwise = !has_row && has_col;
+  // Default: use row-wise data (column-wise case already handled above)
+  sel.base = static_cast<const char *>(t->data.dptr);
+  sel.dtype = row_dtype;
+  sel.use_columnwise = false;
   return sel;
 }
 
@@ -1354,17 +1366,22 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
                                 cublasLtMatrixLayoutOpaque_t &descB,
                                 cublasLtMatrixLayoutOpaque_t &descC,
                                 cublasLtMatrixLayoutOpaque_t &descD,
-                                const GroupedGemmSetupWorkspace &ws, bool transa, bool transb,
-                                bool a_columnwise, bool b_columnwise, size_t num_tensors,
-                                cudaDataType_t A_type, cudaDataType_t B_type,
-                                cudaDataType_t D_type) {
+                                const GroupedGemmSetupWorkspace &ws,
+                                const GroupedOperandSelection &A_sel,
+                                const GroupedOperandSelection &B_sel,
+                                const transformer_engine::GroupedTensor *D,
+                                size_t num_tensors) {
+  const cudaDataType_t A_type = get_cuda_dtype(A_sel.dtype);
+  const cudaDataType_t B_type = get_cuda_dtype(B_sel.dtype);
+  const cudaDataType_t D_type = get_cuda_dtype(D->dtype());
+
   // For column-major layout: leading dimension is the number of rows in storage.
   // If columnwise data was chosen, storage is already transposed.
-  int *rowa = a_columnwise ? ws.M : (transa ? ws.K : ws.M);
-  int *cola = a_columnwise ? ws.K : (transa ? ws.M : ws.K);
+  int *rowa = A_sel.use_columnwise ? ws.M : (A_sel.trans ? ws.K : ws.M);
+  int *cola = A_sel.use_columnwise ? ws.K : (A_sel.trans ? ws.M : ws.K);
   int *lda = rowa;
-  int *rowb = b_columnwise ? ws.N : (transb ? ws.N : ws.K);
-  int *colb = b_columnwise ? ws.K : (transb ? ws.K : ws.N);
+  int *rowb = B_sel.use_columnwise ? ws.N : (B_sel.trans ? ws.N : ws.K);
+  int *colb = B_sel.use_columnwise ? ws.K : (B_sel.trans ? ws.K : ws.N);
   int *ldb = rowb;
 
   NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, rowa, cola, lda));
@@ -1393,6 +1410,31 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                    &alphabeta_batch_stride, sizeof(int64_t)));
+}
+
+inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
+                                   const GroupedOperandSelection &A_sel,
+                                   const GroupedOperandSelection &B_sel) {
+  const bool is_fp8_a = is_fp8_dtype(A_sel.dtype);
+  const bool is_fp8_b = is_fp8_dtype(B_sel.dtype);
+  if (!is_fp8_a && !is_fp8_b) return;
+
+  if (is_fp8_a) {
+    void *a_scale_inv = A_sel.use_columnwise
+        ? A_sel.tensor->columnwise_scale_inv.dptr
+        : A_sel.tensor->scale_inv.dptr;
+    NVTE_CHECK(a_scale_inv != nullptr, "FP8 grouped GEMM: A scale_inv is required");
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_inv, sizeof(a_scale_inv)));
+  }
+  if (is_fp8_b) {
+    void *b_scale_inv = B_sel.use_columnwise
+        ? B_sel.tensor->columnwise_scale_inv.dptr
+        : B_sel.tensor->scale_inv.dptr;
+    NVTE_CHECK(b_scale_inv != nullptr, "FP8 grouped GEMM: B scale_inv is required");
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_inv, sizeof(b_scale_inv)));
+  }
 }
 
 // Constants for grouped GEMM workspace (declared early for use in heuristics)
@@ -1488,20 +1530,20 @@ __global__ void setup_grouped_gemm_kernel(
 
 // Launch the setup kernel to populate workspace arrays
 inline void launch_grouped_gemm_setup(
-    const GroupedGemmSetupWorkspace &ws, const transformer_engine::GroupedTensor *A,
-    const transformer_engine::GroupedTensor *B, const transformer_engine::GroupedTensor *C,
+    const GroupedGemmSetupWorkspace &ws, const GroupedOperandSelection &A_sel,
+    const GroupedOperandSelection &B_sel, const transformer_engine::GroupedTensor *C,
     const transformer_engine::GroupedTensor *D, const transformer_engine::Tensor *alpha_tensor,
-    const transformer_engine::Tensor *beta_tensor, const char *a_base, const char *b_base,
-    size_t a_elem_size, size_t b_elem_size, bool transa, bool transb, size_t num_tensors,
-    cudaStream_t stream) {
-  TensorShapeInfo A_meta = TensorShapeInfo::from_tensor(A);
-  TensorShapeInfo B_meta = TensorShapeInfo::from_tensor(B);
+    const transformer_engine::Tensor *beta_tensor, size_t num_tensors, cudaStream_t stream) {
+  TensorShapeInfo A_meta = TensorShapeInfo::from_tensor(A_sel.tensor);
+  TensorShapeInfo B_meta = TensorShapeInfo::from_tensor(B_sel.tensor);
   TensorShapeInfo C_meta = TensorShapeInfo::for_C(C, D);
   TensorShapeInfo D_meta = TensorShapeInfo::from_tensor(D);
 
   const char *c_base = static_cast<const char *>(C->data.dptr);
   char *d_base = static_cast<char *>(D->data.dptr);
 
+  const size_t a_elem_size = transformer_engine::typeToSize(A_sel.dtype);
+  const size_t b_elem_size = transformer_engine::typeToSize(B_sel.dtype);
   const size_t c_elem_size = transformer_engine::typeToSize(C->dtype());
   const size_t d_elem_size = transformer_engine::typeToSize(D->dtype());
 
@@ -1510,9 +1552,9 @@ inline void launch_grouped_gemm_setup(
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.M, ws.N, ws.K, ws.alpha_ptrs, ws.beta_ptrs,
-      a_base, b_base, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size, b_elem_size,
-      c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), transa, transb, num_tensors);
+      A_sel.base, B_sel.base, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
+      b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
+      static_cast<float *>(beta_tensor->data.dptr), A_sel.trans, B_sel.trans, num_tensors);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1532,7 +1574,7 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   // Convert to internal types
   const GroupedTensor *inputA = convertNVTEGroupedTensorCheck(A);
   const GroupedTensor *inputB = convertNVTEGroupedTensorCheck(B);
-  const GroupedTensor *inputC = convertNVTEGroupedTensorCheck(C);
+  const GroupedTensor *inputC_raw = convertNVTEGroupedTensor(C);  // Can be NULL
   GroupedTensor *outputD = convertNVTEGroupedTensorCheck(D);
   const Tensor *alpha_tensor = convertNVTETensorCheck(alpha);
   const Tensor *beta_tensor = convertNVTETensorCheck(beta);
@@ -1540,19 +1582,16 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   Tensor *wspace_cublas = convertNVTETensor(workspace_cublas);
 
   // Validate inputs and num_tensors
-  validate_grouped_gemm_inputs(inputA, inputB, inputC, outputD);
+  validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD);
+
+  // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
+  const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
   const size_t num_tensors = inputA->num_tensors;
 
   // Select operand storage (row-wise vs column-wise) and adjust transpose flags to
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
-  bool transa_flag = static_cast<bool>(transa);
-  bool transb_flag = static_cast<bool>(transb);
-  const auto A_sel = select_grouped_operand(inputA, transa_flag, /*is_A=*/true);
-  const auto B_sel = select_grouped_operand(inputB, transb_flag, /*is_A=*/false);
-  transa_flag = A_sel.trans;
-  transb_flag = B_sel.trans;
-  const size_t a_elem_size = transformer_engine::typeToSize(A_sel.dtype);
-  const size_t b_elem_size = transformer_engine::typeToSize(B_sel.dtype);
+  const auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
+  const auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   const size_t setup_workspace_size = grouped_gemm_setup_workspace_size(num_tensors);
@@ -1563,65 +1602,35 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   void *cublas_workspace_ptr = validate_and_get_workspace_ptr(wspace_cublas, cublas_workspace_size,
                                                               "Grouped GEMM cuBLAS workspace");
 
-  NVTE_CHECK(cublas_workspace_ptr != nullptr, "Grouped GEMM: cuBLAS workspace pointer is null");
-
   auto setup_workspace = GroupedGemmSetupWorkspace::from_buffers(
-      static_cast<char *>(setup_workspace_ptr), num_tensors, kGroupedGemmAlignment);
-  launch_grouped_gemm_setup(setup_workspace, inputA, inputB, inputC, outputD, alpha_tensor,
-                            beta_tensor, A_sel.base, B_sel.base, a_elem_size, b_elem_size,
-                            transa_flag, transb_flag, num_tensors, stream);
+      static_cast<char *>(setup_workspace_ptr), num_tensors);
+  launch_grouped_gemm_setup(setup_workspace, A_sel, B_sel, inputC, outputD,
+                            alpha_tensor, beta_tensor, num_tensors, stream);
 
   // Get cuBLAS handle
   using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
-  // Get data types
-  const cudaDataType_t A_type = get_cuda_dtype(A_sel.dtype);
-  const cudaDataType_t B_type = get_cuda_dtype(B_sel.dtype);
-  const cudaDataType_t D_type = get_cuda_dtype(outputD->dtype());
-
   // Setup cuBLAS operations
-  cublasOperation_t op_A = transa_flag ? CUBLAS_OP_T : CUBLAS_OP_N;
-  cublasOperation_t op_B = transb_flag ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasOperation_t op_A = A_sel.trans ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasOperation_t op_B = B_sel.trans ? CUBLAS_OP_T : CUBLAS_OP_N;
 
   // Create grouped matrix layouts
   cublasLtMatrixLayoutOpaque_t descA, descB, descC, descD;
-  init_matrix_layouts(descA, descB, descC, descD, setup_workspace, transa_flag, transb_flag,
-                      A_sel.use_columnwise, B_sel.use_columnwise, num_tensors, A_type, B_type,
-                      D_type);
+  init_matrix_layouts(descA, descB, descC, descD, setup_workspace, A_sel, B_sel, outputD,
+                      num_tensors);
 
   // Create matmul descriptor
   cublasLtMatmulDescOpaque_t matmulDesc;
   init_matmul_desc(matmulDesc, op_A, op_B);
-
-  // Set FP8 scale pointers if needed
-  const bool is_fp8_a = is_fp8_dtype(A_sel.dtype);
-  const bool is_fp8_b = is_fp8_dtype(B_sel.dtype);
-  if (is_fp8_a || is_fp8_b) {
-    // For FP8 grouped GEMM, we need to pass scale_inv pointers
-    // The scale_inv arrays contain one float per tensor in the group
-    if (is_fp8_a) {
-      void *a_scale_inv =
-          A_sel.use_columnwise ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
-      NVTE_CHECK(a_scale_inv != nullptr, "FP8 grouped GEMM: A scale_inv is required");
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_inv, sizeof(a_scale_inv)));
-    }
-    if (is_fp8_b) {
-      void *b_scale_inv =
-          B_sel.use_columnwise ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
-      NVTE_CHECK(b_scale_inv != nullptr, "FP8 grouped GEMM: B scale_inv is required");
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_inv, sizeof(b_scale_inv)));
-    }
-  }
+  set_fp8_scale_pointers(matmulDesc, A_sel, B_sel);
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
   int64_t avg_m_val = avg_m ? *avg_m : compute_avg_first_dim(outputD);
   int64_t avg_n_val = avg_n ? *avg_n : compute_avg_last_dim(outputD);
   int64_t avg_k_val =
-      avg_k ? *avg_k : (transa_flag ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      avg_k ? *avg_k : (A_sel.trans ? compute_avg_first_dim(A_sel.tensor) : compute_avg_last_dim(A_sel.tensor));
 
   // Heuristic selection
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,

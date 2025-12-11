@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <tuple>
 #include <vector>
@@ -28,7 +29,6 @@ using namespace test;
 namespace {
 
 enum class InputCase {
-  kFP8Delayed,
   kFP8Current,
   kBF16,
 };
@@ -40,17 +40,37 @@ enum class ShapeCase {
   kAllDifferent,
 };
 
+// Custom deleters for RAII
+struct CudaDeleter {
+  void operator()(void* p) const { if (p) cudaFree(p); }
+};
+struct GroupedTensorDeleter {
+  void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
+};
+
+template <typename T = void>
+using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
+
+// Helper to allocate CUDA memory into a CudaPtr
+template <typename T = void>
+CudaPtr<T> cuda_alloc(size_t bytes) {
+  void* ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
+  return CudaPtr<T>(static_cast<T*>(ptr));
+}
+
 // Helper owning GPU buffers that back NVTEGroupedTensor.
 // NVTEGroupedTensor does not own memory; data/offsets/scales
 // must be allocated and freed by the test.
 struct GroupedBuffers {
-  NVTEGroupedTensor handle{nullptr};
-  void* data{nullptr};
-  void* scale_inv{nullptr};
-  int64_t* first_dims_dev{nullptr};
-  int64_t* last_dims_dev{nullptr};
-  int64_t* offsets_dev{nullptr};
-  void* columnwise_data{nullptr};
+  GroupedTensorHandle handle;
+  CudaPtr<> data;
+  CudaPtr<> scale_inv;
+  CudaPtr<int64_t> first_dims_dev;
+  CudaPtr<int64_t> last_dims_dev;
+  CudaPtr<int64_t> offsets_dev;
+  CudaPtr<> columnwise_data;
   NVTEShape logical_shape{};
   std::vector<int64_t> offsets_host;
   std::vector<size_t> tensor_bytes;
@@ -62,65 +82,13 @@ struct GroupedBuffers {
   GroupedBuffers() = default;
   GroupedBuffers(const GroupedBuffers&) = delete;
   GroupedBuffers& operator=(const GroupedBuffers&) = delete;
-  GroupedBuffers(GroupedBuffers&& other) noexcept {
-    *this = std::move(other);
-  }
-  GroupedBuffers& operator=(GroupedBuffers&& other) noexcept {
-    if (this == &other) return *this;
-    handle = other.handle;
-    data = other.data;
-    scale_inv = other.scale_inv;
-    first_dims_dev = other.first_dims_dev;
-    last_dims_dev = other.last_dims_dev;
-    offsets_dev = other.offsets_dev;
-    logical_shape = other.logical_shape;
-    offsets_host = std::move(other.offsets_host);
-    tensor_bytes = std::move(other.tensor_bytes);
-    num_tensors = other.num_tensors;
-    elem_size = other.elem_size;
-    dtype = other.dtype;
-    scaling_mode = other.scaling_mode;
+  GroupedBuffers(GroupedBuffers&&) = default;
+  GroupedBuffers& operator=(GroupedBuffers&&) = default;
+  ~GroupedBuffers() = default;
 
-    other.handle = nullptr;
-    other.data = nullptr;
-    other.scale_inv = nullptr;
-    other.first_dims_dev = nullptr;
-    other.last_dims_dev = nullptr;
-    other.offsets_dev = nullptr;
-    other.num_tensors = 0;
-    return *this;
-  }
-
-  ~GroupedBuffers() {
-    if (data) {
-      cudaFree(data);
-      data = nullptr;
-    }
-    if (scale_inv) {
-      cudaFree(scale_inv);
-      scale_inv = nullptr;
-    }
-    if (columnwise_data) {
-      cudaFree(columnwise_data);
-      columnwise_data = nullptr;
-    }
-    if (first_dims_dev) {
-      cudaFree(first_dims_dev);
-      first_dims_dev = nullptr;
-    }
-    if (last_dims_dev) {
-      cudaFree(last_dims_dev);
-      last_dims_dev = nullptr;
-    }
-    if (offsets_dev) {
-      cudaFree(offsets_dev);
-      offsets_dev = nullptr;
-    }
-    if (handle) {
-      nvte_destroy_grouped_tensor(handle);
-      handle = nullptr;
-    }
-  }
+  // Convenience accessors for raw pointers
+  NVTEGroupedTensor get_handle() const { return handle.get(); }
+  void* get_data() const { return data.get(); }
 };
 
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
@@ -211,7 +179,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   size_t logical_data[2] = {static_cast<size_t>(logical_first),
                             static_cast<size_t>(logical_last)};
   grouped.logical_shape = nvte_make_shape(logical_data, 2);
-  grouped.handle = nvte_create_grouped_tensor(scaling_mode, num_tensors, grouped.logical_shape);
+  grouped.handle.reset(nvte_create_grouped_tensor(scaling_mode, num_tensors, grouped.logical_shape));
 
   const int64_t last_idx = static_cast<int64_t>(num_tensors - 1);
   const int64_t total_elems = need_offsets
@@ -219,59 +187,60 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                                   : (logical_first * logical_last);
   const size_t total_bytes = static_cast<size_t>(total_elems) * elem_size;
 
-  NVTE_CHECK_CUDA(cudaMalloc(&grouped.data, total_bytes));
+  grouped.data = cuda_alloc(total_bytes);
   for (size_t i = 0; i < num_tensors; ++i) {
     const size_t offset_bytes = static_cast<size_t>(offsets[i]) * elem_size;
-    NVTE_CHECK_CUDA(cudaMemcpy(static_cast<char*>(grouped.data) + offset_bytes,
+    NVTE_CHECK_CUDA(cudaMemcpy(static_cast<char*>(grouped.data.get()) + offset_bytes,
                                tensors[i]->rowwise_dptr(),
                                grouped.tensor_bytes[i],
                                cudaMemcpyDeviceToDevice));
   }
 
-  NVTEBasicTensor data_tensor{grouped.data, static_cast<NVTEDType>(dtype), grouped.logical_shape};
-  nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedRowwiseData, &data_tensor);
+  NVTEBasicTensor data_tensor{grouped.data.get(), static_cast<NVTEDType>(dtype), grouped.logical_shape};
+  NVTEGroupedTensor h = grouped.handle.get();
+  nvte_set_grouped_tensor_param(&h, kNVTEGroupedRowwiseData, &data_tensor);
 
   const bool include_columnwise = isFp8Type(dtype) || isFp4Type(dtype);
   if (include_columnwise) {
-    NVTE_CHECK_CUDA(cudaMalloc(&grouped.columnwise_data, total_bytes));
+    grouped.columnwise_data = cuda_alloc(total_bytes);
     for (size_t i = 0; i < num_tensors; ++i) {
       const size_t offset_bytes = static_cast<size_t>(offsets[i]) * elem_size;
-      NVTE_CHECK_CUDA(cudaMemcpy(static_cast<char*>(grouped.columnwise_data) + offset_bytes,
+      NVTE_CHECK_CUDA(cudaMemcpy(static_cast<char*>(grouped.columnwise_data.get()) + offset_bytes,
                                  tensors[i]->columnwise_dptr(),
                                  grouped.tensor_bytes[i],
                                  cudaMemcpyDeviceToDevice));
     }
-    NVTEBasicTensor col_tensor{grouped.columnwise_data,
+    NVTEBasicTensor col_tensor{grouped.columnwise_data.get(),
                                static_cast<NVTEDType>(dtype),
                                grouped.logical_shape};
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedColumnwiseData, &col_tensor);
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedColumnwiseData, &col_tensor);
   }
 
   if (!same_first) {
-    NVTE_CHECK_CUDA(cudaMalloc(&grouped.first_dims_dev, num_tensors * sizeof(int64_t)));
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped.first_dims_dev, first_dims.data(),
+    grouped.first_dims_dev = cuda_alloc<int64_t>(num_tensors * sizeof(int64_t));
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.first_dims_dev.get(), first_dims.data(),
                                num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
     NVTEShape fd_shape = nvte_make_shape(&num_tensors, 1);
-    NVTEBasicTensor fd_tensor{grouped.first_dims_dev, kNVTEInt64, fd_shape};
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedFirstDims, &fd_tensor);
+    NVTEBasicTensor fd_tensor{grouped.first_dims_dev.get(), kNVTEInt64, fd_shape};
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedFirstDims, &fd_tensor);
   }
 
   if (!same_last) {
-    NVTE_CHECK_CUDA(cudaMalloc(&grouped.last_dims_dev, num_tensors * sizeof(int64_t)));
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped.last_dims_dev, last_dims.data(),
+    grouped.last_dims_dev = cuda_alloc<int64_t>(num_tensors * sizeof(int64_t));
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.last_dims_dev.get(), last_dims.data(),
                                num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
     NVTEShape ld_shape = nvte_make_shape(&num_tensors, 1);
-    NVTEBasicTensor ld_tensor{grouped.last_dims_dev, kNVTEInt64, ld_shape};
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedLastDims, &ld_tensor);
+    NVTEBasicTensor ld_tensor{grouped.last_dims_dev.get(), kNVTEInt64, ld_shape};
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedLastDims, &ld_tensor);
   }
 
   if (!same_first || !same_last) {
-    NVTE_CHECK_CUDA(cudaMalloc(&grouped.offsets_dev, num_tensors * sizeof(int64_t)));
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped.offsets_dev, offsets.data(),
+    grouped.offsets_dev = cuda_alloc<int64_t>(num_tensors * sizeof(int64_t));
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.offsets_dev.get(), offsets.data(),
                                num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
     NVTEShape off_shape = nvte_make_shape(&num_tensors, 1);
-    NVTEBasicTensor off_tensor{grouped.offsets_dev, kNVTEInt64, off_shape};
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedTensorOffsets, &off_tensor);
+    NVTEBasicTensor off_tensor{grouped.offsets_dev.get(), kNVTEInt64, off_shape};
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedTensorOffsets, &off_tensor);
   }
 
   if (isFp8Type(dtype)) {
@@ -280,13 +249,13 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
       tensors[i]->to_cpu();
       scale_inv_cpu[i] = tensors[i]->rowwise_cpu_scale_inv_ptr<float>()[0];
     }
-    NVTE_CHECK_CUDA(cudaMalloc(&grouped.scale_inv, sizeof(float) * num_tensors));
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped.scale_inv, scale_inv_cpu.data(),
+    grouped.scale_inv = cuda_alloc(sizeof(float) * num_tensors);
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.scale_inv.get(), scale_inv_cpu.data(),
                                sizeof(float) * num_tensors, cudaMemcpyHostToDevice));
     NVTEShape scale_shape = nvte_make_shape(&num_tensors, 1);
-    NVTEBasicTensor scale_tensor{grouped.scale_inv, kNVTEFloat32, scale_shape};
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedRowwiseScaleInv, &scale_tensor);
-    nvte_set_grouped_tensor_param(&grouped.handle, kNVTEGroupedColumnwiseScaleInv, &scale_tensor);
+    NVTEBasicTensor scale_tensor{grouped.scale_inv.get(), kNVTEFloat32, scale_shape};
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedRowwiseScaleInv, &scale_tensor);
+    nvte_set_grouped_tensor_param(&h, kNVTEGroupedColumnwiseScaleInv, &scale_tensor);
   }
 
   return grouped;
@@ -321,6 +290,7 @@ struct TestParams {
   bool transa;
   bool transb;
   ShapeCase shape_case;
+  bool use_null_c = false;  // When true, pass nullptr for C (valid when beta=0)
 };
 
 // Returns a vector of (M, N, K) tuples for each GEMM in the group.
@@ -332,12 +302,14 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
     case ShapeCase::kAllSame:
       return {{64, 64, 32}, {64, 64, 32}, {64, 64, 32}};
     case ShapeCase::kSameFirst:
-      return {{64, 80, 32}, {64, 80, 48}, {64, 80, 64}};
+      // Same M (first dim), varying N and K
+      return {{64, 80, 32}, {64, 96, 48}, {64, 112, 64}};
     case ShapeCase::kSameLast:
-      return {{64, 80, 32}, {64, 80, 48}, {64, 80, 64}};
+      // Same N (last dim), varying M and K
+      return {{64, 80, 32}, {80, 80, 48}, {96, 80, 64}};
     case ShapeCase::kAllDifferent:
     default:
-      return {{64, 96, 32}, {64, 96, 48}, {64, 96, 64}};
+      return {{64, 96, 32}, {80, 112, 48}, {96, 128, 64}};
   }
 }
 
@@ -430,9 +402,11 @@ void run_grouped_gemm_case(const TestParams& params) {
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
     (void)K;
-    C_tensors.emplace_back(Tensor("C" + std::to_string(i),
-                                  std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
-                                  DType::kBFloat16));
+    if (!params.use_null_c) {
+      C_tensors.emplace_back(Tensor("C" + std::to_string(i),
+                                    std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
+                                    DType::kBFloat16));
+    }
     D_group_tensors.emplace_back(Tensor("D_group" + std::to_string(i),
                                         std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
                                         DType::kBFloat16));
@@ -441,11 +415,16 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   std::vector<Tensor*> C_views, D_views;
   for (size_t i = 0; i < num_gemms; ++i) {
-    C_views.push_back(&C_tensors[i]);
+    if (!params.use_null_c) {
+      C_views.push_back(&C_tensors[i]);
+    }
     D_views.push_back(&D_group_tensors[i]);
   }
 
-  GroupedBuffers grouped_C = build_grouped_tensor(C_views, NVTE_DELAYED_TENSOR_SCALING);
+  std::optional<GroupedBuffers> grouped_C;
+  if (!params.use_null_c) {
+    grouped_C = build_grouped_tensor(C_views, NVTE_DELAYED_TENSOR_SCALING);
+  }
   GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
 
   Tensor alpha_tensor("alpha", std::vector<size_t>{1}, DType::kFloat32);
@@ -462,11 +441,11 @@ void run_grouped_gemm_case(const TestParams& params) {
   nvte_grouped_gemm(params.transa,
                     params.transb,
                     alpha_tensor.data(),
-                    grouped_A.handle,
-                    grouped_B.handle,
+                    grouped_A.get_handle(),
+                    grouped_B.get_handle(),
                     beta_tensor.data(),
-                    grouped_C.handle,
-                    grouped_D.handle,
+                    params.use_null_c ? nullptr : grouped_C->get_handle(),
+                    grouped_D.get_handle(),
                     setup_ws.data(),
                     cublas_ws.data(),
                     nullptr,
@@ -482,7 +461,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                          D_multi[i].dtype());
     const size_t offset_bytes = static_cast<size_t>(grouped_D.offsets_host[i]) * grouped_D.elem_size;
     NVTE_CHECK_CUDA(cudaMemcpy(grouped_split.rowwise_dptr(),
-                               static_cast<char*>(grouped_D.data) + offset_bytes,
+                               static_cast<char*>(grouped_D.get_data()) + offset_bytes,
                                grouped_D.tensor_bytes[i],
                                cudaMemcpyDeviceToDevice));
     grouped_split.to_cpu();
@@ -504,22 +483,25 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemm) {
 }
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {
-  constexpr const char* kInputNames[] = {"FP8Delayed", "FP8Current", "BF16"};
+  constexpr const char* kInputNames[] = {"FP8Current", "BF16"};
   constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff"};
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
+  const std::string null_c = info.param.use_null_c ? "_NullC" : "";
   return std::string(kInputNames[static_cast<int>(info.param.input_case)]) + "_" +
-         kShapeNames[static_cast<int>(info.param.shape_case)] + "_" + layout;
+         kShapeNames[static_cast<int>(info.param.shape_case)] + "_" + layout + null_c;
 }
 
 const std::vector<TestParams> kTestParams = {
-    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent},
-    {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent},
-    {InputCase::kFP8Current, false, false, ShapeCase::kAllSame},
-    {InputCase::kBF16, true, false, ShapeCase::kSameFirst},
-    {InputCase::kBF16, false, true, ShapeCase::kSameLast},
-    {InputCase::kBF16, false, false, ShapeCase::kAllSame},
-    {InputCase::kBF16, true, true, ShapeCase::kAllDifferent},
+    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
+    {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
+    {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
+    {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false},
+    {InputCase::kBF16, false, true, ShapeCase::kSameLast, false},
+    {InputCase::kBF16, false, false, ShapeCase::kAllSame, false},
+    {InputCase::kBF16, true, true, ShapeCase::kAllDifferent, false},
+    // Test NULL C (valid when beta=0)
+    {InputCase::kBF16, false, false, ShapeCase::kAllSame, true},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,

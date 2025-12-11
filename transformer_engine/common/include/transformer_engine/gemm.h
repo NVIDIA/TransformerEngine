@@ -239,19 +239,27 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
  * memory layout and shape metadata.
  *
- *  \param[in]  transa      Whether to transpose A matrices.
- *  \param[in]  transb      Whether to transpose B matrices.
- *  \param[in]  alpha       Scale multiplier for A @ B (NVTETensor with num_tensors elements,
- *                          or single element for uniform alpha).
- *  \param[in]  A           Input grouped tensor A.
- *  \param[in]  B           Input grouped tensor B.
- *  \param[in]  beta        Scale multiplier for C (NVTETensor with num_tensors elements,
- *                          or single element for uniform beta).
- *  \param[in]  C           Input grouped tensor C (can be NULL for beta=0).
- *  \param[out] D           Output grouped tensor D.
- *  \param[in]  workspace   Workspace tensor for intermediate computations.
- *  \param[in]  config      Matrix multiplication configuration.
- *  \param[in]  stream      CUDA stream for the operation.
+ *  \param[in]  transa           Whether to transpose A matrices.
+ *  \param[in]  transb           Whether to transpose B matrices.
+ *  \param[in]  alpha            Scale multiplier for A @ B (single element NVTETensor).
+ *  \param[in]  A                Input grouped tensor A.
+ *  \param[in]  B                Input grouped tensor B.
+ *  \param[in]  beta             Scale multiplier for C (single element NVTETensor).
+ *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
+ *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+ *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+ *  \param[in]  config           Matrix multiplication configuration.
+ *  \param[in]  stream           CUDA stream for the operation.
+ *  \param[in]  avg_m            Optional hint for average M dimension across all matrices in the
+ *                               group. Used by cuBLASLt for algorithm selection heuristics.
+ *                               If NULL, computed automatically from D's logical shape.
+ *  \param[in]  avg_n            Optional hint for average N dimension across all matrices in the
+ *                               group. Used by cuBLASLt for algorithm selection heuristics.
+ *                               If NULL, computed automatically from D's logical shape.
+ *  \param[in]  avg_k            Optional hint for average K (reduction) dimension across all
+ *                               matrices in the group. Used by cuBLASLt for algorithm selection
+ *                               heuristics. If NULL, computed automatically from A's logical shape.
  *
  * Requirements:
  * - A, B, C (if provided), D must have the same num_tensors
