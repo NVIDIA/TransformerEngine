@@ -724,7 +724,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                       : 1.0f;
 
       float global_decode_scale = 1.0f / global_encode_scale;
-      float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      float global_encode_scale_multiplier = 1.0f;
+      if constexpr (kEnableFastMath) {
+        global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      } 
       auto sfc_converter = cutlass::NumericConverter<TSFD, float>{};
 
       do {
@@ -747,7 +750,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                             cutlass::platform::numeric_limits<float>::max())
                                       : 1.0f;
             global_decode_scale = 1.0f / global_encode_scale;
-            global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            if constexpr (kEnableFastMath) {
+              global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            }
             cur_N = args.split_sections[group_idx];
             if constexpr (kEnableSwizzleSFOutput) {
               sfd_layout =
@@ -821,10 +826,14 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
           }
 
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-              vec_maxs, global_encode_scale_multiplier);
-          auto pvscales_cvted =
-              cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
+          if constexpr (kEnableFastMath) {
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                vec_maxs, global_encode_scale_multiplier);
+          } else {
+            pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
+          }
+          auto pvscales_cvted = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
 
           tD_rRowSFD_frg(_0{}) = pvscales_cvted;
           auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, NumVecs>{}(
@@ -943,7 +952,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                       : 1.0f;
 
       float global_decode_scale = 1.0f / global_encode_scale;
-      float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      float global_encode_scale_multiplier = 1.0f;
+      if constexpr (kEnableFastMath) {
+        global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      } 
       auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
       do {
         CUTLASS_PRAGMA_NO_UNROLL
@@ -962,7 +974,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                             cutlass::platform::numeric_limits<float>::max())
                                       : 1.0f;
             global_decode_scale = 1.0f / global_encode_scale;
-            global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            if constexpr (kEnableFastMath) {
+              global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            }
           }
 
           auto tQAgSFA_mn = tQAgSFA(_, _, _, scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
@@ -999,8 +1013,15 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                 cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(
                     compute_frgs[v]);
             amax_view(_0{}, v) = amax_reduction(ElementAccumulator(0), compute_frgs_up);
-            pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
-                amax_view(_0{}, v), global_encode_scale_multiplier);
+            if constexpr (kEnableFastMath) {
+              pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
+                  amax_view(_0{}, v), global_encode_scale_multiplier);
+            } else {
+              pvscales_view(_0{}, v) = cutlass::divides<ElementAccumulator>{}(
+                  amax_view(_0{}, v), fp4_max);
+              pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
+                  pvscales_view(_0{}, v), global_encode_scale);
+            }
             filter(tQArSFA)(v) = sfa_converter(pvscales_view(_0{}, v));
             auto qpvscale_ups =
                 cutlass::NumericConverter<ElementAccumulator, TSFA>{}(filter(tQArSFA)(v));
