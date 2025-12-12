@@ -818,6 +818,8 @@ class CudaRNGStatesTracker:
                A mapping from string names to RNG states.
         """
         self.states_ = states
+        # Update global states.
+        set_all_rng_states(self.states_)
 
     def add(self, name: str, seed: int) -> None:
         """
