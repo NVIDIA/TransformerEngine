@@ -16,6 +16,8 @@ namespace transformer_engine {
 
 // Parameters for vectorization
 constexpr int desired_load_store_size = 8;  // bytes
+constexpr int n_warps_per_tile = 8;
+constexpr int threads_per_block = THREADS_PER_WARP * n_warps_per_tile;
 
 template <typename scalar_t, int nvec, bool aligned>
 __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs, scalar_t *dst,
@@ -227,14 +229,14 @@ __device__ void fused_rope_block_backward(const scalar_t *src, const float *freq
 }
 
 template <typename scalar_t, int nvec, bool aligned>
-__global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seqlens,
-                                          const float *freqs, const int *start_positions,
-                                          scalar_t *dst, const bool interleaved, const int cp_size,
-                                          const int cp_rank, const int s, const int h, const int d,
-                                          const int d2, const int stride_s_or_t, const int stride_b,
-                                          const int stride_h, const int stride_d,
-                                          const int o_stride_s_or_t, const int o_stride_b,
-                                          const int o_stride_h, const int o_stride_d) {
+__global__ void __launch_bounds__(threads_per_block)
+    fused_rope_forward_kernel(const scalar_t *src, const int *cu_seqlens, const float *freqs,
+                              const int *start_positions, scalar_t *dst, const bool interleaved,
+                              const int cp_size, const int cp_rank, const int s, const int h,
+                              const int d, const int d2, const int stride_s_or_t,
+                              const int stride_b, const int stride_h, const int stride_d,
+                              const int o_stride_s_or_t, const int o_stride_b, const int o_stride_h,
+                              const int o_stride_d) {
   int s_id = blockIdx.x, b_id = blockIdx.y;
   int offset_block, offset_block_dst;
   int cur_seqlens;
@@ -272,12 +274,14 @@ __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seq
 }
 
 template <typename scalar_t, int nvec, bool aligned>
-__global__ void fused_rope_backward_kernel(
-    const scalar_t *src, const int *cu_seqlens, const float *freqs, const int *start_positions,
-    scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int s,
-    const int h, const int d, const int d2, const int stride_s_or_t, const int stride_b,
-    const int stride_h, const int stride_d, const int o_stride_s_or_t, const int o_stride_b,
-    const int o_stride_h, const int o_stride_d) {
+__global__ void __launch_bounds__(threads_per_block)
+    fused_rope_backward_kernel(const scalar_t *src, const int *cu_seqlens, const float *freqs,
+                               const int *start_positions, scalar_t *dst, const bool interleaved,
+                               const int cp_size, const int cp_rank, const int s, const int h,
+                               const int d, const int d2, const int stride_s_or_t,
+                               const int stride_b, const int stride_h, const int stride_d,
+                               const int o_stride_s_or_t, const int o_stride_b,
+                               const int o_stride_h, const int o_stride_d) {
   int s_id = blockIdx.x, b_id = blockIdx.y;
   int offset_block, offset_block_dst;
   int cur_seqlens;
@@ -556,9 +560,8 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
                                  const int h, const int d, const int d2, const int stride_s_or_t,
                                  const int stride_b, const int stride_h, const int stride_d,
                                  cudaStream_t stream) {
-  int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  dim3 threads(THREADS_PER_WARP, n_warps_per_tile);
   // No shared memory needed - cos/sin computed directly in registers
   const int shared_mem_size = 0;
   int o_stride_s_or_t, o_stride_b;
@@ -608,9 +611,8 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
                                   const int s, const int b, const int h, const int d, const int d2,
                                   const int stride_s_or_t, const int stride_b, const int stride_h,
                                   const int stride_d, cudaStream_t stream) {
-  int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  dim3 threads(THREADS_PER_WARP, n_warps_per_tile);
   // Shared memory for cos/sin cache: [cos(d2)] [padding(1)] [sin(d2)]
   const int shared_mem_size = (2 * d2 + 1) * sizeof(float);
   int o_stride_s_or_t, o_stride_b;
