@@ -608,9 +608,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         size_t scale_idx_gate;
         if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
           const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
-          scale_idx_gate = gemm_swizzled_scale_idx(stage_scales_offset_Y,
-                                              stage_scales_offset_X + gate_scale_idx_offset_rowwise,
-                                              DIVUP(output_cols, static_cast<size_t>(128)));
+          scale_idx_gate = gemm_swizzled_scale_idx(
+              stage_scales_offset_Y, stage_scales_offset_X + gate_scale_idx_offset_rowwise,
+              DIVUP(output_cols, static_cast<size_t>(128)));
         } else {
           scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
         }
