@@ -77,6 +77,12 @@ def check_nvfp4_gemm_versus_reference(
     )
     w_nvfp4_native = w_quantizer.update_quantized(w, w_nvfp4_native)
 
+    # Check that the columnwise gemms don't depend on rowwise data.
+    if x_columnwise:
+        x_nvfp4_native.update_usage(rowwise=False)
+    if w_columnwise:
+        w_nvfp4_native.update_usage(rowwise=False)
+
     # Extract quantized data from native NVFP4Tensors
     qx_data = (
         x_nvfp4_native._columnwise_data.view(dtype=torch.uint8)

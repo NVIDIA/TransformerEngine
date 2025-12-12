@@ -363,8 +363,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // TODO: Check whether scales are on CPU/GPU or add API to control.
   // Currently scales are assumed to be on CPU when amax is provided
   // and on GPU when not provided, but this is brittle.
-  if (use_fp4 && ((transa == CUBLAS_OP_T ? inputA->amax.dptr : inputA->columnwise_amax.dptr) != nullptr ||
-                  (transb == CUBLAS_OP_T ? inputB->columnwise_amax.dptr : inputB->amax.dptr) != nullptr)) {
+  if (use_fp4 &&
+      ((transa == CUBLAS_OP_T ? inputA->amax.dptr : inputA->columnwise_amax.dptr) != nullptr ||
+       (transb == CUBLAS_OP_T ? inputB->columnwise_amax.dptr : inputB->amax.dptr) != nullptr)) {
     // Reserve some workspace for alpha scale
     NVTE_CHECK(workspaceSize >= 4,
                "NVFP4 GEMM requires at least 4 byte workspace for alpha scale, but only has ",
