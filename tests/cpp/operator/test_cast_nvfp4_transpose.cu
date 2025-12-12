@@ -114,14 +114,16 @@ void quantize_nvfp4_1d(float (*OP)(const float),
             const float S_dec_b = block_amax / 6.0f;
 
             // Scale & Store per-block decoding scaling factor
-            const float S_dec_b_fp8 = S_dec_b * S_enc;
+            const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+            const float S_dec_b_fp32 = static_cast<float>(S_dec_b_fp8);
 
             // Compute "correct" per-block encoding scaling factor
-            const float S_enc_b_fp8 = S_dec_b_fp8 == 0 ? 0.f : S_enc / S_dec_b_fp8;
+            const float S_enc_b_fp8 = S_dec_b_fp32 == 0.f ? 0.f : S_enc / S_dec_b_fp32;
 
             const size_t scale_idx = i * scales_stride + block_X;
-            scales[scale_idx] = static_cast<fp8e4m3>(S_dec_b_fp8);
-            const float scale_reciprocal = S_enc_b_fp8;
+            scales[scale_idx] = S_dec_b_fp8;
+            // Numercial truncation to match GPU implementation, which uses mixed precision FMA instruction
+            const float scale_reciprocal = static_cast<float>(static_cast<bf16>(S_enc_b_fp8));
 
             for (size_t j = j_min; j < j_max; j += 2) {
                 const int idx_pair = (i * cols + j) / 2;
@@ -349,6 +351,8 @@ void compare_nvfp4_tensors(const std::string& name,
                            const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
                            const int rows, const int cols,
                            double atol = 1e-5, double rtol = 1e-8) {
+    constexpr int max_mismatches_to_print = 3;
+
     std::vector<std::string> mismatch_messages;
     size_t total_mismatches = 0;
 
@@ -362,29 +366,16 @@ void compare_nvfp4_tensors(const std::string& name,
                 const double t = (k == 0 ? test_data_pair.x : test_data_pair.y);
                 const double r = (k == 0 ? ref_data_pair.x : ref_data_pair.y);
 
-                bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
-                /* For Float32 the floating point comparison is enough to error out */
-                bool assertion = false;
-                if (mismatch && !assertion) {
-                    /* Check if it is just a failure of round to nearest choosing different
-                        side of the real value */
-                    const double mean = (t + r) / 2;
-                    const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
-                    const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-                    const double cast_mean_p = static_cast<double>(static_cast<fp4e2m1>(mean_p));
-                    const double cast_mean_m = static_cast<double>(static_cast<fp4e2m1>(mean_m));
-                    assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
-                }
-                if (assertion) {
+                const bool mismatch = fabs(t - r) > (atol + fabs(r) * rtol);
+                if (mismatch) {
                     total_mismatches++;
-                    std::string msg = "Mismatch at place (" + std::to_string(idx + k) + "): " +
-                                    std::to_string(t) + " vs " + std::to_string(r) +
-                                    " (abs_diff: " + std::to_string(fabs(t - r)) +
-                                    ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
-                    mismatch_messages.push_back(msg);
-
                     // Optional: limit number of detailed messages to avoid overwhelming output
-                    if (mismatch_messages.size() <= 100) {
+                    if (total_mismatches <= max_mismatches_to_print) {
+                        std::string msg = "Mismatch at place (" + std::to_string(idx + k) + "): " +
+                                          std::to_string(t) + " vs " + std::to_string(r) +
+                                          " (abs_diff: " + std::to_string(fabs(t - r)) +
+                                          ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
+                        mismatch_messages.push_back(msg);
                         std::cout << "Error in tensor " << name << ": " << msg << std::endl;
                     }
                 }
@@ -400,8 +391,9 @@ void compare_nvfp4_tensors(const std::string& name,
         std::cout << "STATUS: FAILED for output" << std::endl;
         std::cout << "Total mismatches found: " << total_mismatches << std::endl;
         std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
-        if (mismatch_messages.size() > 100) {
-            std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
+        if (mismatch_messages.size() > max_mismatches_to_print) {
+            std::cout << "... and " << (mismatch_messages.size() - max_mismatches_to_print)
+            << " more mismatches (showing first " << max_mismatches_to_print << ")" << std::endl;
         }
         std::cout << "============================" << std::endl;
 
@@ -619,8 +611,8 @@ void performTest(float (*OP)(const float),
     }
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    const double atol = 0.05;
-    const double rtol = 0.1;
+    const double atol = 1.0E-6;
+    const double rtol = 1.0E-6;
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);

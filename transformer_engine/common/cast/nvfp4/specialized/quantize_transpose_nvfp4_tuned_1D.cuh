@@ -150,9 +150,9 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
 
 // Compute "correct" per-block encoding scaling factor
 __device__ __forceinline__ bf16 compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block,
-                                                                  const float S_dec) {
+                                                                  const float S_enc) {
   constexpr float float_max = detail::TypeExtrema<float>::max;
-  const float scale_rcp = fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), float_max);
+  const float scale_rcp = fminf(S_enc / static_cast<float>(S_dec_block), float_max);
   return static_cast<bf16>(scale_rcp);
 }
 
@@ -160,7 +160,7 @@ template <bool USE_STOCHASTIC_ROUNDING>
 __device__ __forceinline__ void colwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
     nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise,
-    const float S_dec_colwise, const int stage_Y, const int stage_X, const int buff_in,
+    const int stage_Y, const int stage_X, const int buff_in,
     const int buff_out_tr, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
   auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
@@ -204,7 +204,7 @@ __device__ __forceinline__ void colwise_scaling(
     // Store scaling factors to SMEM buffer (R2S)
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
-    const bf16 SFcoefficient = compute_nvfp4_scaling_coefficient(S_dec_b_fp8, S_dec_colwise);
+    const bf16 SFcoefficient = compute_nvfp4_scaling_coefficient(S_dec_b_fp8, S_enc_colwise);
 
     // Scale elements
     __align__(8) uint32_t rOut[SCALE_DIM / 8];
@@ -231,7 +231,7 @@ template <bool USE_STOCHASTIC_ROUNDING>
 __device__ __forceinline__ void rowwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
     nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise,
-    const float S_dec_rowwise, const int stage_Y, const int stage_X, const int buff_in,
+    const int stage_Y, const int stage_X, const int buff_in,
     const int buff_out, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
   const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
   auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
@@ -278,7 +278,7 @@ __device__ __forceinline__ void rowwise_scaling(
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
     const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-    const bf16 SFcoefficient = compute_nvfp4_scaling_coefficient(S_dec_b_fp8, S_dec_rowwise);
+    const bf16 SFcoefficient = compute_nvfp4_scaling_coefficient(S_dec_b_fp8, S_enc_rowwise);
 
     // Store scaling factors to SMEM buffer (R2S)
     if (SF_storing_thread) {
@@ -379,14 +379,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
           : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
-  // NOTE: This is to match with how emulation code was written.
-  const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
           : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
-  const float S_dec_colwise = 1.0 / S_enc_colwise;
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;
@@ -535,12 +532,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // NVFP4 Quantization
       rowwise_scaling<USE_STOCHASTIC_ROUNDING>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise,
-                                               S_dec_rowwise, stage_Y, stage_X, buff_in, buff_out,
+                                               stage_Y, stage_X, buff_in, buff_out,
                                                rng, random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
         colwise_scaling<USE_STOCHASTIC_ROUNDING>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr,
-                                                 S_enc_colwise, S_dec_colwise, stage_Y, stage_X,
+                                                 S_enc_colwise, stage_Y, stage_X,
                                                  buff_in, buff_out_tr, rng, random_uint4, rnd_idx);
       }
 
