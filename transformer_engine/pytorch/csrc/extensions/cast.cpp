@@ -326,9 +326,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, fp8_dtype,
-        quantizer_py_list[i], is_2D_scaled));
+    tensor_py_list.emplace_back(
+        Float8BlockwiseQTensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
+                                    fp8_dtype, quantizer_py_list[i], is_2D_scaled));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(

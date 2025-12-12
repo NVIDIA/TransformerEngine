@@ -210,8 +210,7 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   // store it cooperatively for 512 1x32 tiles in a 128x128 tile
   constexpr uint32_t out_x_stride = 512;
   void* const warp_dst =
-      (reinterpret_cast<uint8_t*>(out) + out_tile_y * out_y_stride
-       + out_tile_x * out_x_stride);
+      (reinterpret_cast<uint8_t*>(out) + out_tile_y * out_y_stride + out_tile_x * out_x_stride);
   reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
 }
 

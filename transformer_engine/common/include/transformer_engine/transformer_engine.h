@@ -729,8 +729,7 @@ class TensorWrapper {
   }
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
-    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales,
-                             &with_gemm_swizzled_scales,
+    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &with_gemm_swizzled_scales,
                              sizeof(with_gemm_swizzled_scales));
   }
 
@@ -767,10 +766,8 @@ class TensorWrapper {
 
   bool get_with_gemm_swizzled_scales() const {
     bool with_gemm_swizzled_scales = false;
-    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales,
-                             &with_gemm_swizzled_scales,
-                             sizeof(with_gemm_swizzled_scales),
-                             nullptr);
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &with_gemm_swizzled_scales,
+                             sizeof(with_gemm_swizzled_scales), nullptr);
     return with_gemm_swizzled_scales;
   }
 

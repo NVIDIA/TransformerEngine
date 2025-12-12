@@ -42,8 +42,7 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
 // Convert compact scale indices into GEMM swizzled scale index
-__device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j,
-                                                          size_t num_tiles_X) {
+__device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_X) {
   constexpr size_t TILE_DIM_X = 4;
   constexpr size_t TILE_DIM_Y = 128;
   constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
@@ -283,8 +282,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t global_scales_offset_X = scales_offset_X_colwise;
       size_t scale_idx;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        scale_idx = gemm_swizzled_scale_idx(global_scales_offset_X,
-                                            global_scales_offset_Y,
+        scale_idx = gemm_swizzled_scale_idx(global_scales_offset_X, global_scales_offset_Y,
                                             DIVUP(rows, static_cast<size_t>(128)));
       } else {
         scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;

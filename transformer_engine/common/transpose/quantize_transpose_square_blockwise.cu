@@ -511,17 +511,14 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
   if (return_transpose) {
-    NVTE_CHECK(output_t.shape.size() == input.shape.size(),
-               "input (shape=", input.shape, ") and output_t (shape=",
-               output_t.shape, ") have incompatible dims.");
+    NVTE_CHECK(output_t.shape.size() == input.shape.size(), "input (shape=", input.shape,
+               ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
     if (output_t.shape.size() > 0) {
-      NVTE_CHECK(output_t.shape.front() == input.shape.back(),
-                 "input (shape=", input.shape, ") and output_t (shape=",
-                 output_t.shape, ") have incompatible dims.");
+      NVTE_CHECK(output_t.shape.front() == input.shape.back(), "input (shape=", input.shape,
+                 ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
       for (size_t i = 1; i < output_t.shape.size(); ++i) {
-        NVTE_CHECK(output_t.shape[i] == input.shape[i-1],
-                   "input (shape=", input.shape, ") and output_t (shape=",
-                   output_t.shape, ") have incompatible dims.");
+        NVTE_CHECK(output_t.shape[i] == input.shape[i - 1], "input (shape=", input.shape,
+                   ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
       }
     }
     NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same type.");

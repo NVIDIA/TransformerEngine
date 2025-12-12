@@ -306,9 +306,7 @@ size_t roundup(size_t value, size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-size_t ceildiv(size_t numer, size_t denom) {
-  return (numer + denom - 1) / denom;
-}
+size_t ceildiv(size_t numer, size_t denom) { return (numer + denom - 1) / denom; }
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   NVTE_SCOPED_GIL_RELEASE({

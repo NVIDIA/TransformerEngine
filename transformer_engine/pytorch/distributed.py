@@ -1076,11 +1076,7 @@ def _start_all_gather_fp8_blockwise(
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
 
     # Fall back to high-precision all-gather if FP8 is not supported
-    if (
-        quantizer is None
-        or not quantizer.is_quantizable(inp)
-        or quantizer.block_scaling_dim != 1
-    ):
+    if quantizer is None or not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
         out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
         out = quantizer(out)
@@ -1187,7 +1183,7 @@ def _finish_all_gather_fp8_blockwise(
     # Fix interleaving in row-wise scales
     if interleaved_rowwise_scale_inv is not None:
         dim0 = out._rowwise_scale_inv.size(0)
-        view_in = interleaved_rowwise_scale_inv.view(world_size,dim0, -1)
+        view_in = interleaved_rowwise_scale_inv.view(world_size, dim0, -1)
         view_out = out._rowwise_scale_inv.view(dim0, world_size, -1)
         tex.swap_first_dims(view_in, out=view_out)
 

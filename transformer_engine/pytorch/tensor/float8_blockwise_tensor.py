@@ -215,7 +215,7 @@ class Float8BlockQuantizer(Quantizer):
 
         tensor_kwargs = {
             "device": torch.device("cuda") if device is None else device,
-            "pin_memory": pin_memory
+            "pin_memory": pin_memory,
         }
 
         # Allocate buffers for row-scaled data

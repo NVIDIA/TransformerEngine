@@ -824,9 +824,10 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       sinv0 = ceildiv(k_dim, kBlockLen);
       sinv1 = roundup(m_dim, 4);
     } else {
-      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor rowwise."
-                 "Expected 1 or 2. Got ",
-                 block_scaling_dim);
+      NVTE_ERROR(
+          "Unsupported block_scaling_dim in create_tensor rowwise."
+          "Expected 1 or 2. Got ",
+          block_scaling_dim);
     }
     scale_shape = {sinv0, sinv1};
   } else {
@@ -840,9 +841,10 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       sinv0 = ceildiv(m_dim, kBlockLen);
       sinv1 = roundup(k_dim, 4);
     } else {
-      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor columnwise."
-                 "Expected 1 or 2. Got ",
-                 block_scaling_dim);
+      NVTE_ERROR(
+          "Unsupported block_scaling_dim in create_tensor columnwise."
+          "Expected 1 or 2. Got ",
+          block_scaling_dim);
     }
     scale_shape = {sinv0, sinv1};
   }
