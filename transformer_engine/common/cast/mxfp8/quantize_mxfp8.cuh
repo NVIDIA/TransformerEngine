@@ -43,7 +43,7 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 
 // Convert compact scale indices into GEMM swizzled scale index
 __device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_X) {
-  constexpr size_t TILE_DIM_X = 4;
+  constexpr size_t TILE_DIM_X = 4;  // Tile dim in scale buffer
   constexpr size_t TILE_DIM_Y = 128;
   constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
   const size_t tile_idx_X = j / TILE_DIM_X;
@@ -770,7 +770,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // Zero out swizzled scales if padding is needed
               /// TODO (tmoon) Handle this within the cast kernel
               if (with_gemm_swizzled_scales) {
-                constexpr size_t TILE_DIM_X = 128;
+                constexpr size_t TILE_DIM_X = 128;  // Tile dim in data buffer
                 constexpr size_t TILE_DIM_Y = 128;
                 if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
                   if (use_rowwise_scaling) {

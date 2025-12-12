@@ -51,7 +51,7 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 
 // Convert compact scale indices into GEMM swizzled scale index
 __device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_X) {
-  constexpr size_t TILE_DIM_X = 4;
+  constexpr size_t TILE_DIM_X = 4;  // Tile dim in scale buffer
   constexpr size_t TILE_DIM_Y = 128;
   constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
   const size_t tile_idx_X = j / TILE_DIM_X;
@@ -394,7 +394,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         size_t scale_idx_gate;
         if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-          scale_idx = gemm_swizzled_scale_idx(
+          scale_idx_gate = gemm_swizzled_scale_idx(
               global_scales_offset_X + gate_scale_idx_offset_colwise, global_scales_offset_Y,
               DIVUP(rows, static_cast<size_t>(128)));
         } else {
@@ -608,7 +608,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         size_t scale_idx_gate;
         if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
           const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
-          scale_idx = gemm_swizzled_scale_idx(stage_scales_offset_Y,
+          scale_idx_gate = gemm_swizzled_scale_idx(stage_scales_offset_Y,
                                               stage_scales_offset_X + gate_scale_idx_offset_rowwise,
                                               DIVUP(output_cols, static_cast<size_t>(128)));
         } else {
@@ -831,7 +831,7 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
               // Zero out swizzled scales if padding is needed
               /// TODO (tmoon) Handle this within the cast kernel
               if (with_gemm_swizzled_scales) {
-                constexpr size_t TILE_DIM_X = 128;
+                constexpr size_t TILE_DIM_X = 128;  // Tile dim in data buffer
                 constexpr size_t TILE_DIM_Y = 128;
                 if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
                   if (USE_ROWWISE_SCALING) {

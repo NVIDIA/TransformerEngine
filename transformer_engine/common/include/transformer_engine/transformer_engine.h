@@ -286,7 +286,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
  */
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
 
-/*! \brief Set a parameter of a tensor.
+/*! \brief Set a tensor parameter.
  *
  *  \param[in/out] tensor        Tensor.
  *  \param[in]     param         Tensor parameter type.
@@ -296,7 +296,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
 void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
                               size_t size_in_bytes);
 
-/*! \brief Query an option in quantization config.
+/*! \brief Query a tensor parameter.
  *
  *  \param[in]  tensor        Tensor.
  *  \param[in]  param         Tensor parameter type.
