@@ -244,7 +244,7 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor],
         columnwise_quantized_tensor: Optional[torch.Tensor],
         quantizer: Optional[Quantizer],
@@ -262,8 +262,8 @@ class TEDefaultFeatures:
         layer_name: str
         tensor_name: str
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-        tensor: torch.Tensor
-            tensor in high precision,
+        tensor: Optional[torch.Tensor]
+            tensor in high precision. It can be None only if fp8 model parameters are used and tensor name is `weight`.
         rowwise_quantized_tensor: Optional[torch.Tensor]
             rowwise quantized tensor,
         columnwise_quantized_tensor: Optional[torch.Tensor]
