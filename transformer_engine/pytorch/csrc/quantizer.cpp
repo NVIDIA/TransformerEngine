@@ -1526,9 +1526,17 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
         NVTE_SCOPED_GIL_RELEASE(
             { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+        out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
 
-        // Make columnwise amax point to the same buffer as rowwise (value is identical)
-        out.set_columnwise_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+        // Make sure row-wise and column-wise amaxes match
+        if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+        if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
       }
     } else {
       // with_rht but not with_post_rht_amax and not using estimation
