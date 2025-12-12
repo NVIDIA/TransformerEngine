@@ -51,7 +51,19 @@ jobs:
           df -h
           apt-get clean
           df -h
-          pip install -v cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          pip install -v cmake
+          df -h
+          pip install -v ninja
+          df -h
+          pip install -v pydantic importlib-metadata>=1.0
+          df -h
+          pip install -v packaging pybind11
+          df -h
+          pip install -v numpy
+          df -h
+          pip install -v einops onnxscript
+          df -h
+          pip install -v torch
           df -h
       - name: 'Checkout'
         uses: actions/checkout@v3
