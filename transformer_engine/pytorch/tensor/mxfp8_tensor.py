@@ -904,7 +904,7 @@ class _ViewFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
-                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -991,7 +991,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
-                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

@@ -48,7 +48,7 @@ from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]

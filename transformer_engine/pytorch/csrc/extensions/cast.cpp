@@ -215,7 +215,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 4;
-  const bool with_gemm_swizzled_scales = true;
 
   // Helper function to construct tensor view
   // Note: Deleter holds a shared_ptr for the buffer, so the buffer

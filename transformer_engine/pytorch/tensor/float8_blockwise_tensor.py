@@ -143,10 +143,6 @@ class Float8BlockQuantizer(Quantizer):
         dim0 = math.prod(shape[:-1])
         dim1 = shape[-1] if shape else 1
 
-        # Helper functions for scale tensor dims
-        pad = lambda dim: round_up_to_nearest_multiple(dim, 4)
-        div = lambda dim: (dim + self.block_len - 1) // self.block_len
-
         # Check block dims
         if self.block_scaling_dim not in (1, 2):
             raise RuntimeError(
@@ -156,14 +152,22 @@ class Float8BlockQuantizer(Quantizer):
 
         # 128x128 block scaling
         if self.block_scaling_dim == 2:
+            scale_dim0 = (dim0 + self.block_len - 1) // self.block_len
+            scale_dim1 = (dim1 + self.block_len - 1) // self.block_len
             if columnwise:
-                return (div(dim1), pad(div(dim0)))
-            return (div(dim0), pad(div(dim1)))
+                return (scale_dim1, round_up_to_nearest_multiple(scale_dim0, 4))
+            return (scale_dim0, round_up_to_nearest_multiple(scale_dim1, 4))
 
         # 1x128 block scaling
         if columnwise:
-            return (div(dim0), pad(dim1))
-        return (div(dim1), pad(dim0))
+            return (
+                (dim0 + self.block_len - 1) // self.block_len,
+                round_up_to_nearest_multiple(scale_dim1, 4),
+            )
+        return (
+            (dim1 + self.block_len - 1) // self.block_len,
+            round_up_to_nearest_multiple(scale_dim0, 4),
+        )
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
         """Column-wise data shape
@@ -472,7 +476,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        data_format: Any = None,  # deprecated
+        data_format: Any = None,  # pylint: disable=unused-argument
     ) -> Float8BlockwiseQTensor:
         """Build Float8BlockwiseQTensor, for use in __reduce__
 

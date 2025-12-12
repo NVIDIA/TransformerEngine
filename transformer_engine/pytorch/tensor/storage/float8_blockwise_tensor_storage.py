@@ -145,13 +145,11 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 q_M *= q.shape[i]
             inner_q_dimension_tiled = True
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
-            inner_scale_dimension_tiled = False
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
-            inner_scale_dimension_tiled = False
             inner_q_dimension_tiled = True
             transpose_output = True
             if len(q.shape) >= 1:

@@ -41,6 +41,21 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
+// Convert compact scale indices into GEMM swizzled scale index
+__device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j,
+                                                          size_t num_tiles_X) {
+  constexpr size_t TILE_DIM_X = 4;
+  constexpr size_t TILE_DIM_Y = 128;
+  constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
+  const size_t tile_idx_X = j / TILE_DIM_X;
+  const size_t tile_idx_Y = i / TILE_DIM_Y;
+  const size_t idx_in_tile_X = j % TILE_DIM_X;
+  const size_t idx_in_tile_Y = i % TILE_DIM_Y;
+  size_t idx = (tile_idx_Y * num_tiles_X + tile_idx_X) * TILE_SIZE;
+  idx += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
+  return idx;
+}
+
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES, size_t CHUNK_DIM_Y,
@@ -268,17 +283,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t global_scales_offset_X = scales_offset_X_colwise;
       size_t scale_idx;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        /// TODO (tmoon) Do this more intelligently
-        constexpr size_t SCALE_TILE_DIM_X = 128;
-        constexpr size_t SCALE_TILE_DIM_Y = 4;
-        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
-        const size_t num_scale_tiles_Y = DIVUP(rows, SCALE_DIM_Y * SCALE_TILE_DIM_Y);
-        const size_t tile_idx_X = global_scales_offset_X / SCALE_TILE_DIM_X;
-        const size_t tile_idx_Y = global_scales_offset_Y / SCALE_TILE_DIM_Y;
-        const size_t idx_in_tile_X = global_scales_offset_X % SCALE_TILE_DIM_X;
-        const size_t idx_in_tile_Y = global_scales_offset_Y % SCALE_TILE_DIM_Y;
-        scale_idx = (tile_idx_X * num_scale_tiles_Y + tile_idx_Y) * SCALE_TILE_SIZE;
-        scale_idx += (idx_in_tile_X % 32) * 16 + (idx_in_tile_X / 32) * 4 + idx_in_tile_Y;
+        scale_idx = gemm_swizzled_scale_idx(global_scales_offset_X,
+                                            global_scales_offset_Y,
+                                            DIVUP(rows, static_cast<size_t>(128)));
       } else {
         scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       }
@@ -427,17 +434,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       size_t scale_idx;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        /// TODO (tmoon) Do this more intelligently
-        constexpr size_t SCALE_TILE_DIM_X = 4;
-        constexpr size_t SCALE_TILE_DIM_Y = 128;
-        constexpr size_t SCALE_TILE_SIZE = SCALE_TILE_DIM_X * SCALE_TILE_DIM_Y;
-        const size_t num_scale_tiles_X = DIVUP(cols, SCALE_DIM_X * SCALE_TILE_DIM_X);
-        const size_t tile_idx_X = stage_scales_offset_X / SCALE_TILE_DIM_X;
-        const size_t tile_idx_Y = stage_scales_offset_Y / SCALE_TILE_DIM_Y;
-        const size_t idx_in_tile_X = stage_scales_offset_X % SCALE_TILE_DIM_X;
-        const size_t idx_in_tile_Y = stage_scales_offset_Y % SCALE_TILE_DIM_Y;
-        scale_idx = (tile_idx_Y * num_scale_tiles_X + tile_idx_X) * SCALE_TILE_SIZE;
-        scale_idx += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
+        scale_idx = gemm_swizzled_scale_idx(stage_scales_offset_Y, stage_scales_offset_X,
+                                            DIVUP(cols, static_cast<size_t>(128)));
       } else {
         scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
       }
