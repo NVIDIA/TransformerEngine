@@ -38,7 +38,7 @@ struct TunableConfig {
   static constexpr int CHUNK_DIM_Y = 128;
   static constexpr int CHUNK_DIM_X = 128;
   static constexpr int PREFETCH_STAGES = 1;
-  static constexpr bool PERSISTENT = true;
+  static constexpr bool PERSISTENT = false;
 };
 
 constexpr int SCALE_DIM = 16;  // NVFP4 block (x16 elts)
