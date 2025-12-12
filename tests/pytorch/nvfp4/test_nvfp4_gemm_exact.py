@@ -77,12 +77,6 @@ def check_nvfp4_gemm_versus_reference(
     )
     w_nvfp4_native = w_quantizer.update_quantized(w, w_nvfp4_native)
 
-    # Check that the columnwise gemms don't depend on rowwise data.
-    if x_columnwise:
-        x_nvfp4_native.update_usage(rowwise=False)
-    if w_columnwise:
-        w_nvfp4_native.update_usage(rowwise=False)
-
     # Extract quantized data from native NVFP4Tensors
     qx_data = (
         x_nvfp4_native._columnwise_data.view(dtype=torch.uint8)
@@ -128,8 +122,15 @@ def check_nvfp4_gemm_versus_reference(
     )
 
     # Create reference quantized tensors needed by reference GEMM
-    x_nvfp4_ref = ref_quantizer.quantize(x)
-    w_nvfp4_ref = ref_quantizer.quantize(w)
+    # Reference GEMM is only rowwise.
+    if x_columnwise:
+        x_nvfp4_ref = ref_quantizer.quantize(x.t().contiguous())
+    else:
+        x_nvfp4_ref = ref_quantizer.quantize(x)
+    if w_columnwise:
+        w_nvfp4_ref = ref_quantizer.quantize(w.t().contiguous())
+    else:
+        w_nvfp4_ref = ref_quantizer.quantize(w)
 
     # Reference GEMM using quantizer's qgemm method
     y_ref = ref_quantizer.qgemm(
@@ -161,6 +162,10 @@ def check_nvfp4_gemm_versus_reference(
     use_grad = False
     use_split_accumulator = False
 
+    if x_columnwise:
+        x_nvfp4_native.update_usage(rowwise_usage=False)
+    if w_columnwise:
+        w_nvfp4_native.update_usage(rowwise_usage=False)
     # Native cuBLAS GEMM
     # return type is out, bias_grad, gelu_input, extra_output
     # We are just capturing out.
@@ -218,11 +223,11 @@ def check_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize(
     "is_x_columnwise, is_w_columnwise",
     [
-        (False, False),  # Only rowwise x rowwise is supported by reference GEMM
-        # Note: Reference GEMM expects inputs as (M,K) x (N,K) with rowwise quantization
-        # Columnwise layouts are not supported by the reference implementation
+        (False, False),  # TN
+        (True, False),  # NN
+        (True, True),  # NT
     ],
-    ids=["rowxrow"],
+    ids=["rowxrow", "colxrow", "colxcol"],
 )
 def test_nvfp4_gemm_versus_reference(
     M: int,
