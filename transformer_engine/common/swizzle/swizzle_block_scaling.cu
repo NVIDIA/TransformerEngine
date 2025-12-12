@@ -261,8 +261,6 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
   NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
              "Output must have E8M0 scaling factors");
 
-  NVTE_CHECK(input->with_gemm_swizzled_scales,
-             "Expected input tensor with scales in GEMM swizzled format.");
   NVTE_CHECK(output->with_gemm_swizzled_scales,
              "Expected output tensor with scales in GEMM swizzled format.");
 

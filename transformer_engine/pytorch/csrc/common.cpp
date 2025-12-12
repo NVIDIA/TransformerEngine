@@ -301,9 +301,13 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-size_t roundup(const size_t value, const size_t multiple) {
+size_t roundup(size_t value, size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
+}
+
+size_t ceildiv(size_t numer, size_t denom) {
+  return (numer + denom - 1) / denom;
 }
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {

@@ -577,12 +577,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                     inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
                  "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported, but got 2D by 2D");
 
-      // Check that scales are in expected format
-      NVTE_CHECK(inputA->with_gemm_swizzled_scales,
-                 "FP8 block scales are not in format expected by GEMM");
-      NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-                 "FP8 block scales are not in format expected by GEMM");
-
       // Configure cuBLAS scales
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);

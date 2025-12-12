@@ -478,7 +478,9 @@ void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
 
-size_t roundup(const size_t value, const size_t multiple);
+size_t roundup(size_t value, size_t multiple);
+
+size_t ceildiv(size_t numer, size_t denom);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 

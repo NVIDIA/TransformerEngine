@@ -92,8 +92,6 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
-  const auto data_format = tensor.attr("_data_format").cast<Float8BlockScaleTensorFormat>();
-  const auto with_gemm_swizzled_scales = (data_format == Float8BlockScaleTensorFormat::GEMM_READY);
 
   bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
@@ -122,10 +120,6 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
-
-  // Scale layout
-  nvte_set_tensor_param_v2(ret.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);

@@ -329,7 +329,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     // Construct Python tensor
     tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, fp8_dtype,
-        quantizer_py_list[i], is_2D_scaled, Float8BlockScaleTensorFormat::GEMM_READY));
+        quantizer_py_list[i], is_2D_scaled));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -341,9 +341,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
-    nvte_set_tensor_param_v2(tensor_cpp_list.back().data(),
-                             NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                             &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
   }
 
   return retval;
