@@ -1469,9 +1469,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
-                if core_attention_bias_type == "alibi" and (
-                    alibi_slopes is not None
-                ):
+                if core_attention_bias_type == "alibi" and (alibi_slopes is not None):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = dpa_utils.get_alibi(
                         _alibi_cache,
