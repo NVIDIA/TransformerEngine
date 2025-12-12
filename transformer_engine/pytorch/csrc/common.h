@@ -339,7 +339,7 @@ class NVFP4Quantizer : public Quantizer {
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
-std::vector<size_t> getTensorShape(const at::Tensor& t);
+NVTEShape getTensorShape(const at::Tensor& t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -433,11 +433,28 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
     const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
     void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
     const std::vector<size_t>& scale_inv_shape = {1},
     const std::vector<size_t>& columnwise_scale_inv_shape = {1},
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
+    const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const NVTEShape& scale_inv_shape, const NVTEShape& columnwise_scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
@@ -479,7 +496,7 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 
 size_t roundup(const size_t value, const size_t multiple);
 
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
+NVTEShape convertTorchShape(const c10::IntArrayRef& torch_shape);
 
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
 
