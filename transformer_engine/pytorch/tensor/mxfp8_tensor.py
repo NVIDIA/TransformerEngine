@@ -354,7 +354,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             columnwise_data_view = None
             if tensor._rowwise_data is not None:
                 rowwise_data_view = tensor._rowwise_data.view(shape)
-            if tensor._rowwise_data is not None:
+            if tensor._columnwise_data is not None:
                 columnwise_data_view = tensor._columnwise_data.view(shape)
             return MXFP8Tensor(
                 shape=shape,
