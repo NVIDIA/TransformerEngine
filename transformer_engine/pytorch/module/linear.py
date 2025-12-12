@@ -105,46 +105,48 @@ class _Linear(torch.autograd.Function):
             debug,
         ) = non_tensor_args
 
-        (fp8,
-        fp8_calibration,
-        wgrad_store,
-        fuse_wgrad_accumulation,
-        tp_group,
-        tp_size,
-        sequence_parallel,
-        tensor_parallel,
-        activation_dtype,
-        parallel_mode,
-        ub_overlap_rs_fprop,
-        ub_overlap_ag_dgrad,
-        ub_overlap_ag_fprop,
-        ub_overlap_rs_dgrad,
-        ub_bulk_dgrad,
-        ub_bulk_wgrad,
-        ub_name,
-        fsdp_group,
-        symmetric_ar_type,
-        save_original_input
-        ) = (module.fp8,
-        module.fp8_calibration,
-        module.wgrad_store,
-        module.fuse_wgrad_accumulation,
-        module.tp_group,
-        module.tp_size,
-        module.sequence_parallel,
-        module.tp_size > 1,
-        module.activation_dtype,
-        module.parallel_mode,
-        module.ub_overlap_rs_fprop,
-        module.ub_overlap_ag_dgrad,
-        module.ub_overlap_ag_fprop,
-        module.ub_overlap_rs_dgrad,
-        module.ub_bulk_dgrad,
-        module.ub_bulk_wgrad,
-        module.ub_name,
-        module.fsdp_group,
-        module.symmetric_ar_type,
-        module.save_original_input,
+        (
+            fp8,
+            fp8_calibration,
+            wgrad_store,
+            fuse_wgrad_accumulation,
+            tp_group,
+            tp_size,
+            sequence_parallel,
+            tensor_parallel,
+            activation_dtype,
+            parallel_mode,
+            ub_overlap_rs_fprop,
+            ub_overlap_ag_dgrad,
+            ub_overlap_ag_fprop,
+            ub_overlap_rs_dgrad,
+            ub_bulk_dgrad,
+            ub_bulk_wgrad,
+            ub_name,
+            fsdp_group,
+            symmetric_ar_type,
+            save_original_input,
+        ) = (
+            module.fp8,
+            module.fp8_calibration,
+            module.wgrad_store,
+            module.fuse_wgrad_accumulation,
+            module.tp_group,
+            module.tp_size,
+            module.sequence_parallel,
+            module.tp_size > 1,
+            module.activation_dtype,
+            module.parallel_mode,
+            module.ub_overlap_rs_fprop,
+            module.ub_overlap_ag_dgrad,
+            module.ub_overlap_ag_fprop,
+            module.ub_overlap_rs_dgrad,
+            module.ub_bulk_dgrad,
+            module.ub_bulk_wgrad,
+            module.ub_name,
+            module.fsdp_group,
+            module.symmetric_ar_type,
+            module.save_original_input,
         )
         quantizers = module._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
 
@@ -153,8 +155,14 @@ class _Linear(torch.autograd.Function):
             if module.no_debug_features_active(quantizers):
                 debug = False
                 quantizers = module._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-        (input_quantizer, weight_quantizer, output_quantizer, grad_input_quantizer, grad_weight_quantizer, grad_output_quantizer) = quantizers
-
+        (
+            input_quantizer,
+            weight_quantizer,
+            output_quantizer,
+            grad_input_quantizer,
+            grad_weight_quantizer,
+            grad_output_quantizer,
+        ) = quantizers
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -1007,6 +1015,7 @@ class _Linear(torch.autograd.Function):
             None,
         )
 
+
 class Linear(TransformerEngineBaseModule):
     """Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
@@ -1672,4 +1681,3 @@ class Linear(TransformerEngineBaseModule):
 if torch.__version__ >= "2":
     Linear.forward._torchdynamo_disable = True
     Linear.forward._torchdynamo_disable_msg = None
-

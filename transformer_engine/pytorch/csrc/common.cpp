@@ -26,9 +26,7 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
-NVTEShape getTensorShape(const at::Tensor& t) {
-  return convertTorchShape(t.sizes());
-}
+NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
 
 NVTEShape convertTorchShape(const c10::IntArrayRef& torch_shape) {
   NVTEShape ret;
@@ -175,8 +173,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 }
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode) {
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
@@ -229,8 +227,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
-    const NVTEShape& columnwise_shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
     const NVTEShape& scale_inv_shape, const NVTEShape& columnwise_scale_inv_shape,
     NVTEScalingMode scaling_mode) {
   TensorWrapper ret(scaling_mode);

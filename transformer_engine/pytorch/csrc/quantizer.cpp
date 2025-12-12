@@ -1326,7 +1326,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   if (columnwise_data) {
     shape = convert_shape_back_from_fp4(convertShape(getTensorShape(*columnwise_data)), true);
     if (rowwise_data) {
-      auto expected_shape = convert_shape_back_from_fp4(convertShape(getTensorShape(*rowwise_data)), false);
+      auto expected_shape =
+          convert_shape_back_from_fp4(convertShape(getTensorShape(*rowwise_data)), false);
       NVTE_CHECK(shape == expected_shape, "NVFP4 row-wise data (shape=", expected_shape,
                  ") and column-wise data (shape=", shape, ") do not match");
     }

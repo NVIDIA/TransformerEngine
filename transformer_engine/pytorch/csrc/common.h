@@ -433,8 +433,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
@@ -452,8 +452,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
-    const NVTEShape& columnwise_shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
     const NVTEShape& scale_inv_shape, const NVTEShape& columnwise_scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
