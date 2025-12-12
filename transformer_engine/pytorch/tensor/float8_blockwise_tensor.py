@@ -35,8 +35,6 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
-    # Whether to produce tensors that will be used in all-gather
-    all_gather_usage: bool
 
     def __init__(
         self,
@@ -47,7 +45,6 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
-        all_gather_usage: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -55,7 +52,6 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
-        self.all_gather_usage = all_gather_usage
 
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
@@ -65,11 +61,11 @@ class Float8BlockQuantizer(Quantizer):
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             block_scaling_dim=self.block_scaling_dim,
-            all_gather_usage=self.all_gather_usage,
             amax_epsilon=self.amax_epsilon,
             force_pow_2_scales=self.force_pow_2_scales,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
 
@@ -123,103 +119,84 @@ class Float8BlockQuantizer(Quantizer):
         return tex.quantize(tensor, self)
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
-        """Calculate the shape of the scaling tensor for blockwise quantization.
+        """Scaling tensor shape.
 
-        This method determines the shape of the scaling tensor needed for blockwise quantization,
-        taking into account the input tensor shape and whether columnwise scaling is used.
-        The scales are padded to multiples of 4 on the inner dimension for compatibility with GEMM.
+        This method determines the shape of the scaling tensor based
+        on the quantizer configuration. The scales are padded to
+        multiples of 4 for compatibility with GEMM.
 
         Parameters
         ----------
         shape : Iterable[int]
-            Shape of the input tensor to be quantized
+            Logical tensor shape.
         columnwise : bool
-            Whether to use columnwise scaling (True) or rowwise scaling (False)
+            Whether the data is scaled column-wise (True) or row-wise (False).
 
         Returns
         -------
         Tuple[int, int]
-            Shape of the scaling tensor as (outer_dim, inner_dim)
-            For 2D tensors:
-            - If columnwise: (roundup(K/blocksize), round_to_multiple(roundup(M/blocksize), 4))
-            - If rowwise: (roundup(M/blocksize), round_to_multiple(roundup(K/blocksize), 4))
-            For 1D tensors:
-            - If columnwise: (roundup(M/blocksize), round_to_multiple(K, 4))
-            - If rowwise: (roundup(K/blocksize), round_to_multiple(M, 4))
+            Scaling tensor shape.
+
         """
-        M, K = 1, 1
-        for i in range(len(shape) - 1):
-            M *= shape[i]
-        if len(shape) > 0:
-            K = shape[-1]
-        # 2D 128x128 quantization block scaling
-        # CuBLAS requries 128x128 scaling factor to be padded
-        # currently rowwise and columnwise format option doesn't apply to 2D scaling
+
+        # Flatten tensor to 2D
+        dim0 = math.prod(shape[:-1])
+        dim1 = shape[-1] if shape else 1
+
+        # Helper functions for scale tensor dims
+        pad = lambda dim: round_up_to_nearest_multiple(dim, 4)
+        div_pad = lambda dim: pad((dim + self.block_len - 1) // self.block_len)
+
+        # Check block dims
+        if self.block_scaling_dim not in (1, 2):
+            raise RuntimeError(
+                "Only 1D or 2D blocks are supported, "
+                f"but got block_scaling_dim={self.block_scaling_dim}"
+            )
+
+        # 128x128 block scaling
         if self.block_scaling_dim == 2:
+            scale_dim0 = div_pad(dim0)
+            scale_dim1 = div_pad(dim1)
             if columnwise:
-                outer = math.ceil(K / self.block_len)
-                inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
-                return (outer, inner)
-            # rowwise
-            outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
-            return (outer, inner)
-        # 1D 1x128 quantization block scaling
-        # CuBLAS requries 1x128 scaling factor to be padded and transposed
-        assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
+                return (scale_dim1, scale_dim0)
+            return (scale_dim0, scale_dim1)
+
+        # 1x128 block scaling
         if columnwise:
-            columnwise_compact = self.all_gather_usage
-            outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
-            # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
-            # for COMPACT case, since we apply 1x128 scaling here without transposing columnwise data, scaling factor is also [outer, inner]
-            # so no need to swap inner outer here
-            return (outer, inner)
-        # rowwise
-        rowwise_compact = self.all_gather_usage
-        outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
-        # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
-        # for COMPACT case, since we apply 128x1 scaling, scaling block applies to inner dim, so we need to swap outer and inner here
-        return (outer, inner) if not rowwise_compact else (inner, outer)
+            return (div_pad(dim0), pad(dim1))
+        return (div_pad(dim1), pad(dim0))
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
-        """Calculate the shape of a tensor after columnwise permutation.
+        """Column-wise data shape
 
-        This method rearranges the dimensions of a tensor to be columnwise,
-        moving the last dimension to the front and keeping the order of other dimensions.
+        GEMMs expect that the column-wise data is transposed relative
+        to the logical tensor shape.
 
         Parameters
         ----------
         shape : Iterable[int]
-            Original shape of the tensor
+            Logical tensor shape.
 
         Returns
         -------
         Tuple[int, ...]
-            New shape with dimensions rearranged for columnwise layout.
-            For a shape (d1, d2, ..., dn), returns (dn, d1, d2, ..., dn-1).
-            Returns empty tuple for empty input shape.
+            Column-wise data shape.
         """
-        if len(shape) == 0:
-            return tuple()
-        # currently columnwise format option only applies to 1D quantizer
-        # for 2D scaling, columnwise format should always be GEMM_READY_DATA_AND_SCALES
-        # since currently 2D scaling only applies to module weights
-        if self.block_scaling_dim == 1 and self.all_gather_usage:
-            return shape
-        colwise_shape = [shape[-1]]
-        for i in range(len(shape) - 1):
-            colwise_shape.append(shape[i])
+        colwise_shape = []
+        if shape:
+            colwise_shape.append(shape[-1])
+        colwise_shape.extend(shape[:-1])
         return tuple(colwise_shape)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
-        if inp.ndim < 2:
+        shape = inp.size()
+        if len(shape) < 2:
             return False
-        if inp.shape[-1] % self.block_len != 0:
+        if shape[-1] % self.block_len != 0:
             return False
-        if math.prod(inp.shape[:-1]) % self.block_len != 0:
+        if math.prod(shape[:-1]) % self.block_len != 0:
             return False
         return True
 
@@ -233,44 +210,38 @@ class Float8BlockQuantizer(Quantizer):
         pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
-        if device is None:
-            device = torch.device("cuda")
 
-        data_format = (
-            tex.Float8BlockScaleTensorFormat.COMPACT
-            if self.all_gather_usage
-            else tex.Float8BlockScaleTensorFormat.GEMM_READY
-        )
+        data_format = tex.Float8BlockScaleTensorFormat.GEMM_READY
 
-        # Allocate FP8 data
-        data = None
-        scale_inv = None
+        tensor_kwargs = {
+            "device": torch.device("cuda") if device is None else device,
+            "pin_memory": pin_memory
+        }
+
+        # Allocate buffers for row-scaled data
+        rowwise_data = None
+        rowwise_scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-            scale_shape = self.get_scale_shape(shape, columnwise=False)
-            scale_inv = torch.empty(
-                scale_shape,
+            rowwise_data = torch.empty(shape, dtype=torch.uint8, **tensor_kwargs)
+            rowwise_scale_inv = torch.empty(
+                self.get_scale_shape(shape, columnwise=False),
                 dtype=torch.float32,
-                device=device,
-                pin_memory=pin_memory,
+                **tensor_kwargs,
             )
 
-        # Allocate FP8 data transpose if needed
+        # Allocate buffers for column-scaled data
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
                 self.get_columnwise_shape(shape),
                 dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
+                **tensor_kwargs,
             )
-            columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape,
+                self.get_scale_shape(shape, columnwise=True),
                 dtype=torch.float32,
-                device=device,
-                pin_memory=pin_memory,
+                **tensor_kwargs,
             )
 
         # Construct FP8 tensor
@@ -278,8 +249,8 @@ class Float8BlockQuantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             fp8_dtype=self.dtype,
-            rowwise_data=data,
-            rowwise_scale_inv=scale_inv,
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,

@@ -193,6 +193,7 @@ class NVFP4Quantizer(Quantizer):
             stochastic_rounding=self.stochastic_rounding,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
         quantizer.rht_matrix = self.rht_matrix
         quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
 

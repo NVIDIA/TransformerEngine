@@ -330,7 +330,11 @@ class Quantizer(abc.ABC):
         return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Returns whether or not given tensor can be quantized"""
+        """Whether tensor supports quantized all-gather
+
+        Consider a less misleading.
+
+        """
         return True
 
     def get_usages(self) -> Dict[str, bool]:
