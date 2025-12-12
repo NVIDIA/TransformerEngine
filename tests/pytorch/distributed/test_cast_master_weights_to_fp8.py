@@ -803,18 +803,18 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     # Disable stochastic rounding for deterministic gradients
     nvfp4_recipe = NVFP4BlockScaling(disable_stochastic_rounding=True)
 
-    # Original shapes (commented out for debugging padding issues):
     with te.quantized_model_init(
         enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
     ):
         model_nvfp4 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256+64, **linear_kwargs),
+            te.Linear(256+64, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
+    # Create model with bf16 weights
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256+64, **linear_kwargs),
+        te.Linear(256+64, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
