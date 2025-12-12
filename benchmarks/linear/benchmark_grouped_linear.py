@@ -238,7 +238,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", action="store_true", help="Enable profiling mode")
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         type=str,
         default="benchmark_output/",
         help="output path for report",

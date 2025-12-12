@@ -711,14 +711,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
 // Implements split-quantize NVFP4 with Row/Column-wise Hadamard Transform (RHT)
 void split_quantize_nvfp4_impl_with_rht_helper(
-    const TensorWrapper &input,
-    const std::vector<TensorWrapper> &input_list,
-    std::vector<TensorWrapper> &output_list,
-    const std::vector<size_t> &split_sections,
+    const TensorWrapper &input, const std::vector<TensorWrapper> &input_list,
+    std::vector<TensorWrapper> &output_list, const std::vector<size_t> &split_sections,
     const std::vector<NVFP4Quantizer *> &quantizers,
-    const std::vector<QuantizationConfigWrapper> &quant_config_list,
-    cudaStream_t stream
-) {
+    const std::vector<QuantizationConfigWrapper> &quant_config_list, cudaStream_t stream) {
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
 
@@ -744,19 +740,19 @@ void split_quantize_nvfp4_impl_with_rht_helper(
 
   // Check that RHT matrix is available
   NVTE_CHECK(quantizer.rht_matrix.defined() && quantizer.rht_matrix.numel() > 0,
-              "RHT matrix is not available.");
+             "RHT matrix is not available.");
   auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer.rht_matrix);
 
   // trigger the row-col fusion when the split-sections shapes are all 128 aligned for max performance
-  bool all_aligned_token_dim = std::all_of(split_sections.begin(), split_sections.end(), [](size_t split_section) {
-    return split_section % 128 == 0;
-  });
+  bool all_aligned_token_dim =
+      std::all_of(split_sections.begin(), split_sections.end(),
+                  [](size_t split_section) { return split_section % 128 == 0; });
 
-  if (all_aligned_token_dim){
-    // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose 
+  if (all_aligned_token_dim) {
+    // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose
     nvte_group_hadamard_transform_cast_fusion(
-      input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-      rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0], stream);
+        input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+        rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0], stream);
   } else {
     // Separate quantization for rowwise usage and columnwise usage
     // Rowwise quantization fusion with grouped version
@@ -774,8 +770,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(
                                         static_cast<DType>(out_identity_data.dtype),
                                         out_identity_data.shape);
           out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
-                                            static_cast<DType>(out_identity_scale_inv.dtype),
-                                            out_identity_scale_inv.shape);
+                                             static_cast<DType>(out_identity_scale_inv.dtype),
+                                             out_identity_scale_inv.shape);
           out_identity.set_amax(out_identity_amax.data_ptr,
                                 static_cast<DType>(out_identity_amax.dtype),
                                 out_identity_amax.shape);
@@ -783,9 +779,9 @@ void split_quantize_nvfp4_impl_with_rht_helper(
         out_identity_list.emplace_back(std::move(out_identity));
         nvte_tensor_out_identity_list.push_back(out_identity_list.back().data());
       }
-      nvte_group_nvfp4_quantize_with_amax(
-          input.data(), nvte_tensor_out_identity_list.data(),
-          split_sections.data(), num_tensors, quant_config_list[0], stream);
+      nvte_group_nvfp4_quantize_with_amax(input.data(), nvte_tensor_out_identity_list.data(),
+                                          split_sections.data(), num_tensors, quant_config_list[0],
+                                          stream);
     }
 
     // Columnwise RHT quantization fusion with grouped version
@@ -811,14 +807,14 @@ void split_quantize_nvfp4_impl_with_rht_helper(
           colwise_data_shape_2d.push_back(last_dim);
 
           out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
-                                        static_cast<DType>(out_columnwise_data.dtype),
-                                        colwise_data_shape_2d);
+                                         static_cast<DType>(out_columnwise_data.dtype),
+                                         colwise_data_shape_2d);
           out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
                                               static_cast<DType>(out_columnwise_scale_inv.dtype),
                                               out_columnwise_scale_inv.shape);
           out_transpose.set_amax(out_columnwise_amax.data_ptr,
-                                static_cast<DType>(out_columnwise_amax.dtype),
-                                out_columnwise_amax.shape);
+                                 static_cast<DType>(out_columnwise_amax.dtype),
+                                 out_columnwise_amax.shape);
         }
         out_transpose_list.emplace_back(std::move(out_transpose));
         nvte_tensor_out_transpose_list.push_back(out_transpose_list.back().data());
@@ -831,14 +827,10 @@ void split_quantize_nvfp4_impl_with_rht_helper(
 }
 
 void split_quantize_nvfp4_impl_helper(
-    const TensorWrapper &input,
-    const std::vector<TensorWrapper> &input_list,
-    std::vector<TensorWrapper> &output_list,
-    const std::vector<size_t> &split_sections,
+    const TensorWrapper &input, const std::vector<TensorWrapper> &input_list,
+    std::vector<TensorWrapper> &output_list, const std::vector<size_t> &split_sections,
     const std::vector<NVFP4Quantizer *> &quantizers,
-    const std::vector<QuantizationConfigWrapper> &quant_config_list,
-    cudaStream_t stream
-) {
+    const std::vector<QuantizationConfigWrapper> &quant_config_list, cudaStream_t stream) {
   const size_t num_tensors = input_list.size();
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
@@ -854,24 +846,24 @@ void split_quantize_nvfp4_impl_helper(
   // So we need to set the pointer accordingly to make colwise-only quantization work
   std::vector<void *> orig_amax_ptr_list;
   for (size_t i = 0; i < num_tensors; i++) {
-      auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
-      orig_amax_ptr_list.push_back(rowwise_amax_ptr);
-      auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
-      void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
-      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
-      output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+    auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
+    orig_amax_ptr_list.push_back(rowwise_amax_ptr);
+    auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
+    void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+    NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+    output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
   }
   nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                   split_sections.data(), num_tensors, stream);
   for (size_t i = 0; i < num_tensors; i++) {
-      output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
+    output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
   }
 
   // Quantize tensors individually
   for (size_t i = 0; i < num_tensors; i++) {
     // skip this round if input is empty
     if (input_list[i].numel() == 0) {
-        continue;
+      continue;
     }
     nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
   }
@@ -982,10 +974,12 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       // Check that config is supported
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
       // Fuse the rowwise and colwise into one when the kernel is ready
-      split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections, quantizers, quant_config_list, stream);
+      split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
+                                                quantizers, quant_config_list, stream);
     } else {  // NVFP4 quantize
       // Fuse the rowwise and colwise into one when the kernel is ready
-      split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers, quant_config_list, stream);
+      split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
+                                       quant_config_list, stream);
     }
   });
 }

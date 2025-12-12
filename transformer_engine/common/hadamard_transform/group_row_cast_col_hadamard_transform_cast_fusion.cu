@@ -9,9 +9,10 @@
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
-#include <cuda/barrier>
 #include <cutlass/arch/barrier.h>
 #include <transformer_engine/hadamard_transform.h>
+
+#include <cuda/barrier>
 #include <cute/algorithm/gemm.hpp>
 #include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
@@ -21,24 +22,23 @@
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-
+#include "customized_pipeline.hpp"
 #include "cutlass/arch/barrier.h"
-#include "cutlass/cutlass.h"
-#include "cutlass/gemm/collective/builders/sm100_common.inl"
-#include "cutlass/pipeline/pipeline.hpp"
-#include "cutlass/numeric_conversion.h"
-#include "cutlass/float_subbyte.h"
-#include "cutlass/numeric_types.h"
-#include "cutlass/platform/platform.h"
 #include "cutlass/arch/reg_reconfig.h"
+#include "cutlass/cluster_launch.hpp"
+#include "cutlass/cutlass.h"
+#include "cutlass/detail/sm100_blockscaled_layout.hpp"
 #include "cutlass/fast_math.h"
 #include "cutlass/float8.h"
-#include "cutlass/cluster_launch.hpp"
-#include "cutlass/detail/sm100_blockscaled_layout.hpp"
+#include "cutlass/float_subbyte.h"
+#include "cutlass/gemm/collective/builders/sm100_common.inl"
+#include "cutlass/numeric_conversion.h"
+#include "cutlass/numeric_types.h"
+#include "cutlass/pipeline/pipeline.hpp"
+#include "cutlass/platform/platform.h"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
-#include "customized_pipeline.hpp"
 
 // include utils for get system env
 #include "../util/system.h"
@@ -48,7 +48,8 @@ namespace detail {
 namespace {
 
 using namespace cute;
-using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
+using cute::
+    Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
 
 struct CLCResponse {
   uint32_t data[4] = {0};
@@ -727,7 +728,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       float global_encode_scale_multiplier = 1.0f;
       if constexpr (kEnableFastMath) {
         global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-      } 
+      }
       auto sfc_converter = cutlass::NumericConverter<TSFD, float>{};
 
       do {
@@ -830,10 +831,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
                 vec_maxs, global_encode_scale_multiplier);
           } else {
-            pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
+            pvscales =
+                cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                pvscales, global_encode_scale);
           }
-          auto pvscales_cvted = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
+          auto pvscales_cvted =
+              cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
 
           tD_rRowSFD_frg(_0{}) = pvscales_cvted;
           auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, NumVecs>{}(
@@ -955,7 +959,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       float global_encode_scale_multiplier = 1.0f;
       if constexpr (kEnableFastMath) {
         global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-      } 
+      }
       auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
       do {
         CUTLASS_PRAGMA_NO_UNROLL
@@ -1017,8 +1021,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
                   amax_view(_0{}, v), global_encode_scale_multiplier);
             } else {
-              pvscales_view(_0{}, v) = cutlass::divides<ElementAccumulator>{}(
-                  amax_view(_0{}, v), fp4_max);
+              pvscales_view(_0{}, v) =
+                  cutlass::divides<ElementAccumulator>{}(amax_view(_0{}, v), fp4_max);
               pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
                   pvscales_view(_0{}, v), global_encode_scale);
             }
@@ -1072,8 +1076,7 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
                                       TB const *B, TQA *QA, TSFA *SFA,
                                       MultiAmaxHadamardCastFusionArgs &args,
                                       const size_t *rng_state, uint32_t sm_count,
-                                      cudaStream_t stream,
-                                      int k_tile_size = 1024) {
+                                      cudaStream_t stream, int k_tile_size = 1024) {
   using namespace cute;
   static int constexpr SFVecSize = 16;
   static int constexpr RhtTensorSize = 16;
@@ -1244,7 +1247,8 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
       AccumulatorPipelineStageCount, SchedulerPipelineStageCount, kEnableStochasticRounding,
       kEnableRHTColQuant, kEnableRowQuant, kEnableSwizzleSFOutput, kEnableFastMath>;
 
-  bool status_set_attr = cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  bool status_set_attr =
+      cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   if (status_set_attr != cudaSuccess) {
     std::cerr << "Error: Failed to set Shared Memory size." << std::endl;
@@ -1253,9 +1257,8 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
 
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
-      params, (void const*)kernel_ptr,
-      M, N, k_tile_size, cga_shape, cga_tile_shape, A, dA, sA, tma_load_a, B, dB, sB, tma_load_b,
-      QA, dQA, SFA, sfa_layout, args, mma, rng_state);
+      params, (void const *)kernel_ptr, M, N, k_tile_size, cga_shape, cga_tile_shape, A, dA, sA,
+      tma_load_a, B, dB, sB, tma_load_b, QA, dQA, SFA, sfa_layout, args, mma, rng_state);
   CUTE_CHECK_LAST();
 
   if (status != cutlass::Status::kSuccess) {
@@ -1324,7 +1327,8 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
     void *output_colwise_ptr =
         has_col_quant ? reinterpret_cast<void *>(output_list[i]->columnwise_data.dptr) : nullptr;
     void *output_colwise_scale_inv_ptr =
-        has_col_quant ? reinterpret_cast<void *>(output_list[i]->columnwise_scale_inv.dptr) : nullptr;
+        has_col_quant ? reinterpret_cast<void *>(output_list[i]->columnwise_scale_inv.dptr)
+                      : nullptr;
     kernel_args.global_a_amax_list[kernel_args.num_tensors] = amax_rowwise_ptr;
     kernel_args.global_d_amax_list[kernel_args.num_tensors] = amax_colwise_ptr;
     kernel_args.output_colwise_list[kernel_args.num_tensors] = output_colwise_ptr;
