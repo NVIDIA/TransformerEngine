@@ -380,8 +380,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     // tensor scales in matmul output, instead of in matmul inputs.
     float old_alpha = *reinterpret_cast<const float *>(alpha);  // Assumed to be on CPU
     TensorWrapper new_alpha_tensor(new_alpha_ptr, std::vector<size_t>{1}, DType::kFloat32);
-    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
-                                        old_alpha, new_alpha_tensor.data(), stream);
+    bool a_rowwise_amax = transa == CUBLAS_OP_T;
+    bool b_rowwise_amax = transb != CUBLAS_OP_T;
+    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, a_rowwise_amax, inputB->nvte_tensor,
+                                        b_rowwise_amax, old_alpha, new_alpha_tensor.data(), stream);
     alpha = new_alpha_ptr;
 
     // Make sure beta scale is on device
