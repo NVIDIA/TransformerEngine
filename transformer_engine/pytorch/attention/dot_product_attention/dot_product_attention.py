@@ -1280,7 +1280,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -1289,7 +1288,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
-                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
+                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_diagonal
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
@@ -1471,7 +1470,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
                 if core_attention_bias_type == "alibi" and (
-                    alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
+                    alibi_slopes is not None
                 ):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = dpa_utils.get_alibi(
@@ -1481,7 +1480,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                         bias_dtype=query_layer.dtype,
-                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                        bottom_right_alignment=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(

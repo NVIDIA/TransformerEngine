@@ -200,7 +200,7 @@ class AttentionParams:
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
     window_size : Tuple[int, int], default = None
         Sliding window attention size.
-    bottom_right_diagonal: bool, default = `True`
+    bottom_right_diagonal: bool, default = `None`
         Whether to align sliding window and ALiBi diagonal to the bottom right corner
         of the softmax matrix.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
@@ -962,7 +962,7 @@ def get_attention_backend(
     if (
         use_fused_attention
         and core_attention_bias_type == "alibi"
-        and (alibi_slopes_shape is not None or max_seqlen_q != max_seqlen_kv)
+        and (alibi_slopes_shape is not None)
     ):
         fu_core_attention_bias_type = "post_scale_bias"
         fu_core_attention_bias_requires_grad = False

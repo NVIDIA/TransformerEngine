@@ -347,6 +347,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 attention_mask=attention_mask,
                 window_size=window_size,
                 attention_type=self.attention_type,
+                bottom_right_alignment=(attn_mask_type not in ["causal", "padding_causal"]
+                                        if bottom_right_diagonal is None else bottom_right_diagonal)
             )
         )
 
@@ -450,8 +452,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     actual_seqlens_q=actual_seqlens_q if "padding" in attn_mask_type else None,
                     actual_seqlens_kv=actual_seqlens_kv if "padding" in attn_mask_type else None,
                     alibi_slopes=alibi_slopes,
-                    # (This should be replaced with `bottom_right_diagonal` which is passed from the arguments)
-                    bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                    bottom_right_alignment=(attn_mask_type not in ["causal", "padding_causal"]
+                                            if bottom_right_diagonal is None else bottom_right_diagonal)
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
