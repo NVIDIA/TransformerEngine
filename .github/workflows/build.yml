@@ -63,7 +63,7 @@ jobs:
           df -h
           pip install -v einops onnxscript
           df -h
-          pip install -v torch
+          pip install -v torch --no-deps
           df -h
       - name: 'Checkout'
         uses: actions/checkout@v3
