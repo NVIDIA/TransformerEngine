@@ -1629,7 +1629,7 @@ def gather_along_first_dim(
     if isinstance(inp, Float8TensorStorage) or isinstance(
         quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
     ):
-        return _start_all_gather_fp8_blockwise(
+        return _all_gather_fp8(
             inp,
             process_group,
             async_op=async_op,
