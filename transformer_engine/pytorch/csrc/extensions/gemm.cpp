@@ -365,12 +365,16 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
   NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
 
+  const size_t A_shape_data[2] = {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))};
+  const NVTEShape A_shape = nvte_make_shape(A_shape_data, 2);
   auto te_A = makeTransformerEngineTensor(
-      A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,
+      A.data_ptr(), A_shape, A_type,
       nullptr, nullptr, A_scale_inverse.data_ptr(), getTensorShape(A_scale_inverse),
       nvte_scaling_modeA);
+  const size_t B_shape_data[2] = {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))};
+  const NVTEShape B_shape = nvte_make_shape(B_shape_data, 2);
   auto te_B = makeTransformerEngineTensor(
-      B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_type,
+      B.data_ptr(), B_shape, B_type,
       nullptr, nullptr, B_scale_inverse.data_ptr(), getTensorShape(B_scale_inverse),
       nvte_scaling_modeB);
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.

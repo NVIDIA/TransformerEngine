@@ -209,7 +209,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
   // Tensor dimensions
   std::vector<size_t> shape;
   if (has_transpose) {
-    const auto transpose_shape = getTensorShape(*transpose_tensor);
+    const auto transpose_shape_nvte = getTensorShape(*transpose_tensor);
+    const auto transpose_shape = convertShape(transpose_shape_nvte);
     if (transpose_shape.size() > 0) {
       for (size_t i = 1; i < transpose_shape.size(); ++i) {
         shape.push_back(transpose_shape[i]);
@@ -217,12 +218,13 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
       shape.push_back(transpose_shape.front());
     }
     if (has_data) {
-      auto expected_shape = getTensorShape(*data_tensor);
+      const auto expected_shape_nvte = getTensorShape(*data_tensor);
+      const auto expected_shape = convertShape(expected_shape_nvte);
       NVTE_CHECK(shape == expected_shape, "FP8 data (shape=", expected_shape,
                  ") and transpose (shape=", transpose_shape, ") do not match");
     }
   } else {  // Already checked has_data == true
-    shape = getTensorShape(*data_tensor);
+    shape = convertShape(getTensorShape(*data_tensor));
   }
 
   // Coerce data tensor
@@ -430,7 +432,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
   // Tensor dimensions
   std::vector<size_t> shape;
   if (has_transpose) {
-    const auto transpose_shape = getTensorShape(*transpose_tensor);
+    const auto transpose_shape_nvte = getTensorShape(*transpose_tensor);
+    const auto transpose_shape = convertShape(transpose_shape_nvte);
     if (transpose_shape.size() > 0) {
       for (size_t i = 1; i < transpose_shape.size(); ++i) {
         shape.push_back(transpose_shape[i]);
@@ -438,12 +441,13 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
       shape.push_back(transpose_shape.front());
     }
     if (has_data) {
-      auto expected_shape = getTensorShape(*data_tensor);
+      const auto expected_shape_nvte = getTensorShape(*data_tensor);
+      const auto expected_shape = convertShape(expected_shape_nvte);
       NVTE_CHECK(shape == expected_shape, "FP8 data (shape=", expected_shape,
                  ") and transpose (shape=", transpose_shape, ") do not match");
     }
   } else {  // Already checked has_data == true
-    shape = getTensorShape(*data_tensor);
+    shape = convertShape(getTensorShape(*data_tensor));
   }
 
   // Coerce data tensor in Python tensor
@@ -680,9 +684,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
       return std::vector<size_t>();
     }
     if (all_gather_usage) {
-      return getTensorShape(*columnwise_data);
+      return convertShape(getTensorShape(*columnwise_data));
     }
-    std::vector<size_t> shape = getTensorShape(*columnwise_data);
+    std::vector<size_t> shape = convertShape(getTensorShape(*columnwise_data));
     std::vector<size_t> shape_transposed(shape.size());
     for (size_t i = 0; i + 1 < shape.size(); ++i) {
       shape_transposed[i] = shape[i + 1];
@@ -694,7 +698,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
   };
   std::vector<size_t> shape;
   if (rowwise_data) {
-    shape = getTensorShape(*rowwise_data);
+    shape = convertShape(getTensorShape(*rowwise_data));
     if (columnwise_data) {
       auto expected_shape = get_columnwise_shape(all_gather_usage);
       NVTE_CHECK(shape == expected_shape, "BlockwiseFP8 row-wise data (shape=", shape,
@@ -1004,14 +1008,14 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
   // Tensor dimensions
   std::vector<size_t> shape;
   if (columnwise_data) {
-    shape = getTensorShape(*columnwise_data);
+    shape = convertShape(getTensorShape(*columnwise_data));
     if (rowwise_data) {
-      auto expected_shape = getTensorShape(*rowwise_data);
+      const auto expected_shape = convertShape(getTensorShape(*rowwise_data));
       NVTE_CHECK(shape == expected_shape, "MXFP8 row-wise data (shape=", expected_shape,
                  ") and column-wise data (shape=", shape, ") do not match");
     }
   } else {  // Already checked columnwise_data_tensor == true
-    shape = getTensorShape(*rowwise_data);
+    shape = convertShape(getTensorShape(*rowwise_data));
   }
 
   // Coerce row-wise data
@@ -1320,14 +1324,14 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   // Tensor dimensions, shape means original shape
   std::vector<size_t> shape;
   if (columnwise_data) {
-    shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
+    shape = convert_shape_back_from_fp4(convertShape(getTensorShape(*columnwise_data)), true);
     if (rowwise_data) {
-      auto expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
+      auto expected_shape = convert_shape_back_from_fp4(convertShape(getTensorShape(*rowwise_data)), false);
       NVTE_CHECK(shape == expected_shape, "NVFP4 row-wise data (shape=", expected_shape,
                  ") and column-wise data (shape=", shape, ") do not match");
     }
   } else {  // Already checked columnwise_data_tensor == true
-    shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
+    shape = convert_shape_back_from_fp4(convertShape(getTensorShape(*rowwise_data)), false);
   }
 
   size_t flat_first_dim = 1;

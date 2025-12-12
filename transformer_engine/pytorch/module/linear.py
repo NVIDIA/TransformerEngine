@@ -96,39 +96,65 @@ class _Linear(torch.autograd.Function):
 
         (
             is_first_microbatch,
-            fp8,
-            fp8_calibration,
-            wgrad_store,
-            input_quantizer,
-            weight_quantizer,
-            output_quantizer,
-            grad_input_quantizer,
-            grad_weight_quantizer,
-            grad_output_quantizer,
-            fuse_wgrad_accumulation,
             cpu_offloading,
-            tp_group,
-            tp_size,
-            sequence_parallel,
-            tensor_parallel,
-            activation_dtype,
-            parallel_mode,
             is_grad_enabled,
-            ub_overlap_rs_fprop,
-            ub_overlap_ag_dgrad,
-            ub_overlap_ag_fprop,
-            ub_overlap_rs_dgrad,
-            ub_bulk_dgrad,
-            ub_bulk_wgrad,
-            ub_name,
-            fp8_output,  # pylint: disable=unused-variable
-            fsdp_group,
+            fp8_output,
+            fp8_grad,
             module,
             skip_fp8_weight_update,
-            symmetric_ar_type,
-            save_original_input,
             debug,
         ) = non_tensor_args
+
+        (fp8,
+        fp8_calibration,
+        wgrad_store,
+        fuse_wgrad_accumulation,
+        tp_group,
+        tp_size,
+        sequence_parallel,
+        tensor_parallel,
+        activation_dtype,
+        parallel_mode,
+        ub_overlap_rs_fprop,
+        ub_overlap_ag_dgrad,
+        ub_overlap_ag_fprop,
+        ub_overlap_rs_dgrad,
+        ub_bulk_dgrad,
+        ub_bulk_wgrad,
+        ub_name,
+        fsdp_group,
+        symmetric_ar_type,
+        save_original_input
+        ) = (module.fp8,
+        module.fp8_calibration,
+        module.wgrad_store,
+        module.fuse_wgrad_accumulation,
+        module.tp_group,
+        module.tp_size,
+        module.sequence_parallel,
+        module.tp_size > 1,
+        module.activation_dtype,
+        module.parallel_mode,
+        module.ub_overlap_rs_fprop,
+        module.ub_overlap_ag_dgrad,
+        module.ub_overlap_ag_fprop,
+        module.ub_overlap_rs_dgrad,
+        module.ub_bulk_dgrad,
+        module.ub_bulk_wgrad,
+        module.ub_name,
+        module.fsdp_group,
+        module.symmetric_ar_type,
+        module.save_original_input,
+        )
+        quantizers = module._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+
+        if debug:
+            quantizers = module._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+            if module.no_debug_features_active(quantizers):
+                debug = False
+                quantizers = module._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+        (input_quantizer, weight_quantizer, output_quantizer, grad_input_quantizer, grad_weight_quantizer, grad_output_quantizer) = quantizers
+
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -981,7 +1007,6 @@ class _Linear(torch.autograd.Function):
             None,
         )
 
-
 class Linear(TransformerEngineBaseModule):
     """Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
@@ -1343,7 +1368,6 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
-    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
@@ -1401,28 +1425,7 @@ class Linear(TransformerEngineBaseModule):
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
-
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
-
-            quantizers = (
-                self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-                if not debug
-                else self._get_debug_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-            )
-            if debug:
-                if self.no_debug_features_active(quantizers):
-                    debug = False
-                    quantizers = self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-
-            (
-                input_quantizer,
-                weight_quantizer,
-                output_quantizer,
-                grad_input_quantizer,
-                grad_weight_quantizer,
-                grad_output_quantizer,
-            ) = quantizers
-
             if is_grad_enabled:
                 linear_fn = _Linear.apply
                 autograd_ctx = []
@@ -1432,37 +1435,12 @@ class Linear(TransformerEngineBaseModule):
 
             non_tensor_args = (
                 is_first_microbatch,
-                self.fp8,
-                self.fp8_calibration,
-                self.wgrad_store,
-                input_quantizer,
-                weight_quantizer,
-                output_quantizer,
-                grad_input_quantizer,
-                grad_weight_quantizer,
-                grad_output_quantizer,
-                self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
-                self.tp_group,
-                self.tp_size,
-                self.sequence_parallel,
-                self.tp_size > 1,
-                self.activation_dtype,
-                self.parallel_mode,
                 is_grad_enabled,
-                self.ub_overlap_rs_fprop,
-                self.ub_overlap_ag_dgrad,
-                self.ub_overlap_ag_fprop,
-                self.ub_overlap_rs_dgrad,
-                self.ub_bulk_dgrad,
-                self.ub_bulk_wgrad,
-                self.ub_name,
                 fp8_output,
-                self.fsdp_group,
+                fp8_grad,
                 self,
                 skip_fp8_weight_update,
-                self.symmetric_ar_type,
-                self.save_original_input,
                 debug,
             )
             out = linear_fn(
@@ -1687,3 +1665,11 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].all_gather_usage = True
+
+
+# disable torch dynamo just once to reduce wrapped function overhead on each
+# forward call of te Linear.
+if torch.__version__ >= "2":
+    Linear.forward._torchdynamo_disable = True
+    Linear.forward._torchdynamo_disable_msg = None
+
