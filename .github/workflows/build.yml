@@ -47,7 +47,7 @@ jobs:
           df -h
           apt-get update
           df -h
-          apt-get install -y git python3.9 pip
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
           df -h
           apt-get clean
           df -h
