@@ -157,11 +157,13 @@ __device__ __forceinline__ bf16 compute_nvfp4_scaling_coefficient(const nvfp4_sc
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ void colwise_scaling(
-    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise,
-    const int stage_Y, const int stage_X, const int buff_in,
-    const int buff_out_tr, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_ptr,
+                                                fp4e2m1x2 *__restrict__ sOut_tr_ptr,
+                                                nvfp4_scale_t *__restrict__ sSFcolwise_ptr,
+                                                const float S_enc_colwise, const int stage_Y,
+                                                const int stage_X, const int buff_in,
+                                                const int buff_out_tr, RNG_t &rng,
+                                                uint4 &random_uint4, int &rnd_idx) {
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
   auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
   auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
@@ -228,11 +230,13 @@ __device__ __forceinline__ void colwise_scaling(
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ void rowwise_scaling(
-    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
-    nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise,
-    const int stage_Y, const int stage_X, const int buff_in,
-    const int buff_out, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_ptr,
+                                                fp4e2m1x2 *__restrict__ sOut_ptr,
+                                                nvfp4_scale_t *__restrict__ sSFrowwise_ptr,
+                                                const float S_enc_rowwise, const int stage_Y,
+                                                const int stage_X, const int buff_in,
+                                                const int buff_out, RNG_t &rng, uint4 &random_uint4,
+                                                int &rnd_idx) {
   const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
   auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
   auto &sSFrowwise = *reinterpret_cast<ScalesType2D *>(sSFrowwise_ptr);
@@ -532,13 +536,13 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // NVFP4 Quantization
       rowwise_scaling<USE_STOCHASTIC_ROUNDING>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise,
-                                               stage_Y, stage_X, buff_in, buff_out,
-                                               rng, random_uint4, rnd_idx);
+                                               stage_Y, stage_X, buff_in, buff_out, rng,
+                                               random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
         colwise_scaling<USE_STOCHASTIC_ROUNDING>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr,
-                                                 S_enc_colwise, stage_Y, stage_X,
-                                                 buff_in, buff_out_tr, rng, random_uint4, rnd_idx);
+                                                 S_enc_colwise, stage_Y, stage_X, buff_in,
+                                                 buff_out_tr, rng, random_uint4, rnd_idx);
       }
 
       // Wait for shared memory writes to be visible to TMA engine
