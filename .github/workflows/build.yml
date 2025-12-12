@@ -44,10 +44,15 @@ jobs:
     steps:
       - name: 'Dependencies'
         run: |
+          df -h
           apt-get update
+          df -h
           apt-get install -y git python3.9 pip
+          df -h
           apt-get clean
-          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          df -h
+          pip install -v cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
+          df -h
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
