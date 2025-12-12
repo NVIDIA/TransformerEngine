@@ -728,6 +728,12 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
+    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales,
+                             &with_gemm_swizzled_scales,
+                             sizeof(with_gemm_swizzled_scales));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -757,6 +763,15 @@ class TensorWrapper {
 
   NVTEBasicTensor get_columnwise_amax() const noexcept {
     return get_parameter(kNVTEColumnwiseAmax);
+  }
+
+  bool get_with_gemm_swizzled_scales() const {
+    bool with_gemm_swizzled_scales = false;
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales,
+                             &with_gemm_swizzled_scales,
+                             sizeof(with_gemm_swizzled_scales),
+                             nullptr);
+    return with_gemm_swizzled_scales;
   }
 
   /*! \brief Get an underlying NVTETensor.

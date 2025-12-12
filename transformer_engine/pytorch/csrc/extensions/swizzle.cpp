@@ -20,19 +20,6 @@ namespace pytorch {
 
 namespace {
 
-void set_with_gemm_swizzled_scales(transformer_engine::TensorWrapper &tensor,
-                                   bool with_gemm_swizzled_scales) {
-  nvte_set_tensor_param_v2(tensor.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
-}
-
-bool get_with_gemm_swizzled_scales(transformer_engine::TensorWrapper &tensor) {
-  bool with_gemm_swizzled_scales = false;
-  nvte_get_tensor_param_v2(tensor.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales), nullptr);
-  return with_gemm_swizzled_scales;
-}
-
 void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, bool columnwise) {
   NVTEShape shape;
   shape.ndim = 1;
@@ -67,7 +54,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   }
 
   // Return early if scales are already swizzled
-  if (get_with_gemm_swizzled_scales(tensor)) {
+  if (tensor.get_with_gemm_swizzled_scales()) {
     return {std::nullopt, std::nullopt};
   }
 
@@ -77,7 +64,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   // TE tensors with only scales
   TensorWrapper input_nvte(scaling_mode);
   TensorWrapper output_nvte(scaling_mode);
-  set_with_gemm_swizzled_scales(output_nvte, true);
+  output_nvte.set_with_gemm_swizzled_scales(true);
 
   // Swizzle row-wise scales if needed
   std::optional<at::Tensor> rowwise_scales_pyt;
@@ -145,7 +132,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
 
   // Update tensor
   reset_tensor_data(tensor, !rowwise_usage, !columnwise_usage);
-  set_with_gemm_swizzled_scales(tensor, true);
+  tensor.set_with_gemm_swizzled_scales(true);
 
   return {std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
@@ -181,7 +168,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   // Filter out tensors that already have swizzled scales
   std::vector<TensorWrapper *> tensors_needing_swizzle;
   for (auto &tensor : tensors) {
-    if (!get_with_gemm_swizzled_scales(tensor)) {
+    if (!tensor.get_with_gemm_swizzled_scales()) {
       tensors_needing_swizzle.push_back(&tensor);
     }
   }
@@ -217,7 +204,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
     outputs_nvte.emplace_back(scaling_mode);
     auto &input_nvte = inputs_nvte.back();
     auto &output_nvte = outputs_nvte.back();
-    set_with_gemm_swizzled_scales(output_nvte, true);
+    output_nvte.set_with_gemm_swizzled_scales(true);
     if (rowwise_usage) {
       const auto data_nvte = tensor.get_rowwise_data();
       const auto scales_nvte = tensor.get_rowwise_scale_inv();
@@ -261,7 +248,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
     reset_tensor_data(tensor, !rowwise_usage, !columnwise_usage);
-    set_with_gemm_swizzled_scales(tensor, true);
+    tensor.set_with_gemm_swizzled_scales(true);
     if (rowwise_usage) {
       auto scales_nvte = outputs_nvte[i].get_rowwise_scale_inv();
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
@@ -333,7 +320,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   swizzled_scale_inv_shape.ndim = 2;
   output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr, transformer_engine::DType::kFloat8E8M0,
                                   swizzled_scale_inv_shape);
-  set_with_gemm_swizzled_scales(output_cu, true);
+  output_cu.set_with_gemm_swizzled_scales(true);
 
   // Convert scaling factors from FP8 block scaling GEMM_READY format to mxfp8 swizzled format
   NVTE_SCOPED_GIL_RELEASE({
@@ -366,7 +353,7 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   }
 
   // Return early if scales are already swizzled
-  if (get_with_gemm_swizzled_scales(tensor_nvte)) {
+  if (tensor_nvte.get_with_gemm_swizzled_scales()) {
     return;
   }
 

@@ -489,9 +489,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
-    nvte_set_tensor_param_v2(tensor_cpp_list.back().data(),
-                             NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                             &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+    tensor_cpp_list.back().set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
   return retval;
@@ -698,8 +696,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
           rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
-      nvte_set_tensor_param_v2(tensor_wrapper.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                               &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+      tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {

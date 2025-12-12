@@ -80,8 +80,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
   }
 
   // Scale layout
-  nvte_set_tensor_param_v2(ret.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);
@@ -163,8 +162,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   }
 
   // Scale layout
-  nvte_set_tensor_param_v2(ret.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);

@@ -776,8 +776,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
-  nvte_set_tensor_param_v2(ret.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   set_quantization_params(&ret);
   return {std::move(ret), std::move(tensor)};
 }
@@ -933,8 +932,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
                                      columnwise_scale_inv_shape);
   }
-  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -1044,8 +1042,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                      getTensorShape(*columnwise_scale_inv));
   }
-  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};
@@ -1235,8 +1232,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
                                 std::vector<size_t>{1});
   }
-  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -1406,8 +1402,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
                                 std::vector<size_t>{1});
   }
-  nvte_set_tensor_param_v2(out_cpp.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
-                           &with_gemm_swizzled_scales, sizeof(with_gemm_swizzled_scales));
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};
