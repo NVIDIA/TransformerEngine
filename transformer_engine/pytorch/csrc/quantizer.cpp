@@ -1433,17 +1433,37 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
+  // Stochastic rounding
+  // When both rowwise and columnwise quantization are used with RHT,
+  // we need separate RNG states for each to ensure they use different random numbers.
   TensorWrapper te_rng_state;
+  TensorWrapper te_rng_state_columnwise;
+  QuantizationConfigWrapper quant_config_columnwise;
+  const bool need_separate_columnwise_rng =
+      this->stochastic_rounding && this->with_rht && this->columnwise_usage;
+
   if (this->stochastic_rounding) {
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
-    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+
+    // Generate RNG state for rowwise quantization
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     auto rng_state = torch::empty({2}, opts);
     philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
+
+    // Generate separate RNG state for columnwise quantization
+    if (need_separate_columnwise_rng) {
+      at::PhiloxCudaState philox_args_columnwise = init_philox_state(gen, rng_elts_per_thread);
+      auto rng_state_columnwise = torch::empty({2}, opts);
+      philox_unpack(philox_args_columnwise, static_cast<int64_t*>(rng_state_columnwise.data_ptr()));
+      te_rng_state_columnwise = makeTransformerEngineTensor(rng_state_columnwise);
+      quant_config_columnwise.set_stochastic_rounding(true);
+      quant_config_columnwise.set_rng_state(te_rng_state_columnwise.data());
+    }
   }
 
   // Restriction for the RHT cast fusion kernel.
@@ -1570,6 +1590,10 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                              static_cast<DType>(out_columnwise_amax.dtype),
                              out_columnwise_amax.shape);
 
+      // Use separate RNG state for columnwise to ensure different random numbers than rowwise
+      auto& columnwise_quant_config =
+          need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
+
       if (!eligible_for_rht_cast_fusion) {
         // Invoking fallback RHT kernel.
 
@@ -1594,7 +1618,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         // Quantize kernel will treat everything as rowwise input/output, which is
         // intended.
         NVTE_SCOPED_GIL_RELEASE({
-          nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), quant_config, stream);
+          nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), columnwise_quant_config,
+                           stream);
         });
       } else {
         // RHT cast fusion kernel.
@@ -1602,8 +1627,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                    "RHT matrix is not set");
         auto rht_matrix_nvte = makeTransformerEngineTensor(this->rht_matrix);
         NVTE_SCOPED_GIL_RELEASE({
-          nvte_hadamard_transform_cast_fusion_columnwise(
-              input.data(), out_transpose.data(), rht_matrix_nvte.data(), quant_config, stream);
+          nvte_hadamard_transform_cast_fusion_columnwise(input.data(), out_transpose.data(),
+                                                         rht_matrix_nvte.data(),
+                                                         columnwise_quant_config, stream);
         });
       }
     }
