@@ -30,7 +30,7 @@ NVTEShape getTensorShape(const at::Tensor& t) {
   return convertTorchShape(t.sizes());
 }
 
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+NVTEShape convertTorchShape(const c10::IntArrayRef& torch_shape) {
   NVTEShape ret;
   ret.ndim = torch_shape.size();
   constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
