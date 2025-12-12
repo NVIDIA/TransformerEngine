@@ -2,10 +2,6 @@
 #
 # See LICENSE for license information.
 
-
-pip3 install onnxruntime
-pip3 install onnxruntime_extensions
-
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"

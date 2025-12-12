@@ -20,6 +20,10 @@ Usage:
     @staticmethod
     def lowering(ctx, x, **kwargs):
         return triton_call_lowering(ctx, my_kernel, x, ...)
+
+    # Use permutation functions
+    from transformer_engine.jax.triton_extensions import make_row_id_map, permute_with_mask_map
 """
 
 from .utils import *
+from .permutation import *

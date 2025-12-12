@@ -304,13 +304,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     grid = (num_tokens,)
     _unpermute_bwd_with_merging_probs_kernel[grid](
         fwd_output_grad,
-        act_grad,
         fwd_input,
         merging_probs,
-        merging_probs_grad,
         row_id_map,
-        num_experts,
-        hidden_size,
         row_id_map.stride(0),
         row_id_map.stride(1),
         fwd_output_grad.stride(0),
@@ -323,6 +319,10 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         merging_probs.stride(1),
         merging_probs_grad.stride(0),
         merging_probs_grad.stride(1),
+        act_grad,
+        merging_probs_grad,
+        num_experts,
+        hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
     )
     return act_grad, merging_probs_grad

@@ -402,16 +402,11 @@ except RuntimeError:
 
 @triton.jit
 def _unpermute_bwd_with_merging_probs_kernel(
-    # pointers
+    # input pointers
     fwd_output_grad_ptr,
-    fwd_input_grad_ptr,
     fwd_input_ptr,
     merging_probs_ptr,
-    merging_probs_grad_ptr,
     row_id_map_ptr,
-    # sizes
-    num_experts: tl.constexpr,
-    hidden_size: tl.constexpr,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -425,7 +420,12 @@ def _unpermute_bwd_with_merging_probs_kernel(
     stride_merging_probs_expert,
     stride_merging_probs_grad_token,
     stride_merging_probs_grad_expert,
+    # output pointers
+    fwd_input_grad_ptr,
+    merging_probs_grad_ptr,
     # metas
+    num_experts: tl.constexpr,
+    hidden_size: tl.constexpr,
     PROBS_LOAD_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
