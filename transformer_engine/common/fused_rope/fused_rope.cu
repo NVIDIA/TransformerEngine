@@ -42,7 +42,7 @@ __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs
       float v_cos[nvec], v_sin[nvec];
 #pragma unroll
       for (int i = 0; i < nvec; i++) {
-        __sincosf(freqs_row[d_id + i], &v_sin[i], &v_cos[i]);
+        sincosf(freqs_row[d_id + i], &v_sin[i], &v_cos[i]);
       }
 
       // Process all heads with the same cos/sin values
@@ -68,7 +68,7 @@ __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs
     for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
       // Compute cos/sin once per d_id, store in registers
       float v_sin, v_cos;
-      __sincosf(freqs_row[d_id], &v_sin, &v_cos);
+      sincosf(freqs_row[d_id], &v_sin, &v_cos);
 
       // Precompute rotation parameters once per d_id
       int rot_offset_d;
@@ -138,7 +138,7 @@ __device__ void fused_rope_block_backward(const scalar_t *src, const float *freq
   const float *freqs_row = freqs + s_id * d2;
   int tid = threadIdx.x * blockDim.y + threadIdx.y;
   for (int i = tid; i < d2; i += blockDim.x * blockDim.y) {
-    __sincosf(freqs_row[i], &shared_sin[i], &shared_cos[i]);
+    sincosf(freqs_row[i], &shared_sin[i], &shared_cos[i]);
   }
   __syncthreads();
 
