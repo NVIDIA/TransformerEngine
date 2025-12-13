@@ -14,8 +14,8 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../transpose/transpose.h"
+#include "../../utils.cuh"
 #include "../fp8/gated_fp8.cuh"
 #include "../mxfp8/gated_mxfp8.cuh"
 

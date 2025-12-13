@@ -6,8 +6,8 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstring>
 #include <iostream>

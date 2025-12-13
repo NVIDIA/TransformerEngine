@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "./transpose.h"
-
 #include <cuda_runtime.h>
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/transpose.h>
@@ -16,6 +14,7 @@
 #include "../util/rtc.h"
 #include "../util/string.h"
 #include "../utils.cuh"
+#include "./transpose.h"
 
 namespace transformer_engine {
 namespace detail {
@@ -206,8 +205,7 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
 
   NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
-  NVTE_CHECK(input.data.dtype == output.data.dtype,
-             "Input (dtype=", to_string(input.data.dtype),
+  NVTE_CHECK(input.data.dtype == output.data.dtype, "Input (dtype=", to_string(input.data.dtype),
              ") and output (dtype=", to_string(output.data.dtype), ") do not match.");
 
   if (noop.data.dptr != nullptr) {
