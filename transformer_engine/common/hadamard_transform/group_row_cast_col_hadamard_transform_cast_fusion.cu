@@ -1259,7 +1259,7 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
       params, (void const *)kernel_ptr, M, N, k_tile_size, cga_shape, cga_tile_shape, A, dA, sA,
       tma_load_a, B, dB, sB, tma_load_b, QA, dQA, SFA, sfa_layout, args, mma, rng_state);
-  CUTE_CHECK_LAST();
+  // CUTE_CHECK_LAST();
 
   if (status != cutlass::Status::kSuccess) {
     std::cerr << "Error: Failed at kernel Launch" << std::endl;
