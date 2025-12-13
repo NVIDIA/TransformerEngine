@@ -737,8 +737,7 @@ class TensorWrapper {
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
     NVTEBasicTensor ret;
-    size_t size_written;
-    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), &size_written);
+    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), nullptr);
     return ret;
   }
 
