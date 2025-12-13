@@ -162,11 +162,11 @@ class Float8BlockQuantizer(Quantizer):
         if columnwise:
             return (
                 (dim0 + self.block_len - 1) // self.block_len,
-                round_up_to_nearest_multiple(scale_dim1, 4),
+                round_up_to_nearest_multiple(dim1, 4),
             )
         return (
             (dim1 + self.block_len - 1) // self.block_len,
-            round_up_to_nearest_multiple(scale_dim0, 4),
+            round_up_to_nearest_multiple(dim0, 4),
         )
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
