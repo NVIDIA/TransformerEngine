@@ -559,6 +559,10 @@ def fill_userbuffers_buffer_for_all_gather(
                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
             )
+        if local_tensor._with_gemm_swizzled_scales:
+            raise ValueError(
+                "Userbuffers assumes MXFP8 tensors have unswizzled scales"
+            )
         local_scale_inv = (
             local_tensor._rowwise_scale_inv
             if with_rowwise_data

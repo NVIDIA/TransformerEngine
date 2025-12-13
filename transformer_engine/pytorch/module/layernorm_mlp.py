@@ -2188,7 +2188,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.fp8 or self.fp8_calibration:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
-            fc1_input_quantizer.optimize_for_gemm = True
+            if not self.sequence_parallel:
+                fc1_input_quantizer.optimize_for_gemm = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
@@ -2208,7 +2209,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
                 fc2_grad_output_quantizer.internal = True
-                fc2_grad_output_quantizer.optimize_for_gemm = True
+                if not self.sequence_parallel:
+                    fc2_grad_output_quantizer.optimize_for_gemm = True
                 fc1_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ]
