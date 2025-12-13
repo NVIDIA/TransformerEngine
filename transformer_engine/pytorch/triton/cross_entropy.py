@@ -66,7 +66,7 @@ def cross_entropy_forward(
         rank=rank,
         n_cols=V,
         ignore_idx=ignore_idx,
-        n_non_ignore_ptr=n_non_ignore,
+        n_non_ignore=n_non_ignore,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
