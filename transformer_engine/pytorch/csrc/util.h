@@ -38,7 +38,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
  *  If rowwise==false, the columnwise data will be reinterpreted as
  *  rowwise data to avoid transposing it in memory. Due to differences
  *  in how block scaling and mxfp8 store data, this requires the
- *  calling code to treat the output tensor as having been tranposed
+ *  calling code to treat the output tensor as having been transposed
  *  in this case.
  *
  *  Returns the swizzled scaling factor of the converted mxfp8 tensor.

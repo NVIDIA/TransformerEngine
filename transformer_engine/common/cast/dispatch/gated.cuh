@@ -55,7 +55,8 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
       }
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
-        // Compute FP8 transpose if needed
+        // FP8 kernel only populates row-wise data, so perform
+        // transpose separately if needed
         Tensor transpose_in, transpose_out, dummy;
         transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
         transpose_in.data.dptr = output->data.dptr;
@@ -144,7 +145,8 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
         fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
       }
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
-        // Compute FP8 transpose if needed
+        // FP8 kernel only populates row-wise data, so perform
+        // transpose separately if needed
         Tensor transpose_in, transpose_out, dummy;
         transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
         transpose_in.data.dptr = output->data.dptr;
