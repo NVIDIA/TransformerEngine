@@ -2925,8 +2925,8 @@ class TestSequentialModules:
         torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
         if bias:
             torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
             torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)

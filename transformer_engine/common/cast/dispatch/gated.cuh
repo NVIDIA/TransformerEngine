@@ -15,6 +15,7 @@
 
 #include "../../common.h"
 #include "../../utils.cuh"
+#include "../../transpose/transpose.h"
 #include "../fp8/gated_fp8.cuh"
 #include "../mxfp8/gated_mxfp8.cuh"
 
@@ -52,6 +53,19 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
                                                                        output, p, stream);
       } else {
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+      }
+      if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
+        // Compute FP8 transpose if needed
+        Tensor transpose_in, transpose_out, dummy;
+        transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_in.data.dptr = output->data.dptr;
+        transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
+        transpose_in.data.dtype = output->data.dtype;
+        transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_out.data.dptr = output->columnwise_data.dptr;
+        transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
+        transpose_out.data.dtype = output->data.dtype;
+        detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
       }
       break;
     }
@@ -128,6 +142,19 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
                                                                      stream);
       } else {
         fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+      }
+      if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
+        // Compute FP8 transpose if needed
+        Tensor transpose_in, transpose_out, dummy;
+        transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_in.data.dptr = output->data.dptr;
+        transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
+        transpose_in.data.dtype = output->data.dtype;
+        transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_out.data.dptr = output->columnwise_data.dptr;
+        transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
+        transpose_out.data.dtype = output->data.dtype;
+        detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
       }
       break;
     }
