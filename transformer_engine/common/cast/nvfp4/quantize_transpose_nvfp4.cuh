@@ -1168,7 +1168,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
 
-  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16) && return_transpose) {
+  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
     return;
   }
