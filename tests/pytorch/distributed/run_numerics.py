@@ -38,7 +38,7 @@ WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
 QUANTIZATION = None
-NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED") or "0")
 
 if NVTE_TEST_NVINSPECT_ENABLED:
     # The numerics of all the layers should work the same,
