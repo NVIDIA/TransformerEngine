@@ -122,7 +122,7 @@ void quantize_nvfp4_1d(float (*OP)(const float),
 
             const size_t scale_idx = i * scales_stride + block_X;
             scales[scale_idx] = S_dec_b_fp8;
-            // Numercial truncation to match GPU implementation, which uses mixed precision FMA instruction
+            // Numerical truncation to match GPU implementation, which uses mixed precision FMA instruction
             const float scale_reciprocal = static_cast<float>(static_cast<bf16>(S_enc_b_fp8));
 
             for (size_t j = j_min; j < j_max; j += 2) {
