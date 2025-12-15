@@ -13,9 +13,15 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     Float8Quantizer,
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    Float8Tensor,
+    MXFP8Tensor,
+    NVFP4Tensor,
 )
+
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
@@ -46,6 +52,12 @@ DimsType = Union[Iterable[int], int]
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 
 # delayed scaling
@@ -452,3 +464,88 @@ class TestCurrentScalingFloat8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
+
+
+class TestAllQuantizedTensors:
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("quantization", ["fp8", "mxfp8", "nvfp4", "fp8_blockwise"])
+    @pytest.mark.parametrize("dim", [0, 1])
+    def test_chunk(
+        self,
+        quantization: str,
+        dim: int,
+        shape: Iterable[int] = (128, 128),
+        chunks: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        # Skip invalid configs
+        if quantization == "fp8" and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if quantization == "fp8_blockwise" and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
+        # Create quantizer
+        if quantization == "fp8":
+            quantizer = Float8Quantizer(
+                scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
+                amax=torch.zeros(1, dtype=torch.float32, device=device),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+            )
+        elif quantization == "mxfp8":
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        elif quantization == "fp8_blockwise":
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=True,
+                amax_epsilon=0.0,
+                block_scaling_dim=1,
+            )
+        elif quantization == "nvfp4":
+            quantizer = NVFP4Quantizer(
+                with_rht=False,
+                with_post_rht_amax=False,
+                with_2d_quantization=False,
+                stochastic_rounding=False,
+                with_random_sign_mask=False,
+            )
+        else:
+            raise ValueError(f"Unknown quantizer ({quantizer})")
+        # Create reference and quantized tensor
+        ref_tensor = torch.randn(shape, device=device, dtype=dtype)
+        quantized_tensor = quantizer(ref_tensor)
+        ref_tensor.copy_(quantized_tensor)
+
+        # Chunk tensors
+        ref_splits = torch.chunk(ref_tensor, chunks, dim=dim)
+        quantized_splits = torch.chunk(quantized_tensor, chunks, dim=dim)
+        # Check splits
+        for ref_split, quantized_split in zip(ref_splits, quantized_splits):
+            # Check split shapes
+            assert ref_split.size() == quantized_split.size()
+
+            # Check that splits are quantized when expected
+            if quantization == "fp8":
+                assert isinstance(quantized_split, Float8Tensor)
+                expected_value = quantized_split.dequantize()
+            elif quantization == "mxfp8" and dim == 0:
+                assert isinstance(quantized_split, MXFP8Tensor)
+                expected_value = quantized_split.dequantize()
+            else:
+                # Otherwise torch dispatch would default to base implementation
+                # dequantize and computing output and hence output from torch chunk
+                # is already dequantized.
+                expected_value = quantized_split
+            # Check values
+            torch.testing.assert_close(expected_value, ref_split)
