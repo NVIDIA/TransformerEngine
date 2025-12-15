@@ -9,7 +9,7 @@ set -x
 mkdir -p "$XML_LOG_DIR"
 
 pip3 install pytest==8.1.1 pytest-benchmark==5.1.0
-python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml ${THUNDER_PATH}/thunder/tests/test_transformer_engine_executor.py
+python3 -m pytest -c $TE_PATH/tests/pytorch/pytest.ini -v -s --junitxml=$XML_LOG_DIR/pytest.xml ${THUNDER_PATH}/thunder/tests/test_transformer_engine_executor.py
 
 # Check return code
 # Note: Return code 5 is fine. Lightning tests are skipped on systems

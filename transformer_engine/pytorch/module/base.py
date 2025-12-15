@@ -643,18 +643,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         "fp8_parameters",
     }
 
-    def fast_set_attr(self, name: str, value: Any) -> None:
+    def fast_setattr(self, name: str, value: Any) -> None:
         self.__dict__[name] = value
 
+    def module_setattr(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in TransformerEngineBaseModule._fast_setattr_names:
-            # torch.nn.Module has a custom __setattr__ that handles
-            # modules, parameters, and buffers. This is unnecessary
-            # overhead when setting plain attrs.
-            self.fast_set_attr(name, value)
-        else:
-            # Default case
-            super().__setattr__(name, value)
+        warnings.warn(
+            """The default implementation of torch.nn.Module introduces significant CPU overhead
+            when setting attributes and is therefore not recommended. Please use the explicit calls
+            (fast_setattr for setting regular values and module_setattr for setting parameters,
+            children modules and buffers).""",
+            RuntimeWarning)
+        self.module_setattr(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
@@ -932,7 +934,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.fast_set_attr("activation_dtype", torch_get_autocast_gpu_dtype())
+            self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
 
         # All checks after this have already been performed once, thus skip
@@ -947,7 +949,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         "Data types for parameters must match when outside of autocasted region. "
                         f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                     )
-        self.fast_set_attr("activation_dtype", dtype)
+        self.fast_setattr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
@@ -981,9 +983,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
         fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
-        self.fast_set_attr("fp8_parameters", fp8_parameters)
-        self.fast_set_attr("fp8", fp8)
-        self.fast_set_attr("fp8_calibration", fp8_calibration)
+        self.fast_setattr("fp8_parameters", fp8_parameters)
+        self.fast_setattr("fp8", fp8)
+        self.fast_setattr("fp8_calibration", fp8_calibration)
         fp8_enabled = fp8 or fp8_calibration
         meta["fp8_checkpoint"] = fp8_enabled
 
@@ -997,7 +999,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fast_set_attr("fp8_initialized", False)
+            self.fast_setattr("fp8_initialized", False)
             return
 
         if fp8_parameters and not self.fp8_initialized:
@@ -1041,10 +1043,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_different_data_and_param_types: bool = False,
     ) -> torch.Tensor:
         """Checks and prepare for FWD execution."""
-        self.fast_set_attr(
+        self.fast_setattr(
             "allow_different_data_and_param_types", allow_different_data_and_param_types
         )
-        self.fast_set_attr("forwarded_at_least_once", True)
+        self.fast_setattr("forwarded_at_least_once", True)
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
