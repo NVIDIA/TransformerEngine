@@ -45,6 +45,7 @@ Transformer Engine documentation
    :caption: Features
 
    features/low_precision_training/index.rst
+   features/other_optimizations/index.rst
 
 
 .. toctree::
