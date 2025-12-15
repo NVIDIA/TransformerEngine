@@ -113,7 +113,7 @@ The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
 
    .. tab:: PyTorch
 
-      .. literalinclude:: basic_offload_example.py
+      .. literalinclude:: pytorch_basic_offload_example.py
          :language: python
          :start-after: # START_BASIC_EXAMPLE
          :end-before: # END_BASIC_EXAMPLE
@@ -152,7 +152,7 @@ The ``ManualOffloadSynchronizer`` object provides the following methods:
          The compute stream will automatically wait for each tensor to be reloaded
          before it's accessed in backward.
 
-      .. literalinclude:: manual_offload_example.py
+      .. literalinclude:: pytorch_manual_offload_example.py
          :language: python
          :start-after: # START_MANUAL_EXAMPLE
          :end-before: # END_MANUAL_EXAMPLE
@@ -180,7 +180,7 @@ pinned CPU memory (via PCIe DMA, without CPU involvement).
 
    .. tab:: PyTorch
 
-      .. literalinclude:: cuda_graphs_example.py
+      .. literalinclude:: pytorch_cuda_graphs_example.py
          :language: python
          :start-after: # START_CUDA_GRAPHS_EXAMPLE
          :end-before: # END_CUDA_GRAPHS_EXAMPLE
