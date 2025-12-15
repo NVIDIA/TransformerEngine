@@ -89,7 +89,7 @@ class TestParallelCrossEntropy:
         # Check that loss and grad input match
         tols = dtype_tols(dtype)
         test_loss = test_loss.to(dtype=torch.float64, device="cpu")
-        ref_loss = test_loss.to(dtype=torch.float64, device="cpu")
+        ref_loss = ref_loss.to(dtype=torch.float64, device="cpu")
         ref_loss = ref_loss.reshape(test_loss.size())
         test_grad_input = self.input_test.grad.to(dtype=torch.float64, device="cpu")
         ref_grad_input = self.input_ref.grad.to(dtype=torch.float64, device="cpu")
@@ -152,5 +152,18 @@ class TestParallelCrossEntropy:
                 swap_dim=random.choice([True, False]),
                 label_smoothing=0,
                 reduce_loss=False,
+                ignore_idx=True,
+            )
+
+    def test_ignore_idx_reduced_loss(self):
+        """Test ignore_idx with reduce_loss=True"""
+        self.generate_iters(5)
+        self.generate_infra(True, 0)  # reduce_loss=True
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=True,
                 ignore_idx=True,
             )
