@@ -10,7 +10,6 @@ x = torch.randn(16, 1024, 1024, device="cuda")
 offload_stream = torch.cuda.Stream()
 cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
     enabled=True,
-    num_layers=num_layers,
     model_layers=num_layers,
     manual_synchronization=True,
     offload_stream=offload_stream,
