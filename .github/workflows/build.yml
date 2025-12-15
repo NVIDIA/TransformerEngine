@@ -82,7 +82,6 @@ jobs:
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
-          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
   jax:
@@ -153,6 +152,5 @@ jobs:
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
-          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
