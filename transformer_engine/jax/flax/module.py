@@ -1377,7 +1377,8 @@ def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str]
     import transformer_engine.jax as te
 
     class TEWrapper(te.flax.module.TransformerEngineBase):
-        """ Wrapper Flax module for TransformerEngine quantization support. """
+        """Wrapper Flax module for TransformerEngine quantization support."""
+
         def generate_quantizer_set(self, postfix: str = ""):
             OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
             return super().generate_quantizer_set(
@@ -1417,8 +1418,8 @@ def make_dot_general_cls(quantization_recipe):
     from transformer_engine.common.recipe import NVFP4BlockScaling
 
     def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
-        """ Performs a dot_general operation using TransformerEngine with quantization. """
-        del kwargs # Unused
+        """Performs a dot_general operation using TransformerEngine with quantization."""
+        del kwargs  # Unused
         contracting_dims, batch_dims = dims
         assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
 
