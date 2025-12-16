@@ -540,6 +540,7 @@ def run_length_fill(segment_ids) -> jnp.ndarray:
     run_length_segment_id_shape = jax.vmap(run_length_fill_flattened, in_axes=0)(segment_ids_flat)
     return run_length_segment_id_shape.reshape(orig_shape)
 
+
 def _get_seqlens_thd(segment_ids, max_segments_per_seq):
     # Create mask for non-zero seg ids and get the non-zero indices associated with the same
     non_zero_mask = segment_ids != 0
@@ -556,9 +557,10 @@ def _get_seqlens_thd(segment_ids, max_segments_per_seq):
     )
     seqlens_all = jax.vmap(
         lambda sp_row: jnp.bincount(sp_row, length=max_segments_per_seq + 1)[1:]
-        )(valid_segment_ids)
+    )(valid_segment_ids)
     seqlens_all_pad_neg = jnp.where(seqlens_all == 0, -1, seqlens_all)
     return seqlens_all_pad_neg
+
 
 def _get_seqoffsets_thd(segment_ids, segment_pos, max_segments_per_seq):
     segment_changes = jnp.concatenate(
@@ -577,7 +579,7 @@ def _get_seqoffsets_thd(segment_ids, segment_pos, max_segments_per_seq):
         lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
     )(segment_changes_masked)
     return seq_offsets
- 
+
 
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
@@ -614,10 +616,22 @@ def _segment_ids_pos_to_seqlens_offsets(
     #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
     #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
     #     )
-    q_seqlen = _get_seqlens_thd(segment_ids=segment_ids_q, max_segments_per_seq=max_segments_per_seq)
-    kv_seqlen = _get_seqlens_thd(segment_ids=segment_ids_kv, max_segments_per_seq=max_segments_per_seq)
-    q_offset = _get_seqoffsets_thd(segment_ids=segment_ids_q, segment_pos=segment_pos_q, max_segments_per_seq=max_segments_per_seq)
-    kv_offset = _get_seqoffsets_thd(segment_ids=segment_ids_kv, segment_pos=segment_pos_kv, max_segments_per_seq=max_segments_per_seq)
+    q_seqlen = _get_seqlens_thd(
+        segment_ids=segment_ids_q, max_segments_per_seq=max_segments_per_seq
+    )
+    kv_seqlen = _get_seqlens_thd(
+        segment_ids=segment_ids_kv, max_segments_per_seq=max_segments_per_seq
+    )
+    q_offset = _get_seqoffsets_thd(
+        segment_ids=segment_ids_q,
+        segment_pos=segment_pos_q,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    kv_offset = _get_seqoffsets_thd(
+        segment_ids=segment_ids_kv,
+        segment_pos=segment_pos_kv,
+        max_segments_per_seq=max_segments_per_seq,
+    )
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
