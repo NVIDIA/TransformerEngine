@@ -644,7 +644,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             when setting attributes and is therefore not recommended. Please use the explicit calls
             (fast_setattr for setting regular values and module_setattr for setting parameters,
             children modules and buffers).""",
-            RuntimeWarning)
+            RuntimeWarning,
+        )
         self.module_setattr(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
