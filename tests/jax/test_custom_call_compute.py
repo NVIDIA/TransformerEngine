@@ -2055,6 +2055,7 @@ class TestFFICompatibility:
             ))
         return parsed_args
 
+    @pytest.mark.skipif(is_fp4_supported, reason=fp4_unsupported_reason)
     def test_ffi_compatibility(self, ffi_hlo_name):
         """ Tests that the current FFI bindings are compatible with the provided HLO and there are no API mismatches. """
         from jax.extend.backend import get_backend
