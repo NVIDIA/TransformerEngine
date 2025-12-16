@@ -15,6 +15,7 @@ cpu_offload_context, sync_function = get_cpu_offload_context(
     retain_pinned_cpu_buffers=True,
 )
 
+
 # Wrap layers in a module that uses offloading
 class OffloadedModel(torch.nn.Module):
     def __init__(self, layers):
@@ -28,6 +29,7 @@ class OffloadedModel(torch.nn.Module):
             x = sync_function(x)
         return x
 
+
 model = OffloadedModel(layers)
 sample_input = (torch.randn(16, 1024, 1024, device="cuda"),)
 
@@ -39,4 +41,3 @@ x = torch.randn(16, 1024, 1024, device="cuda")
 out = graphed_model(x)
 out.sum().backward()
 # END_CUDA_GRAPHS_EXAMPLE
-
