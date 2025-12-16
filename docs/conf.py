@@ -58,6 +58,7 @@ extensions = [
     "nbsphinx",
     "breathe",
     "autoapi.extension",
+    "sphinx_tabs.tabs",
 ]
 
 templates_path = ["_templates"]
@@ -83,6 +84,10 @@ html_show_sphinx = False
 html_css_files = [
     "css/nvidia_font.css",
     "css/nvidia_footer.css",
+    "css/output-style.css",
+    "css/diagram-colors.css",
+    "css/sphinx_tabs.css",
+    "css/svg-responsive.css",
 ]
 
 html_theme_options = {
