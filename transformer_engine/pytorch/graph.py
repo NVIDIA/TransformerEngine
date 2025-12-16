@@ -471,8 +471,14 @@ def _make_graphed_callables(
                             required_grad_input_idx.append(i)
                     module_params_with_grad = []
                     for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
-                        if grad_inputs[grad_inputs_idx] is None and grad_inputs_idx < num_required_grad_sample_args:
-                            assert allow_unused_input, "The input tensor requires grad, but the grad is None after backward pass."
+                        if (
+                            grad_inputs[grad_inputs_idx] is None
+                            and grad_inputs_idx < num_required_grad_sample_args
+                        ):
+                            assert allow_unused_input, (
+                                "The input tensor requires grad, but the grad is None after"
+                                " backward pass."
+                            )
                         elif (
                             grad_inputs[grad_inputs_idx] is not None
                             and grad_inputs_idx >= num_required_grad_sample_args
@@ -625,17 +631,13 @@ def _make_graphed_callables(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
-                        inputs = tuple(
-                            i for i in static_input_surface if i.requires_grad
-                        )
+                        inputs = tuple(i for i in static_input_surface if i.requires_grad)
                         with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                             bwd_graph, pool=mempool
                         ):
                             torch.autograd.backward(
                                 tuple(o for o in static_outputs if o.requires_grad),
-                                grad_tensors=tuple(
-                                    o for o in static_grad_outputs if o is not None
-                                ),
+                                grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                                 retain_graph=retain_graph_in_backward,
                             )
                             grad_inputs = tuple(input.grad for input in inputs)
@@ -726,9 +728,7 @@ def _make_graphed_callables(
                 ):
                     torch.autograd.backward(
                         tuple(o for o in static_outputs if o.requires_grad),
-                        grad_tensors=tuple(
-                            o for o in static_grad_outputs if o is not None
-                        ),
+                        grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                         retain_graph=retain_graph_in_backward,
                     )
                     grad_inputs = tuple(input.grad for input in inputs)
