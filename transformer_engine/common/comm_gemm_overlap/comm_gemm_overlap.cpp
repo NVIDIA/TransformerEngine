@@ -79,6 +79,8 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 
 CommOverlapCore::CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size,
                                  int num_comm_sm, bool is_p2p, bool atomic_gemm) {
+  NVTE_CHECK(nvte_built_with_cublasmp(),
+             "Comm+GEMM overlap with cuBLASMp backend requires TE to be built with NVTE_WITH_CUBLASMP=1.");
   _with_cublasmp = true;
 
   nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(nccl_comm_ptr), tp_size, tp_rank);

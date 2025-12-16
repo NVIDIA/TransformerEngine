@@ -528,7 +528,9 @@ class CommOverlapHelper : torch::CustomClassHolder {
   void ub_barrier(ExtComm comm);
 
   int64_t get_nccl_comm_ptr(std::string comm_name) {
-    NVTE_CHECK(backend_is_nccl, "Cannot get nccComm_t ptr if backend is not NCCL.");
+    NVTE_CHECK(backend_is_nccl,
+               "Comm+GEMM overlap with cuBLASMp backend requires a tensor-parallel process ",
+               "group with NCCL backend.");
     return reinterpret_cast<c10d::ProcessGroupNCCL *>(pgs[comm_name])->getCommPtr();
   }
 };

@@ -18,7 +18,7 @@
 
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
 
-/* \brief Check if TE is built with cuBlasMp.
+/* \brief Check if TE is built with cuBLASMp.
  *
  * \return True if TE is built with cuBlasMp.
  */

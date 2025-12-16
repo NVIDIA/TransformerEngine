@@ -271,7 +271,7 @@ if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
     find_library(CUBLASMP_LIB
-                 NAMES cublasmp libcublasmp
+                 NAMES cublasmp libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
