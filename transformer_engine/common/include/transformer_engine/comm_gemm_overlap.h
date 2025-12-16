@@ -20,7 +20,7 @@
 
 /* \brief Check if TE is built with cuBLASMp.
  *
- * \return True if TE is built with cuBlasMp.
+ * \return True if TE is built with cuBLASMp.
  */
 bool nvte_built_with_cublasmp();
 

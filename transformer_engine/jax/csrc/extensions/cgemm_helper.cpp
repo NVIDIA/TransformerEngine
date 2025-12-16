@@ -132,7 +132,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
   // Allocate device memory for barrier operations
-  NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&reinterpret_cast<int>(handler._device_barrier), sizeof(int)));
 
   handler._initialize = true;
 

@@ -258,6 +258,12 @@ def _parse_args(argv=None, namespace=None):
         default=0,
         help="Number of layers at the end to run in bf16.",
     )
+    parser.add_argument(
+        "--use-cublasmp",
+        action="store_true",
+        default=False,
+        help="Use cuBLASMp backend.",
+    )
     args = parser.parse_args(argv, namespace)
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
@@ -436,6 +442,7 @@ def _train(opts):
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
+        with_cublasmp=opts.use_cublasmp,
     )
 
     with te.quantized_model_init(enabled=opts.fp8_init):

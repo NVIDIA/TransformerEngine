@@ -525,7 +525,7 @@ class CommOverlapHelper : torch::CustomClassHolder {
   void ub_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
                     ExtComm comm);
 
-  void ub_barrier(ExtComm comm);
+  void ub_barrier(ExtComm comm);a
 
   int64_t get_nccl_comm_ptr(std::string comm_name) {
     NVTE_CHECK(backend_is_nccl,
