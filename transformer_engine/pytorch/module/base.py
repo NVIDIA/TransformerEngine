@@ -607,28 +607,28 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
-        self.fast_setattr("name", None)
-        self.fast_setattr("next_iter_when_debug_should_be_run", 0)
-        self.fast_setattr("fp8_initialized", False)
-        self.fast_setattr("fp8", False)
-        self.fast_setattr("fp8_calibration", False)
-        self.fast_setattr("fp8_meta", {})
+        self.name = None
+        self.next_iter_when_debug_should_be_run = 0
+        self.fp8_initialized = False
+        self.fp8 = False
+        self.fp8_calibration = False
+        self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
-        self.fast_setattr("fp8_meta_tensors_initialized", False)
-        self.fast_setattr("quantizers", {"scaling_fwd": {}, "scaling_bwd": {}})
-        self.fast_setattr("tp_group", None)
-        self.fast_setattr("tp_size", 1)
-        self.fast_setattr("sequence_parallel", False)
-        self.fast_setattr("param_init_meta", {})
-        self.fast_setattr("primary_weights_in_fp8", FP8GlobalStateManager.with_fp8_parameters())
-        self.fast_setattr("preserve_high_precision_init_val", FP8GlobalStateManager.with_high_precision_init_val())
-        self.fast_setattr("fsdp_wrapped", False)
-        self.fast_setattr("fsdp_group", None)
-        self.fast_setattr("_fp8_workspaces", {})
-        self.fast_setattr("activation_dtype", None)
-        self.fast_setattr("wgrad_accumulation_and_reduce_hooks", [])
-        self.fast_setattr("wgrad_store", None)
+        self.fp8_meta_tensors_initialized = False
+        self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
+        self.tp_group = None
+        self.tp_size = 1
+        self.sequence_parallel = False
+        self.param_init_meta = {}
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
+        self.fsdp_wrapped = False
+        self.fsdp_group = None
+        self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
+        self.activation_dtype: Optional[torch.dtype] = None
+        self.wgrad_accumulation_and_reduce_hooks = []
+        self.wgrad_store = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -639,13 +639,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def module_setattr(self, name: str, value: Any) -> None:
         super().__setattr__(name, value)
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def default_setattr(self, name: str, value: Any) -> None:
         warnings.warn(
             """The default implementation of torch.nn.Module introduces significant CPU overhead
             when setting attributes and is therefore not recommended. Please use the explicit calls
             (fast_setattr for setting regular values and module_setattr for setting parameters,
             children modules and buffers).""",
-            RuntimeWarning)
+            RuntimeWarning,
+        )
         self.module_setattr(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
