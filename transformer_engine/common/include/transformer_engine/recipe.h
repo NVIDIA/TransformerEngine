@@ -99,6 +99,23 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_amax_with_config(const NVTETensor input, NVTETensor output,
                                    const NVTEQuantizationConfig config, cudaStream_t stream);
 
+/*! \brief Scale a tensor's amax by a scalar.
+ *
+ *  This is a lightweight utility intended for cases where the amax is
+ *  derived/estimated from another amax value (e.g., post-transform amax
+ *  estimated from pre-transform amax via a linear scale factor).
+ *
+ *  If `columnwise` is true, scales `tensor.columnwise_amax` if present.
+ *  Otherwise, scales `tensor.amax` if present. If the selected amax pointer
+ *  is null, this function is a no-op.
+ *
+ *  \param[in,out] tensor           Tensor that owns the amax buffer(s).
+ *  \param[in]     columnwise       Whether to scale columnwise amax (true) or rowwise amax (false).
+ *  \param[in]     scale            Scalar multiplier applied to the amax value.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_scale_amax(NVTETensor tensor, bool columnwise, float scale, cudaStream_t stream);
+
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
  *  This is only supported for FP8 tensors with per-tensor scaling.

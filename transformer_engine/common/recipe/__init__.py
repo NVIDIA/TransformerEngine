@@ -65,6 +65,9 @@ class QParams:
     amax_epsilon: optional minimum value of abs max
     random_hadamard_transform: whether to use random hadamard transform
     stochastic_rounding: whether to use stocastic rounding
+    amax_estimation_scale: scale factor for estimating post-RHT amax from pre-RHT amax.
+        When None, true post-RHT amax is computed (default behavior).
+        When set to a float, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
     """
 
     power_2_scale: bool = False
@@ -72,6 +75,7 @@ class QParams:
     random_hadamard_transform: bool = False
     stochastic_rounding: bool = False
     fp4_2d_quantization: bool = False
+    amax_estimation_scale: Optional[float] = None
 
     def __repr__(self) -> str:
         return (
@@ -79,7 +83,8 @@ class QParams:
             f"amax_epsilon={self.amax_epsilon},\n"
             f"random_hadamard_transform={self.random_hadamard_transform},\n"
             f"stochastic_rounding={self.stochastic_rounding},\n"
-            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
+            f"fp4_2d_quantization={self.fp4_2d_quantization},\n"
+            f"amax_estimation_scale={self.amax_estimation_scale}\n)"
         )
 
 
@@ -428,6 +433,16 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+    use_post_rht_amax_estimation : bool, default = False
+             **EXPERIMENTAL**: If set to `True`, post-RHT amax is estimated from pre-RHT amax
+             instead of being computed by a separate RHT+amax kernel. This can reduce the
+             number of kernel launches but may affect numerical accuracy.
+    post_rht_amax_estimation_scale_fwd_inp : float, default = 2.0
+             Scale factor for estimating post-RHT amax for forward input activations.
+             Only used when `use_post_rht_amax_estimation=True`.
+    post_rht_amax_estimation_scale_bwd_grad : float, default = 1.0
+             Scale factor for estimating post-RHT amax for backward gradients.
+             Only used when `use_post_rht_amax_estimation=True`.
     """
 
     # Configuration envvars
@@ -444,9 +459,32 @@ class NVFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
 
+    # Experimental: Post-RHT amax estimation
+    use_post_rht_amax_estimation: bool = (
+        os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION", "0") == "1"
+    )
+    post_rht_amax_estimation_scale_fwd_inp = float(
+        os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_X_SCALE", "2.0")
+    )
+    post_rht_amax_estimation_scale_bwd_grad = float(
+        os.getenv("NVTE_NVFP4_POST_RHT_AMAX_ESTIMATION_G_SCALE", "1.0")
+    )
+
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+
+        # Determine amax estimation scales (None = use true post-RHT amax)
+        amax_scale_fwd_inp = (
+            self.post_rht_amax_estimation_scale_fwd_inp
+            if self.use_post_rht_amax_estimation
+            else None
+        )
+        amax_scale_bwd_grad = (
+            self.post_rht_amax_estimation_scale_bwd_grad
+            if self.use_post_rht_amax_estimation
+            else None
+        )
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -455,6 +493,7 @@ class NVFP4BlockScaling(Recipe):
             random_hadamard_transform=not self.disable_rht,
             stochastic_rounding=False,
             fp4_2d_quantization=False,
+            amax_estimation_scale=amax_scale_fwd_inp,
         )
         self.fp4_quant_fwd_weight = QParams(
             random_hadamard_transform=False,
@@ -465,6 +504,7 @@ class NVFP4BlockScaling(Recipe):
             random_hadamard_transform=not self.disable_rht,
             stochastic_rounding=not self.disable_stochastic_rounding,
             fp4_2d_quantization=False,
+            amax_estimation_scale=amax_scale_bwd_grad,
         )
 
     def __repr__(self) -> str:
@@ -477,6 +517,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
+            f"use_post_rht_amax_estimation={self.use_post_rht_amax_estimation}, "
         )
 
 

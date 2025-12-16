@@ -188,6 +188,45 @@ void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor out
   compute_amax_impl(input_, output_, stream, config_);
 }
 
+namespace {
+
+__global__ void scale_amax_kernel(float *amax_ptr, float scale) { amax_ptr[0] *= scale; }
+
+}  // namespace
+
+void nvte_scale_amax(NVTETensor tensor_, bool columnwise, float scale, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_scale_amax);
+  NVTE_CHECK(tensor_ != nullptr, "Invalid tensor (got NULL)");
+  auto &tensor = *transformer_engine::convertNVTETensorCheck(tensor_);
+
+  // Pick amax pointer
+  void *amax_dptr = nullptr;
+  if (columnwise) {
+    amax_dptr = tensor.columnwise_amax.dptr;
+  } else {
+    amax_dptr = tensor.amax.dptr;
+  }
+  if (amax_dptr == nullptr) {
+    return;
+  }
+  NVTE_CHECK((!columnwise && tensor.amax.numel() == 1) ||
+                 (columnwise && tensor.columnwise_amax.numel() == 1),
+             "Invalid amax buffer (expected 1 element)");
+  NVTE_CHECK((!columnwise && tensor.amax.dtype == transformer_engine::DType::kFloat32) ||
+                 (columnwise && tensor.columnwise_amax.dtype == transformer_engine::DType::kFloat32),
+             "Invalid amax dtype (expected FP32)");
+
+  // No-op for scale==1 to save a launch
+  if (scale == 1.0f) {
+    return;
+  }
+  // Scale should be positive for amax estimation use-cases
+  NVTE_CHECK(scale > 0.0f, "nvte_scale_amax requires scale > 0 (got ", scale, ")");
+
+  scale_amax_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<float *>(amax_dptr), scale);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 namespace transformer_engine {
 namespace {
 
