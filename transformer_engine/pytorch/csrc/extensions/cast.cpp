@@ -709,12 +709,96 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   return retval;
 }
 
+// Owns all allocations/wrappers backing quant_config_list[*].set_rng_state(...).
+struct StochasticRngStateResources {
+  at::Tensor rng_states_tensor;          // [2 * num_tensors], int64, CUDA
+  at::Tensor rng_states_tensor_colwise;  // optional, same shape/dtype/device
+  std::vector<TensorWrapper> te_rng_state_list;
+  std::vector<TensorWrapper> te_rng_state_list_colwise;
+
+  bool enabled{false};
+  bool need_separate_rng_states{false};
+  bool with_bulk_generate_rng_states{false};
+};
+
+// Populates quant_config_list (+ optional colwise list) with rng_state pointers and stochastic flag.
+static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
+    size_t num_tensors, bool stochastic_rounding, bool with_bulk_generate_rng_states,
+    bool need_separate_rng_states,
+    std::vector<QuantizationConfigWrapper> &quant_config_list_rowwise,
+    std::vector<QuantizationConfigWrapper> &quant_config_list_colwise) {
+  // the return object will be used to keep rng states alive
+  StochasticRngStateResources res;
+  res.enabled = stochastic_rounding;
+  res.need_separate_rng_states = need_separate_rng_states;
+  res.with_bulk_generate_rng_states = with_bulk_generate_rng_states;
+
+  if (!stochastic_rounding) return res;
+
+  // Basic sanity: caller usually pre-sizes these to num_tensors.
+  TORCH_CHECK(quant_config_list_rowwise.size() == num_tensors,
+              "quant_config_list_rowwise must be sized to num_tensors");
+  if (need_separate_rng_states) {
+    TORCH_CHECK(quant_config_list_colwise.size() == num_tensors,
+                "quant_config_list_colwise must be sized to num_tensors when "
+                "need_separate_rng_states=true");
+  }
+
+  const size_t rng_elts_per_thread =
+      res.with_bulk_generate_rng_states ? (1024 * num_tensors) : 1024;
+
+  auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  res.rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
+  if (need_separate_rng_states) {
+    res.rng_states_tensor_colwise = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
+  }
+
+  res.te_rng_state_list.reserve(num_tensors);
+  if (need_separate_rng_states) res.te_rng_state_list_colwise.reserve(num_tensors);
+
+  for (size_t i = 0; i < num_tensors; ++i) {
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+
+    // Rowwise RNG state
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+    int64_t *rng_state_ptr = static_cast<int64_t *>(res.rng_states_tensor.data_ptr()) + i * 2;
+    philox_unpack(philox_args, rng_state_ptr);
+
+    res.te_rng_state_list.push_back(makeTransformerEngineTensor(
+        static_cast<void *>(rng_state_ptr), std::vector<size_t>{2}, DType::kInt64));
+    quant_config_list_rowwise[i].set_rng_state(res.te_rng_state_list[i].data());
+    quant_config_list_rowwise[i].set_stochastic_rounding(true);
+
+    // Colwise RNG state (only if you truly need a different sequence)
+    if (need_separate_rng_states) {
+      // re-initialize philox_args for colwise RNG state
+      at::PhiloxCudaState philox_args_col = init_philox_state(gen, rng_elts_per_thread);
+      int64_t *rng_state_ptr_colwise =
+          static_cast<int64_t *>(res.rng_states_tensor_colwise.data_ptr()) + i * 2;
+
+      philox_unpack(philox_args_col, rng_state_ptr_colwise);
+
+      res.te_rng_state_list_colwise.push_back(makeTransformerEngineTensor(
+          static_cast<void *>(rng_state_ptr_colwise), std::vector<size_t>{2}, DType::kInt64));
+      quant_config_list_colwise[i].set_rng_state(res.te_rng_state_list_colwise[i].data());
+      quant_config_list_colwise[i].set_stochastic_rounding(true);
+    }
+
+    // break the loop if we are using bulk generate rng states
+    if (res.with_bulk_generate_rng_states) break;
+  }
+
+  return res;
+}
+
 // Implements split-quantize NVFP4 with Row/Column-wise Hadamard Transform (RHT)
-void split_quantize_nvfp4_impl_with_rht_helper(
-    const TensorWrapper &input, const std::vector<TensorWrapper> &input_list,
-    std::vector<TensorWrapper> &output_list, const std::vector<size_t> &split_sections,
-    const std::vector<NVFP4Quantizer *> &quantizers,
-    const std::vector<QuantizationConfigWrapper> &quant_config_list, cudaStream_t stream) {
+void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
+                                               const std::vector<TensorWrapper> &input_list,
+                                               std::vector<TensorWrapper> &output_list,
+                                               const std::vector<size_t> &split_sections,
+                                               const std::vector<NVFP4Quantizer *> &quantizers,
+                                               cudaStream_t stream) {
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
 
@@ -724,6 +808,36 @@ void split_quantize_nvfp4_impl_with_rht_helper(
     nvte_tensor_input_list.push_back(input_list[i].data());
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
+
+  // trigger the row-col fusion when the split-sections shapes are all 128 aligned for max performance
+  bool all_aligned_token_dim =
+      std::all_of(split_sections.begin(), split_sections.end(),
+                  [](size_t split_section) { return split_section % 128 == 0; });
+
+  // in the case when rowwise and colwise cannot be fused, we have to generate the RNG states twice
+  // so that rowwise and colwise will have different random numbers
+  bool need_separate_rng_states =
+      (!all_aligned_token_dim) && quantizer.rowwise_usage && quantizer.columnwise_usage;
+
+  // Objects for TE C API
+  std::vector<QuantizationConfigWrapper> quant_config_list;
+  std::vector<QuantizationConfigWrapper> quant_config_list_colwise;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    quant_config_list.emplace_back(QuantizationConfigWrapper());
+    quant_config_list_colwise.emplace_back(QuantizationConfigWrapper());
+  }
+
+  // this is true because we have already built grouped kernels for rowwise and colwise quantization with RHT
+  bool with_bulk_generate_rng_states = true;
+
+  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+
+  auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
+      num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
+      need_separate_rng_states, quant_config_list, quant_config_list_colwise);
+
+  auto &quant_config_list_colwise_to_use =
+      need_separate_rng_states ? quant_config_list_colwise : quant_config_list;
 
   // Compute amaxes
   if (quantizer.with_post_rht_amax) {
@@ -742,11 +856,6 @@ void split_quantize_nvfp4_impl_with_rht_helper(
   NVTE_CHECK(quantizer.rht_matrix.defined() && quantizer.rht_matrix.numel() > 0,
              "RHT matrix is not available.");
   auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer.rht_matrix);
-
-  // trigger the row-col fusion when the split-sections shapes are all 128 aligned for max performance
-  bool all_aligned_token_dim =
-      std::all_of(split_sections.begin(), split_sections.end(),
-                  [](size_t split_section) { return split_section % 128 == 0; });
 
   if (all_aligned_token_dim) {
     // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose
@@ -783,11 +892,6 @@ void split_quantize_nvfp4_impl_with_rht_helper(
                                           split_sections.data(), num_tensors, quant_config_list[0],
                                           stream);
     }
-
-    // TODO(zhongbo): move the rng states if we enable stochastic rounding
-    // so that rowwise and colwise will have different random numbers
-    // this is not needed for all_aligned_token_dim path, because row & col are both fused
-    // into one kernel, the kernel itself generates two different random numbers for row & col
 
     // Columnwise RHT quantization fusion with grouped version
     if (quantizer.columnwise_usage) {
@@ -826,23 +930,52 @@ void split_quantize_nvfp4_impl_with_rht_helper(
       }
       nvte_group_hadamard_transform_cast_fusion_columnwise(
           input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
-          rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0], stream);
+          rht_matrix_nvte.data(), split_sections.data(), num_tensors,
+          quant_config_list_colwise_to_use[0], stream);
     }
   }
 }
 
-void split_quantize_nvfp4_impl_helper(
-    const TensorWrapper &input, const std::vector<TensorWrapper> &input_list,
-    std::vector<TensorWrapper> &output_list, const std::vector<size_t> &split_sections,
-    const std::vector<NVFP4Quantizer *> &quantizers,
-    const std::vector<QuantizationConfigWrapper> &quant_config_list, cudaStream_t stream) {
+void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
+                                      const std::vector<TensorWrapper> &input_list,
+                                      std::vector<TensorWrapper> &output_list,
+                                      const std::vector<size_t> &split_sections,
+                                      const std::vector<NVFP4Quantizer *> &quantizers,
+                                      cudaStream_t stream) {
   const size_t num_tensors = input_list.size();
+  const auto &quantizer = *quantizers.front();
+
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   for (size_t i = 0; i < num_tensors; ++i) {
     nvte_tensor_input_list.push_back(input_list[i].data());
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
+
+  // In this case without RHT, the rowwise and colwise quantization are fused
+  // we don't need separate rng states for rowwise and colwise
+  bool need_separate_rng_states = false;
+
+  // Objects for TE C API
+  std::vector<QuantizationConfigWrapper> quant_config_list;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    quant_config_list.emplace_back(QuantizationConfigWrapper());
+  }
+
+  // TODO: this is only true because the non-RHT path doesn't have grouped kernels yet, which we can be optimized
+  // so that we can generate all rng states at once
+  bool with_bulk_generate_rng_states = false;
+
+  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+
+  // place holder for colwise rng states, which are not needed in this case
+  std::vector<QuantizationConfigWrapper> dummy_quant_config_list_colwise;
+
+  auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
+      num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
+      need_separate_rng_states, quant_config_list,
+      dummy_quant_config_list_colwise);  // colwise rng states are not needed in this case
+
   // We need:
   // 1. Rowwise amax = amax for input
   // 2. Columnwise amax = amax for input too
@@ -922,43 +1055,6 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Objects for TE C API
-  std::vector<QuantizationConfigWrapper> quant_config_list;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    quant_config_list.emplace_back(QuantizationConfigWrapper());
-  }
-
-  // Stochastic rounding
-  std::vector<TensorWrapper> te_rng_state_list;
-  at::Tensor rng_states_tensor;
-
-  if (quantizer.stochastic_rounding) {
-    // TODO(zhongbo): remove the for loop of generating rng states with a single call
-    // with rng_elts_per_thread = 1024 * num_tensors
-    // RHT path is fully grouped kernels, which we can be optimized
-    bool with_bulk_generate_rng_states = quantizer.with_rht;
-    const size_t rng_elts_per_thread = with_bulk_generate_rng_states ? 1024 * num_tensors : 1024;
-    auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-    rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
-
-    for (size_t i = 0; i < num_tensors; ++i) {
-      auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-          std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
-      // Generate RNG state for rowwise quantization
-      at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-      int64_t *rng_state_ptr = static_cast<int64_t *>(rng_states_tensor.data_ptr()) + i * 2;
-      philox_unpack(philox_args, rng_state_ptr);
-      te_rng_state_list.push_back(makeTransformerEngineTensor(
-          static_cast<void *>(rng_state_ptr), std::vector<size_t>{2}, DType::kInt64));
-      quant_config_list[i].set_rng_state(te_rng_state_list[i].data());
-      quant_config_list[i].set_stochastic_rounding(true);
-      // break the loop if we are using bulk generate rng states
-      if (with_bulk_generate_rng_states) {
-        break;
-      }
-    }
-  }
-
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
@@ -966,11 +1062,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
-                                                quantizers, quant_config_list, stream);
+                                                quantizers, stream);
     } else {  // NVFP4 quantize
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
-                                       quant_config_list, stream);
+                                       stream);
     }
   });
 }
