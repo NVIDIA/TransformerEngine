@@ -824,10 +824,11 @@ class SequenceDescriptor:
                 DeprecationWarning,
             )
             warnings.warn(
-                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all other cases, " \
-                " please explicitly pass the segment_pos",
+                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all"
+                " other cases,  please explicitly pass the segment_pos",
                 UserWarning,
             )
+
             def generate_default_pos(segment_ids):
                 seqlen = segment_ids.shape[-1]
                 return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
