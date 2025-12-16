@@ -795,10 +795,11 @@ class SequenceDescriptor:
     def from_segment_ids_and_pos(
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
+        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]],
     ) -> SequenceDescriptor:
         """
-        Experimental factory method for inputs with segment IDs and optional positions. (THD)
+        Experimental factory method for inputs with segment IDs and optional positions.
+        segment_pos = None to be used only for : BSHD without load balancing
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -817,10 +818,16 @@ class SequenceDescriptor:
         """
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
-        if segment_pos is not None:
-            segment_pos = cls._expand_to_pair(segment_pos)
-        else:
-
+        if segment_pos is None:
+            warnings.warn(
+                "segment_pos no longer defaults to None and must be explicitly passed",
+                DeprecationWarning,
+            )
+            warnings.warn(
+                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all other cases, " \
+                " please explicitly pass the segment_pos",
+                UserWarning,
+            )
             def generate_default_pos(segment_ids):
                 seqlen = segment_ids.shape[-1]
                 return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
@@ -828,6 +835,8 @@ class SequenceDescriptor:
             q_seg_pos = generate_default_pos(q_seg_ids)
             kv_seg_pos = generate_default_pos(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
+        else:
+            segment_pos = cls._expand_to_pair(segment_pos)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
