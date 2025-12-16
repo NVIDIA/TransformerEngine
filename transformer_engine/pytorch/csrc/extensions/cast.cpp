@@ -784,6 +784,11 @@ void split_quantize_nvfp4_impl_with_rht_helper(
                                           stream);
     }
 
+    // TODO(zhongbo): move the rng states if we enable stochastic rounding
+    // so that rowwise and colwise will have different random numbers
+    // this is not needed for all_aligned_token_dim path, because row & col are both fused
+    // into one kernel, the kernel itself generates two different random numbers for row & col
+
     // Columnwise RHT quantization fusion with grouped version
     if (quantizer.columnwise_usage) {
       std::vector<TensorWrapper> out_transpose_list;
@@ -924,15 +929,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   }
 
   // Stochastic rounding
-  // When both rowwise and columnwise quantization are used,
-  // we need separate RNG states for each to ensure they use different random numbers.
   std::vector<TensorWrapper> te_rng_state_list;
-  std::vector<TensorWrapper> te_rng_state_columnwise_list;
-  std::vector<QuantizationConfigWrapper> quant_config_columnwise_list;
   at::Tensor rng_states_tensor;
-  at::Tensor rng_states_columnwise_tensor;
-  const bool need_separate_columnwise_rng =
-      quantizer.stochastic_rounding && quantizer.with_rht && quantizer.columnwise_usage;
 
   if (quantizer.stochastic_rounding) {
     // TODO(zhongbo): remove the for loop of generating rng states with a single call
@@ -943,13 +941,6 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
     rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
 
-    // Allocate columnwise RNG resources when separate RNG is needed
-    if (need_separate_columnwise_rng) {
-      rng_states_columnwise_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
-      for (size_t i = 0; i < num_tensors; ++i) {
-        quant_config_columnwise_list.emplace_back(QuantizationConfigWrapper());
-      }
-    }
     for (size_t i = 0; i < num_tensors; ++i) {
       auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
           std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
