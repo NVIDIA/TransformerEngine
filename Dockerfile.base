@@ -45,7 +45,7 @@ RUN pip install nvidia-nvshmem-cu${CUDA_VERSION%%.*} \
     && ldconfig
 RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
   [[ "${FRAMEWORK}" == "jax" ]] \
-  && export CUBLASMP_VERSION=0.5.1.65 \
+  && export CUBLASMP_VERSION=0.7.0.125 \
   || [[ ! "${FRAMEWORK}" == "jax" ]]
 
   /nvidia/build-scripts/installCUBLASMP.sh
