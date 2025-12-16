@@ -702,7 +702,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        is_meta = torch.device(device).type == 'meta'
+        is_meta = torch.device(device).type == "meta"
         self.reset_parameters(defer_init=is_meta)
 
         if self.wgrad_store.delay_wgrad_compute():
