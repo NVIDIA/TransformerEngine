@@ -73,7 +73,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
         transpose_batch_sequence,
     ):
         """
-        amax calcuation abstract
+        amax calculation abstract
         """
         del amax_scope, transpose_batch_sequence
 
@@ -263,7 +263,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         flatten_axis,
     ):
         """
-        amax calcuation implementation
+        amax calculation implementation
         """
         assert RHTAmaxCalculationPrimitive.inner_primitive is not None
         (
